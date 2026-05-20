@@ -1,4 +1,3 @@
-use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use crate::storage::Page;
@@ -22,15 +21,18 @@ impl PageFrame {
     }
 }
 
-/// 页访问守卫，类似 RwLockReadGuard
+/// 页访问守卫
 pub struct PageGuard {
     frame: Arc<Mutex<PageFrame>>,
 }
 
 impl PageGuard {
     pub fn new(frame: Arc<Mutex<PageFrame>>) -> Self {
-        frame.lock().unwrap().ref_count += 1;
-        frame.lock().unwrap().clock_bit = true;
+        {
+            let mut f = frame.lock().unwrap();
+            f.ref_count += 1;
+            f.clock_bit = true;
+        }
         Self { frame }
     }
 
@@ -41,12 +43,9 @@ impl PageGuard {
     pub fn ref_count(&self) -> u32 {
         self.frame.lock().unwrap().ref_count
     }
-}
 
-impl Deref for PageGuard {
-    type Target = Page;
-    fn deref(&self) -> &Self::Target {
-        &self.frame.lock().unwrap().page
+    pub fn page(&self) -> Page {
+        self.frame.lock().unwrap().page.clone()
     }
 }
 

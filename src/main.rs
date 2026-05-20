@@ -2,11 +2,11 @@
 
 #![allow(unused_imports)] // M0: Imports validate module exports work
 
-use rtsql::storage;
 use rtsql::executor;
-use rtsql::transaction;
-use rtsql::parser;
 use rtsql::network;
+use rtsql::parser;
+use rtsql::storage;
+use rtsql::transaction;
 
 #[tokio::main]
 async fn main() {

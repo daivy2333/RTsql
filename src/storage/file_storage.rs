@@ -21,6 +21,7 @@ impl FileStorage {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
 
         let metadata = file.metadata()?;
@@ -47,7 +48,11 @@ impl FileStorage {
         self.file_len.load(Ordering::SeqCst)
     }
 
-    fn read_page_blocking(file: Arc<std::fs::File>, page_id: PageId, page_size: usize) -> Result<Page> {
+    fn read_page_blocking(
+        file: Arc<std::fs::File>,
+        page_id: PageId,
+        page_size: usize,
+    ) -> Result<Page> {
         let offset = page_id.to_offset(page_size);
         let mut file_ref = file.as_ref();
         file_ref.seek(SeekFrom::Start(offset))?;
@@ -56,7 +61,12 @@ impl FileStorage {
         Page::from_bytes(page_id, &buf)
     }
 
-    fn write_page_blocking(file: Arc<std::fs::File>, page_id: PageId, page_size: usize, data: Box<[u8; Page::PAGE_SIZE]>) -> Result<()> {
+    fn write_page_blocking(
+        file: Arc<std::fs::File>,
+        page_id: PageId,
+        page_size: usize,
+        data: Box<[u8; Page::PAGE_SIZE]>,
+    ) -> Result<()> {
         let offset = page_id.to_offset(page_size);
         let mut file_ref = file.as_ref();
         file_ref.seek(SeekFrom::Start(offset))?;
@@ -88,7 +98,8 @@ impl AsyncStorage for FileStorage {
         spawn_blocking(move || {
             file.as_ref().set_len(offset + page_size as u64)?;
             Ok::<(), std::io::Error>(())
-        }).await??;
+        })
+        .await??;
         Ok(PageId(page_id))
     }
 
@@ -97,6 +108,7 @@ impl AsyncStorage for FileStorage {
         spawn_blocking(move || {
             file.as_ref().sync_all()?;
             Ok::<(), StorageError>(())
-        }).await?
+        })
+        .await?
     }
 }

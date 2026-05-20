@@ -17,9 +17,7 @@ async fn async_compute(n: u32) -> u32 {
 
 #[tokio::test]
 async fn test_spawn_task() {
-    let handle = tokio::spawn(async {
-        100
-    });
+    let handle = tokio::spawn(async { 100 });
 
     let result = handle.await.expect("task should complete");
     assert_eq!(result, 100);

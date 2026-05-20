@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::storage::{Page, PageId, Result};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait AsyncStorage: Send + Sync {
