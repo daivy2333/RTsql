@@ -1,0 +1,18 @@
+[package]
+name = "rtsql"
+version = "0.1.0"
+edition = "2021"
+description = "Async coroutine-driven embedded relational database"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs"] }
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev]
+opt-level = 0

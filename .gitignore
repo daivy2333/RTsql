@@ -1,4 +1,9 @@
 /target
-/Cargo.lock
+# Cargo.lock removed - binary applications should commit it for reproducible builds
 **/*.rs.bk
 *.pdb
+
+# Added by cargo
+# already existing elements were commented out
+
+#/target
