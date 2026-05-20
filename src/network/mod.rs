@@ -3,11 +3,12 @@
 //! M6: Implement tokio::net::TcpListener and connection handling
 
 pub mod error;
+pub mod protocol;
 
 pub use error::NetworkError;
+pub use protocol::{Protocol, Request, Response};
 
-// Task 3-8 will add these modules:
-// pub mod protocol;
+// Task 4-8 will add these modules:
 // pub mod connection;
 // pub mod handler;
 // pub mod server;
