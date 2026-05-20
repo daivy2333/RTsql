@@ -4,6 +4,7 @@
 
 mod create_table;
 mod delete;
+mod drop_table;
 mod executor_trait;
 mod index_scan;
 mod insert;
@@ -15,6 +16,7 @@ mod value;
 
 pub use create_table::CreateTableExecutor;
 pub use delete::DeleteExecutor;
+pub use drop_table::DropTableExecutor;
 pub use executor_trait::Executor;
 pub use index_scan::IndexScanExecutor;
 pub use insert::InsertExecutor;

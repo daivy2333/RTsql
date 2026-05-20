@@ -641,3 +641,108 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
 
     Ok(())
 }
+
+// =============================================================================
+// DropTableExecutor Tests (M9)
+// =============================================================================
+
+#[tokio::test]
+async fn test_drop_table_executor_success() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+
+    use rtsql::database::Database;
+    use rtsql::executor::DropTableExecutor;
+    let database = Arc::new(Database {
+        buffer_pool: buffer_pool.clone(),
+        table_manager: table_manager.clone(),
+        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
+    });
+
+    // Create table first
+    table_manager
+        .create_table(
+            "test_table",
+            vec![("id".to_string(), ColumnType::Int)],
+            "id",
+        )
+        .await?;
+    assert!(table_manager.table_exists("test_table"));
+
+    // Drop the table
+    let plan = PhysicalPlan::DropTable(rtsql::executor::DropTableNode {
+        table_name: "test_table".to_string(),
+        if_exists: false,
+    });
+
+    let mut executor = DropTableExecutor::new(plan, database);
+    let result = executor.next().await?;
+    assert_eq!(result, Some(ExecResult::AffectedRows(0)));
+
+    // Verify table no longer exists
+    assert!(!table_manager.table_exists("test_table"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_drop_table_executor_not_found() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+
+    use rtsql::database::Database;
+    use rtsql::executor::DropTableExecutor;
+    let database = Arc::new(Database {
+        buffer_pool: buffer_pool.clone(),
+        table_manager: table_manager.clone(),
+        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
+    });
+
+    // Try to drop a non-existent table without IF EXISTS
+    let plan = PhysicalPlan::DropTable(rtsql::executor::DropTableNode {
+        table_name: "nonexistent".to_string(),
+        if_exists: false,
+    });
+
+    let mut executor = DropTableExecutor::new(plan, database);
+    let result = executor.next().await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        StorageError::TableNotFound(name) => assert_eq!(name, "nonexistent"),
+        e => panic!("Expected TableNotFound error, got {:?}", e),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_drop_table_if_exists_success() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+
+    use rtsql::database::Database;
+    use rtsql::executor::DropTableExecutor;
+    let database = Arc::new(Database {
+        buffer_pool: buffer_pool.clone(),
+        table_manager: table_manager.clone(),
+        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
+    });
+
+    // Drop a non-existent table with IF EXISTS - should succeed without error
+    let plan = PhysicalPlan::DropTable(rtsql::executor::DropTableNode {
+        table_name: "nonexistent".to_string(),
+        if_exists: true,
+    });
+
+    let mut executor = DropTableExecutor::new(plan, database);
+    let result = executor.next().await?;
+    assert_eq!(result, Some(ExecResult::AffectedRows(0)));
+
+    Ok(())
+}

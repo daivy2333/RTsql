@@ -153,4 +153,28 @@ impl TableManager {
             Err(_) => false,
         }
     }
+
+    /// Drop a table by name.
+    ///
+    /// # Errors
+    /// - `TableNotFound` when no table with `name` is registered.
+    ///
+    /// # Note
+    /// This is a simplified implementation that only removes the table metadata.
+    /// Physical page deletion is not implemented yet.
+    pub async fn drop_table(&self, name: &str) -> Result<()> {
+        let mut tables = self.tables.write().await;
+
+        // Remove table from metadata (returns None if not found)
+        tables
+            .remove(name)
+            .ok_or_else(|| StorageError::TableNotFound(name.to_string()))?;
+
+        // TODO: In the future, we should also:
+        // 1. Delete all data pages associated with the table
+        // 2. Clean up the index manager
+        // 3. Deallocate pages from storage
+
+        Ok(())
+    }
 }
