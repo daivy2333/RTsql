@@ -1,9 +1,11 @@
 //! Execution engine - Physical plan execution, async iterator
 //!
-//! M5: Implement async fn next() -> Result<Option<Row>>
+//! M5: Implement async fn next() -> Result<Option<ExecResult>>
 
 mod plan;
+mod result;
 mod value;
 
 pub use plan::{DeleteNode, IndexScanNode, InsertNode, PhysicalPlan, ScanNode, UpdateNode};
+pub use result::ExecResult;
 pub use value::Value;
