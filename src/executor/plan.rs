@@ -1,5 +1,6 @@
 //! Physical plan types for query execution
 
+use crate::executor::predicate::PredicateRef;
 use crate::executor::{ColumnType, Value};
 use crate::storage::page_format::Key;
 
@@ -10,6 +11,8 @@ pub enum PhysicalPlan {
     Scan(ScanNode),
     /// 主键索引扫描
     IndexScan(IndexScanNode),
+    /// 过滤节点（WHERE 子句）
+    Filter(FilterNode),
     /// 插入
     Insert(InsertNode),
     /// 更新
@@ -40,6 +43,17 @@ pub struct IndexScanNode {
     pub key: Key,
     /// 输出列名列表
     pub columns: Vec<String>,
+}
+
+/// 过滤节点（WHERE 子句求值）
+#[derive(Debug, Clone)]
+pub struct FilterNode {
+    /// 输入计划（通常是 Scan）
+    pub input: Box<PhysicalPlan>,
+    /// 谓词（WHERE 条件）
+    pub predicate: PredicateRef,
+    /// 表名
+    pub table_name: String,
 }
 
 /// 插入节点

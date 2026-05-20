@@ -11,6 +11,8 @@ pub enum PlanError {
     UnsupportedValue,
     /// 不支持的语句类型
     UnsupportedStatement,
+    /// 不支持的表达式类型
+    UnsupportedExpression,
     /// 缺少必要字段
     MissingField(String),
     /// CREATE TABLE 空列定义
@@ -29,6 +31,7 @@ impl fmt::Display for PlanError {
             PlanError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             PlanError::UnsupportedValue => write!(f, "Unsupported value type"),
             PlanError::UnsupportedStatement => write!(f, "Unsupported statement type"),
+            PlanError::UnsupportedExpression => write!(f, "Unsupported expression type"),
             PlanError::MissingField(field) => write!(f, "Missing required field: {}", field),
             PlanError::EmptyColumnDefinition => {
                 write!(f, "Empty column definition in CREATE TABLE")

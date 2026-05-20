@@ -124,6 +124,12 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
                 message: "DDL executor not yet implemented".to_string(),
             };
         }
+        PhysicalPlan::Filter(_) => {
+            // TODO: Task 10 will implement FilterExecutor
+            return Response::Error {
+                message: "Filter executor not yet implemented".to_string(),
+            };
+        }
     };
 
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();

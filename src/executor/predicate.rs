@@ -3,10 +3,11 @@
 //! Task 8: WHERE clause expression evaluator
 
 use crate::executor::Value;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 /// Predicate trait - evaluates a row against a boolean condition
-pub trait Predicate: Send + Sync {
+pub trait Predicate: Send + Sync + Debug {
     /// Evaluate the predicate against a row
     /// Returns true if the row satisfies the predicate
     fn evaluate(&self, row: &[Value]) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
@@ -16,7 +17,7 @@ pub trait Predicate: Send + Sync {
 pub type PredicateRef = Arc<dyn Predicate>;
 
 /// Expression trait - evaluates to a value
-pub trait Expression: Send + Sync {
+pub trait Expression: Send + Sync + Debug {
     /// Evaluate the expression against a row
     fn evaluate(&self, row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>>;
 }
@@ -42,6 +43,7 @@ pub enum ComparisonOp {
 }
 
 /// Comparison predicate (e.g., id = 5, value > 10)
+#[derive(Debug)]
 pub struct ComparisonPredicate {
     pub left: ExpressionRef,
     pub op: ComparisonOp,
@@ -82,6 +84,7 @@ pub enum LogicalOp {
 }
 
 /// Logical predicate (e.g., id > 10 AND value < 100)
+#[derive(Debug)]
 pub struct LogicalPredicate {
     pub left: PredicateRef,
     pub op: LogicalOp,
@@ -112,6 +115,7 @@ impl Predicate for LogicalPredicate {
 }
 
 /// Column expression - evaluates to a column value from the row
+#[derive(Debug)]
 pub struct ColumnExpression {
     pub column_name: String,
     pub column_index: usize,
@@ -131,6 +135,7 @@ impl Expression for ColumnExpression {
 }
 
 /// Constant expression - evaluates to a constant value
+#[derive(Debug)]
 pub struct ConstantExpression {
     pub value: Value,
 }

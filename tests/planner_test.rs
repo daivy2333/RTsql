@@ -103,17 +103,17 @@ fn test_table_not_found() {
 
 #[test]
 fn test_invalid_where_not_pk() {
-    // Non-PK WHERE clause should fall back to full table scan
+    // Non-PK WHERE clause should generate Filter plan
     let sql = "SELECT id, name FROM users WHERE name = 'Alice'";
     let stmts = parse_sql(sql).unwrap();
     let builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
-        PhysicalPlan::Scan(node) => {
+        PhysicalPlan::Filter(node) => {
             assert_eq!(node.table_name, "users");
         }
-        _ => panic!("Expected Scan for non-PK WHERE, got {:?}", plan),
+        _ => panic!("Expected Filter for non-PK WHERE, got {:?}", plan),
     }
 }
 
@@ -271,4 +271,100 @@ fn test_create_table_multiple_pk_error() {
     // Testing via table constraint: PRIMARY KEY (col1, col2)
     // This is complex to construct, so we'll test through the error path
     // when implementing
+}
+
+// ============================================================================
+// WHERE Expression Tests (Task 9: WHERE parsing + Filter plan)
+// ============================================================================
+
+#[test]
+fn test_build_where_comparison() {
+    // WHERE id > 10 (comparison predicate)
+    let sql = "SELECT id, name FROM users WHERE id > 10";
+    let stmts = parse_sql(sql).unwrap();
+    let builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Filter(node) => {
+            assert_eq!(node.table_name, "users");
+            // Predicate should be a ComparisonPredicate (id > 10)
+            // We'll verify the predicate evaluates correctly
+        }
+        _ => panic!("Expected Filter plan for non-PK WHERE, got {:?}", plan),
+    }
+}
+
+#[test]
+fn test_build_where_logical_and() {
+    // WHERE id > 10 AND id < 100 (logical AND predicate)
+    let sql = "SELECT id, name FROM users WHERE id > 10 AND id < 100";
+    let stmts = parse_sql(sql).unwrap();
+    let builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Filter(node) => {
+            assert_eq!(node.table_name, "users");
+            // Predicate should be a LogicalPredicate (AND)
+        }
+        _ => panic!("Expected Filter plan for complex WHERE, got {:?}", plan),
+    }
+}
+
+#[test]
+fn test_build_where_comparison_operators() {
+    // Test all comparison operators: =, !=, >, <, >=, <=
+    let test_cases = vec![
+        ("SELECT id FROM users WHERE id = 5", "eq"),
+        ("SELECT id FROM users WHERE id != 5", "ne"),
+        ("SELECT id FROM users WHERE id > 5", "gt"),
+        ("SELECT id FROM users WHERE id < 5", "lt"),
+        ("SELECT id FROM users WHERE id >= 5", "ge"),
+        ("SELECT id FROM users WHERE id <= 5", "le"),
+    ];
+
+    for (sql, _op_name) in test_cases {
+        let stmts = parse_sql(sql).unwrap();
+        let builder = setup_builder();
+        let plan = builder.build_plan(&stmts[0]).unwrap();
+
+        match plan {
+            PhysicalPlan::Filter(_) => {}    // Expected
+            PhysicalPlan::IndexScan(_) => {} // = might still use index scan
+            _ => panic!("Expected Filter or IndexScan for WHERE, got {:?}", plan),
+        }
+    }
+}
+
+#[test]
+fn test_build_where_column_comparison() {
+    // WHERE name = 'Alice' (non-PK column)
+    let sql = "SELECT id, name FROM users WHERE name = 'Alice'";
+    let stmts = parse_sql(sql).unwrap();
+    let builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Filter(node) => {
+            assert_eq!(node.table_name, "users");
+        }
+        _ => panic!("Expected Filter plan for non-PK WHERE, got {:?}", plan),
+    }
+}
+
+#[test]
+fn test_build_where_logical_or() {
+    // WHERE id < 10 OR id > 100 (logical OR predicate)
+    let sql = "SELECT id, name FROM users WHERE id < 10 OR id > 100";
+    let stmts = parse_sql(sql).unwrap();
+    let builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Filter(node) => {
+            assert_eq!(node.table_name, "users");
+        }
+        _ => panic!("Expected Filter plan for OR WHERE, got {:?}", plan),
+    }
 }

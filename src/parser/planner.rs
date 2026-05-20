@@ -3,14 +3,17 @@
 //! M4: SQL Parser and Physical Plan
 
 use crate::executor::{
-    ColumnConstraint, ColumnDef, ColumnType, CreateTableNode, DeleteNode, DropTableNode,
-    IndexScanNode, InsertNode, PhysicalPlan, ScanNode, UpdateNode, Value,
+    ColumnConstraint, ColumnDef, ColumnType, ComparisonOp, ComparisonPredicate, ConstantExpression,
+    CreateTableNode, DeleteNode, DropTableNode, ExpressionRef, FilterNode, IndexScanNode,
+    InsertNode, LogicalOp, LogicalPredicate, PhysicalPlan, PredicateRef, ScanNode, UpdateNode,
+    Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
 use sqlparser::ast::{Expr, ObjectType, Query, SetExpr, Statement};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// PlanBuilder - Convert AST to PhysicalPlan
 ///
@@ -105,29 +108,77 @@ impl PlanBuilder {
         // Extract columns
         let columns = extract_columns(&select.projection)?;
 
+        // Build base plan (scan)
+        let base_plan = PhysicalPlan::Scan(ScanNode {
+            table_name: table_name.clone(),
+            columns,
+        });
+
         // Handle WHERE clause
         if let Some(where_expr) = &select.selection {
-            // Try to extract primary key from WHERE clause
+            // Try to extract primary key from WHERE clause for index scan
             if let Some(key) = self.extract_pk_from_where(&table_name, where_expr)? {
-                // Index scan
-                Ok(PhysicalPlan::IndexScan(IndexScanNode {
-                    table_name,
-                    key,
-                    columns,
-                }))
+                // Simple PK equality check - use index scan
+                // Note: This is a simplification. A more sophisticated optimizer would
+                // check if the WHERE clause is ONLY pk = value, not part of a complex expression
+                if self.is_simple_pk_equality(&table_name, where_expr)? {
+                    Ok(PhysicalPlan::IndexScan(IndexScanNode {
+                        table_name,
+                        key,
+                        columns: extract_columns(&select.projection)?,
+                    }))
+                } else {
+                    // Complex WHERE with PK - use Filter over Scan
+                    let predicate = self.build_where(&table_name, where_expr)?;
+                    Ok(PhysicalPlan::Filter(FilterNode {
+                        input: Box::new(base_plan),
+                        predicate,
+                        table_name,
+                    }))
+                }
             } else {
-                // Full table scan (unsupported WHERE)
-                Ok(PhysicalPlan::Scan(ScanNode {
+                // Non-PK WHERE - use Filter over Scan
+                let predicate = self.build_where(&table_name, where_expr)?;
+                Ok(PhysicalPlan::Filter(FilterNode {
+                    input: Box::new(base_plan),
+                    predicate,
                     table_name,
-                    columns,
                 }))
             }
         } else {
             // No WHERE clause - full table scan
-            Ok(PhysicalPlan::Scan(ScanNode {
-                table_name,
-                columns,
-            }))
+            Ok(base_plan)
+        }
+    }
+
+    /// Check if WHERE clause is a simple PK equality (pk = value)
+    fn is_simple_pk_equality(&self, table_name: &str, expr: &Expr) -> Result<bool, PlanError> {
+        let pk_column = match self.primary_keys.get(table_name) {
+            Some(pk) => pk.clone(),
+            None => return Ok(false),
+        };
+
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: sqlparser::ast::BinaryOperator::Eq,
+                right,
+            } => {
+                // Check: column = value
+                if let Expr::Identifier(ident) = left.as_ref() {
+                    if ident.value.to_lowercase() == pk_column {
+                        return Ok(matches!(right.as_ref(), Expr::Value(_)));
+                    }
+                }
+                // Check: value = column
+                if let Expr::Identifier(ident) = right.as_ref() {
+                    if ident.value.to_lowercase() == pk_column {
+                        return Ok(matches!(left.as_ref(), Expr::Value(_)));
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -175,6 +226,123 @@ impl PlanBuilder {
 
         // Unsupported WHERE clause
         Ok(None)
+    }
+
+    /// Convert sqlparser BinaryOperator to ComparisonOp
+    fn convert_comparison_op(&self, op: &sqlparser::ast::BinaryOperator) -> Option<ComparisonOp> {
+        use sqlparser::ast::BinaryOperator as SqlOp;
+        match op {
+            SqlOp::Eq => Some(ComparisonOp::Eq),
+            SqlOp::NotEq => Some(ComparisonOp::Ne),
+            SqlOp::Gt => Some(ComparisonOp::Gt),
+            SqlOp::Lt => Some(ComparisonOp::Lt),
+            SqlOp::GtEq => Some(ComparisonOp::Ge),
+            SqlOp::LtEq => Some(ComparisonOp::Le),
+            _ => None,
+        }
+    }
+
+    /// Build ExpressionRef from Expr
+    fn build_expression(&self, table_name: &str, expr: &Expr) -> Result<ExpressionRef, PlanError> {
+        match expr {
+            Expr::Identifier(ident) => {
+                let ident_value = ident.value.to_uppercase();
+                // Check for NULL constant
+                if ident_value == "NULL" {
+                    return Ok(Arc::new(ConstantExpression { value: Value::Null }));
+                }
+                // Column reference
+                let column_name = ident.value.to_lowercase();
+                let columns = self.tables.get(table_name).ok_or_else(|| {
+                    PlanError::ParseError(format!("Table '{}' not found", table_name))
+                })?;
+                let column_index = columns
+                    .iter()
+                    .position(|c| c.to_lowercase() == column_name)
+                    .ok_or_else(|| {
+                        PlanError::ParseError(format!(
+                            "Column '{}' not found in table '{}'",
+                            column_name, table_name
+                        ))
+                    })?;
+                Ok(Arc::new(crate::executor::ColumnExpression {
+                    column_name,
+                    column_index,
+                }))
+            }
+            Expr::Value(v) => {
+                // Constant value
+                let value = value_from_sqlparser(v)?;
+                Ok(Arc::new(ConstantExpression { value }))
+            }
+            // Handle negative numbers: -42
+            Expr::UnaryOp {
+                op: sqlparser::ast::UnaryOperator::Minus,
+                expr: inner,
+            } => {
+                if let Expr::Value(v) = inner.as_ref() {
+                    let value = value_from_sqlparser(v)?;
+                    match value {
+                        Value::Int(n) => Ok(Arc::new(ConstantExpression {
+                            value: Value::Int(-n),
+                        })),
+                        Value::Float(f) => Ok(Arc::new(ConstantExpression {
+                            value: Value::Float(-f),
+                        })),
+                        _ => Err(PlanError::UnsupportedValue),
+                    }
+                } else {
+                    Err(PlanError::UnsupportedValue)
+                }
+            }
+            _ => Err(PlanError::UnsupportedExpression),
+        }
+    }
+
+    /// Build PredicateRef from WHERE clause expression
+    fn build_where(&self, table_name: &str, expr: &Expr) -> Result<PredicateRef, PlanError> {
+        match expr {
+            Expr::BinaryOp { left, op, right } => {
+                // Check if this is a logical operator (AND/OR)
+                use sqlparser::ast::BinaryOperator as SqlOp;
+                match op {
+                    SqlOp::And => {
+                        let left_pred = self.build_where(table_name, left)?;
+                        let right_pred = self.build_where(table_name, right)?;
+                        Ok(Arc::new(LogicalPredicate {
+                            left: left_pred,
+                            op: LogicalOp::And,
+                            right: right_pred,
+                        }))
+                    }
+                    SqlOp::Or => {
+                        let left_pred = self.build_where(table_name, left)?;
+                        let right_pred = self.build_where(table_name, right)?;
+                        Ok(Arc::new(LogicalPredicate {
+                            left: left_pred,
+                            op: LogicalOp::Or,
+                            right: right_pred,
+                        }))
+                    }
+                    _ => {
+                        // Try to convert to comparison operator
+                        let comp_op = self
+                            .convert_comparison_op(op)
+                            .ok_or(PlanError::UnsupportedExpression)?;
+                        let left_expr = self.build_expression(table_name, left)?;
+                        let right_expr = self.build_expression(table_name, right)?;
+                        Ok(Arc::new(ComparisonPredicate {
+                            left: left_expr,
+                            op: comp_op,
+                            right: right_expr,
+                        }))
+                    }
+                }
+            }
+            // Parenthesized expression - just unwrap
+            Expr::Nested(expr) => self.build_where(table_name, expr),
+            _ => Err(PlanError::UnsupportedExpression),
+        }
     }
 
     /// Build PhysicalPlan for INSERT statement
@@ -705,14 +873,14 @@ mod tests {
         let mut builder = PlanBuilder::new();
         builder.register_table("users", vec!["id".into(), "name".into()], "id");
 
-        // Non-PK WHERE clause - should fall back to full scan
+        // Non-PK WHERE clause - should generate Filter plan
         let sql = "SELECT * FROM users WHERE name = 'Alice'";
         let stmts = parse_sql(sql).unwrap();
         let plan = builder.build_plan(&stmts[0]).unwrap();
 
         match plan {
-            PhysicalPlan::Scan(_) => {} // Expected - fall back to full scan
-            _ => panic!("Expected Scan plan for non-PK WHERE"),
+            PhysicalPlan::Filter(_) => {} // Expected - Filter for non-PK WHERE
+            _ => panic!("Expected Filter plan for non-PK WHERE"),
         }
     }
 
