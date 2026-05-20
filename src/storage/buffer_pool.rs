@@ -114,4 +114,22 @@ impl BufferPool {
 
         Err(StorageError::BufferPoolFull)
     }
+
+    /// Flush all dirty pages to storage
+    pub async fn flush_all(&self) -> Result<()> {
+        let pages = self.pages.read().await;
+
+        for (page_id, frame) in pages.iter() {
+            let mut frame_guard = frame.lock().unwrap();
+
+            if frame_guard.dirty {
+                let page = frame_guard.page.clone();
+                frame_guard.dirty = false;
+                drop(frame_guard);
+                self.storage.write_page(*page_id, &page).await?;
+            }
+        }
+
+        Ok(())
+    }
 }

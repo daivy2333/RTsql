@@ -199,21 +199,50 @@ impl<'a> LeafNode<'a> {
             return Err(StorageError::KeyNotFound);
         }
 
-        // 读取现有 key
-        let existing_key = self.get_key(position).ok_or(StorageError::KeyNotFound)?;
+        // Check if the key at position matches
+        if let Some(existing_key) = self.get_key(position) {
+            if existing_key != *key {
+                return Err(StorageError::KeyNotFound);
+            }
+        } else {
+            return Err(StorageError::KeyNotFound);
+        }
 
-        // 构造新数据
-        let mut new_data = vec![0u8; MAX_KEY_LEN + RowId::SIZE];
-        existing_key.serialize(&mut new_data[..MAX_KEY_LEN]);
-        new_row_id.serialize(&mut new_data[MAX_KEY_LEN..]);
+        // Simplified approach: read all entries, update the target, rebuild page
+        let entries: Vec<(Key, RowId)> = (0..self.key_count())
+            .filter_map(|i| {
+                let k = self.get_key(i)?;
+                let r = self.get_row_id(i)?;
+                Some((k, r))
+            })
+            .collect();
 
-        // 需要更新 slot 数据（SlottedPage 当前不支持更新，需要先删除再插入）
-        // 简化实现：删除旧 entry，插入新 entry
-        self.delete(key)?;
+        // Update the matching entry
+        let updated_entries: Vec<(Key, RowId)> = entries
+            .into_iter()
+            .map(|(k, r)| {
+                if k == *key {
+                    (k, new_row_id.clone())
+                } else {
+                    (k, r)
+                }
+            })
+            .collect();
 
-        // 重新构造 slotted page 引用
-        // 注意：这里需要重新获取可变引用
-        // 由于 delete 操作已经修改了页数据，我们需要重新初始化 LeafNode
+        // Rebuild the page
+        let page_id = self.slotted.page_id();
+        let mut new_page = Page::new(page_id);
+        let mut new_leaf = LeafNode::init(&mut new_page);
+
+        for (k, r) in updated_entries {
+            new_leaf.insert_simple(&k, &r)?;
+        }
+
+        // Copy new page data to current page
+        self.slotted
+            .page
+            .data
+            .copy_from_slice(new_page.data.as_ref());
 
         Ok(())
     }

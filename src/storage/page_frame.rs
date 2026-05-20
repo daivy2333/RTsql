@@ -47,6 +47,17 @@ impl PageGuard {
     pub fn page(&self) -> Page {
         self.frame.lock().unwrap().page.clone()
     }
+
+    /// Get mutable access to page data and automatically mark dirty
+    /// The closure receives a mutable reference to the page
+    pub fn modify_page<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Page) -> R,
+    {
+        let mut frame = self.frame.lock().unwrap();
+        frame.dirty = true;
+        f(&mut frame.page)
+    }
 }
 
 impl Drop for PageGuard {

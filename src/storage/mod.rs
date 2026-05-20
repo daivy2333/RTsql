@@ -1,5 +1,5 @@
 mod async_storage;
-mod btree;
+pub mod btree;
 mod buffer_pool;
 mod error;
 mod file_storage;
