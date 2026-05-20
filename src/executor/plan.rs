@@ -4,6 +4,15 @@ use crate::executor::predicate::PredicateRef;
 use crate::executor::{ColumnType, Value};
 use crate::storage::page_format::Key;
 
+/// 排序列定义
+#[derive(Debug, Clone)]
+pub struct OrderByColumn {
+    /// 列名
+    pub column: String,
+    /// 是否升序（true = ASC, false = DESC）
+    pub asc: bool,
+}
+
 /// 物理计划节点（同步结构，M5 异步执行）
 #[derive(Debug, Clone)]
 pub enum PhysicalPlan {
@@ -23,6 +32,10 @@ pub enum PhysicalPlan {
     CreateTable(CreateTableNode),
     /// 删除表
     DropTable(DropTableNode),
+    /// 排序节点（ORDER BY）
+    Sort(SortNode),
+    /// 分页节点（LIMIT + OFFSET）
+    Limit(LimitNode),
 }
 
 /// 全表扫描节点
@@ -180,4 +193,26 @@ pub struct DropTableNode {
     pub table_name: String,
     /// 是否使用 IF EXISTS
     pub if_exists: bool,
+}
+
+/// 排序节点（ORDER BY）
+#[derive(Debug, Clone)]
+pub struct SortNode {
+    /// 输入计划（通常是 Scan 或 Filter）
+    pub input: Box<PhysicalPlan>,
+    /// 排序列定义列表
+    pub order_by: Vec<OrderByColumn>,
+    /// 表名（用于列名解析）
+    pub table_name: String,
+}
+
+/// 分页节点（LIMIT + OFFSET）
+#[derive(Debug, Clone)]
+pub struct LimitNode {
+    /// 输入计划（通常是 Sort）
+    pub input: Box<PhysicalPlan>,
+    /// 限制行数（LIMIT）
+    pub limit: usize,
+    /// 跳过行数（OFFSET）
+    pub offset: usize,
 }

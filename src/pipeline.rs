@@ -194,6 +194,18 @@ fn create_executor_from_plan(
             PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
                 panic!("DDL should be handled separately in execute()")
             }
+
+            PhysicalPlan::Sort(node) => {
+                let input = create_executor_from_plan(*node.input, database).await?;
+                // TODO: Task 3 - Implement SortExecutor
+                Ok(input)
+            }
+
+            PhysicalPlan::Limit(node) => {
+                let input = create_executor_from_plan(*node.input, database).await?;
+                // TODO: Task 5 - Implement LimitExecutor
+                Ok(input)
+            }
         }
     })
 }
