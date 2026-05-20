@@ -5,5 +5,5 @@
 mod plan;
 mod value;
 
-pub use plan::{PhysicalPlan, ScanNode, IndexScanNode, InsertNode, UpdateNode, DeleteNode};
+pub use plan::{DeleteNode, IndexScanNode, InsertNode, PhysicalPlan, ScanNode, UpdateNode};
 pub use value::Value;

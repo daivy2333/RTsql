@@ -53,9 +53,7 @@ mod tests {
 
         for _ in 0..10 {
             let tx_id_clone = tx_id.clone();
-            handles.push(thread::spawn(move || {
-                tx_id_clone.allocate()
-            }));
+            handles.push(thread::spawn(move || tx_id_clone.allocate()));
         }
 
         let mut ids: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();

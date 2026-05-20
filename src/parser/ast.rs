@@ -1,7 +1,7 @@
 //! AST helper functions for extracting information from sqlparser AST
 
-use sqlparser::ast::*;
 use crate::parser::error::PlanError;
+use sqlparser::ast::*;
 
 /// 解析 SQL 字符串，返回 Statement 列表
 pub fn parse_sql(sql: &str) -> Result<Vec<Statement>, PlanError> {
@@ -24,27 +24,24 @@ pub fn extract_table_name(from: &[TableWithJoins]) -> Result<String, PlanError> 
     }
     let table_factor = &from[0].relation;
     match table_factor {
-        TableFactor::Table { name, .. } => {
-            Ok(name.to_string().to_lowercase())
-        }
+        TableFactor::Table { name, .. } => Ok(name.to_string().to_lowercase()),
         _ => Err(PlanError::UnsupportedStatement),
     }
 }
 
 /// 从 projection 提取列名列表
 pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanError> {
-    projection.iter().map(|item| {
-        match item {
-            SelectItem::UnnamedExpr(expr) => {
-                match expr {
-                    Expr::Identifier(ident) => Ok(ident.value.to_string().to_lowercase()),
-                    _ => Err(PlanError::UnsupportedStatement),
-                }
-            }
+    projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::UnnamedExpr(expr) => match expr {
+                Expr::Identifier(ident) => Ok(ident.value.to_string().to_lowercase()),
+                _ => Err(PlanError::UnsupportedStatement),
+            },
             SelectItem::Wildcard(_) => Ok("*".into()),
             _ => Err(PlanError::UnsupportedStatement),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// 从 ObjectName 提取表名（lowercase）

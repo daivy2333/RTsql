@@ -1,7 +1,7 @@
 //! SQL value types for physical plan execution
 
-use std::fmt;
 use crate::storage::page_format::Key;
+use std::fmt;
 
 /// SQL 值类型（M4: 仅支持 Int/String/Null）
 #[derive(Debug, Clone, PartialEq)]

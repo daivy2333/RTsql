@@ -12,8 +12,8 @@ const UNSET_ROW_ID: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 /// - next_version (6 bytes): RowId pointing to previous version (UNSET = None)
 pub struct VersionHeader {
     create_tx_id: u64,
-    commit_tx_id: u64,       // UNSET_TX_ID = None
-    next_version: [u8; 6],   // RowId bytes, UNSET_ROW_ID = None
+    commit_tx_id: u64,     // UNSET_TX_ID = None
+    next_version: [u8; 6], // RowId bytes, UNSET_ROW_ID = None
 }
 
 impl VersionHeader {

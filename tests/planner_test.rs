@@ -2,7 +2,7 @@
 //!
 //! Tests for PlanBuilder converting SQL AST to PhysicalPlan
 
-use rtsql::{parse_sql, PlanBuilder, PhysicalPlan};
+use rtsql::{parse_sql, PhysicalPlan, PlanBuilder};
 
 fn setup_builder() -> PlanBuilder {
     let mut builder = PlanBuilder::new();

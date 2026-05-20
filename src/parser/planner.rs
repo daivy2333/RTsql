@@ -2,12 +2,14 @@
 //!
 //! M4: SQL Parser and Physical Plan
 
-use std::collections::HashMap;
-use sqlparser::ast::{Statement, Query, Expr, SetExpr};
-use crate::parser::error::PlanError;
+use crate::executor::{
+    DeleteNode, IndexScanNode, InsertNode, PhysicalPlan, ScanNode, UpdateNode, Value,
+};
 use crate::parser::ast::*;
+use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
-use crate::executor::{PhysicalPlan, ScanNode, IndexScanNode, InsertNode, UpdateNode, DeleteNode, Value};
+use sqlparser::ast::{Expr, Query, SetExpr, Statement};
+use std::collections::HashMap;
 
 /// PlanBuilder - Convert AST to PhysicalPlan
 ///
@@ -40,15 +42,21 @@ impl PlanBuilder {
     pub fn build_plan(&self, stmt: &Statement) -> Result<PhysicalPlan, PlanError> {
         match stmt {
             Statement::Query(query) => self.build_query(query),
-            Statement::Insert { table_name, columns, source, .. } => {
-                self.build_insert(table_name, columns, source)
-            }
-            Statement::Update { table, assignments, selection, .. } => {
-                self.build_update(table, assignments, selection)
-            }
-            Statement::Delete { from, selection, .. } => {
-                self.build_delete(from, selection)
-            }
+            Statement::Insert {
+                table_name,
+                columns,
+                source,
+                ..
+            } => self.build_insert(table_name, columns, source),
+            Statement::Update {
+                table,
+                assignments,
+                selection,
+                ..
+            } => self.build_update(table, assignments, selection),
+            Statement::Delete {
+                from, selection, ..
+            } => self.build_delete(from, selection),
             _ => Err(PlanError::UnsupportedStatement),
         }
     }
@@ -59,7 +67,10 @@ impl PlanBuilder {
         if self.tables.contains_key(&name_lower) {
             Ok(())
         } else {
-            Err(PlanError::ParseError(format!("Table '{}' does not exist", table_name)))
+            Err(PlanError::ParseError(format!(
+                "Table '{}' does not exist",
+                table_name
+            )))
         }
     }
 
@@ -104,7 +115,11 @@ impl PlanBuilder {
     /// Extract primary key from WHERE clause
     ///
     /// Only supports: pk_column = value
-    fn extract_pk_from_where(&self, table_name: &str, expr: &Expr) -> Result<Option<crate::storage::page_format::Key>, PlanError> {
+    fn extract_pk_from_where(
+        &self,
+        table_name: &str,
+        expr: &Expr,
+    ) -> Result<Option<crate::storage::page_format::Key>, PlanError> {
         // Get primary key column name
         let pk_column = match self.primary_keys.get(table_name) {
             Some(pk) => pk.clone(),
@@ -152,9 +167,7 @@ impl PlanBuilder {
         self.validate_table(&table_name_str)?;
 
         // Extract column names
-        let columns: Vec<String> = columns.iter()
-            .map(|c| c.value.to_lowercase())
-            .collect();
+        let columns: Vec<String> = columns.iter().map(|c| c.value.to_lowercase()).collect();
 
         // Extract values from source
         let values = self.extract_insert_values(source)?;
@@ -167,28 +180,39 @@ impl PlanBuilder {
     }
 
     /// Extract values from INSERT source (VALUES clause)
-    fn extract_insert_values(&self, source: &Option<Box<sqlparser::ast::Query>>) -> Result<Vec<Vec<Value>>, PlanError> {
-        let source = source.as_ref().ok_or_else(|| PlanError::MissingField("VALUES".into()))?;
+    fn extract_insert_values(
+        &self,
+        source: &Option<Box<sqlparser::ast::Query>>,
+    ) -> Result<Vec<Vec<Value>>, PlanError> {
+        let source = source
+            .as_ref()
+            .ok_or_else(|| PlanError::MissingField("VALUES".into()))?;
 
         // Expect SetExpr::Values
         match source.body.as_ref() {
             SetExpr::Values(values) => {
-                values.rows.iter().map(|row| {
-                    row.iter().map(|expr| {
-                        match expr {
-                            Expr::Value(v) => value_from_sqlparser(v),
-                            Expr::Identifier(ident) => {
-                                // Handle NULL identifier
-                                if ident.value.to_uppercase() == "NULL" {
-                                    Ok(Value::Null)
-                                } else {
-                                    Err(PlanError::UnsupportedValue)
+                values
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|expr| {
+                                match expr {
+                                    Expr::Value(v) => value_from_sqlparser(v),
+                                    Expr::Identifier(ident) => {
+                                        // Handle NULL identifier
+                                        if ident.value.to_uppercase() == "NULL" {
+                                            Ok(Value::Null)
+                                        } else {
+                                            Err(PlanError::UnsupportedValue)
+                                        }
+                                    }
+                                    _ => Err(PlanError::UnsupportedValue),
                                 }
-                            }
-                            _ => Err(PlanError::UnsupportedValue),
-                        }
-                    }).collect::<Result<Vec<_>, _>>()
-                }).collect::<Result<Vec<_>, _>>()
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()
             }
             _ => Err(PlanError::UnsupportedStatement),
         }
@@ -208,10 +232,14 @@ impl PlanBuilder {
         self.validate_table(&table_name)?;
 
         // Extract primary key from WHERE clause
-        let where_expr = selection.as_ref()
+        let where_expr = selection
+            .as_ref()
             .ok_or_else(|| PlanError::MissingField("WHERE clause for UPDATE".into()))?;
-        let key = self.extract_pk_from_where(&table_name, where_expr)?
-            .ok_or_else(|| PlanError::ParseError("UPDATE requires primary key equality in WHERE clause".into()))?;
+        let key = self
+            .extract_pk_from_where(&table_name, where_expr)?
+            .ok_or_else(|| {
+                PlanError::ParseError("UPDATE requires primary key equality in WHERE clause".into())
+            })?;
 
         // Only support single column update
         if assignments.len() != 1 {
@@ -264,15 +292,16 @@ impl PlanBuilder {
         self.validate_table(&table_name)?;
 
         // Extract primary key from WHERE clause
-        let where_expr = selection.as_ref()
+        let where_expr = selection
+            .as_ref()
             .ok_or_else(|| PlanError::MissingField("WHERE clause for DELETE".into()))?;
-        let key = self.extract_pk_from_where(&table_name, where_expr)?
-            .ok_or_else(|| PlanError::ParseError("DELETE requires primary key equality in WHERE clause".into()))?;
+        let key = self
+            .extract_pk_from_where(&table_name, where_expr)?
+            .ok_or_else(|| {
+                PlanError::ParseError("DELETE requires primary key equality in WHERE clause".into())
+            })?;
 
-        Ok(PhysicalPlan::Delete(DeleteNode {
-            table_name,
-            key,
-        }))
+        Ok(PhysicalPlan::Delete(DeleteNode { table_name, key }))
     }
 }
 
@@ -471,8 +500,14 @@ mod tests {
         match plan {
             PhysicalPlan::Insert(node) => {
                 assert_eq!(node.values.len(), 2);
-                assert_eq!(node.values[0], vec![Value::Int(1), Value::String("Alice".to_string())]);
-                assert_eq!(node.values[1], vec![Value::Int(2), Value::String("Bob".to_string())]);
+                assert_eq!(
+                    node.values[0],
+                    vec![Value::Int(1), Value::String("Alice".to_string())]
+                );
+                assert_eq!(
+                    node.values[1],
+                    vec![Value::Int(2), Value::String("Bob".to_string())]
+                );
             }
             _ => panic!("Expected Insert plan"),
         }
