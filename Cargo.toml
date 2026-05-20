@@ -7,8 +7,12 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs"] }
+async-trait = "0.1"
+thiserror = "1.0"
+anyhow = "1.0"
 
 [dev-dependencies]
+tempfile = "3.0"
 
 [profile.release]
 opt-level = 3
