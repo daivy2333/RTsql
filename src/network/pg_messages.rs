@@ -124,3 +124,59 @@ pub fn row_description(columns: &[(/* name */ &str, /* sample value */ Value)]) 
 
     bytes
 }
+
+/// DataRow message: 'D' + length + column_count + columns
+pub fn data_row(row: &[Value]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(b'D');
+
+    // Calculate columns data first
+    let mut columns_data = Vec::new();
+
+    // Column count (Int16 BE)
+    columns_data.extend_from_slice(&(row.len() as i16).to_be_bytes());
+
+    for value in row {
+        // Column length (Int32 BE): -1 (NULL) or N (data bytes)
+        match value {
+            Value::Int(n) => {
+                // Convert to text format: i64 → ASCII
+                let text = n.to_string();
+                columns_data.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                columns_data.extend_from_slice(text.as_bytes());
+            },
+            Value::String(s) => {
+                columns_data.extend_from_slice(&(s.len() as i32).to_be_bytes());
+                columns_data.extend_from_slice(s.as_bytes());
+            },
+            Value::Null => {
+                // Length = -1 (NULL)
+                columns_data.extend_from_slice(&(-1i32).to_be_bytes());
+            },
+        }
+    }
+
+    // Length = 4 (length field) + columns_data.len()
+    let length = 4 + columns_data.len();
+    bytes.extend_from_slice(&(length as i32).to_be_bytes());
+
+    bytes.extend(columns_data);
+
+    bytes
+}
+
+/// CommandComplete message: 'C' + length + tag(NUL)
+pub fn command_complete(tag: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(b'C');
+
+    // Length = 4 (length field) + tag.len() + 1 (NUL)
+    let length = 4 + tag.len() + 1;
+    bytes.extend_from_slice(&(length as i32).to_be_bytes());
+
+    // Tag (null-terminated)
+    bytes.extend_from_slice(tag.as_bytes());
+    bytes.push(0);
+
+    bytes
+}

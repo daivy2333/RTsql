@@ -67,3 +67,30 @@ fn test_row_description_serialization() {
     let field_count = i16::from_be_bytes([bytes[5], bytes[6]]);
     assert_eq!(field_count, 2);
 }
+
+#[test]
+fn test_data_row_serialization() {
+    let row = vec![
+        Value::Int(42),
+        Value::String("hello".to_string()),
+        Value::Null,
+    ];
+
+    let bytes = pg_messages::data_row(&row);
+
+    // Format: 'D' + length + column_count + columns...
+    assert_eq!(bytes[0], b'D');
+
+    // Column count (Int16 BE): 3
+    let column_count = i16::from_be_bytes([bytes[5], bytes[6]]);
+    assert_eq!(column_count, 3);
+}
+
+#[test]
+fn test_command_complete_serialization() {
+    let bytes = pg_messages::command_complete("SELECT 5");
+
+    // Format: 'C' + length + tag(NUL)
+    assert_eq!(bytes[0], b'C');
+    assert!(bytes.ends_with(&[0]));  // NUL terminated
+}
