@@ -3,7 +3,7 @@
 use crate::storage::page_format::RowId;
 
 /// 执行结果类型
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecResult {
     /// 查询返回 RowId（IndexScan）
     RowId(RowId),
