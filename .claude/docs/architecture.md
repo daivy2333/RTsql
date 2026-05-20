@@ -61,6 +61,33 @@
 | 内存分配 | `jemalloc` / `mimalloc` | 减少内存碎片，提升多线程分配效率 |
 | 测试 | `sqllogictest` + `proptest` | 保证 SQL 兼容性和正确性，覆盖边界场景 |
 
+### 2026-05-20 - M1 存储层架构决策
+
+- **决策**: 采用 AsyncStorage trait + FileStorage 实现 + BufferPool（Clock 淘汰）三层架构
+- **原因**:
+  - trait 抽象便于未来扩展（内存模式、io_uring）
+  - spawn_blocking 只在 FileStorage 层使用，不污染上层
+  - Clock 淘汰比纯 LRU 更好适应扫描访问模式
+- **影响**:
+  - BufferPool 使用 RwLock<HashMap> + Mutex<PageFrame> 组合
+  - PageGuard 通过引用计数防止淘汰正在使用的页
+  - Dirty page 在淘汰时自动写回（不主动 flush）
+- **替代方案**:
+  - 一体化 BufferPool（rejected：职责混乱，难以测试）
+  - 纯 LRU 淘汰（rejected：实现复杂，对扫描访问性能差）
+- **文件结构**:
+```
+src/storage/
+├── mod.rs           # 模块导出
+├── error.rs         # StorageError（含 JoinError）
+├── page_id.rs       # PageId 结构
+├── page.rs          # Page 结构（4KB Box<[u8]>）
+├── async_storage.rs # AsyncStorage trait
+├── file_storage.rs  # FileStorage 实现
+├── buffer_pool.rs   # BufferPool + Clock 淘汰
+└── page_frame.rs    # PageFrame + PageGuard
+```
+
 ### 模块划分与职责
 
 | 模块 | 职责 | 异步策略 |
@@ -92,7 +119,7 @@
 | 里程碑 | 内容 | 异步相关重点 |
 |--------|------|-------------|
 | M0 | 项目骨架，引入 Tokio | 确定异步运行时配置 |
-| M1 | 文件/缓存层 | 实现 `AsyncStorage` trait，使用 `spawn_blocking` 读页 |
+| M1 | 文件/缓存层 | 实现 `AsyncStorage` trait，使用 `spawn_blocking` 读页 | ✅ 完成 |
 | M2 | B-Tree 索引与存储引擎 | 索引同步，通过 `spawn_blocking` 暴露为 async API |
 | M3 | 事务与 MVCC | 用异步锁实现提交等待，快照读无锁 |
 | M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） |
