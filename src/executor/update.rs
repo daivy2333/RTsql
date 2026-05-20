@@ -1,25 +1,49 @@
-//! Update executor - updates RowId in index
+//! Update executor - MVCC-aware row update
 
 use crate::executor::{ExecResult, Executor, Value};
-use crate::storage::{btree::IndexManager, page_format::RowId, Result};
+use crate::storage::page_format::{
+    compute_tuple_size, deserialize_tuple, serialize_tuple, ColumnType,
+};
+use crate::storage::{
+    read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, Result, StorageError,
+    TableMeta,
+};
+use crate::transaction::VersionHeader;
 use std::sync::Arc;
 
-/// UpdateExecutor - updates the RowId for an existing key
 pub struct UpdateExecutor {
-    index_manager: Arc<IndexManager>,
+    table_meta: Arc<TableMeta>,
+    buffer_pool: Arc<BufferPool>,
     key: Vec<u8>,
-    // M5: new_value will be used in future to compute new RowId
-    #[allow(dead_code)]
+    column_name: String,
     new_value: Value,
+    tx_id: u64,
+    schema: Vec<ColumnType>,
     executed: bool,
 }
 
 impl UpdateExecutor {
-    pub fn new(index_manager: Arc<IndexManager>, key: Vec<u8>, new_value: Value) -> Self {
+    pub fn new(
+        table_meta: Arc<TableMeta>,
+        buffer_pool: Arc<BufferPool>,
+        key: Vec<u8>,
+        column_name: String,
+        new_value: Value,
+        tx_id: u64,
+    ) -> Self {
+        let schema: Vec<ColumnType> = table_meta
+            .columns
+            .iter()
+            .map(|(_, ct)| ct.clone())
+            .collect();
         Self {
-            index_manager,
+            table_meta,
+            buffer_pool,
             key,
+            column_name,
             new_value,
+            tx_id,
+            schema,
             executed: false,
         }
     }
@@ -34,9 +58,44 @@ impl Executor for UpdateExecutor {
 
         self.executed = true;
 
-        // M5: 使用测试占位 RowId（page_id=0, slot_id=999）
-        let new_row_id = RowId::new(0, 999);
-        self.index_manager.update(&self.key, new_row_id).await?;
+        // Step 1: Search index for key → get old RowId
+        let old_row_id = match self.table_meta.index_manager.search(&self.key).await? {
+            Some(id) => id,
+            None => return Err(StorageError::KeyNotFound),
+        };
+
+        // Step 2: Read old tuple from data page
+        let (_version_header, old_tuple_bytes) =
+            read_tuple_from_data_page(&self.buffer_pool, old_row_id).await?;
+        let mut values = deserialize_tuple(&old_tuple_bytes, &self.schema)?;
+
+        // Step 3: Find column index and modify the target column
+        let col_idx = self
+            .table_meta
+            .columns
+            .iter()
+            .position(|(name, _)| name == &self.column_name)
+            .ok_or_else(|| StorageError::ColumnNotFound(self.column_name.clone()))?;
+        values[col_idx] = self.new_value.clone();
+
+        // Step 4: Serialize new tuple
+        let size = compute_tuple_size(&values, &self.schema);
+        let mut buf = vec![0u8; size];
+        serialize_tuple(&values, &self.schema, &mut buf)?;
+
+        // Step 5: Create new VersionHeader with next_version → old RowId
+        let version_header = VersionHeader::new(self.tx_id, None).with_next_version(old_row_id);
+
+        // Step 6: Write new tuple to data page
+        let new_row_id =
+            write_tuple_to_data_page(&self.buffer_pool, &self.table_meta, &version_header, &buf)
+                .await?;
+
+        // Step 7: Update index → new RowId
+        self.table_meta
+            .index_manager
+            .update(&self.key, new_row_id)
+            .await?;
 
         Ok(Some(ExecResult::AffectedRows(1)))
     }

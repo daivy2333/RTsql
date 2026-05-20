@@ -1,36 +1,29 @@
+use crate::database::Database;
 use crate::network::protocol::{Request, Response};
+use std::sync::Arc;
 
-/// SQL handler (M6 simplified: mock executor)
 pub struct SqlHandler {
-    // M6: No persistent state
+    database: Arc<Database>,
 }
 
 impl SqlHandler {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(database: Arc<Database>) -> Self {
+        Self { database }
     }
 
-    pub fn execute(&mut self, request: Request) -> Response {
-        match request {
-            Request::Query { sql: _ } => {
-                // M6 mock: return fixed RowId
-                Response::QueryResult {
-                    row_ids: vec![(0, 1)], // mock: page_id=0, slot_id=1
-                }
+    pub async fn execute(&self, request: Request) -> Response {
+        let sql = match request.sql() {
+            Some(sql) => sql.to_string(),
+            None => {
+                return match request {
+                    Request::Ping => Response::Pong,
+                    _ => Response::Error {
+                        message: "Unknown request".to_string(),
+                    },
+                };
             }
-            Request::Insert { sql: _ } => {
-                // M6 mock: return fixed AffectedRows
-                Response::AffectedRows { count: 1 }
-            }
-            Request::Update { sql: _ } => Response::AffectedRows { count: 1 },
-            Request::Delete { sql: _ } => Response::AffectedRows { count: 1 },
-            Request::Ping => Response::Pong,
-        }
-    }
-}
+        };
 
-impl Default for SqlHandler {
-    fn default() -> Self {
-        Self::new()
+        self.database.execute_sql(&sql).await
     }
 }

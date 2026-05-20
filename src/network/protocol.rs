@@ -32,7 +32,7 @@ pub enum Request {
 /// Response types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    QueryResult { row_ids: Vec<(u64, u16)> },
+    QueryResult { rows: Vec<Vec<serde_json::Value>> },
     AffectedRows { count: u64 },
     Error { message: String },
     Pong,

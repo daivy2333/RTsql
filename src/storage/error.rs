@@ -1,6 +1,8 @@
 use thiserror::Error;
 use tokio::task::JoinError;
 
+use super::RowId;
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("IO error: {0}")]
@@ -32,6 +34,18 @@ pub enum StorageError {
 
     #[error("Page full")]
     PageFull,
+
+    #[error("slot not found: {0:?}")]
+    SlotNotFound(RowId),
+
+    #[error("table not found: {0}")]
+    TableNotFound(String),
+
+    #[error("duplicate table: {0}")]
+    DuplicateTable(String),
+
+    #[error("column not found: {0}")]
+    ColumnNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

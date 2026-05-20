@@ -4,18 +4,19 @@ use crate::executor::{ExecResult, Executor};
 use crate::storage::{btree::IndexManager, Result};
 use std::sync::Arc;
 
-/// DeleteExecutor - delete a key from the index
 pub struct DeleteExecutor {
     index_manager: Arc<IndexManager>,
     key: Vec<u8>,
+    tx_id: u64,
     executed: bool,
 }
 
 impl DeleteExecutor {
-    pub fn new(index_manager: Arc<IndexManager>, key: Vec<u8>) -> Self {
+    pub fn new(index_manager: Arc<IndexManager>, key: Vec<u8>, tx_id: u64) -> Self {
         Self {
             index_manager,
             key,
+            tx_id,
             executed: false,
         }
     }

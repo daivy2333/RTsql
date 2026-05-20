@@ -1,6 +1,6 @@
 use crate::network::error::NetworkError;
 use crate::network::handler::SqlHandler;
-use crate::network::protocol::{Protocol, Request, Response};
+use crate::network::protocol::Protocol;
 use tokio::net::TcpStream;
 
 /// Connection handler, one coroutine per connection
@@ -25,7 +25,7 @@ impl<P: Protocol> ConnectionHandler<P> {
             match request {
                 Some(req) => {
                     // 2. Execute SQL
-                    let response = self.handler.execute(req);
+                    let response = self.handler.execute(req).await;
 
                     // 3. Write response
                     self.protocol.write_response(&mut stream, &response).await?;

@@ -4,174 +4,168 @@
 
 ## 当前状态
 
-- **阶段**: M6 完成（网络层已实现）
+- **阶段**: M7 完成（全流程集成 + 数据存储层）
 - **状态**: 正常
-- **当前里程碑**: M7 准备开始
+- **当前里程碑**: M8 准备开始
 
 ## 项目结构
 
 ```
 RTsql/
-├── Cargo.toml              # Rust 项目配置，含 Tokio/async-trait/thiserror/anyhow/sqlparser 依赖
+├── Cargo.toml              # Rust 项目配置
 ├── Cargo.lock              # 依赖锁定文件
 ├── .gitignore              # Git 忽略配置
 ├── CLAUDE.md               # 文档入口
 ├── src/
-│   ├── main.rs             # 数据库服务器入口（#[tokio::main]）
+│   ├── main.rs             # 数据库服务器入口
 │   ├── lib.rs              # 库入口，导出模块公共接口
+│   ├── database.rs         # M7 新增：Database 协调器结构
+│   ├── pipeline.rs         # M7 新增：SQL 执行管道
 │   └── storage/
 │       ├── mod.rs          # 存储模块导出
-│       ├── error.rs        # StorageError 错误类型
+│       ├── error.rs        # StorageError (含 SlotNotFound/TableNotFound/DuplicateTable)
+│       ├── page.rs         # Page 结构（4KB）
 │       ├── page_id.rs      # PageId 结构
-│       ├── page.rs         # Page 结构（4KB 固定大小）
 │       ├── async_storage.rs # AsyncStorage trait
-│       ├── file_storage.rs  # FileStorage 实现（spawn_blocking I/O）
-│       ├── buffer_pool.rs   # BufferPool（Clock 淘汰）+ storage() 方法
-│       ├── page_frame.rs    # PageFrame + PageGuard + modify_page()
-│       ├── page_format/     # M2 新增：页格式模块
-│       │   ├── mod.rs       # 模块导出
-│       │   ├── key.rs       # Key 结构（固定 32 bytes）
-│       │   ├── row_id.rs    # RowId 结构（page_id + slot_id）
-│       │   └── slotted_page.rs # SlottedPage 通用格式
-│       └── btree/           # M2 新增：B-Tree 索引模块
-│           ├── mod.rs       # 模块导出
-│           ├── node.rs      # LeafNode + InternalNode 结构
-│           ├── btree.rs     # BTree 核心逻辑
-│           ├── sync_loader.rs # SyncPageLoader（block_on 包装）
-│           └── index_manager.rs # IndexManager 异步 API
-│   ├── executor/           # M4-M5: 执行引擎模块
-│   │   ├── mod.rs          # 模块导出
-│   │   ├── value.rs        # Value enum（Int/String/Null + to_key()）
-│   │   ├── plan.rs         # PhysicalPlan + 5 节点结构
-│   │   ├── result.rs       # ExecResult（RowId/AffectedRows/NotImplemented）[M5]
-│   │   ├── executor_trait.rs # Executor trait（async next）[M5]
-│   │   ├── scan.rs         # ScanExecutor [M5]
-│   │   ├── index_scan.rs   # IndexScanExecutor [M5]
-│   │   ├── insert.rs       # InsertExecutor [M5]
-│   │   ├── update.rs       # UpdateExecutor [M5]
-│   │   └── delete.rs       # DeleteExecutor [M5]
-│   ├── transaction/        # M3 新增：事务管理模块
-│   │   ├── mod.rs          # 模块导出
-│   │   ├── tx_id.rs        # TransactionId（AtomicU64）
-│   │   ├── error.rs        # TransactionError
-│   │   ├── snapshot.rs     # Snapshot（可见性判断）
-│   │   ├── version_chain.rs # VersionHeader（版本链）
-│   │   ├── row_lock.rs     # RowLockTable（行级锁）
+│       ├── file_storage.rs  # FileStorage 实现
+│       ├── buffer_pool.rs   # BufferPool（Clock 淘汰）
+│       ├── page_frame.rs    # PageFrame + PageGuard
+│       ├── data_page.rs    # M7 新增：write/read_tuple_to_data_page
+│       ├── data/           # M7 新增：数据存储模块
+│       │   ├── mod.rs
+│       │   └── table_manager.rs # TableManager + TableMeta
+│       ├── page_format/
+│       │   ├── mod.rs
+│       │   ├── key.rs       # Key（32 bytes）
+│       │   ├── row_id.rs    # RowId（page_id + slot_id）
+│       │   ├── slotted_page.rs # SlottedPage 通用格式
+│       │   └── tuple.rs    # M7 新增：ColumnType + tuple 序列化
+│       └── btree/
+│           ├── mod.rs
+│           ├── node.rs      # LeafNode + InternalNode
+│           ├── btree.rs     # BTree（含 scan_all）
+│           ├── sync_loader.rs
+│           └── index_manager.rs # IndexManager（含 scan_all）
+│   ├── executor/
+│   │   ├── mod.rs
+│   │   ├── value.rs        # Value（Int/String/Null）
+│   │   ├── plan.rs         # PhysicalPlan + 5 节点
+│   │   ├── result.rs       # ExecResult（Row/AffectedRows）
+│   │   ├── executor_trait.rs
+│   │   ├── scan.rs         # ScanExecutor（全表扫描）[M7 重写]
+│   │   ├── index_scan.rs   # IndexScanExecutor（读 Tuple）[M7 重写]
+│   │   ├── insert.rs       # InsertExecutor（写数据页）[M7 重写]
+│   │   ├── update.rs       # UpdateExecutor（版本链）[M7 重写]
+│   │   └── delete.rs       # DeleteExecutor
+│   ├── transaction/
+│   │   ├── mod.rs
+│   │   ├── tx_id.rs
+│   │   ├── error.rs
+│   │   ├── snapshot.rs     # Snapshot（MVCC 可见性）
+│   │   ├── version_chain.rs # VersionHeader（22B）
+│   │   ├── row_lock.rs
 │   │   └── manager.rs      # TransactionManager
-│   ├── parser/             # M4 新增：SQL 解析模块
-│   │   ├── mod.rs          # 模块导出
-│   │   ├── error.rs        # PlanError（7 种错误类型）
-│   │   ├── value.rs        # Value 转换函数
-│   │   ├── ast.rs          # AST 辅助函数
-│   │   └── planner.rs      # PlanBuilder（AST → PhysicalPlan）
-│   └── network/            # M6 新增：网络层模块
-│       ├── mod.rs          # 模块导出
-│       ├── error.rs        # NetworkError
-│       ├── protocol.rs     # Protocol trait + JsonProtocol + Request/Response
-│       ├── connection.rs   # ConnectionHandler
-│       ├── handler.rs      # SqlHandler（mock executor）
-│       └── server.rs       # Server + TcpListener + shutdown
+│   ├── parser/
+│   │   ├── mod.rs
+│   │   ├── error.rs
+│   │   ├── value.rs
+│   │   ├── ast.rs
+│   │   └── planner.rs      # PlanBuilder
+│   └── network/
+│       ├── mod.rs
+│       ├── error.rs
+│       ├── protocol.rs     # Protocol trait + JsonProtocol
+│       ├── connection.rs   # ConnectionHandler（async handler）
+│       ├── handler.rs      # SqlHandler（真实 pipeline）[M7 重写]
+│       └── server.rs       # Server（接受 Arc<Database>）
 ├── tests/
-│   ├── runtime_test.rs     # 运行时功能验证测试（3 个测试）
-│   ├── btree_test.rs       # M2 新增：BTree 核心测试（10 个测试）
-│   ├── index_manager_test.rs # M2 新增：IndexManager 异步测试（3 个测试）
-│   ├── sync_loader_test.rs # M2 新增：SyncPageLoader 测试（2 个测试）
-│   ├── concurrent_test.rs  # M3 新增：并发事务测试（4 个测试）
-│   ├── parser_test.rs      # M4 新增：SQL 解析测试（6 个测试）
-│   ├── planner_test.rs     # M4 新增：计划构建测试（8 个测试）
-│   ├── executor_test.rs    # M5 新增：Executor 单元测试（7 个测试）
-│   ├── plan_exec_test.rs   # M5 新增：集成测试（4 个测试）
-│   ├── network_protocol_test.rs # M6 新增：JSON 协议测试（5 个测试）
-│   └── network_server_test.rs   # M6 新增：Server 集成测试（4 个测试）
+│   ├── runtime_test.rs       (3)
+│   ├── btree_test.rs         (10)
+│   ├── index_manager_test.rs (3)
+│   ├── sync_loader_test.rs   (2)
+│   ├── concurrent_test.rs    (4)
+│   ├── parser_test.rs        (6)
+│   ├── planner_test.rs       (8)
+│   ├── executor_test.rs      (16) [M7 更新]
+│   ├── plan_exec_test.rs     (4)  [M7 更新]
+│   ├── table_manager_test.rs (6)  [M7 新增]
+│   ├── network_protocol_test.rs (5)
+│   ├── network_server_test.rs (4)  [M7 更新]
+│   └── e2e_test.rs          (7)  [M7 新增]
 └── .claude/
     └── docs/
-        ├── architecture.md    - 架构决策记录
-        ├── learned.md         - 学习记忆
-        ├── optimization.md    - 优化方向与技术债务
-        ├── references.md      - 外部参考资料
-        ├── rules.md           - 编码规范与行为约束
-        ├── snapshot.md        - 项目状态快照
-        ├── tasks.md           - 任务清单
-        └── superpowers/
-            ├── specs/         - 设计规范
-            └─ plans/          - 实现计划
+        ├── architecture.md
+        ├── learned.md
+        ├── optimization.md
+        ├── references.md
+        ├── rules.md
+        ├── snapshot.md
+        └── tasks.md
 ```
 
-**注**: M6 网络层已完成，包含 Protocol trait + JsonProtocol + Server + ConnectionHandler + SqlHandler，124 个测试全部通过。
+**注**: M7 全流程集成完成，157 个测试全部通过。新增 34 个测试（含 7 个 E2E TCP 测试）。
 
 ## 技术栈
 
 | 类别 | 技术 | 版本 |
 |------|------|------|
-| 语言 | Rust | 最新稳定版（建议 1.75+） |
-| 构建工具 | Cargo | Rust 内置 |
-| 异步运行时 | Tokio | 1.x（多线程 scheduler + io-util） |
-| SQL 解析 | sqlparser-rs | 0.44 ✅ 已集成 |
-| 协议层 | serde + serde_json | 1.0 ✅ 已集成 |
-| Shutdown | tokio-util (CancellationToken) | 0.7 ✅ 已集成 |
-| 测试框架 | tempfile + 内置测试 | 3.x |
-| 代码格式化 | rustfmt | Rust 内置 |
-| Lint | clippy | Rust 内置 |
+| 语言 | Rust | 1.75+ |
+| 构建工具 | Cargo | 内置 |
+| 异步运行时 | Tokio | 1.x（multi-thread + io-util） |
+| SQL 解析 | sqlparser-rs | 0.44 |
+| 协议层 | serde + serde_json | 1.0 |
+| Shutdown | tokio-util (CancellationToken) | 0.7 |
+| 测试框架 | tempfile + 内置 | 3.x |
+| 格式化 | rustfmt | 内置 |
+| Lint | clippy | 内置 |
 
 ## Git 状态
 
 - **当前分支**: master
 - **最近提交**:
+  - e721bec docs: update for M6 completion
   - 8ac8913 style(m6): apply cargo fmt formatting
-  - dbc245c test(m6): add Server integration tests for query/insert/ping flows
-  - 46a10f9 feat(m6): implement Server with TcpListener and graceful shutdown
-  - c6ac485 feat(m6): implement ConnectionHandler for per-connection coroutine
-  - b48ab0a feat(m6): implement SqlHandler with mock executor
-  - 70748af test(m6): add JsonProtocol serialization/deserialization tests
-- **未提交更改**: 无（working tree clean）
-
-**注**: M6 代码已全部提交，124 个测试通过，clippy 有 minor warnings（无 Critical）。
+  - dbc245c test(m6): add Server integration tests
+  - 46a10f9 feat(m6): implement Server with TcpListener
+- **未提交更改**: M7 全部文件（27 个文件修改/新增，157 测试通过）
 
 ## 关键文件
 
 | 文件 | 作用 | 状态 |
 |------|------|------|
-| Cargo.toml | Rust 项目配置 | ✅ 完成 |
-| src/lib.rs | 库入口，模块导出 | ✅ M4 更新 |
-| src/storage/mod.rs | 存储模块导出 | ✅ 完成 |
-| src/storage/page_format/key.rs | Key 结构（32 bytes） | ✅ M2 完成 |
-| src/storage/btree/btree.rs | BTree 核心逻辑 | ✅ M2 完成 |
-| src/storage/btree/index_manager.rs | IndexManager API | ✅ M2 完成 |
-| src/executor/mod.rs | 执行模块导出 | ✅ M4 完成 |
-| src/executor/value.rs | Value enum | ✅ M4 完成 |
-| src/executor/plan.rs | PhysicalPlan + 5 nodes | ✅ M4 完成 |
-| src/parser/mod.rs | 解析模块导出 | ✅ M4 完成 |
-| src/parser/error.rs | PlanError | ✅ M4 完成 |
-| src/parser/ast.rs | AST 辅助函数 | ✅ M4 完成 |
-| src/parser/planner.rs | PlanBuilder | ✅ M4 完成 |
-| src/transaction/manager.rs | TransactionManager | ✅ M3 完成 |
-| src/network/mod.rs | 网络模块导出 | ✅ M6 完成 |
-| src/network/protocol.rs | Protocol trait + JsonProtocol | ✅ M6 完成 |
-| src/network/server.rs | Server + TcpListener | ✅ M6 完成 |
-| src/network/connection.rs | ConnectionHandler | ✅ M6 完成 |
-| src/network/handler.rs | SqlHandler (mock) | ✅ M6 完成 |
-| tests/network_protocol_test.rs | JSON 协议测试 | ✅ M6 完成（5 测试）|
-| tests/network_server_test.rs | Server 集成测试 | ✅ M6 完成（4 测试）|
+| src/database.rs | Database 协调器（BufferPool+TableManager+TxManager） | ✅ M7 |
+| src/pipeline.rs | SQL→parse→plan→execute→Response 管道 | ✅ M7 |
+| src/storage/data/table_manager.rs | TableManager 表元数据注册 | ✅ M7 |
+| src/storage/data_page.rs | write_tuple_to_data_page / read_tuple_from_data_page | ✅ M7 |
+| src/storage/page_format/tuple.rs | ColumnType + serialize/deserialize_tuple | ✅ M7 |
+| src/executor/insert.rs | InsertExecutor（真实数据页写入） | ✅ M7 重写 |
+| src/executor/index_scan.rs | IndexScanExecutor（读 Tuple + MVCC 可见性） | ✅ M7 重写 |
+| src/executor/scan.rs | ScanExecutor（全表 BTree 扫描） | ✅ M7 重写 |
+| src/executor/update.rs | UpdateExecutor（版本链创建） | ✅ M7 重写 |
+| src/executor/delete.rs | DeleteExecutor（含 tx_id） | ✅ M7 更新 |
+| src/network/handler.rs | SqlHandler（真实 pipeline，async） | ✅ M7 重写 |
+| src/network/server.rs | Server（接受 Arc<Database>） | ✅ M7 更新 |
+| src/storage/btree/btree.rs | BTree（新增 scan_all） | ✅ M7 更新 |
+| tests/e2e_test.rs | 7 个端到端 TCP 测试 | ✅ M7 新增 |
 
 ## 最近修改
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
-| 2026-05-20 | src/network/*, tests/network_* | M6 Protocol trait/JsonProtocol/Server/ConnectionHandler/SqlHandler 实现 |
-| 2026-05-20 | Cargo.toml | 添加 tokio-util/io-util/serde/serde_json 依赖 |
-| 2026-05-20 | .claude/docs/superpowers/* | M6 设计规范和实现计划 |
-| 2026-05-20 | src/executor/*, tests/executor_test.rs, tests/plan_exec_test.rs | M5 ExecResult/Executor trait/5 Executors 实现 |
-| 2026-05-20 | src/parser/*, tests/parser_test.rs | M4 PlanError/Value/AST/PlanBuilder 实现 |
-| 2026-05-20 | src/executor/*, tests/planner_test.rs | M4 PhysicalPlan + 5 nodes 实现 |
-| 2026-05-20 | .claude/docs/superpowers/* | M4-M5 设计规范和实现计划 |
-| 2026-05-20 | src/transaction/*, tests/concurrent_test.rs | M3 TransactionManager + MVCC 实现 |
-| 2026-05-20 | src/storage/btree/*, tests/btree_* | M2 B-Tree 索引与存储引擎 |
-| 2026-05-20 | src/storage/page_format/* | M2 Key/RowId/SlottedPage 实现 |
+| 2026-05-20 | src/database.rs, src/pipeline.rs | M7 Database + Pipeline 新增 |
+| 2026-05-20 | src/storage/data_page.rs, src/storage/data/ | M7 数据存储层 |
+| 2026-05-20 | src/storage/page_format/tuple.rs | M7 Tuple 序列化 |
+| 2026-05-20 | src/executor/* | M7 5 Executor 重写（MVCC + 真实存储） |
+| 2026-05-20 | src/network/handler.rs, server.rs | M7 SqlHandler 真实 pipeline |
+| 2026-05-20 | src/storage/btree/* | M7 BTree::scan_all + IndexManager::scan_all |
+| 2026-05-20 | tests/e2e_test.rs | M7 端到端 TCP 测试（7 tests） |
+| 2026-05-20 | tests/executor_test.rs | M7 更新所有测试（16 tests） |
+| 2026-05-20 | tests/table_manager_test.rs | M7 TableManager 测试（6 tests） |
 
 ## 下一步行动
 
-1. 开始 M6 里程碑：全流程集成 + 网络层
-2. 实现数据存储层（TableManager、Row 数据存储）
-3. 实现 TCP 服务器（tokio::net::TcpListener）
-4. 整合事务到执行引擎
-5. 端到端测试
+1. 开始 M8 里程碑：PostgreSQL 有线协议 + 性能优化
+2. 实现完整版本链遍历（follow next_version）
+3. 实现 WAL（Write-Ahead Logging）
+4. 实现版本链 GC（清理旧版本）
+5. 复杂 WHERE 表达式计算 + JOIN 支持

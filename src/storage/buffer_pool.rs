@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 
 use crate::storage::{
     page_frame::{PageFrame, PageGuard},
-    AsyncStorage, PageId, Result, StorageError,
+    AsyncStorage, Page, PageId, Result, StorageError,
 };
 
 pub struct BufferPool {
@@ -85,31 +85,38 @@ impl BufferPool {
             let candidate_id = clock_hand.remove(0);
             attempts += 1;
 
-            if let Some(frame) = pages.get(&candidate_id) {
+            let frame = match pages.get(&candidate_id) {
+                Some(f) => f.clone(),
+                None => continue,
+            };
+
+            let (dirty, page_copy): (bool, Option<Page>) = {
                 let mut frame_guard = frame.lock().unwrap();
 
                 if frame_guard.ref_count > 0 {
                     clock_hand.push(candidate_id);
-                    continue;
-                }
-
-                if frame_guard.clock_bit {
+                    (false, None)
+                } else if frame_guard.clock_bit {
                     frame_guard.clock_bit = false;
                     clock_hand.push(candidate_id);
-                    continue;
-                }
-
-                if frame_guard.dirty {
-                    let page = frame_guard.page.clone();
-                    drop(frame_guard);
-                    self.storage.write_page(candidate_id, &page).await?;
+                    (false, None)
                 } else {
-                    drop(frame_guard);
+                    let is_dirty = frame_guard.dirty;
+                    let page = frame_guard.page.clone();
+                    (is_dirty, Some(page))
                 }
+            };
 
-                pages.remove(&candidate_id);
-                return Ok(());
+            let Some(page_copy) = page_copy else {
+                continue;
+            };
+
+            if dirty {
+                self.storage.write_page(candidate_id, &page_copy).await?;
             }
+
+            pages.remove(&candidate_id);
+            return Ok(());
         }
 
         Err(StorageError::BufferPoolFull)

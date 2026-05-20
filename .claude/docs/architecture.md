@@ -379,6 +379,73 @@ JSON 帧协议：
   - PostgreSQL 有线协议（后续里程碑）
   - 二进制协议优化（后续里程碑）
 
+### 2026-05-20 - M7 架构决策：Database 协调器结构
+
+- **决策**: 引入 `Database` struct 集中管理 `BufferPool`、`TableManager`、`TransactionManager`
+- **原因**:
+  - 消除分散初始化样板，提供单一 `open(Path)` + `execute_sql(SQL)` 入口
+  - 类似 sqlite3 的 `sqlite3*` handle 模式，降低使用复杂度
+  - 所有组件通过 `Arc` 共享，支持多连接并发访问
+- **影响**:
+  - `Server` 接受 `Arc<Database>`，每个 `ConnectionHandler` 的 `SqlHandler` 持有 clone
+  - Pipeline 通过 Database 访问所有子系统
+- **替代方案**: 分散初始化各组件（rejected：样板代码多，生命周期管理复杂）
+
+### 2026-05-20 - M7 架构决策：数据存储模块
+
+- **决策**: 创建 `src/storage/data/` 模块存放 `TableManager`，数据页读写放在 `src/storage/data_page.rs`
+- **原因**: 分离"数据存储"（Tuple、表元数据）与"页格式"（Key、RowId、SlottedPage），后者被 BTree 复用
+- **影响**:
+  - `TableMeta` 持有 `IndexManager`（主键索引）和 data_page 链表（head + tail）
+  - `write_tuple_to_data_page` 负责页满自动分配新页 + 链表更新
+  - `read_tuple_from_data_page` 通过 RowId 定位 page + slot，解析 VersionHeader + tuple
+- **文件结构**:
+```
+src/storage/data/         # 数据存储
+├── mod.rs
+└── table_manager.rs      # TableManager + TableMeta
+src/storage/data_page.rs  # write/read_tuple_to_data_page
+src/storage/page_format/tuple.rs  # ColumnType + serialize/deserialize
+```
+
+### 2026-05-20 - M7 架构决策：简单类型化 Tuple 序列化
+
+- **决策**: 采用 type-tag + value 的紧凑二进制格式，不依赖 serde
+- **原因**:
+  - Schema 在反序列化时已知（来自 TableManager），无需自描述格式
+  - 紧凑存储（Int 9B, String 3+N B, Null 1B），适合 4KB 页内密集打包
+- **格式**: `[0x01][8B i64 LE]` / `[0x02][2B len LE][N B UTF-8]` / `[0x03]`
+- **替代方案**: serde 自描述格式（rejected：冗余大，页利用率低）
+
+### 2026-05-20 - M7 架构决策：BTree 全扫描接口
+
+- **决策**: 添加 `BTree::scan_all()` 遍历所有 LeafNode 的 entries，通过 `IndexManager::scan_all()` 暴露 async API
+- **原因**: 为 `ScanExecutor`（全表扫描）提供数据源；跟随 `next_leaf_page_id` 链支持未来多叶子节点
+- **影响**: 当前仅单根叶节点（无 split），链在 root 后终止；未来 multi-leaf 自然扩展
+
+### 2026-05-20 - M7 架构决策：MVCC 分阶段实现
+
+- **决策**: M7 仅验证最新版本的 MVCC 可见性（Snapshot.is_visible），完整版本链遍历推迟到 M8
+- **原因**:
+  - 版本链遍历需要跟随 `next_version` 跨页读取，增加 I/O 复杂度
+  - 先验证单版本可见性规则正确性，再扩展多版本遍历
+- **影响**:
+  - InsertExecutor 创建 `VersionHeader(tx_id, None)`（未提交标记）
+  - UpdateExecutor 创建新版本 + `with_next_version(old_row_id)` 链
+  - Read Executor 通过 `Snapshot` 参数过滤不可见版本
+  - M8 补全：follow next_version 找第一个可见版本
+
+### 2026-05-20 - M7 架构决策：SQL 执行管道
+
+- **决策**: 创建 `pipeline.rs` 实现完整的 SQL→Response 转换管道
+- **原因**:
+  - 统一 parse→plan→execute→collect→Response 流程
+  - 从 Statement 提取表名 → 在 TableManager 中查找 → 动态注册到 PlanBuilder
+  - `value_to_json()` 将 executor::Value 映射到 serde_json::Value
+- **影响**:
+  - `SqlHandler` 变得极简：仅持有 `Arc<Database>`，`execute()` 委托给 pipeline
+  - 新增 PhysicalPlan 节点类型时只需更新 pipeline 的 match arm
+
 ### 2026-05-20 - M6 架构决策：Graceful Shutdown
 
 - **决策**: 使用 tokio_util::sync::CancellationToken 实现 graceful shutdown
@@ -428,5 +495,5 @@ JSON 帧协议：
 | M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） | ✅ 完成 |
 | M5 | 异步执行引擎 | 实现 `async fn next()` 迭代器，整合存储异步接口 | ✅ 完成 |
 | M6 | 网络层 | TCP 服务器 + Protocol trait + JSON 协议 + graceful shutdown | ✅ 完成 |
-| M7 | 数据存储层 + 全流程集成 | 实现 TableManager、Row 数据存储、整合真实 executor | 进行中 |
-| M8 | PostgreSQL 协议 + 性能优化 | PG 协议 + io_uring + 协程调度优化 | 待开始 |
+| M7 | 数据存储层 + 全流程集成 | 实现 TableManager、Row 数据存储、整合真实 executor + MVCC | ✅ 完成 |
+| M8 | PostgreSQL 协议 + 性能优化 | PG 协议 + io_uring + 版本链遍历 + WAL | 待开始 |

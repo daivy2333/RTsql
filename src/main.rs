@@ -1,20 +1,27 @@
 //! RTsql - Async coroutine-driven embedded relational database
 
-#![allow(unused_imports)] // M0: Imports validate module exports work
-
-use rtsql::executor;
-use rtsql::network;
-use rtsql::parser;
-use rtsql::storage;
-use rtsql::transaction;
+use rtsql::database::Database;
+use rtsql::network::Server;
+use rtsql::storage::ColumnType;
+use std::path::Path;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
-    println!("RTsql database server starting...");
+    let database = Arc::new(
+        Database::open(Path::new("rtsql.db"))
+            .await
+            .expect("Failed to open database"),
+    );
 
-    // TODO: Initialize storage engine (M1)
-    // TODO: Initialize execution engine (M5)
-    // TODO: Start network server (M6)
+    database
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await
+        .ok();
 
-    println!("RTsql ready. (M0 skeleton completed)");
+    let addr = "127.0.0.1:9876".parse().unwrap();
+    let server = Server::new(addr, database);
+
+    println!("RTsql server listening on {}", addr);
+    server.run().await.unwrap();
 }

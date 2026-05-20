@@ -49,6 +49,20 @@ impl IndexManager {
         tokio::task::spawn_blocking(move || btree.lock().unwrap().delete(&key)).await?
     }
 
+    /// Scan all entries in the index.
+    /// Returns all (key, RowId) pairs in key order.
+    pub async fn scan_all(&self) -> Result<Vec<(Vec<u8>, RowId)>> {
+        let btree = self.btree.clone();
+        tokio::task::spawn_blocking(move || {
+            btree.lock().unwrap().scan_all().map(|v| {
+                v.into_iter()
+                    .map(|(k, r)| (k.as_bytes().to_vec(), r))
+                    .collect()
+            })
+        })
+        .await?
+    }
+
     /// Update the RowId for an existing key
     /// Returns error if key not found
     pub async fn update(&self, key: &[u8], new_row_id: RowId) -> Result<()> {

@@ -1,21 +1,39 @@
-//! Insert executor - batch insertion
-
 use crate::executor::{ExecResult, Executor, Value};
-use crate::storage::{btree::IndexManager, page_format::RowId, Result};
+use crate::storage::page_format::{compute_tuple_size, serialize_tuple, ColumnType};
+use crate::storage::{write_tuple_to_data_page, BufferPool, Result, StorageError, TableMeta};
+use crate::transaction::VersionHeader;
 use std::sync::Arc;
 
-/// InsertExecutor - 批量插入执行器
 pub struct InsertExecutor {
-    index_manager: Arc<IndexManager>,
+    table_meta: Arc<TableMeta>,
+    buffer_pool: Arc<BufferPool>,
     values: Vec<Vec<Value>>,
+    schema: Vec<ColumnType>,
+    pk_index: usize,
+    tx_id: u64,
     executed: bool,
 }
 
 impl InsertExecutor {
-    pub fn new(index_manager: Arc<IndexManager>, values: Vec<Vec<Value>>) -> Self {
+    pub fn new(
+        table_meta: Arc<TableMeta>,
+        buffer_pool: Arc<BufferPool>,
+        values: Vec<Vec<Value>>,
+        tx_id: u64,
+    ) -> Self {
+        let schema: Vec<ColumnType> = table_meta
+            .columns
+            .iter()
+            .map(|(_, ct)| ct.clone())
+            .collect();
+        let pk_index = table_meta.pk_index;
         Self {
-            index_manager,
+            table_meta,
+            buffer_pool,
             values,
+            schema,
+            pk_index,
+            tx_id,
             executed: false,
         }
     }
@@ -31,16 +49,44 @@ impl Executor for InsertExecutor {
         self.executed = true;
 
         let mut count = 0u64;
-        for (slot_id, row_values) in self.values.iter().enumerate() {
-            // 取第一列作为 key（假设主键在第一列）
-            if let Some(first_value) = row_values.first() {
-                if let Some(key) = first_value.to_key() {
-                    // M5: 使用测试占位 RowId（page_id=0, slot_id 递增）
-                    let row_id = RowId::new(0, slot_id as u16);
-                    self.index_manager.insert(key.as_bytes(), row_id).await?;
-                    count += 1;
-                }
+        for row_values in &self.values {
+            let pk_value = &row_values[self.pk_index];
+
+            let key = match pk_value.to_key() {
+                Some(k) => k,
+                None => continue,
+            };
+
+            if self
+                .table_meta
+                .index_manager
+                .search(key.as_bytes())
+                .await?
+                .is_some()
+            {
+                return Err(StorageError::DuplicateKey);
             }
+
+            let size = compute_tuple_size(row_values, &self.schema);
+            let mut buf = vec![0u8; size];
+            serialize_tuple(row_values, &self.schema, &mut buf)?;
+
+            let version_header = VersionHeader::new(self.tx_id, None);
+
+            let row_id = write_tuple_to_data_page(
+                &self.buffer_pool,
+                &self.table_meta,
+                &version_header,
+                &buf,
+            )
+            .await?;
+
+            self.table_meta
+                .index_manager
+                .insert(key.as_bytes(), row_id)
+                .await?;
+
+            count += 1;
         }
 
         Ok(Some(ExecResult::AffectedRows(count)))

@@ -145,6 +145,36 @@ impl BTree {
         }
     }
 
+    /// Scan all entries in the BTree by iterating through all leaf nodes.
+    /// Returns all (Key, RowId) pairs in key order.
+    pub fn scan_all(&self) -> Result<Vec<(Key, RowId)>> {
+        let mut results = Vec::new();
+        let mut page_id = self.root_page_id;
+
+        while page_id.0 != 0 {
+            let guard = self.loader.load_page(page_id)?;
+            let entries = guard.modify_page(|page| {
+                let leaf = LeafNode::from_page(page)?;
+                let count = leaf.key_count();
+                let mut entries = Vec::with_capacity(count);
+                for i in 0..count {
+                    if let (Some(key), Some(row_id)) = (leaf.get_key(i), leaf.get_row_id(i)) {
+                        entries.push((key, row_id));
+                    }
+                }
+                Ok::<_, StorageError>(entries)
+            })?;
+            results.extend(entries);
+
+            let next_page_u32 = guard.modify_page(|page| {
+                let leaf = LeafNode::from_page(page)?;
+                Ok::<_, StorageError>(leaf.next_leaf_page_id())
+            })?;
+            page_id = PageId(next_page_u32 as u64);
+        }
+        Ok(results)
+    }
+
     /// Update the RowId for an existing key
     /// Returns error if key not found (KeyNotFound)
     pub fn update(&self, key: &[u8], new_row_id: RowId) -> Result<()> {

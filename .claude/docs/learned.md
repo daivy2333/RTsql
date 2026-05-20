@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-20 (M6 网络层完成)
+> 最后更新：2026-05-20 (M7 全流程集成完成)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -41,6 +41,23 @@
 | Protocol trait | `#[async_trait] trait Protocol { async fn parse_request/write_response }` | 协议抽象 | 2026-05-20 |
 | JSON 帧协议 | 消息以 `\n` 结尾，serde_json 序列化 | 简单帧协议 | 2026-05-20 |
 | tokio io-util feature | `tokio = { features = ["io-util"] }` | AsyncReadExt/AsyncWriteExt | 2026-05-20 |
+| Database::open | `Database::open(&path).await?` | 打开数据库，初始化所有子系统 | 2026-05-20 |
+| Database::execute_sql | `database.execute_sql(sql).await` → `Response` | SQL 执行管道入口 | 2026-05-20 |
+| Database::create_table | `database.create_table(name, columns, pk).await` | 创建表（委托 TableManager） | 2026-05-20 |
+| Pipeline::execute | `pipeline::execute(database, sql).await` → `Response` | parse→plan→execute→collect | 2026-05-20 |
+| write_tuple_to_data_page | `write_tuple_to_data_page(bp, meta, vh, bytes).await?` → `RowId` | 写 Tuple 到数据页（页满自动分配） | 2026-05-20 |
+| read_tuple_from_data_page | `read_tuple_from_data_page(bp, row_id).await?` → `(VersionHeader, Vec<u8>)` | 从数据页读 Tuple | 2026-05-20 |
+| serialize_tuple | `serialize_tuple(values, schema, &mut buf)?` → `usize` | Int/String/Null 二进制序列化 | 2026-05-20 |
+| deserialize_tuple | `deserialize_tuple(bytes, schema)?` → `Vec<Value>` | 按 schema 反序列化 Tuple | 2026-05-20 |
+| compute_tuple_size | `compute_tuple_size(values, schema)` → `usize` | 预计算 Tuple 序列化大小 | 2026-05-20 |
+| BTree::scan_all | `btree.scan_all()?` → `Vec<(Key, RowId)>` | 全表扫描（遍历所有 LeafNode） | 2026-05-20 |
+| IndexManager::scan_all | `index_manager.scan_all().await?` → `Vec<(Vec<u8>, RowId)>` | async 全扫描包装 | 2026-05-20 |
+| TableManager::create_table | `table_mgr.create_table(name, cols, pk).await?` | 注册表元数据 + 分配数据页 + 创建 IndexManager | 2026-05-20 |
+| TableManager::get_table | `table_mgr.get_table(name).await?` → `Arc<TableMeta>` | 获取表元数据 | 2026-05-20 |
+| VersionHeader::with_next_version | `vh.with_next_version(old_row_id)` → `Self` | 版本链链接到前一版本 | 2026-05-20 |
+| Snapshot::is_visible | `snapshot.is_visible(create_id, commit_id)` → `bool` | MVCC 可见性判断（3 规则） | 2026-05-20 |
+| Snapshot::is_visible_self | `snapshot.is_visible_self(create_id, commit_id)` → `bool` | 自身未提交写可见 | 2026-05-20 |
+| value_to_json | `value_to_json(value)` → `serde_json::Value` | executor::Value → JSON 转换 | 2026-05-20 |
 
 ---
 
@@ -57,6 +74,11 @@
 | 执行模块 | src/executor/ | M4-M5: PhysicalPlan/Value/ExecResult/Executor trait/5 Executors |
 | 解析模块 | src/parser/ | M4: PlanBuilder/PlanError/AST helpers |
 | 网络模块 | src/network/ | M6: Protocol trait/JsonProtocol/Server/ConnectionHandler/SqlHandler |
+| 数据库入口 | src/database.rs | M7: Database 协调器（BufferPool+TableManager+TxManager） |
+| 执行管道 | src/pipeline.rs | M7: SQL→parse→plan→execute→Response |
+| 数据存储 | src/storage/data/ | M7: TableManager + TableMeta |
+| 数据页读写 | src/storage/data_page.rs | M7: write/read_tuple_to_data_page |
+| Tuple 序列化 | src/storage/page_format/tuple.rs | M7: ColumnType + serialize/deserialize_tuple |
 
 ---
 
@@ -90,6 +112,11 @@
 | AsyncReadExt/AsyncWriteExt 未找到 | Tokio 缺少 io-util feature，无法使用 read/write_all | 添加 `tokio = { features = ["io-util"] }` | 2026-05-20 |
 | handler mut 声明缺失 | ConnectionHandler.handle() 需要 mut self，spawn 内未声明 mut | 修改为 `let mut handler = ConnectionHandler::new(...)` | 2026-05-20 |
 | ConnectionHandler unused imports | Protocol trait 导入 Request/Response 但 connection.rs 未使用 | 移除 unused imports，保持代码整洁 | 2026-05-20 |
+| MutexGuard 跨 await 非 Send | write_tuple_to_data_page 中 std::sync::MutexGuard 被 async_trait 的 Send bound 拒绝 | 在 await 前将 MutexGuard 局部化 drop，只在需要时短暂加锁 | 2026-05-20 |
+| MutexGuard 跨 await 在 buffer_pool | evict_one 中 frame_guard 跨 await 导致 Send trait bound 失败 | 重构为 block 作用域，在 await 前自然 drop MutexGuard | 2026-05-20 |
+| PageId(0) 是合法分配 | FileStorage::allocate_page 从 PageId(0) 开始分配 | 断言改为 `data_page_head == data_page_tail` 而非 `> 0` | 2026-05-20 |
+| PlanBuilder 表注册依赖 | pipeline 需要表已在 PlanBuilder 中注册，但 TableManager 无 list_tables | 从 sqlparser Statement 提取表名 → TableManager::get_table → 动态注册 | 2026-05-20 |
+| UpdateExecutor mock 破坏数据页引用 | M5 UpdateExecutor 使用 fake RowId(0, 999)，M7 IndexScanExecutor 读真实数据页时报 SlotNotFound | M7 重写 UpdateExecutor 为真实版本链创建，修复集成测试 | 2026-05-20 |
 
 **详细踩坑档案**（复杂问题）：
 
@@ -168,6 +195,12 @@
 | CancellationToken shutdown | Graceful 关闭 | `tokio::select! { accept => ..., _ = shutdown.cancelled() => break }` |
 | 每连接一协程 | 高并发连接模型 | `tokio::spawn(async move { handler.handle(stream).await })` |
 | mock executor 模式 | 分阶段实现 | M6 SqlHandler 返回固定值，M7 整合真实 executor |
+| VersionHeader::with_next_version | 版本链创建 | `VersionHeader::new(tx_id, None).with_next_version(old_row_id)` |
+| Snapshot 可见性过滤 | 执行器读路径 | `snapshot.is_visible(vh.create_tx_id(), vh.commit_tx_id())` 过滤不可见版本 |
+| Database 协调器模式 | 组件生命周期管理 | `Arc<Database>` 集中持有 BufferPool+TableManager+TxManager |
+| Pipeline 管道模式 | SQL 全流程 | parse→extract table→register table→plan→executor→collect→Response |
+| Tuple 序列化格式 | 紧凑二进制存储 | Int(9B) / String(3+N B) / Null(1B) 的 type-tag 格式 |
+| 数据页自动扩展 | Page 满时处理 | 写路径 detect PageFull → allocate new page → link via next_page_id → update tail |
 
 ---
 
@@ -202,8 +235,13 @@
 - [ ] Serializable 隔离级别（需谓词锁，推迟）
 - [ ] 复杂 WHERE 表达式计算（M5/M6 阶段）
 - [ ] JOIN 多表计划与执行（M5/M6 阶段）
-- [ ] 数据存储层（TableManager、Row 数据）（M6 阶段）
+- [x] 数据存储层（TableManager、Row 数据）（M7 阶段）→ 已完成，157 测试通过
 - [ ] DDL 元数据管理（后续里程碑）
+- [x] 全流程集成（M7 阶段）→ Database + Pipeline + 真实 SqlHandler
+- [x] MVCC 可见性集成（M7 阶段）→ 最新版本可见性过滤，版本链创建
+- [ ] 完整版本链遍历（follow next_version）（M8 阶段）
+- [ ] 复杂 WHERE 表达式计算（M8 阶段）
+- [ ] JOIN 多表计划与执行（M8 阶段）
 
 ---
 
