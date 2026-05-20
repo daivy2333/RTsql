@@ -9,6 +9,10 @@ pub enum PlanError {
     ParseError(String),
     /// 不支持的值类型
     UnsupportedValue,
+    /// 不支持的语句类型
+    UnsupportedStatement,
+    /// 缺少必要字段
+    MissingField(String),
 }
 
 impl fmt::Display for PlanError {
@@ -16,6 +20,8 @@ impl fmt::Display for PlanError {
         match self {
             PlanError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             PlanError::UnsupportedValue => write!(f, "Unsupported value type"),
+            PlanError::UnsupportedStatement => write!(f, "Unsupported statement type"),
+            PlanError::MissingField(field) => write!(f, "Missing required field: {}", field),
         }
     }
 }
