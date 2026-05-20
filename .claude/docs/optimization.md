@@ -1,37 +1,75 @@
 # 优化方向与技术债务
 
 > 记录已识别但暂不处理的问题
+> 最后更新：2026-05-20 (M6 完成)
 
 ## 已识别的优化点
 
-### M5 实现中的简化与优化机会（待 M6/M7 处理）
+### M6 实现中的简化与优化机会（待 M7/M8 处理）
+
+- [x] **仅网络层，mock executor**: M6 SqlHandler 返回固定值
+  - **当前状态**: SqlHandler.execute() 返回 mock Response（QueryResult 固定 RowId，AffectedRows 固定 count=1）
+  - **优化方案**: M7 整合真实 Executor + Storage + Transaction，替换 mock
+  - **预期收益**: 真实 SQL 执行流程，支持索引查找 + 数据访问
+  - **时机**: M7 数据存储层阶段
+  - **复杂度**: 高（需实现 TableManager、Row 数据存储、整合全流程）
+
+- [x] **JSON 协议效率低**: 序列化有开销，不兼容 psql
+  - **当前状态**: 使用 serde_json，每条消息完整序列化
+  - **优化方案**: M8 实现 PostgreSQL 有线协议（兼容 psql/pgAdmin）或 TLV 二进制协议
+  - **预期收益**: 效率提升，兼容现有工具
+  - **时机**: M8 PostgreSQL 协议阶段
+  - **复杂度**: 中（PG 协议需实现 StartupMessage、RowDescription 等多种消息）
+
+- [x] **无会话状态管理**: 单语句自动提交，无多语句事务
+  - **当前状态**: 每条 SQL 独立执行，无显式 BEGIN/COMMIT/ROLLBACK
+  - **优化方案**: M7 实现会话状态管理（当前事务ID、查询结果缓存）
+  - **预期收益**: 支持多语句事务，完整事务语义
+  - **时机**: M7 数据存储层阶段
+  - **复杂度**: 中
+
+- [x] **ConnectionHandler 无超时处理**: 连接无限等待
+  - **当前状态**: ConnectionHandler.handle() 循环等待，无超时机制
+  - **优化方案**: 添加 read timeout、idle timeout，超时自动关闭连接
+  - **预期收益**: 防止僵尸连接占用资源
+  - **时机**: M8 性能优化阶段
+  - **复杂度**: 低
+
+- [x] **Server 单线程 accept**: TcpListener.accept() 在单协程处理
+  - **当前状态**: Server.run() 单协程 accept + spawn handler
+  - **优化方案**: 多协程 accept（高并发场景），或 accept 批量化
+  - **预期收益**: 提升高并发连接性能
+  - **时机**: M8 性能优化阶段
+  - **复杂度**: 中
+
+### M5 实现中的简化与优化机会（待 M7 处理）
 
 - [x] **仅索引层执行，返回 RowId**: M5 未实现数据存储层
   - **当前状态**: Executor 返回 RowId（而非完整 Row 数据）
-  - **优化方案**: M6 实现 TableManager + Row 数据存储，Executor 返回 Row
+  - **优化方案**: M7 实现 TableManager + Row 数据存储，Executor 返回 Row
   - **预期收益**: 完整 SQL 执行流程，支持 Scan 全表扫描
-  - **时机**: M6 网络层阶段
+  - **时机**: M7 数据存储层阶段
   - **复杂度**: 高（需实现数据页格式、Row 序列化）
 
 - [x] **ScanExecutor 返回 NotImplemented**: 全表扫描暂未实现
   - **当前状态**: ScanExecutor.next() 返回 NotImplemented
-  - **优化方案**: M6 实现数据存储层遍历所有数据页
+  - **优化方案**: M7 实现数据存储层遍历所有数据页
   - **预期收益**: 支持 SELECT 无 WHERE 的全表扫描
-  - **时机**: M6 网络层阶段
+  - **时机**: M7 数据存储层阶段
   - **复杂度**: 中（需遍历数据页 + slot 数组）
 
 - [x] **RowId 测试占位值**: Insert/Update 使用测试占位 RowId
   - **当前状态**: InsertExecutor 使用 RowId::new(0, slot_id)，UpdateExecutor 使用 RowId::new(0, 999)
-  - **优化方案**: M6 实现真实 RowId 分配（从数据页 slot 分配）
+  - **优化方案**: M7 实现真实 RowId 分配（从数据页 slot 分配）
   - **预期收益**: 真实数据存储，支持多数据页
-  - **时机**: M6 网络层阶段
+  - **时机**: M7 数据存储层阶段
   - **复杂度**: 中
 
 - [x] **事务未整合到 Executor**: M5 未整合 TransactionManager
   - **当前状态**: Executor 不持有 Transaction，MVCC 可见性判断未实现
-  - **优化方案**: M6 Executor 持有 Transaction，执行时检查可见性
+  - **优化方案**: M7 Executor 持有 Transaction，执行时检查可见性
   - **预期收益**: 完整事务支持，Repeatable Read 隔离
-  - **时机**: M6 网络层阶段
+  - **时机**: M7 数据存储层阶段
   - **复杂度**: 高
 
 ### M2 实现中的简化与优化机会（待后续处理）

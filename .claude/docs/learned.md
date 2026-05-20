@@ -86,6 +86,10 @@
 | LeafNode insert 有序问题 | SlottedPage::add_slot 总是添加到末尾，无法中间插入 | 实现 shift_slots_right() 方法，调整 slot 数组保持有序 | 2026-05-20 |
 | async_trait warning | Executor trait 使用 async fn 导致 clippy warning | 使用 #[async_trait::async_trait] macro 解决 | 2026-05-20 |
 | unused field warning | IndexScanExecutor columns 字段未使用 | 移除未使用字段，保持代码简洁 | 2026-05-20 |
+| tokio-util sync feature 错误 | tokio-util 没有 sync feature，CancellationToken 需要 rt feature | 修改为 `tokio-util = { features = ["rt"] }` | 2026-05-20 |
+| AsyncReadExt/AsyncWriteExt 未找到 | Tokio 缺少 io-util feature，无法使用 read/write_all | 添加 `tokio = { features = ["io-util"] }` | 2026-05-20 |
+| handler mut 声明缺失 | ConnectionHandler.handle() 需要 mut self，spawn 内未声明 mut | 修改为 `let mut handler = ConnectionHandler::new(...)` | 2026-05-20 |
+| ConnectionHandler unused imports | Protocol trait 导入 Request/Response 但 connection.rs 未使用 | 移除 unused imports，保持代码整洁 | 2026-05-20 |
 
 **详细踩坑档案**（复杂问题）：
 
@@ -113,6 +117,30 @@
 - **预防**: 有序数据结构插入时，需考虑 slot 数组调整逻辑
 - **时间**: 2026-05-20
 
+### Tokio io-util Feature 缺失（M6）
+
+- **症状**: 编译报错 `unresolved imports: tokio::io::AsyncReadExt, tokio::io::AsyncWriteExt`
+- **根因**: Tokio 默认不包含 io-util feature，AsyncReadExt/AsyncWriteExt trait 需单独启用
+- **解决**: 在 Cargo.toml 添加 `tokio = { features = ["io-util"] }`
+- **预防**: 使用 tokio::io 异步读写 trait 时，必须启用 io-util feature
+- **时间**: 2026-05-20
+
+### tokio-util Feature 错误（M6）
+
+- **症状**: 编译报错 `tokio-util does not have feature 'sync'`
+- **根因**: CancellationToken 需要 rt feature 而非 sync feature（文档误导）
+- **解决**: 修改为 `tokio-util = { version = "0.7", features = ["rt"] }`
+- **预防**: 查看 crate 实际可用 feature，不要依赖假设或文档错误
+- **时间**: 2026-05-20
+
+### ConnectionHandler mut 声明缺失（M6）
+
+- **症状**: 编译报错 `cannot borrow handler as mutable, as it is not declared as mutable`
+- **根因**: ConnectionHandler::handle() 需要 &mut self，但 spawn 内 handler 未声明 mut
+- **解决**: 修改为 `let mut handler = ConnectionHandler::new(...)`
+- **预防**: async 方法需要 mut self 时，变量声明必须 mut
+- **时间**: 2026-05-20
+
 ---
 
 ## 技巧 & 模式
@@ -134,7 +162,12 @@
 | Executor 模式 | 异步迭代器 | `async fn next(&mut self) -> Result<Option<ExecResult>>` |
 | executed flag | 单次执行状态 | `if self.executed { return Ok(None); } self.executed = true; ...` |
 | RowId placeholder | M5 测试占位 | `RowId::new(0, slot_id)` 或 `RowId::new(0, 999)` |
-| NotImplemented variant | 未实现标记 | `ExecResult::NotImplemented` 用于 Scan（M6 补数据层） |
+| NotImplemented variant | 未实现标记 | `ExecResult::NotImplemented` 用于 Scan（M7 补数据层） |
+| Protocol trait 抽象 | 协议层可替换设计 | `#[async_trait] trait Protocol { async fn parse_request/write_response }` |
+| newline-delimited framing | JSON 帧协议 | 消息以 `\n` 结尾，`stream.read_until(b'\n')` |
+| CancellationToken shutdown | Graceful 关闭 | `tokio::select! { accept => ..., _ = shutdown.cancelled() => break }` |
+| 每连接一协程 | 高并发连接模型 | `tokio::spawn(async move { handler.handle(stream).await })` |
+| mock executor 模式 | 分阶段实现 | M6 SqlHandler 返回固定值，M7 整合真实 executor |
 
 ---
 

@@ -317,8 +317,79 @@ src/executor/
   - 写操作返回影响计数，符合 SQL 标准
 - **推迟内容**:
   - 完整 Row 数据返回（M6 实现数据存储层）
-  - Scan 全表扫描（M6 实现数据存储层）
-  - 事务整合（M6 网络层整合）
+  - Scan 全表扫描（M7 实现数据存储层）
+  - 事务整合（M7 网络层整合）
+
+### 2026-05-20 - M6 架构决策：网络层三层分离设计
+
+- **决策**: 采用 Protocol trait + JsonProtocol + ConnectionHandler + Server 三层分离架构
+- **原因**:
+  - Protocol trait 抽象：为后续升级 PostgreSQL 协议预留接口
+  - JsonProtocol 简单实现：快速验证全流程，降低实现复杂度
+  - ConnectionHandler 隔离：每连接一协程，职责清晰
+  - Server 统一管理：TcpListener + graceful shutdown
+- **影响**:
+  - 协议可替换：升级 PG 协议只需新增 `PgProtocol` 实现
+  - 测试友好：每层可独立测试（protocol、server）
+  - mock executor：M6 仅网络层，真实执行推迟 M7
+- **文件结构**:
+```
+src/network/
+├── mod.rs           # 模块导出
+├── error.rs         # NetworkError enum
+├── protocol.rs      # Protocol trait + JsonProtocol + Request/Response
+├── connection.rs    # ConnectionHandler（每连接一协程）
+├── handler.rs       # SqlHandler（M6 mock executor）
+└── server.rs        # Server + TcpListener + CancellationToken
+```
+- **替代方案**:
+  - 单文件简单架构（rejected：职责混乱，难扩展）
+  - Actor 模式（rejected：过度设计，不符合无状态场景）
+
+### 2026-05-20 - M6 架构决策：Protocol trait 抽象
+
+- **决策**: 定义 Protocol trait 包含 `parse_request` 和 `write_response` 两个 async 方法
+- **原因**:
+  - 抽象协议层：支持多种协议实现（JSON、PostgreSQL、自定义）
+  - async trait：支持流式读写（大消息分帧）
+  - 泛型 ConnectionHandler：`ConnectionHandler<P: Protocol>` 支持协议替换
+- **影响**:
+  - JsonProtocol 实现：newline-delimited framing（简单帧协议）
+  - PostgreSQL 协议预留：后续只需实现 `PgProtocol`
+  - 测试隔离：协议测试不依赖 server
+- **协议格式**:
+```
+JSON 帧协议：
+  Request:  {"Query":{"sql":"SELECT * FROM users"}}\n
+  Response: {"QueryResult":{"row_ids":[[0,1]]}}\n
+```
+
+### 2026-05-20 - M6 架构决策：JSON 消息优先（后续升级 PG）
+
+- **决策**: M6 先实现 JSON 协议，后续里程碑升级 PostgreSQL 协议
+- **原因**:
+  - YAGNI 原则：先验证正确性，后优化性能
+  - serde_json 成熟：无需额外依赖管理
+  - JSON 可读性强：调试友好
+- **影响**:
+  - 效率较低：JSON 序列化有开销（标记为优化点）
+  - 不兼容 psql：需要专用客户端
+  - 快速迭代：先验证全流程，后续升级
+- **推迟内容**:
+  - PostgreSQL 有线协议（后续里程碑）
+  - 二进制协议优化（后续里程碑）
+
+### 2026-05-20 - M6 架构决策：Graceful Shutdown
+
+- **决策**: 使用 tokio_util::sync::CancellationToken 实现 graceful shutdown
+- **原因**:
+  - 协程安全：不强制中断正在处理的连接
+  - 多点监听：Server、ConnectionHandler 都可监听 shutdown signal
+  - tokio::select!：优雅处理 accept + shutdown 并发
+- **影响**:
+  - Ctrl+C 安全：服务器优雅关闭
+  - 测试友好：测试用例可通过 shutdown.cancel() 停止服务器
+  - 扩展性强：后续可添加超时、等待连接完成等功能
 
 ### 模块划分与职责
 
@@ -356,5 +427,6 @@ src/executor/
 | M3 | 事务与 MVCC | 用异步锁实现提交等待，快照读无锁 | ✅ 完成 |
 | M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） | ✅ 完成 |
 | M5 | 异步执行引擎 | 实现 `async fn next()` 迭代器，整合存储异步接口 | ✅ 完成 |
-| M6 | 全流程集成 + 网络层 | 实现 TCP 服务器，每个连接一个协程 |
-| M7 | 性能深度优化 | 替换 `io_uring`，调优协程调度、页缓存策略 |
+| M6 | 网络层 | TCP 服务器 + Protocol trait + JSON 协议 + graceful shutdown | ✅ 完成 |
+| M7 | 数据存储层 + 全流程集成 | 实现 TableManager、Row 数据存储、整合真实 executor | 进行中 |
+| M8 | PostgreSQL 协议 + 性能优化 | PG 协议 + io_uring + 协程调度优化 | 待开始 |
