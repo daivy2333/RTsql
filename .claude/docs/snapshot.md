@@ -4,9 +4,9 @@
 
 ## 当前状态
 
-- **阶段**: M1 完成（文件/缓存层已实现）
+- **阶段**: M2 完成（B-Tree 索引与存储引擎已实现）
 - **状态**: 正常
-- **当前里程碑**: M2 准备开始
+- **当前里程碑**: M3 准备开始
 
 ## 项目结构
 
@@ -26,15 +26,28 @@ RTsql/
 │       ├── page.rs         # Page 结构（4KB 固定大小）
 │       ├── async_storage.rs # AsyncStorage trait
 │       ├── file_storage.rs  # FileStorage 实现（spawn_blocking I/O）
-│       ├── buffer_pool.rs   # BufferPool（Clock 淘汰）
-│       └── page_frame.rs    # PageFrame + PageGuard
+│       ├── buffer_pool.rs   # BufferPool（Clock 淘汰）+ storage() 方法
+│       ├── page_frame.rs    # PageFrame + PageGuard + modify_page()
+│       ├── page_format/     # M2 新增：页格式模块
+│       │   ├── mod.rs       # 模块导出
+│       │   ├── key.rs       # Key 结构（固定 32 bytes）
+│       │   ├── row_id.rs    # RowId 结构（page_id + slot_id）
+│       │   └── slotted_page.rs # SlottedPage 通用格式
+│       └── btree/           # M2 新增：B-Tree 索引模块
+│           ├── mod.rs       # 模块导出
+│           ├── node.rs      # LeafNode + InternalNode 结构
+│           ├── btree.rs     # BTree 核心逻辑
+│           ├── sync_loader.rs # SyncPageLoader（block_on 包装）
+│           └── index_manager.rs # IndexManager 异步 API
 │   ├── executor/mod.rs      # 执行引擎模块（占位符）
 │   ├── transaction/mod.rs   # 事务管理模块（占位符）
 │   ├── parser/mod.rs        # SQL 解析模块（占位符）
 │   └── network/mod.rs       # 网络层模块（占位符）
 ├── tests/
 │   ├── runtime_test.rs      # 运行时功能验证测试（3 个测试）
-│   └── storage_test.rs      # 存储层测试（17 个测试）
+│   ├── btree_test.rs        # M2 新增：BTree 核心测试（10 个测试）
+│   ├── index_manager_test.rs # M2 新增：IndexManager 异步测试（3 个测试）
+│   └── sync_loader_test.rs  # M2 新增：SyncPageLoader 测试（2 个测试）
 └── .claude/
     └── docs/
         ├── architecture.md    - 架构决策记录
@@ -49,7 +62,7 @@ RTsql/
             └─ plans/          - 实现计划
 ```
 
-**注**: M1 文件/缓存层已完成，包含 AsyncStorage trait、FileStorage、BufferPool（Clock 淘汰）和 PageGuard。
+**注**: M2 B-Tree 索引与存储引擎已完成，包含 Key、RowId、SlottedPage、LeafNode、InternalNode、BTree、SyncPageLoader、IndexManager，53 个测试全部通过。
 
 ## 技术栈
 
@@ -67,14 +80,18 @@ RTsql/
 
 - **当前分支**: master
 - **最近提交**:
-  - ac40676 feat(storage): complete M1 implementation with BufferPool and Clock eviction
-  - 5121ebf feat(storage): implement PageFrame and PageGuard with ref counting
-  - 09b71b6 feat(storage): implement FileStorage with async read/write/allocate/sync
-  - f065b44 feat(storage): define AsyncStorage trait with async methods
-  - bd717bc feat(storage): implement Page struct with 4KB fixed size
+  - 30c2f1d feat(storage): complete M2 implementation with B-Tree index and storage engine
+  - 5beb916 feat(m2-btree): implement IndexManager async API
+  - f4117f8 feat(m2-btree): implement BTree core logic with proper page write-back
+  - 68946e5 test(m2-btree): add failing tests for BTree core logic
+  - 2e6afc8 feat(m2-btree): implement SyncPageLoader with async wrapper
+  - 5b7d532 feat(btree): implement LeafNode and InternalNode structures
+  - c939ff0 feat(page_format): implement SlottedPage with slot array and row data layout
+  - 3b7bf47 feat(page_format): implement RowId structure (page_id + slot_id)
+  - 76469a9 feat(page_format): implement Key structure with fixed 32 bytes length
 - **未提交更改**: 无（working tree clean）
 
-**注**: M1 代码已全部提交，17 个测试通过，clippy 仅有 1 个可接受警告（await_holding_lock）。
+**注**: M2 代码已全部提交，53 个测试通过，clippy 有 11 个可接受警告。
 
 ## 关键文件
 
@@ -89,20 +106,31 @@ RTsql/
 | src/storage/file_storage.rs | FileStorage 实现 | ✅ 完成 |
 | src/storage/buffer_pool.rs | BufferPool + Clock 淘汰 | ✅ 完成 |
 | src/storage/page_frame.rs | PageFrame + PageGuard | ✅ 完成 |
-| tests/storage_test.rs | 存储层测试 | ✅ 17 测试通过 |
+| src/storage/page_format/mod.rs | 页格式模块导出 | ✅ M2 完成 |
+| src/storage/page_format/key.rs | Key 结构（32 bytes） | ✅ M2 完成 |
+| src/storage/page_format/row_id.rs | RowId 结构 | ✅ M2 完成 |
+| src/storage/page_format/slotted_page.rs | SlottedPage 格式 | ✅ M2 完成 |
+| src/storage/btree/mod.rs | B-Tree 模块导出 | ✅ M2 完成 |
+| src/storage/btree/node.rs | LeafNode + InternalNode | ✅ M2 完成 |
+| src/storage/btree/btree.rs | BTree 核心逻辑 | ✅ M2 完成 |
+| src/storage/btree/sync_loader.rs | SyncPageLoader | ✅ M2 完成 |
+| src/storage/btree/index_manager.rs | IndexManager API | ✅ M2 完成 |
+| tests/btree_test.rs | BTree 测试 | ✅ M2 完成（10 测试）|
+| tests/index_manager_test.rs | IndexManager 测试 | ✅ M2 完成（3 测试）|
+| tests/sync_loader_test.rs | SyncPageLoader 测试 | ✅ M2 完成（2 测试）|
 
 ## 最近修改
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
-| 2026-05-20 | src/storage/*, tests/storage_test.rs | M1 完整实现 |
-| 2026-05-20 | Cargo.toml | 添加 async-trait/thiserror/anyhow/tempfile |
-| 2026-05-20 | .claude/docs/superpowers/* | M1 设计规范和实现计划 |
-| 2026-05-20 | src/*, tests/* | M0 骨架实现 |
+| 2026-05-20 | src/storage/page_format/*, tests/page_format_test | M2 Key/RowId/SlottedPage 实现 |
+| 2026-05-20 | src/storage/btree/*, tests/btree_* | M2 B-Tree 索引与存储引擎 |
+| 2026-05-20 | .claude/docs/superpowers/* | M2 设计规范和实现计划 |
+| 2026-05-20 | src/storage/*, tests/storage_test.rs | M1 文件/缓存层完整实现 |
 
 ## 下一步行动
 
-1. 开始 M2 里程碑：B-Tree 索引与存储引擎
-2. 实现同步 B-Tree 索引内核
-3. 通过 `spawn_blocking` 暴露为 async API
-4. 实现 Slotted Page 行存储格式
+1. 开始 M3 里程碑：事务与 MVCC
+2. 实现全局事务 ID 分配（`AtomicU64`）
+3. 实现 MVCC 快照读（无锁）
+4. 实现异步读写锁（`tokio::sync::RwLock`）
