@@ -5,7 +5,9 @@
 mod error;
 mod snapshot;
 mod tx_id;
+mod version_chain;
 
 pub use error::{Result, TransactionError};
 pub use snapshot::Snapshot;
 pub use tx_id::TransactionId;
+pub use version_chain::VersionHeader;
