@@ -25,6 +25,10 @@ pub enum ColumnType {
     Int,
     /// Variable-length UTF-8 string column with a maximum byte length.
     String(u16),
+    /// 64-bit floating-point column.
+    Float,
+    /// Boolean column.
+    Bool,
 }
 
 /// Return the total number of bytes required to serialize the given values
@@ -161,6 +165,30 @@ pub fn deserialize_tuple(data: &[u8], schema: &[ColumnType]) -> Result<Vec<Value
             TAG_NULL => {
                 values.push(Value::Null);
             }
+            TAG_FLOAT => {
+                if pos + 8 > data.len() {
+                    return Err(eof("expected 8 bytes for f64"));
+                }
+                let bytes = [
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
+                ];
+                values.push(Value::Float(f64::from_le_bytes(bytes)));
+                pos += 8;
+            }
+            TAG_BOOL => {
+                if pos + 1 > data.len() {
+                    return Err(eof("expected 1 byte for bool"));
+                }
+                values.push(Value::Bool(data[pos] != 0));
+                pos += 1;
+            }
             other => {
                 return Err(StorageError::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -239,5 +267,54 @@ mod tests {
         let big = "x".repeat(200);
         let v = roundtrip_single(Value::String(big.clone()), ColumnType::String(300));
         assert_eq!(v, Value::String(big));
+    }
+
+    #[test]
+    fn serialize_float_roundtrip() {
+        let v = roundtrip_single(Value::Float(3.14159), ColumnType::Float);
+        assert_eq!(v, Value::Float(3.14159));
+    }
+
+    #[test]
+    fn serialize_bool_roundtrip() {
+        let v = roundtrip_single(Value::Bool(true), ColumnType::Bool);
+        assert_eq!(v, Value::Bool(true));
+
+        let v = roundtrip_single(Value::Bool(false), ColumnType::Bool);
+        assert_eq!(v, Value::Bool(false));
+    }
+
+    #[test]
+    fn serialize_mixed_types() {
+        let values = [
+            Value::Int(42),
+            Value::Float(1.5),
+            Value::Bool(true),
+            Value::String("test".into()),
+            Value::Null,
+            Value::Bool(false),
+        ];
+        let schema = [
+            ColumnType::Int,
+            ColumnType::Float,
+            ColumnType::Bool,
+            ColumnType::String(50),
+            ColumnType::Int, // Null can use any type
+            ColumnType::Bool,
+        ];
+
+        let size = compute_tuple_size(&values, &schema);
+        let mut buf = vec![0u8; size];
+        let written = serialize_tuple(&values, &schema, &mut buf).unwrap();
+        assert_eq!(written, size);
+
+        let result = deserialize_tuple(&buf[..written], &schema).unwrap();
+        assert_eq!(result.len(), 6);
+        assert_eq!(result[0], Value::Int(42));
+        assert_eq!(result[1], Value::Float(1.5));
+        assert_eq!(result[2], Value::Bool(true));
+        assert_eq!(result[3], Value::String("test".into()));
+        assert_eq!(result[4], Value::Null);
+        assert_eq!(result[5], Value::Bool(false));
     }
 }
