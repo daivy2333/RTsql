@@ -101,6 +101,40 @@ impl ColumnDef {
         self.constraints.push(constraint);
         self
     }
+
+    /// 转换为 storage::ColumnSchema
+    pub fn to_schema_column(&self) -> crate::storage::data::ColumnSchema {
+        use crate::storage::page_format::ColumnType as StorageColumnType;
+
+        // 转换 executor::ColumnType -> storage::ColumnType
+        let storage_type = match &self.data_type {
+            ColumnType::Int => StorageColumnType::Int,
+            ColumnType::String => StorageColumnType::String(255), // 默认长度 255
+            ColumnType::Float => StorageColumnType::Float,
+            ColumnType::Bool => StorageColumnType::Bool,
+        };
+
+        // 解析约束
+        let mut not_null = false;
+        let mut unique = false;
+        let mut default_value = None;
+
+        for constraint in &self.constraints {
+            match constraint {
+                ColumnConstraint::NotNull => not_null = true,
+                ColumnConstraint::Unique => unique = true,
+                ColumnConstraint::DefaultValue(v) => default_value = Some(v.clone()),
+            }
+        }
+
+        crate::storage::data::ColumnSchema {
+            name: self.name.clone(),
+            data_type: storage_type,
+            not_null,
+            unique,
+            default_value,
+        }
+    }
 }
 
 /// 列约束

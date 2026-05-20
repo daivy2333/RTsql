@@ -1,12 +1,12 @@
 //! Executor unit tests
 
 use rtsql::executor::{
-    DeleteExecutor, ExecResult, Executor, IndexScanExecutor, InsertExecutor, ScanExecutor,
-    UpdateExecutor, Value,
+    ColumnDef, CreateTableExecutor, DeleteExecutor, ExecResult, Executor, IndexScanExecutor,
+    InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value,
 };
 use rtsql::storage::{
     data::TableManager, page_format::ColumnType, read_tuple_from_data_page, BufferPool,
-    FileStorage, Result,
+    FileStorage, Result, StorageError,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -556,6 +556,87 @@ async fn test_update_creates_new_version() -> Result<()> {
             assert_eq!(values[1], Value::String("bob".to_string()));
         }
         _ => panic!("Expected Row with updated values, got {:?}", result),
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// CreateTableExecutor Tests (M9)
+// =============================================================================
+
+#[tokio::test]
+async fn test_create_table_executor_success() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+
+    use rtsql::database::Database;
+    use rtsql::executor::ColumnType;
+    let database = Arc::new(Database {
+        buffer_pool: buffer_pool.clone(),
+        table_manager: table_manager.clone(),
+        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
+    });
+
+    let plan = PhysicalPlan::CreateTable(rtsql::executor::CreateTableNode {
+        table_name: "users".to_string(),
+        columns: vec![
+            ColumnDef::new("id".to_string(), ColumnType::Int),
+            ColumnDef::new("name".to_string(), ColumnType::String),
+        ],
+        primary_key: Some("id".to_string()),
+    });
+
+    let mut executor = CreateTableExecutor::new(plan, database);
+    let result = executor.next().await?;
+    assert_eq!(result, Some(ExecResult::AffectedRows(0)));
+
+    // Verify table was created
+    assert!(table_manager.table_exists("users"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_create_table_executor_already_exists() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+
+    use rtsql::database::Database;
+    use rtsql::executor::ColumnType as ExecColumnType;
+    use rtsql::storage::ColumnType as StorageColumnType;
+    let database = Arc::new(Database {
+        buffer_pool: buffer_pool.clone(),
+        table_manager: table_manager.clone(),
+        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
+    });
+
+    // Create table first time (using storage::ColumnType)
+    table_manager
+        .create_table(
+            "users",
+            vec![("id".to_string(), StorageColumnType::Int)],
+            "id",
+        )
+        .await?;
+
+    // Try to create again with same name (using executor::ColumnType)
+    let plan = PhysicalPlan::CreateTable(rtsql::executor::CreateTableNode {
+        table_name: "users".to_string(),
+        columns: vec![ColumnDef::new("id".to_string(), ExecColumnType::Int)],
+        primary_key: Some("id".to_string()),
+    });
+
+    let mut executor = CreateTableExecutor::new(plan, database);
+    let result = executor.next().await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        StorageError::TableAlreadyExists(name) => assert_eq!(name, "users"),
+        e => panic!("Expected TableAlreadyExists error, got {:?}", e),
     }
 
     Ok(())

@@ -2,10 +2,44 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
+use crate::executor::Value;
 use crate::storage::btree::IndexManager;
 use crate::storage::page_format::ColumnType;
 use crate::storage::page_id::PageId;
 use crate::storage::{BufferPool, Result, StorageError};
+
+/// Column schema with constraints
+#[derive(Debug, Clone)]
+pub struct ColumnSchema {
+    /// Column name
+    pub name: String,
+    /// Column data type
+    pub data_type: ColumnType,
+    /// NOT NULL constraint
+    pub not_null: bool,
+    /// UNIQUE constraint
+    pub unique: bool,
+    /// Default value (if any)
+    pub default_value: Option<Value>,
+}
+
+impl ColumnSchema {
+    /// Create a new column schema with just name and type
+    pub fn new(name: String, data_type: ColumnType) -> Self {
+        Self {
+            name,
+            data_type,
+            not_null: false,
+            unique: false,
+            default_value: None,
+        }
+    }
+
+    /// Convert to tuple format for TableManager::create_table
+    pub fn to_tuple(&self) -> (String, ColumnType) {
+        (self.name.clone(), self.data_type.clone())
+    }
+}
 
 /// Table metadata: schema, primary key, per-table index, data page chain.
 pub struct TableMeta {
