@@ -2,6 +2,8 @@
 //!
 //! M7: PostgreSQL 3.0 Simple Query Protocol message definitions
 
+use crate::executor::Value;
+
 /// PostgreSQL message serialization functions
 
 /// AuthenticationOk message: 'R' + length(8) + code(0)
@@ -65,6 +67,60 @@ pub fn ready_for_query(status: char) -> Vec<u8> {
 
     // Status: 'I' (Idle), 'T' (In transaction), 'E' (Error)
     bytes.push(status as u8);
+
+    bytes
+}
+
+/// RowDescription message: 'T' + length + field_count + fields
+pub fn row_description(columns: &[(/* name */ &str, /* sample value */ Value)]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(b'T');
+
+    // Calculate fields data first
+    let mut fields_data = Vec::new();
+
+    // Field count (Int16 BE)
+    fields_data.extend_from_slice(&(columns.len() as i16).to_be_bytes());
+
+    for (name, sample_value) in columns {
+        // Field name (null-terminated)
+        fields_data.extend_from_slice(name.as_bytes());
+        fields_data.push(0);
+
+        // Table OID (Int32 BE): 0
+        fields_data.extend_from_slice(&0i32.to_be_bytes());
+
+        // Column attr (Int16 BE): 0
+        fields_data.extend_from_slice(&0i16.to_be_bytes());
+
+        // Type OID (Int32 BE): Int=23, Text=25, Null=0
+        let type_oid = match sample_value {
+            Value::Int(_) => 23i32,
+            Value::String(_) => 25i32,
+            Value::Null => 0i32,
+        };
+        fields_data.extend_from_slice(&type_oid.to_be_bytes());
+
+        // Type size (Int16 BE): Int=4, Text=-1(varlena), Null=0
+        let type_size = match sample_value {
+            Value::Int(_) => 4i16,
+            Value::String(_) => -1i16,
+            Value::Null => 0i16,
+        };
+        fields_data.extend_from_slice(&type_size.to_be_bytes());
+
+        // Type modifier (Int32 BE): -1
+        fields_data.extend_from_slice(&(-1i32).to_be_bytes());
+
+        // Format code (Int16 BE): 0 (text)
+        fields_data.extend_from_slice(&0i16.to_be_bytes());
+    }
+
+    // Length = 4 (length field) + fields_data.len()
+    let length = 4 + fields_data.len();
+    bytes.extend_from_slice(&(length as i32).to_be_bytes());
+
+    bytes.extend(fields_data);
 
     bytes
 }

@@ -1,4 +1,5 @@
 use rtsql::network::pg_messages;
+use rtsql::executor::Value;
 
 #[test]
 fn test_authentication_ok_serialization() {
@@ -48,4 +49,21 @@ fn test_ready_for_query_serialization() {
     assert_eq!(bytes[0], b'Z');
     assert_eq!(bytes.len(), 6);
     assert_eq!(bytes[5], b'I');
+}
+
+#[test]
+fn test_row_description_serialization() {
+    let columns = vec![
+        ("id", Value::Int(0)),  // OID 23
+        ("name", Value::String(String::new())),  // OID 25
+    ];
+
+    let bytes = pg_messages::row_description(&columns);
+
+    // Format: 'T' + length + field_count + fields...
+    assert_eq!(bytes[0], b'T');
+
+    // Field count (Int16 BE): 2
+    let field_count = i16::from_be_bytes([bytes[5], bytes[6]]);
+    assert_eq!(field_count, 2);
 }
