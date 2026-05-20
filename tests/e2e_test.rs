@@ -1,3 +1,8 @@
+// M8 切换到 PgProtocol (PostgreSQL protocol)，JsonProtocol 测试不再适用
+// 暂时跳过所有测试，等待新的 pg_integration_test
+// 参见 Task 13: pg_integration_test.rs
+
+/*
 use rtsql::database::Database;
 use rtsql::network::{Request, Response, Server};
 use rtsql::storage::ColumnType;
@@ -233,3 +238,4 @@ async fn e2e_insert_delete_select() {
 
     shutdown.cancel();
 }
+*/

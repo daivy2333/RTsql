@@ -2,7 +2,7 @@ use crate::database::Database;
 use crate::network::connection::ConnectionHandler;
 use crate::network::error::NetworkError;
 use crate::network::handler::SqlHandler;
-use crate::network::protocol::JsonProtocol;
+use crate::network::pg_protocol::PgProtocol;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -37,7 +37,7 @@ impl Server {
                     let (stream, peer_addr) = result?;
 
                     let mut handler = ConnectionHandler::new(
-                        JsonProtocol::new(),
+                        PgProtocol::new(),
                         SqlHandler::new(self.database.clone()),
                     );
 

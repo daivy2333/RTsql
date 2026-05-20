@@ -145,15 +145,15 @@ pub fn data_row(row: &[Value]) -> Vec<u8> {
                 let text = n.to_string();
                 columns_data.extend_from_slice(&(text.len() as i32).to_be_bytes());
                 columns_data.extend_from_slice(text.as_bytes());
-            },
+            }
             Value::String(s) => {
                 columns_data.extend_from_slice(&(s.len() as i32).to_be_bytes());
                 columns_data.extend_from_slice(s.as_bytes());
-            },
+            }
             Value::Null => {
                 // Length = -1 (NULL)
                 columns_data.extend_from_slice(&(-1i32).to_be_bytes());
-            },
+            }
         }
     }
 

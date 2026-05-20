@@ -1,5 +1,5 @@
-use rtsql::network::pg_messages;
 use rtsql::executor::Value;
+use rtsql::network::pg_messages;
 
 #[test]
 fn test_authentication_ok_serialization() {
@@ -54,8 +54,8 @@ fn test_ready_for_query_serialization() {
 #[test]
 fn test_row_description_serialization() {
     let columns = vec![
-        ("id", Value::Int(0)),  // OID 23
-        ("name", Value::String(String::new())),  // OID 25
+        ("id", Value::Int(0)),                  // OID 23
+        ("name", Value::String(String::new())), // OID 25
     ];
 
     let bytes = pg_messages::row_description(&columns);
@@ -92,7 +92,7 @@ fn test_command_complete_serialization() {
 
     // Format: 'C' + length + tag(NUL)
     assert_eq!(bytes[0], b'C');
-    assert!(bytes.ends_with(&[0]));  // NUL terminated
+    assert!(bytes.ends_with(&[0])); // NUL terminated
 }
 
 #[test]
@@ -100,21 +100,42 @@ fn test_error_response_serialization() {
     let bytes = pg_messages::error_response("ERROR", "42000", "syntax error");
 
     // Format: 'E' + length + fields + NUL terminator
-    assert_eq!(bytes[0], b'E');  // Message type
+    assert_eq!(bytes[0], b'E'); // Message type
 
     // Verify severity field ('S')
-    let s_pos = bytes.iter().position(|&b| b == b'S').expect("Severity field 'S' not found");
-    let severity: Vec<u8> = bytes[s_pos + 1..].iter().take_while(|&&b| b != 0).cloned().collect();
+    let s_pos = bytes
+        .iter()
+        .position(|&b| b == b'S')
+        .expect("Severity field 'S' not found");
+    let severity: Vec<u8> = bytes[s_pos + 1..]
+        .iter()
+        .take_while(|&&b| b != 0)
+        .cloned()
+        .collect();
     assert_eq!(severity, b"ERROR".to_vec());
 
     // Verify code field ('C')
-    let c_pos = bytes.iter().position(|&b| b == b'C').expect("Code field 'C' not found");
-    let code: Vec<u8> = bytes[c_pos + 1..].iter().take_while(|&&b| b != 0).cloned().collect();
+    let c_pos = bytes
+        .iter()
+        .position(|&b| b == b'C')
+        .expect("Code field 'C' not found");
+    let code: Vec<u8> = bytes[c_pos + 1..]
+        .iter()
+        .take_while(|&&b| b != 0)
+        .cloned()
+        .collect();
     assert_eq!(code, b"42000".to_vec());
 
     // Verify message field ('M')
-    let m_pos = bytes.iter().position(|&b| b == b'M').expect("Message field 'M' not found");
-    let message: Vec<u8> = bytes[m_pos + 1..].iter().take_while(|&&b| b != 0).cloned().collect();
+    let m_pos = bytes
+        .iter()
+        .position(|&b| b == b'M')
+        .expect("Message field 'M' not found");
+    let message: Vec<u8> = bytes[m_pos + 1..]
+        .iter()
+        .take_while(|&&b| b != 0)
+        .cloned()
+        .collect();
     assert_eq!(message, b"syntax error".to_vec());
 
     // Should end with NUL terminator (after all fields)
@@ -126,12 +147,15 @@ fn test_sqlstate_mapping() {
     use rtsql::network::NetworkError;
 
     // Test ProtocolParse error mapping
-    let (severity, code) = pg_messages::map_error_to_sqlstate(&NetworkError::ProtocolParse("test".to_string()));
+    let (severity, code) =
+        pg_messages::map_error_to_sqlstate(&NetworkError::ProtocolParse("test".to_string()));
     assert_eq!(code, "42000");
     assert_eq!(severity, "ERROR");
 
     // Test Io error mapping
-    let (severity, code) = pg_messages::map_error_to_sqlstate(&NetworkError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test")));
+    let (severity, code) = pg_messages::map_error_to_sqlstate(&NetworkError::Io(
+        std::io::Error::new(std::io::ErrorKind::Other, "test"),
+    ));
     assert_eq!(code, "58000");
     assert_eq!(severity, "ERROR");
 }
