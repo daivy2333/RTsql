@@ -226,6 +226,54 @@ src/transaction/
 Total: 22 bytes
 ```
 
+### 2026-05-20 - M4 架构决策：sqlparser-rs + 直接物理计划
+
+- **决策**: 采用 sqlparser-rs 解析 + 直接映射到 PhysicalPlan（跳过逻辑计划层）
+- **原因**:
+  - M4 目标是建立解析 → 计划流程，单表主键查询不需要逻辑计划优化
+  - sqlparser-rs 提供完整 AST，可直接提取所需信息
+  - 避免中间层复杂性，降低实现难度
+- **影响**:
+  - 解析层纯同步（符合架构决策：CPU 密集型）
+  - PlanBuilder 负责语义验证（表名/列名/主键）
+  - PhysicalPlan 是静态结构，不含 async 语义
+- **文件结构**:
+```
+src/parser/
+├── mod.rs           # 模块导出
+├── error.rs         # PlanError（7 种错误类型）
+├── value.rs         # Value 转换函数（sqlparser → executor Value）
+├── ast.rs           # AST 辅助函数（parse_sql/extract_select_body/extract_table_name）
+└── planner.rs       # PlanBuilder（AST → PhysicalPlan）
+
+src/executor/
+├── mod.rs           # 模块导出
+├── value.rs         # Value enum（Int/String/Null + to_key()）
+└── plan.rs          # PhysicalPlan + 5 节点结构
+```
+- **替代方案**:
+  - 三层架构（AST → 逻辑计划 → 物理计划）（rejected：M4 单表主键查询无需优化层）
+  - 手写解析器（rejected：sqlparser-rs 已成熟，无需重复造轮）
+
+### 2026-05-20 - M4 架构决策：PhysicalPlan 五节点设计
+
+- **决策**: PhysicalPlan 采用 5 种节点：Scan、IndexScan、Insert、Update、Delete
+- **原因**:
+  - M4 范围：DML Only（INSERT/UPDATE/DELETE/SELECT）
+  - 节点类型直接对应 SQL 语句类型
+  - 与 M2/M3 集成接口明确（IndexScan.key → IndexManager.get()）
+- **影响**:
+  - Scan：全表扫描（无 WHERE）
+  - IndexScan：主键查询（WHERE pk = value）
+  - Insert：插入（VALUES 列表）
+  - Update：单列更新（WHERE pk = value）
+  - Delete：删除（WHERE pk = value）
+- **推迟内容**:
+  - 复杂 WHERE（表达式计算，推迟到 M5）
+  - JOIN（多表，推迟到 M5/M6）
+  - 聚合函数（需聚合算子，推迟到 M5）
+  - DDL（CREATE/DROP，需元数据管理，后续里程碑）
+
 ### 模块划分与职责
 
 | 模块 | 职责 | 异步策略 |
@@ -260,7 +308,7 @@ Total: 22 bytes
 | M1 | 文件/缓存层 | 实现 `AsyncStorage` trait，使用 `spawn_blocking` 读页 | ✅ 完成 |
 | M2 | B-Tree 索引与存储引擎 | 索引同步，通过 `spawn_blocking` 暴露为 async API | ✅ 完成 |
 | M3 | 事务与 MVCC | 用异步锁实现提交等待，快照读无锁 | ✅ 完成 |
-| M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） |
+| M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） | ✅ 完成 |
 | M5 | 异步执行引擎 | 实现 `async fn next()` 迭代器，整合存储异步接口 |
 | M6 | 全流程集成 + 网络层 | 实现 TCP 服务器，每个连接一个协程 |
 | M7 | 性能深度优化 | 替换 `io_uring`，调优协程调度、页缓存策略 |

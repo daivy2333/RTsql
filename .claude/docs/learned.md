@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-20 (M3 事务与 MVCC 完成)
+> 最后更新：2026-05-20 (M4 SQL 解析与计划完成)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -28,6 +28,9 @@
 | spawn_blocking + Mutex | `Arc<Mutex<T>>` + spawn_blocking | 在阻塞线程池中使用同步 Mutex（不阻塞异步运行时） | 2026-05-20 |
 | AtomicU64 事务ID | `std::sync::atomic::AtomicU64` + `fetch_add` | 无锁分配全局唯一事务 ID | 2026-05-20 |
 | tokio::sync::Mutex | `Arc<Mutex<()>>` + `lock().await` | 异步行锁（不阻塞物理线程） | 2026-05-20 |
+| sqlparser::parse_sql | `Parser::parse_sql(&GenericDialect, sql)` | 解析 SQL 字符串为 AST | 2026-05-20 |
+| sqlparser AST | `sqlparser::ast::{Statement, Query, Select, Expr}` | SQL AST 类型 | 2026-05-20 |
+| Value.to_key() | `Value::Int(n).to_key()` | Int 值转为 Key（用于索引查找） | 2026-05-20 |
 
 ---
 
@@ -41,8 +44,8 @@
 | 页格式模块 | src/storage/page_format/ | M2: Key/RowId/SlottedPage |
 | B-Tree 模块 | src/storage/btree/ | M2: BTree 索引核心 |
 | 事务模块 | src/transaction/ | M3: TransactionId/Snapshot/VersionHeader/RowLockTable/Manager |
-| 执行模块 | src/executor/ | 执行引擎核心（占位符） |
-| 解析模块 | src/parser/ | SQL 解析核心（占位符） |
+| 执行模块 | src/executor/ | M4: PhysicalPlan/Value |
+| 解析模块 | src/parser/ | M4: PlanBuilder/PlanError/AST helpers |
 | 网络模块 | src/network/ | 网络层核心（占位符） |
 
 ---
@@ -112,6 +115,10 @@
 | AtomicU64 无锁分配 | 全局事务 ID | `counter.fetch_add(1, Ordering::SeqCst) + 1` |
 | Snapshot 可见性判断 | MVCC 快照读 | `snapshot.is_visible(create_tx_id, commit_tx_id)` |
 | 异步行锁 | 写写冲突等待 | `lock_table.get_lock(row_id).await; let guard = lock.lock().await` |
+| sqlparser-rs 解析 | SQL 字符串解析 | `Parser::parse_sql(&GenericDialect{}, sql)` |
+| AST 直接映射 | 简单查询计划生成 | `Statement::Query → build_query(query)` |
+| PlanBuilder 表注册 | 元数据管理 | `builder.register_table("users", columns, "id")` |
+| Value.to_key() | Int 转 Key | `Value::Int(n).to_key()` → Key::new(&n.to_be_bytes()) |
 
 ---
 
@@ -139,9 +146,13 @@
 - [x] MVCC 实现细节（M3 阶段）→ Repeatable Read 隔离级别已实现
 - [x] B-Tree 索引优化策略（M2 阶段）→ 简化实现（Split/Merge 未完整）
 - [x] PageGuard::modify_page() 方法（M2 添加）
+- [x] SQL 解析与计划生成（M4 阶段）→ sqlparser-rs + PhysicalPlan 已实现
 - [ ] WAL（Write-Ahead Logging）实现（M7 阶段）
 - [ ] 版本链 GC（清理旧版本）（M7 阶段）
 - [ ] Serializable 隔离级别（需谓词锁，推迟）
+- [ ] 复杂 WHERE 表达式计算（M5 阶段）
+- [ ] JOIN 多表计划与执行（M5/M6 阶段）
+- [ ] DDL 元数据管理（后续里程碑）
 
 ---
 

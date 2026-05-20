@@ -12,7 +12,7 @@
 
 ```
 RTsql/
-├── Cargo.toml              # Rust 项目配置，含 Tokio/async-trait/thiserror/anyhow/tempfile 依赖
+├── Cargo.toml              # Rust 项目配置，含 Tokio/async-trait/thiserror/anyhow/sqlparser 依赖
 ├── Cargo.lock              # 依赖锁定文件
 ├── .gitignore              # Git 忽略配置
 ├── CLAUDE.md               # 文档入口
@@ -39,23 +39,33 @@ RTsql/
 │           ├── btree.rs     # BTree 核心逻辑
 │           ├── sync_loader.rs # SyncPageLoader（block_on 包装）
 │           └── index_manager.rs # IndexManager 异步 API
-│   ├── executor/mod.rs      # 执行引擎模块（占位符）
-│   ├── transaction/         # M3 新增：事务管理模块
-│   │   ├── mod.rs           # 模块导出
-│   │   ├── tx_id.rs         # TransactionId（AtomicU64）
-│   │   ├── error.rs         # TransactionError
-│   │   ├── snapshot.rs      # Snapshot（可见性判断）
+│   ├── executor/           # M4 新增：执行引擎模块
+│   │   ├── mod.rs          # 模块导出
+│   │   ├── value.rs        # Value enum（Int/String/Null + to_key()）
+│   │   └── plan.rs         # PhysicalPlan + 5 节点结构
+│   ├── transaction/        # M3 新增：事务管理模块
+│   │   ├── mod.rs          # 模块导出
+│   │   ├── tx_id.rs        # TransactionId（AtomicU64）
+│   │   ├── error.rs        # TransactionError
+│   │   ├── snapshot.rs     # Snapshot（可见性判断）
 │   │   ├── version_chain.rs # VersionHeader（版本链）
-│   │   ├── row_lock.rs      # RowLockTable（行级锁）
-│   │   └── manager.rs       # TransactionManager
-│   ├── parser/mod.rs        # SQL 解析模块（占位符）
-│   └── network/mod.rs       # 网络层模块（占位符）
+│   │   ├── row_lock.rs     # RowLockTable（行级锁）
+│   │   └── manager.rs      # TransactionManager
+│   ├── parser/             # M4 新增：SQL 解析模块
+│   │   ├── mod.rs          # 模块导出
+│   │   ├── error.rs        # PlanError（7 种错误类型）
+│   │   ├── value.rs        # Value 转换函数
+│   │   ├── ast.rs          # AST 辅助函数
+│   │   └── planner.rs      # PlanBuilder（AST → PhysicalPlan）
+│   └── network/mod.rs      # 网络层模块（占位符）
 ├── tests/
-│   ├── runtime_test.rs      # 运行时功能验证测试（3 个测试）
-│   ├── btree_test.rs        # M2 新增：BTree 核心测试（10 个测试）
+│   ├── runtime_test.rs     # 运行时功能验证测试（3 个测试）
+│   ├── btree_test.rs       # M2 新增：BTree 核心测试（10 个测试）
 │   ├── index_manager_test.rs # M2 新增：IndexManager 异步测试（3 个测试）
-│   ├── sync_loader_test.rs  # M2 新增：SyncPageLoader 测试（2 个测试）
-│   └── concurrent_test.rs   # M3 新增：并发事务测试（4 个测试）
+│   ├── sync_loader_test.rs # M2 新增：SyncPageLoader 测试（2 个测试）
+│   ├── concurrent_test.rs  # M3 新增：并发事务测试（4 个测试）
+│   ├── parser_test.rs      # M4 新增：SQL 解析测试（6 个测试）
+│   └── planner_test.rs     # M4 新增：计划构建测试（8 个测试）
 └── .claude/
     └── docs/
         ├── architecture.md    - 架构决策记录
@@ -70,7 +80,7 @@ RTsql/
             └─ plans/          - 实现计划
 ```
 
-**注**: M2 B-Tree 索引与存储引擎已完成，包含 Key、RowId、SlottedPage、LeafNode、InternalNode、BTree、SyncPageLoader、IndexManager，53 个测试全部通过。
+**注**: M4 SQL 解析与计划已完成，包含 PlanError、Value、PhysicalPlan、PlanBuilder，104 个测试全部通过。
 
 ## 技术栈
 
@@ -79,7 +89,7 @@ RTsql/
 | 语言 | Rust | 最新稳定版（建议 1.75+） |
 | 构建工具 | Cargo | Rust 内置 |
 | 异步运行时 | Tokio | 1.x（多线程 scheduler） |
-| SQL 解析 | sqlparser-rs | 待集成 |
+| SQL 解析 | sqlparser-rs | 0.44 ✅ 已集成 |
 | 测试框架 | tempfile + 内置测试 | 3.x |
 | 代码格式化 | rustfmt | Rust 内置 |
 | Lint | clippy | Rust 内置 |
@@ -88,57 +98,51 @@ RTsql/
 
 - **当前分支**: master
 - **最近提交**:
-  - 30c2f1d feat(storage): complete M2 implementation with B-Tree index and storage engine
-  - 5beb916 feat(m2-btree): implement IndexManager async API
-  - f4117f8 feat(m2-btree): implement BTree core logic with proper page write-back
-  - 68946e5 test(m2-btree): add failing tests for BTree core logic
-  - 2e6afc8 feat(m2-btree): implement SyncPageLoader with async wrapper
-  - 5b7d532 feat(btree): implement LeafNode and InternalNode structures
-  - c939ff0 feat(page_format): implement SlottedPage with slot array and row data layout
-  - 3b7bf47 feat(page_format): implement RowId structure (page_id + slot_id)
-  - 76469a9 feat(page_format): implement Key structure with fixed 32 bytes length
+  - 689e144 docs: mark M4 complete, update project status
+  - 9fa65e6 style(m4): apply cargo fmt formatting
+  - 8202d50 feat(m4): complete SQL parser with tests
+  - e866d99 feat(m4): implement PlanBuilder for AST to PhysicalPlan conversion
+  - 5708232 feat(m4): add Value conversion from sqlparser AST
+  - a67f4fb feat(m4): add PhysicalPlan and node structures
 - **未提交更改**: 无（working tree clean）
 
-**注**: M2 代码已全部提交，53 个测试通过，clippy 有 11 个可接受警告。
+**注**: M4 代码已全部提交，104 个测试通过，clippy 有 minor warnings（无 Critical）。
 
 ## 关键文件
 
 | 文件 | 作用 | 状态 |
 |------|------|------|
 | Cargo.toml | Rust 项目配置 | ✅ 完成 |
+| src/lib.rs | 库入口，模块导出 | ✅ M4 更新 |
 | src/storage/mod.rs | 存储模块导出 | ✅ 完成 |
-| src/storage/error.rs | StorageError 类型 | ✅ 完成 |
-| src/storage/page_id.rs | PageId 结构 | ✅ 完成 |
-| src/storage/page.rs | Page 结构（4KB） | ✅ 完成 |
-| src/storage/async_storage.rs | AsyncStorage trait | ✅ 完成 |
-| src/storage/file_storage.rs | FileStorage 实现 | ✅ 完成 |
-| src/storage/buffer_pool.rs | BufferPool + Clock 淘汰 | ✅ 完成 |
-| src/storage/page_frame.rs | PageFrame + PageGuard | ✅ 完成 |
-| src/storage/page_format/mod.rs | 页格式模块导出 | ✅ M2 完成 |
 | src/storage/page_format/key.rs | Key 结构（32 bytes） | ✅ M2 完成 |
-| src/storage/page_format/row_id.rs | RowId 结构 | ✅ M2 完成 |
-| src/storage/page_format/slotted_page.rs | SlottedPage 格式 | ✅ M2 完成 |
-| src/storage/btree/mod.rs | B-Tree 模块导出 | ✅ M2 完成 |
-| src/storage/btree/node.rs | LeafNode + InternalNode | ✅ M2 完成 |
 | src/storage/btree/btree.rs | BTree 核心逻辑 | ✅ M2 完成 |
-| src/storage/btree/sync_loader.rs | SyncPageLoader | ✅ M2 完成 |
 | src/storage/btree/index_manager.rs | IndexManager API | ✅ M2 完成 |
-| tests/btree_test.rs | BTree 测试 | ✅ M2 完成（10 测试）|
-| tests/index_manager_test.rs | IndexManager 测试 | ✅ M2 完成（3 测试）|
-| tests/sync_loader_test.rs | SyncPageLoader 测试 | ✅ M2 完成（2 测试）|
+| src/executor/mod.rs | 执行模块导出 | ✅ M4 完成 |
+| src/executor/value.rs | Value enum | ✅ M4 完成 |
+| src/executor/plan.rs | PhysicalPlan + 5 nodes | ✅ M4 完成 |
+| src/parser/mod.rs | 解析模块导出 | ✅ M4 完成 |
+| src/parser/error.rs | PlanError | ✅ M4 完成 |
+| src/parser/ast.rs | AST 辅助函数 | ✅ M4 完成 |
+| src/parser/planner.rs | PlanBuilder | ✅ M4 完成 |
+| src/transaction/manager.rs | TransactionManager | ✅ M3 完成 |
+| tests/parser_test.rs | SQL 解析测试 | ✅ M4 完成（6 测试）|
+| tests/planner_test.rs | 计划构建测试 | ✅ M4 完成（8 测试）|
 
 ## 最近修改
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
-| 2026-05-20 | src/storage/page_format/*, tests/page_format_test | M2 Key/RowId/SlottedPage 实现 |
+| 2026-05-20 | src/parser/*, tests/parser_test.rs | M4 PlanError/Value/AST/PlanBuilder 实现 |
+| 2026-05-20 | src/executor/*, tests/planner_test.rs | M4 PhysicalPlan + 5 nodes 实现 |
+| 2026-05-20 | .claude/docs/superpowers/* | M4 设计规范和实现计划 |
+| 2026-05-20 | src/transaction/*, tests/concurrent_test.rs | M3 TransactionManager + MVCC 实现 |
 | 2026-05-20 | src/storage/btree/*, tests/btree_* | M2 B-Tree 索引与存储引擎 |
-| 2026-05-20 | .claude/docs/superpowers/* | M2 设计规范和实现计划 |
-| 2026-05-20 | src/storage/*, tests/storage_test.rs | M1 文件/缓存层完整实现 |
+| 2026-05-20 | src/storage/page_format/* | M2 Key/RowId/SlottedPage 实现 |
 
 ## 下一步行动
 
-1. 开始 M4 里程碑：SQL 解析与计划
-2. 集成 sqlparser-rs
-3. 实现同步解析
-4. 生成物理计划（包含 async 节点）
+1. 开始 M5 里程碑：异步执行引擎
+2. 实现 `async fn next() -> Result<Option<Row>>` 迭代器
+3. 整合存储异步接口（BufferPool + IndexManager）
+4. 支持流式返回结果
