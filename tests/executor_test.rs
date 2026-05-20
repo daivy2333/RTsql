@@ -41,7 +41,7 @@ async fn test_index_scan_executor_found() -> Result<()> {
     index_manager.insert(key, row_id).await.unwrap();
 
     // 创建 IndexScanExecutor
-    let mut executor = IndexScanExecutor::new(index_manager, key.to_vec(), vec!["id".to_string()]);
+    let mut executor = IndexScanExecutor::new(index_manager, key.to_vec());
 
     // 第一次 next 返回 RowId
     let result = executor.next().await?;
@@ -70,7 +70,7 @@ async fn test_index_scan_executor_not_found() -> Result<()> {
 
     // 不插入任何数据，直接查找
     let key = b"key_not_found";
-    let mut executor = IndexScanExecutor::new(index_manager, key.to_vec(), vec!["id".to_string()]);
+    let mut executor = IndexScanExecutor::new(index_manager, key.to_vec());
 
     // next 返回 None（未找到）
     let result = executor.next().await?;

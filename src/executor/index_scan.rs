@@ -8,16 +8,14 @@ use std::sync::Arc;
 pub struct IndexScanExecutor {
     index_manager: Arc<IndexManager>,
     key: Vec<u8>,
-    columns: Vec<String>,
     executed: bool,
 }
 
 impl IndexScanExecutor {
-    pub fn new(index_manager: Arc<IndexManager>, key: Vec<u8>, columns: Vec<String>) -> Self {
+    pub fn new(index_manager: Arc<IndexManager>, key: Vec<u8>) -> Self {
         Self {
             index_manager,
             key,
-            columns,
             executed: false,
         }
     }
