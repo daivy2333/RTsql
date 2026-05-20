@@ -146,25 +146,28 @@ impl PlanBuilder {
         };
 
         // Check for binary operation: column = value or value = column
-        if let Expr::BinaryOp { left, op, right } = expr {
-            if let sqlparser::ast::BinaryOperator::Eq = op {
-                // Case 1: column = value
-                if let Expr::Identifier(ident) = left.as_ref() {
-                    if ident.value.to_lowercase() == pk_column {
-                        if let Expr::Value(v) = right.as_ref() {
-                            let value = value_from_sqlparser(v)?;
-                            return Ok(value.to_key());
-                        }
+        if let Expr::BinaryOp {
+            left,
+            op: sqlparser::ast::BinaryOperator::Eq,
+            right,
+        } = expr
+        {
+            // Case 1: column = value
+            if let Expr::Identifier(ident) = left.as_ref() {
+                if ident.value.to_lowercase() == pk_column {
+                    if let Expr::Value(v) = right.as_ref() {
+                        let value = value_from_sqlparser(v)?;
+                        return Ok(value.to_key());
                     }
                 }
+            }
 
-                // Case 2: value = column
-                if let Expr::Identifier(ident) = right.as_ref() {
-                    if ident.value.to_lowercase() == pk_column {
-                        if let Expr::Value(v) = left.as_ref() {
-                            let value = value_from_sqlparser(v)?;
-                            return Ok(value.to_key());
-                        }
+            // Case 2: value = column
+            if let Expr::Identifier(ident) = right.as_ref() {
+                if ident.value.to_lowercase() == pk_column {
+                    if let Expr::Value(v) = left.as_ref() {
+                        let value = value_from_sqlparser(v)?;
+                        return Ok(value.to_key());
                     }
                 }
             }
@@ -453,7 +456,7 @@ impl PlanBuilder {
         selection: &Option<Expr>,
     ) -> Result<PhysicalPlan, PlanError> {
         // Extract table name
-        let table_name = extract_table_name(&[table.clone()])?;
+        let table_name = extract_table_name(std::slice::from_ref(table))?;
         self.validate_table(&table_name)?;
 
         // Extract primary key from WHERE clause
