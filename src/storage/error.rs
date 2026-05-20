@@ -46,6 +46,15 @@ pub enum StorageError {
 
     #[error("column not found: {0}")]
     ColumnNotFound(String),
+
+    #[error("table already exists: {0}")]
+    TableAlreadyExists(String),
+
+    #[error("constraint violation: {0}")]
+    ConstraintViolation(String),
+
+    #[error("invalid column type: {0}")]
+    InvalidColumnType(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
