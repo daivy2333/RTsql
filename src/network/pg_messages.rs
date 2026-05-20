@@ -37,3 +37,34 @@ pub fn parameter_status(name: &str, value: &str) -> Vec<u8> {
 
     bytes
 }
+
+/// BackendKeyData message: 'K' + length(12) + process_id + secret_key
+pub fn backend_key_data(process_id: u32, secret_key: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(13);
+    bytes.push(b'K');
+
+    // Length (Int32 BE): 12
+    bytes.extend_from_slice(&12i32.to_be_bytes());
+
+    // Process ID (Int32 BE)
+    bytes.extend_from_slice(&process_id.to_be_bytes());
+
+    // Secret Key (Int32 BE)
+    bytes.extend_from_slice(&secret_key.to_be_bytes());
+
+    bytes
+}
+
+/// ReadyForQuery message: 'Z' + length(5) + status('I'/'T'/'E')
+pub fn ready_for_query(status: char) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(5);
+    bytes.push(b'Z');
+
+    // Length (Int32 BE): 5
+    bytes.extend_from_slice(&5i32.to_be_bytes());
+
+    // Status: 'I' (Idle), 'T' (In transaction), 'E' (Error)
+    bytes.push(status as u8);
+
+    bytes
+}

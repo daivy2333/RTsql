@@ -26,3 +26,26 @@ fn test_parameter_status_serialization() {
     let length = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
     assert_eq!(length, 24);
 }
+
+#[test]
+fn test_backend_key_data_serialization() {
+    let bytes = pg_messages::backend_key_data(12345, 67890);
+
+    // Format: 'K' + length(12) + process_id + secret_key
+    assert_eq!(bytes[0], b'K');
+    assert_eq!(bytes.len(), 13);
+
+    let length = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+    assert_eq!(length, 12);
+}
+
+#[test]
+fn test_ready_for_query_serialization() {
+    let bytes = pg_messages::ready_for_query('I');
+
+    // Format: 'Z' + length(5) + status('I')
+    // Total: 1 (type) + 4 (length) + 1 (status) = 6 bytes
+    assert_eq!(bytes[0], b'Z');
+    assert_eq!(bytes.len(), 6);
+    assert_eq!(bytes[5], b'I');
+}
