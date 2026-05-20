@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-20
+> 最后更新：2026-05-20 (M3 事务与 MVCC 完成)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -26,6 +26,8 @@
 | Handle::current() | `tokio::runtime::Handle::current()` | 在异步上下文中获取 runtime handle | 2026-05-20 |
 | Handle::block_on | `runtime.block_on(async_future)` | 在同步代码中执行异步操作（spawn_blocking 内安全） | 2026-05-20 |
 | spawn_blocking + Mutex | `Arc<Mutex<T>>` + spawn_blocking | 在阻塞线程池中使用同步 Mutex（不阻塞异步运行时） | 2026-05-20 |
+| AtomicU64 事务ID | `std::sync::atomic::AtomicU64` + `fetch_add` | 无锁分配全局唯一事务 ID | 2026-05-20 |
+| tokio::sync::Mutex | `Arc<Mutex<()>>` + `lock().await` | 异步行锁（不阻塞物理线程） | 2026-05-20 |
 
 ---
 
@@ -38,8 +40,8 @@
 | 存储模块 | src/storage/ | 存储引擎核心 |
 | 页格式模块 | src/storage/page_format/ | M2: Key/RowId/SlottedPage |
 | B-Tree 模块 | src/storage/btree/ | M2: BTree 索引核心 |
+| 事务模块 | src/transaction/ | M3: TransactionId/Snapshot/VersionHeader/RowLockTable/Manager |
 | 执行模块 | src/executor/ | 执行引擎核心（占位符） |
-| 事务模块 | src/transaction/ | 事务管理核心（占位符） |
 | 解析模块 | src/parser/ | SQL 解析核心（占位符） |
 | 网络模块 | src/network/ | 网络层核心（占位符） |
 
@@ -107,6 +109,9 @@
 | 异步页加载 | Buffer Pool 管理 | `get_page(page_id) -> impl Future<Output = Page>` |
 | SyncPageLoader 模式 | 同步代码访问异步 BufferPool | `loader.load_page(page_id)` (内部 block_on) |
 | PageGuard::modify_page | 页修改自动写回 | `guard.modify_page(|page| { leaf.insert(...) })` |
+| AtomicU64 无锁分配 | 全局事务 ID | `counter.fetch_add(1, Ordering::SeqCst) + 1` |
+| Snapshot 可见性判断 | MVCC 快照读 | `snapshot.is_visible(create_tx_id, commit_tx_id)` |
+| 异步行锁 | 写写冲突等待 | `lock_table.get_lock(row_id).await; let guard = lock.lock().await` |
 
 ---
 
@@ -131,10 +136,12 @@
 
 - [ ] io_uring 集成方式（M7 阶段）
 - [ ] PostgreSQL 有线协议细节（M6 阶段）
-- [ ] MVCC 实现细节（M3 阶段）
+- [x] MVCC 实现细节（M3 阶段）→ Repeatable Read 隔离级别已实现
 - [x] B-Tree 索引优化策略（M2 阶段）→ 简化实现（Split/Merge 未完整）
 - [x] PageGuard::modify_page() 方法（M2 添加）
-- [ ] WAL（Write-Ahead Logging）实现
+- [ ] WAL（Write-Ahead Logging）实现（M7 阶段）
+- [ ] 版本链 GC（清理旧版本）（M7 阶段）
+- [ ] Serializable 隔离级别（需谓词锁，推迟）
 
 ---
 
@@ -144,3 +151,6 @@
 |--------|----------|------|
 | Tokio 多线程调度器适合数据库 | 架构分析 | 多线程调度器可充分利用多核，适合高并发场景 |
 | spawn_blocking 不阻塞异步运行时 | 文档确认 | CPU密集型操作隔离，不影响协程调度 |
+| AtomicU64 无锁分配正确性 | 多线程测试（10 线程并发） | fetch_add 保证原子递增，ID 唯一且有序 |
+| Snapshot 可见性规则正确 | 5 个单元测试 | 已提交/未提交/活跃事务场景正确判断 |
+| 异步行锁不阻塞物理线程 | 3 个并发测试 | tokio::sync::Mutex 在 await 时挂起协程，线程继续执行其他任务 |

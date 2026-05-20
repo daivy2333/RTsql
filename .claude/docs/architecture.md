@@ -159,6 +159,73 @@ src/storage/btree/
 └────────────┴──────────────────┴─────────────┴─────────────┘
 ```
 
+### 2026-05-20 - M3 架构决策：MVCC 事务系统五层设计
+
+- **决策**: 采用 TransactionId → Snapshot → VersionHeader → RowLockTable → TransactionManager 五层架构
+- **原因**:
+  - TransactionId（AtomicU64）无锁分配全局唯一 ID
+  - Snapshot 实现 Repeatable Read 可见性规则
+  - VersionHeader 管理版本链（多版本数据）
+  - RowLockTable 异步行级锁（写写冲突等待）
+  - TransactionManager 协调事务生命周期（begin/commit/abort）
+- **影响**:
+  - 快照读无锁（读写不阻塞）
+  - 写写冲突通过 tokio::sync::Mutex 等待（不阻塞物理线程）
+  - 版本链存储在 Row 数据前（22 bytes header）
+- **文件结构**:
+```
+src/transaction/
+├── mod.rs           # 模块导出
+├── tx_id.rs         # TransactionId（AtomicU64）
+├── error.rs         # TransactionError
+├── snapshot.rs      # Snapshot（可见性判断）
+├── version_chain.rs # VersionHeader（版本链头部）
+├── row_lock.rs      # RowLockTable（异步行锁）
+└── manager.rs       # TransactionManager（事务管理）
+```
+- **替代方案**:
+  - 全局大锁（rejected：性能差，阻塞所有并发）
+  - 两阶段锁（rejected：读写阻塞，不符合 MVCC 设计）
+
+### 2026-05-20 - M3 架构决策：Repeatable Read 隔离级别
+
+- **决策**: M3 实现 Repeatable Read（可重复读）隔离级别
+- **原因**:
+  - MVCC 标准模式，真正的快照读
+  - 读不阻塞写，写不阻塞读
+  - 比 Serializable 实现简单（无需谓词锁）
+- **影响**:
+  - 事务开始时创建 Snapshot（记录活跃事务列表）
+  - 读操作按 Snapshot 可见性规则过滤版本
+  - 写操作创建新版本，链接到 VersionChain
+- **可见性规则**:
+```
+版本可见条件：
+  1. 创建事务已提交（commit_tx_id 存在）
+  2. 创建事务 ID < Snapshot ID（早于快照）
+  3. 创建事务不在 Snapshot.active_tx_ids 中
+```
+
+### 2026-05-20 - M3 架构决策：版本链同页存储优先
+
+- **决策**: 版本链优先在同页存储，页满时溢出到新页
+- **原因**:
+  - 紧凑存储，减少 I/O
+  - 同页访问无需额外页加载
+  - 溢出页处理边界情况
+- **影响**:
+  - VersionHeader 固定 22 bytes（create_tx_id + commit_tx_id + next_version）
+  - next_version 指向上一版本 RowId（6 bytes）
+  - 版本过多时需手动清理（推迟到 M7）
+- **VersionHeader 布局**:
+```
+┌──────────────┬──────────────┬──────────────┐
+│ create_tx_id │ commit_tx_id │ next_version │
+│  (8 bytes)   │  (8 bytes)   │  (6 bytes)   │
+└──────────────┴──────────────┴──────────────┘
+Total: 22 bytes
+```
+
 ### 模块划分与职责
 
 | 模块 | 职责 | 异步策略 |
@@ -192,7 +259,7 @@ src/storage/btree/
 | M0 | 项目骨架，引入 Tokio | 确定异步运行时配置 |
 | M1 | 文件/缓存层 | 实现 `AsyncStorage` trait，使用 `spawn_blocking` 读页 | ✅ 完成 |
 | M2 | B-Tree 索引与存储引擎 | 索引同步，通过 `spawn_blocking` 暴露为 async API | ✅ 完成 |
-| M3 | 事务与 MVCC | 用异步锁实现提交等待，快照读无锁 |
+| M3 | 事务与 MVCC | 用异步锁实现提交等待，快照读无锁 | ✅ 完成 |
 | M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） |
 | M5 | 异步执行引擎 | 实现 `async fn next()` 迭代器，整合存储异步接口 |
 | M6 | 全流程集成 + 网络层 | 实现 TCP 服务器，每个连接一个协程 |
