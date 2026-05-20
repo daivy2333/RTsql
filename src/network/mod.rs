@@ -6,7 +6,7 @@ pub mod error;
 pub mod protocol;
 
 pub use error::NetworkError;
-pub use protocol::{Protocol, Request, Response};
+pub use protocol::{Protocol, JsonProtocol, Request, Response};
 
 // Task 4-8 will add these modules:
 // pub mod connection;
