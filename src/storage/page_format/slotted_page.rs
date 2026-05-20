@@ -63,7 +63,7 @@ impl SlottedPageHeader {
 
 /// Slotted Page format reader/writer
 pub struct SlottedPage<'a> {
-    page: &'a mut Page,
+    pub(crate) page: &'a mut Page,
     header: SlottedPageHeader,
 }
 
@@ -178,6 +178,16 @@ impl<'a> SlottedPage<'a> {
     /// Sync header to page data
     pub fn sync_header(&mut self) {
         self.header.serialize(&mut self.page.data[..SlottedPageHeader::SIZE]);
+    }
+
+    /// Get page id
+    pub fn page_id(&self) -> crate::storage::PageId {
+        self.page.id
+    }
+
+    /// Get page data reference
+    pub fn page_data(&self) -> &[u8] {
+        self.page.data.as_ref()
     }
 }
 

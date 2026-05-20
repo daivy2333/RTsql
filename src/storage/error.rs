@@ -20,6 +20,18 @@ pub enum StorageError {
 
     #[error("Task join error: {0}")]
     JoinError(#[from] JoinError),
+
+    #[error("Invalid page type: expected {expected:#x}, got {actual:#x}")]
+    InvalidPageType { expected: u8, actual: u8 },
+
+    #[error("Duplicate key")]
+    DuplicateKey,
+
+    #[error("Key not found")]
+    KeyNotFound,
+
+    #[error("Page full")]
+    PageFull,
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
