@@ -4,6 +4,36 @@
 
 ## 已识别的优化点
 
+### M5 实现中的简化与优化机会（待 M6/M7 处理）
+
+- [x] **仅索引层执行，返回 RowId**: M5 未实现数据存储层
+  - **当前状态**: Executor 返回 RowId（而非完整 Row 数据）
+  - **优化方案**: M6 实现 TableManager + Row 数据存储，Executor 返回 Row
+  - **预期收益**: 完整 SQL 执行流程，支持 Scan 全表扫描
+  - **时机**: M6 网络层阶段
+  - **复杂度**: 高（需实现数据页格式、Row 序列化）
+
+- [x] **ScanExecutor 返回 NotImplemented**: 全表扫描暂未实现
+  - **当前状态**: ScanExecutor.next() 返回 NotImplemented
+  - **优化方案**: M6 实现数据存储层遍历所有数据页
+  - **预期收益**: 支持 SELECT 无 WHERE 的全表扫描
+  - **时机**: M6 网络层阶段
+  - **复杂度**: 中（需遍历数据页 + slot 数组）
+
+- [x] **RowId 测试占位值**: Insert/Update 使用测试占位 RowId
+  - **当前状态**: InsertExecutor 使用 RowId::new(0, slot_id)，UpdateExecutor 使用 RowId::new(0, 999)
+  - **优化方案**: M6 实现真实 RowId 分配（从数据页 slot 分配）
+  - **预期收益**: 真实数据存储，支持多数据页
+  - **时机**: M6 网络层阶段
+  - **复杂度**: 中
+
+- [x] **事务未整合到 Executor**: M5 未整合 TransactionManager
+  - **当前状态**: Executor 不持有 Transaction，MVCC 可见性判断未实现
+  - **优化方案**: M6 Executor 持有 Transaction，执行时检查可见性
+  - **预期收益**: 完整事务支持，Repeatable Read 隔离
+  - **时机**: M6 网络层阶段
+  - **复杂度**: 高
+
 ### M2 实现中的简化与优化机会（待后续处理）
 
 - [x] **B-Tree Split/Merge 未完整实现**: 当前仅支持单页 LeafNode 操作
@@ -99,6 +129,28 @@
   - **时机**: M6 网络层阶段（可选）
 
 ## 技术债务
+
+### M5 遗留的技术债务
+
+- [x] **仅索引层执行**: 未实现数据存储层，Executor 返回 RowId
+  - **影响**: 无法返回完整 Row 数据，Scan 无法实现
+  - **优先级**: 高（完整执行流程必需）
+  - **预计处理**: M6 网络层阶段（TableManager + Row 数据存储）
+
+- [x] **Scan NotImplemented**: 全表扫描未实现
+  - **影响**: SELECT 无 WHERE 无法执行
+  - **优先级**: 高（完整 SQL 执行必需）
+  - **预计处理**: M6 网络层阶段
+
+- [x] **事务未整合**: Executor 不持有 Transaction
+  - **影响**: 无法保证事务隔离性，并发执行可能出错
+  - **优先级**: 高（事务层必需）
+  - **预计处理**: M6 网络层阶段
+
+- [x] **RowId 测试占位**: 使用固定 page_id=0
+  - **影响**: 无法支持多数据页，真实数据存储受限
+  - **优先级**: 中（测试验证通过，生产需修复）
+  - **预计处理**: M6 网络层阶段
 
 ### M2 遗留的技术债务
 

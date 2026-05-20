@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-20 (M4 SQL 解析与计划完成)
+> 最后更新：2026-05-20 (M5 异步执行引擎完成)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -31,6 +31,9 @@
 | sqlparser::parse_sql | `Parser::parse_sql(&GenericDialect, sql)` | 解析 SQL 字符串为 AST | 2026-05-20 |
 | sqlparser AST | `sqlparser::ast::{Statement, Query, Select, Expr}` | SQL AST 类型 | 2026-05-20 |
 | Value.to_key() | `Value::Int(n).to_key()` | Int 值转为 Key（用于索引查找） | 2026-05-20 |
+| Executor trait | `#[async_trait] trait Executor { async fn next(&mut self) -> Result<Option<ExecResult>>; }` | 异步迭代器接口 | 2026-05-20 |
+| ExecResult enum | `ExecResult::RowId(RowId) / AffectedRows(u64) / NotImplemented` | 执行结果统一类型 | 2026-05-20 |
+| async_trait macro | `#[async_trait::async_trait] impl Executor for X` | 为 trait 提供 Send bounds | 2026-05-20 |
 
 ---
 
@@ -44,7 +47,7 @@
 | 页格式模块 | src/storage/page_format/ | M2: Key/RowId/SlottedPage |
 | B-Tree 模块 | src/storage/btree/ | M2: BTree 索引核心 |
 | 事务模块 | src/transaction/ | M3: TransactionId/Snapshot/VersionHeader/RowLockTable/Manager |
-| 执行模块 | src/executor/ | M4: PhysicalPlan/Value |
+| 执行模块 | src/executor/ | M4-M5: PhysicalPlan/Value/ExecResult/Executor trait/5 Executors |
 | 解析模块 | src/parser/ | M4: PlanBuilder/PlanError/AST helpers |
 | 网络模块 | src/network/ | 网络层核心（占位符） |
 
@@ -74,6 +77,8 @@
 | Runtime nesting 错误 | 在异步测试中调用 Handle::block_on 导致 "Cannot start a runtime from within a runtime" | 将 SyncPageLoader 创建放入 spawn_blocking 内，避免在异步上下文中调用 block_on | 2026-05-20 |
 | PageGuard 写回失效 | BTree 克隆 Page 后操作，但未写回 BufferPool，修改丢失 | 添加 PageGuard::modify_page() 方法，闭包内操作 + 自动 mark_dirty | 2026-05-20 |
 | LeafNode insert 有序问题 | SlottedPage::add_slot 总是添加到末尾，无法中间插入 | 实现 shift_slots_right() 方法，调整 slot 数组保持有序 | 2026-05-20 |
+| async_trait warning | Executor trait 使用 async fn 导致 clippy warning | 使用 #[async_trait::async_trait] macro 解决 | 2026-05-20 |
+| unused field warning | IndexScanExecutor columns 字段未使用 | 移除未使用字段，保持代码简洁 | 2026-05-20 |
 
 **详细踩坑档案**（复杂问题）：
 
@@ -119,6 +124,10 @@
 | AST 直接映射 | 简单查询计划生成 | `Statement::Query → build_query(query)` |
 | PlanBuilder 表注册 | 元数据管理 | `builder.register_table("users", columns, "id")` |
 | Value.to_key() | Int 转 Key | `Value::Int(n).to_key()` → Key::new(&n.to_be_bytes()) |
+| Executor 模式 | 异步迭代器 | `async fn next(&mut self) -> Result<Option<ExecResult>>` |
+| executed flag | 单次执行状态 | `if self.executed { return Ok(None); } self.executed = true; ...` |
+| RowId placeholder | M5 测试占位 | `RowId::new(0, slot_id)` 或 `RowId::new(0, 999)` |
+| NotImplemented variant | 未实现标记 | `ExecResult::NotImplemented` 用于 Scan（M6 补数据层） |
 
 ---
 
@@ -147,11 +156,13 @@
 - [x] B-Tree 索引优化策略（M2 阶段）→ 简化实现（Split/Merge 未完整）
 - [x] PageGuard::modify_page() 方法（M2 添加）
 - [x] SQL 解析与计划生成（M4 阶段）→ sqlparser-rs + PhysicalPlan 已实现
+- [x] 异步执行引擎（M5 阶段）→ Executor trait + 5 Executors 已实现
 - [ ] WAL（Write-Ahead Logging）实现（M7 阶段）
 - [ ] 版本链 GC（清理旧版本）（M7 阶段）
 - [ ] Serializable 隔离级别（需谓词锁，推迟）
-- [ ] 复杂 WHERE 表达式计算（M5 阶段）
+- [ ] 复杂 WHERE 表达式计算（M5/M6 阶段）
 - [ ] JOIN 多表计划与执行（M5/M6 阶段）
+- [ ] 数据存储层（TableManager、Row 数据）（M6 阶段）
 - [ ] DDL 元数据管理（后续里程碑）
 
 ---

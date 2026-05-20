@@ -274,6 +274,52 @@ src/executor/
   - 聚合函数（需聚合算子，推迟到 M5）
   - DDL（CREATE/DROP，需元数据管理，后续里程碑）
 
+### 2026-05-20 - M5 架构决策：Executor trait + 多实现模式
+
+- **决策**: 采用 Executor trait + 多 Executor 结构设计（而非单一 Executor switch PhysicalPlan）
+- **原因**:
+  - 每种 PhysicalPlan 节点职责独立，符合 Rust trait 抽象
+  - 便于扩展新节点类型（未来 Filter/Join 等）
+  - 测试时可单独测试每种 Executor
+  - 符合 "Design for isolation and clarity" 原则
+- **影响**:
+  - Executor trait 定义统一接口：`async fn next(&mut self) -> Result<Option<ExecResult>>`
+  - 5 种 Executor 实现：ScanExecutor、IndexScanExecutor、InsertExecutor、UpdateExecutor、DeleteExecutor
+  - 使用 async_trait macro 保证 Send bounds
+- **文件结构**:
+```
+src/executor/
+├── mod.rs           # 模块导出
+├── value.rs         # Value enum（M4）
+├── plan.rs          # PhysicalPlan（M4）
+├── result.rs        # ExecResult enum（M5）
+├── executor_trait.rs # Executor trait（M5）
+├── scan.rs          # ScanExecutor（M5: NotImplemented）
+├── index_scan.rs    # IndexScanExecutor（M5）
+├── insert.rs        # InsertExecutor（M5）
+├── update.rs        # UpdateExecutor（M5）
+└── delete.rs        # DeleteExecutor（M5）
+```
+- **替代方案**:
+  - 单一 Executor + switch PhysicalPlan（rejected：扩展性差，职责混乱）
+
+### 2026-05-20 - M5 架构决策：ExecResult 统一返回类型
+
+- **决策**: ExecResult enum 包含三种结果：RowId、AffectedRows、NotImplemented
+- **原因**:
+  - 统一返回类型，适配不同 PhysicalPlan 节点
+  - RowId 用于 IndexScan（M5 仅索引层执行）
+  - AffectedRows 符合 SQL 语义（INSERT 返回插入行数）
+  - NotImplemented 明确标记未完成功能（Scan 暂不实现）
+- **影响**:
+  - M5 仅返回 RowId（数据存储层推迟 M6）
+  - ScanExecutor 返回 NotImplemented，不阻塞其他测试
+  - 写操作返回影响计数，符合 SQL 标准
+- **推迟内容**:
+  - 完整 Row 数据返回（M6 实现数据存储层）
+  - Scan 全表扫描（M6 实现数据存储层）
+  - 事务整合（M6 网络层整合）
+
 ### 模块划分与职责
 
 | 模块 | 职责 | 异步策略 |
@@ -309,6 +355,6 @@ src/executor/
 | M2 | B-Tree 索引与存储引擎 | 索引同步，通过 `spawn_blocking` 暴露为 async API | ✅ 完成 |
 | M3 | 事务与 MVCC | 用异步锁实现提交等待，快照读无锁 | ✅ 完成 |
 | M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） | ✅ 完成 |
-| M5 | 异步执行引擎 | 实现 `async fn next()` 迭代器，整合存储异步接口 |
+| M5 | 异步执行引擎 | 实现 `async fn next()` 迭代器，整合存储异步接口 | ✅ 完成 |
 | M6 | 全流程集成 + 网络层 | 实现 TCP 服务器，每个连接一个协程 |
 | M7 | 性能深度优化 | 替换 `io_uring`，调优协程调度、页缓存策略 |
