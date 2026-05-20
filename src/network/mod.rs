@@ -5,11 +5,12 @@
 pub mod error;
 pub mod protocol;
 pub mod handler;
+pub mod connection;
 
 pub use error::NetworkError;
 pub use protocol::{Protocol, JsonProtocol, Request, Response};
 pub use handler::SqlHandler;
+pub use connection::ConnectionHandler;
 
-// Task 7-8 will add these modules:
-// pub mod connection;
+// Task 8 will add this module:
 // pub mod server;
