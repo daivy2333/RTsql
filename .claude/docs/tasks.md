@@ -84,14 +84,23 @@
 **新增测试**: parser_test(6), planner_test(8)
 **范围**: DML Only（INSERT/UPDATE/DELETE/SELECT），单表+主键查询
 
-### M5: 异步执行引擎
+### M5: 异步执行引擎 ✅
 
-- [ ] 实现 `async fn next() -> Result<Option<Row>>` 迭代器
-- [ ] 整合存储异步接口
-- [ ] 支持流式返回结果
-- [ ] 测试执行引擎
+- [x] 实现 ExecResult enum（RowId/AffectedRows/NotImplemented）
+- [x] 实现 Executor trait（async fn next()）
+- [x] 实现 ScanExecutor（返回 NotImplemented）
+- [x] 实现 IndexScanExecutor（主键索引查找）
+- [x] 实现 InsertExecutor（批量插入）
+- [x] 实现 UpdateExecutor（更新 RowId）
+- [x] 实现 DeleteExecutor（删除）
+- [x] 单元测试（tests/executor_test.rs）
+- [x] 集成测试（tests/plan_exec_test.rs）
 
-**异步相关重点**: 实现 `async fn next()` 迭代器，整合存储异步接口
+**完成日期**: 2026-05-20
+**验证结果**: cargo test (115 passed) ✅, cargo clippy ✅, cargo fmt ✅
+**新增测试**: executor_test(7), plan_exec_test(4)
+**范围**: 仅索引层执行，返回 RowId（数据层推迟 M6）
+**新增文件**: result.rs, executor_trait.rs, scan.rs, index_scan.rs, insert.rs, update.rs, delete.rs
 
 ### M6: 全流程集成 + 网络层
 

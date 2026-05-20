@@ -4,9 +4,9 @@
 
 ## 当前状态
 
-- **阶段**: M4 完成（SQL 解析与计划已实现）
+- **阶段**: M5 完成（异步执行引擎已实现）
 - **状态**: 正常
-- **当前里程碑**: M5 准备开始
+- **当前里程碑**: M6 准备开始
 
 ## 项目结构
 
@@ -39,10 +39,17 @@ RTsql/
 │           ├── btree.rs     # BTree 核心逻辑
 │           ├── sync_loader.rs # SyncPageLoader（block_on 包装）
 │           └── index_manager.rs # IndexManager 异步 API
-│   ├── executor/           # M4 新增：执行引擎模块
+│   ├── executor/           # M4-M5: 执行引擎模块
 │   │   ├── mod.rs          # 模块导出
 │   │   ├── value.rs        # Value enum（Int/String/Null + to_key()）
-│   │   └── plan.rs         # PhysicalPlan + 5 节点结构
+│   │   ├── plan.rs         # PhysicalPlan + 5 节点结构
+│   │   ├── result.rs       # ExecResult（RowId/AffectedRows/NotImplemented）[M5]
+│   │   ├── executor_trait.rs # Executor trait（async next）[M5]
+│   │   ├── scan.rs         # ScanExecutor [M5]
+│   │   ├── index_scan.rs   # IndexScanExecutor [M5]
+│   │   ├── insert.rs       # InsertExecutor [M5]
+│   │   ├── update.rs       # UpdateExecutor [M5]
+│   │   └── delete.rs       # DeleteExecutor [M5]
 │   ├── transaction/        # M3 新增：事务管理模块
 │   │   ├── mod.rs          # 模块导出
 │   │   ├── tx_id.rs        # TransactionId（AtomicU64）
@@ -65,7 +72,9 @@ RTsql/
 │   ├── sync_loader_test.rs # M2 新增：SyncPageLoader 测试（2 个测试）
 │   ├── concurrent_test.rs  # M3 新增：并发事务测试（4 个测试）
 │   ├── parser_test.rs      # M4 新增：SQL 解析测试（6 个测试）
-│   └── planner_test.rs     # M4 新增：计划构建测试（8 个测试）
+│   ├── planner_test.rs     # M4 新增：计划构建测试（8 个测试）
+│   ├── executor_test.rs    # M5 新增：Executor 单元测试（7 个测试）
+│   └── plan_exec_test.rs   # M5 新增：集成测试（4 个测试）
 └── .claude/
     └── docs/
         ├── architecture.md    - 架构决策记录
@@ -80,7 +89,7 @@ RTsql/
             └─ plans/          - 实现计划
 ```
 
-**注**: M4 SQL 解析与计划已完成，包含 PlanError、Value、PhysicalPlan、PlanBuilder，104 个测试全部通过。
+**注**: M5 异步执行引擎已完成，包含 ExecResult、Executor trait 和 5 种 Executor 实现，115 个测试全部通过。
 
 ## 技术栈
 
@@ -133,16 +142,18 @@ RTsql/
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
+| 2026-05-20 | src/executor/*, tests/executor_test.rs, tests/plan_exec_test.rs | M5 ExecResult/Executor trait/5 Executors 实现 |
 | 2026-05-20 | src/parser/*, tests/parser_test.rs | M4 PlanError/Value/AST/PlanBuilder 实现 |
 | 2026-05-20 | src/executor/*, tests/planner_test.rs | M4 PhysicalPlan + 5 nodes 实现 |
-| 2026-05-20 | .claude/docs/superpowers/* | M4 设计规范和实现计划 |
+| 2026-05-20 | .claude/docs/superpowers/* | M4-M5 设计规范和实现计划 |
 | 2026-05-20 | src/transaction/*, tests/concurrent_test.rs | M3 TransactionManager + MVCC 实现 |
 | 2026-05-20 | src/storage/btree/*, tests/btree_* | M2 B-Tree 索引与存储引擎 |
 | 2026-05-20 | src/storage/page_format/* | M2 Key/RowId/SlottedPage 实现 |
 
 ## 下一步行动
 
-1. 开始 M5 里程碑：异步执行引擎
-2. 实现 `async fn next() -> Result<Option<Row>>` 迭代器
-3. 整合存储异步接口（BufferPool + IndexManager）
-4. 支持流式返回结果
+1. 开始 M6 里程碑：全流程集成 + 网络层
+2. 实现数据存储层（TableManager、Row 数据存储）
+3. 实现 TCP 服务器（tokio::net::TcpListener）
+4. 整合事务到执行引擎
+5. 端到端测试
