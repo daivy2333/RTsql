@@ -1,27 +1,33 @@
 // SyncPageLoader（Task 4 实现）
 use std::sync::Arc;
+use tokio::runtime::Handle;
 
-use crate::storage::{BufferPool, PageGuard, PageId, Result, StorageError};
+use crate::storage::{BufferPool, PageGuard, PageId, Result};
 
 /// SyncPageLoader：在同步代码中加载页（使用 block_on 包装 BufferPool）
 pub struct SyncPageLoader {
     buffer_pool: Arc<BufferPool>,
+    runtime: Handle,
 }
 
 impl SyncPageLoader {
+    /// Create SyncPageLoader (must be called within Tokio runtime context)
     pub fn new(buffer_pool: Arc<BufferPool>) -> Self {
+        let runtime = Handle::current();
         Self {
             buffer_pool,
+            runtime,
         }
     }
 
-    pub fn load_page(&self, _page_id: PageId) -> Result<PageGuard> {
-        // Task 4 实现：使用 tokio::runtime::Handle::current().block_on()
-        Err(StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, "SyncPageLoader not implemented yet")))
+    /// Load page synchronously using block_on
+    pub fn load_page(&self, page_id: PageId) -> Result<PageGuard> {
+        self.runtime.block_on(self.buffer_pool.get_page(page_id))
     }
 
+    /// Allocate page synchronously using block_on
     pub fn allocate_page(&self) -> Result<PageId> {
-        // Task 4 实现：使用 tokio::runtime::Handle::current().block_on()
-        Err(StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, "SyncPageLoader not implemented yet")))
+        self.runtime
+            .block_on(self.buffer_pool.storage().allocate_page())
     }
 }

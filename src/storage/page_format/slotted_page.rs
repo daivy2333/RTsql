@@ -3,12 +3,12 @@ use crate::storage::Page;
 /// Slot: pointing to row data in the page
 #[derive(Debug, Clone, Copy)]
 pub struct Slot {
-    pub offset: u16,  // Offset into Row Data area
-    pub length: u16,  // Row length
+    pub offset: u16, // Offset into Row Data area
+    pub length: u16, // Row length
 }
 
 impl Slot {
-    pub const SIZE: usize = 4;  // u16 + u16
+    pub const SIZE: usize = 4; // u16 + u16
 }
 
 /// Slotted Page Header (16 bytes)
@@ -28,7 +28,7 @@ impl SlottedPageHeader {
         Self {
             page_type,
             slot_count: 0,
-            free_space_offset: Self::SIZE as u16,  // Initially points right after header
+            free_space_offset: Self::SIZE as u16, // Initially points right after header
             next_page_id: 0,
             _padding: [0; 5],
         }
@@ -150,7 +150,8 @@ impl<'a> SlottedPage<'a> {
         // 5. Update header
         self.header.slot_count += 1;
         self.header.free_space_offset += data_len as u16;
-        self.header.serialize(&mut self.page.data[..SlottedPageHeader::SIZE]);
+        self.header
+            .serialize(&mut self.page.data[..SlottedPageHeader::SIZE]);
 
         Ok(slot_index)
     }
@@ -177,7 +178,8 @@ impl<'a> SlottedPage<'a> {
 
     /// Sync header to page data
     pub fn sync_header(&mut self) {
-        self.header.serialize(&mut self.page.data[..SlottedPageHeader::SIZE]);
+        self.header
+            .serialize(&mut self.page.data[..SlottedPageHeader::SIZE]);
     }
 
     /// Get page id
@@ -194,7 +196,7 @@ impl<'a> SlottedPage<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{PageId, Page};
+    use crate::storage::{Page, PageId};
 
     #[test]
     fn test_slotted_page_init() {
@@ -246,7 +248,7 @@ mod tests {
 
         let after_free = slotted.free_space();
         assert!(after_free < initial_free);
-        assert_eq!(initial_free - after_free, 4 + Slot::SIZE);  // 4 bytes data + 4 bytes slot
+        assert_eq!(initial_free - after_free, 4 + Slot::SIZE); // 4 bytes data + 4 bytes slot
     }
 
     #[test]

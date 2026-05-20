@@ -1,5 +1,5 @@
 use crate::storage::{
-    page_format::{Key, MAX_KEY_LEN, RowId, SlottedPage, SlottedPageHeader, Slot},
+    page_format::{Key, RowId, Slot, SlottedPage, SlottedPageHeader, MAX_KEY_LEN},
     Page, StorageError,
 };
 
@@ -75,7 +75,7 @@ impl<'a> LeafNode<'a> {
             }
         }
 
-        count  // 应该插入到末尾
+        count // 应该插入到末尾
     }
 
     /// 插入 key + row_id
@@ -93,7 +93,7 @@ impl<'a> LeafNode<'a> {
         }
 
         // 3. 检查空间是否足够
-        let entry_size = MAX_KEY_LEN + RowId::SIZE;  // 38 bytes
+        let entry_size = MAX_KEY_LEN + RowId::SIZE; // 38 bytes
         if self.slotted.free_space() < Slot::SIZE + entry_size {
             return Err(StorageError::PageFull);
         }
@@ -105,7 +105,10 @@ impl<'a> LeafNode<'a> {
 
         // 5. 添加 slot（注意：SlottedPage 的 add_slot 总是添加到末尾）
         // 我们需要手动调整 slot 顺序以保持有序
-        let slot_index = self.slotted.add_slot(&data).map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let slot_index = self
+            .slotted
+            .add_slot(&data)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
         // 6. 如果不是插入到末尾，需要移动 slots
         if slot_index != position {
@@ -143,7 +146,10 @@ impl<'a> LeafNode<'a> {
         }
 
         // 5. 将新页数据复制回当前页
-        self.slotted.page.data.copy_from_slice(new_page.data.as_ref());
+        self.slotted
+            .page
+            .data
+            .copy_from_slice(new_page.data.as_ref());
 
         Ok(())
     }
@@ -151,7 +157,7 @@ impl<'a> LeafNode<'a> {
     /// 简单插入（不检查顺序，用于重建时）
     fn insert_simple(&mut self, key: &Key, row_id: &RowId) -> Result<(), StorageError> {
         // 检查空间是否足够
-        let entry_size = MAX_KEY_LEN + RowId::SIZE;  // 38 bytes
+        let entry_size = MAX_KEY_LEN + RowId::SIZE; // 38 bytes
         if self.slotted.free_space() < Slot::SIZE + entry_size {
             return Err(StorageError::PageFull);
         }
@@ -162,7 +168,9 @@ impl<'a> LeafNode<'a> {
         row_id.serialize(&mut data[MAX_KEY_LEN..]);
 
         // 添加 slot（直接添加到末尾）
-        self.slotted.add_slot(&data).map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        self.slotted
+            .add_slot(&data)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
         Ok(())
     }
@@ -175,7 +183,9 @@ impl<'a> LeafNode<'a> {
             return Err(StorageError::KeyNotFound);
         }
 
-        self.slotted.delete_slot(position).map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        self.slotted
+            .delete_slot(position)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         self.slotted.sync_header();
 
         Ok(())
@@ -228,7 +238,7 @@ impl<'a> LeafNode<'a> {
 
     /// 最小 key 数量（用于 merge 判断）
     pub fn min_keys(&self) -> usize {
-        48  // 见 spec 中的计算
+        48 // 见 spec 中的计算
     }
 }
 
@@ -320,7 +330,7 @@ pub enum Node<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{PageId, Page};
+    use crate::storage::{Page, PageId};
 
     #[test]
     fn test_leaf_node_init() {

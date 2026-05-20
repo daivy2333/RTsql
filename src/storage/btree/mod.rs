@@ -1,9 +1,9 @@
-mod node;
 mod btree;
-mod sync_loader;
 mod index_manager;
+mod node;
+mod sync_loader;
 
-pub use node::{LeafNode, InternalNode, Node, LEAF_NODE, INTERNAL_NODE};
 pub use btree::BTree;
-pub use sync_loader::SyncPageLoader;
 pub use index_manager::IndexManager;
+pub use node::{InternalNode, LeafNode, Node, INTERNAL_NODE, LEAF_NODE};
+pub use sync_loader::SyncPageLoader;

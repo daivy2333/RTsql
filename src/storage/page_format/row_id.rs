@@ -3,8 +3,8 @@ use std::fmt;
 /// RowId：指向数据页中的具体行
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RowId {
-    pub page_id: u32,  // 数据页 ID
-    pub slot_id: u16,  // Slotted Page 中的 slot index
+    pub page_id: u32, // 数据页 ID
+    pub slot_id: u16, // Slotted Page 中的 slot index
 }
 
 impl RowId {

@@ -32,6 +32,11 @@ impl BufferPool {
         self.capacity
     }
 
+    /// Get storage reference for page allocation
+    pub fn storage(&self) -> &Arc<dyn AsyncStorage> {
+        &self.storage
+    }
+
     pub async fn get_page(&self, page_id: PageId) -> Result<PageGuard> {
         // 1. 读锁检查缓存
         {

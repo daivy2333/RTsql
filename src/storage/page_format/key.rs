@@ -7,13 +7,18 @@ pub const MAX_KEY_LEN: usize = 32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     data: [u8; MAX_KEY_LEN],
-    len: u8,  // 实际长度（<= 32）
+    len: u8, // 实际长度（<= 32）
 }
 
 impl Key {
     /// 从字节切片创建 Key
     pub fn new(bytes: &[u8]) -> Self {
-        assert!(bytes.len() <= MAX_KEY_LEN, "Key too long: {} > {}", bytes.len(), MAX_KEY_LEN);
+        assert!(
+            bytes.len() <= MAX_KEY_LEN,
+            "Key too long: {} > {}",
+            bytes.len(),
+            MAX_KEY_LEN
+        );
 
         let mut data = [0u8; MAX_KEY_LEN];
         data[..bytes.len()].copy_from_slice(bytes);
@@ -57,7 +62,11 @@ impl Key {
         data.copy_from_slice(&buf[..MAX_KEY_LEN]);
 
         // 找到实际长度（去除尾部 0）
-        let len = data.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
+        let len = data
+            .iter()
+            .rposition(|&b| b != 0)
+            .map(|i| i + 1)
+            .unwrap_or(0);
 
         Self {
             data,
