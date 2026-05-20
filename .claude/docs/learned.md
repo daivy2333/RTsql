@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-20 (M5 异步执行引擎完成)
+> 最后更新：2026-05-20 (M6 网络层完成)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -34,6 +34,13 @@
 | Executor trait | `#[async_trait] trait Executor { async fn next(&mut self) -> Result<Option<ExecResult>>; }` | 异步迭代器接口 | 2026-05-20 |
 | ExecResult enum | `ExecResult::RowId(RowId) / AffectedRows(u64) / NotImplemented` | 执行结果统一类型 | 2026-05-20 |
 | async_trait macro | `#[async_trait::async_trait] impl Executor for X` | 为 trait 提供 Send bounds | 2026-05-20 |
+| tokio::net::TcpListener | `TcpListener::bind(addr).await` | TCP 监听 | 2026-05-20 |
+| tokio::spawn | `tokio::spawn(async move { handler.handle(stream) })` | 每连接一协程 | 2026-05-20 |
+| CancellationToken | `tokio_util::sync::CancellationToken` | Graceful shutdown | 2026-05-20 |
+| tokio::select! | `tokio::select! { accept => ..., shutdown => ... }` | 多事件监听 | 2026-05-20 |
+| Protocol trait | `#[async_trait] trait Protocol { async fn parse_request/write_response }` | 协议抽象 | 2026-05-20 |
+| JSON 帧协议 | 消息以 `\n` 结尾，serde_json 序列化 | 简单帧协议 | 2026-05-20 |
+| tokio io-util feature | `tokio = { features = ["io-util"] }` | AsyncReadExt/AsyncWriteExt | 2026-05-20 |
 
 ---
 
@@ -49,7 +56,7 @@
 | 事务模块 | src/transaction/ | M3: TransactionId/Snapshot/VersionHeader/RowLockTable/Manager |
 | 执行模块 | src/executor/ | M4-M5: PhysicalPlan/Value/ExecResult/Executor trait/5 Executors |
 | 解析模块 | src/parser/ | M4: PlanBuilder/PlanError/AST helpers |
-| 网络模块 | src/network/ | 网络层核心（占位符） |
+| 网络模块 | src/network/ | M6: Protocol trait/JsonProtocol/Server/ConnectionHandler/SqlHandler |
 
 ---
 

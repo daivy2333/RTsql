@@ -4,9 +4,9 @@
 
 ## 当前状态
 
-- **阶段**: M5 完成（异步执行引擎已实现）
+- **阶段**: M6 完成（网络层已实现）
 - **状态**: 正常
-- **当前里程碑**: M6 准备开始
+- **当前里程碑**: M7 准备开始
 
 ## 项目结构
 
@@ -64,7 +64,13 @@ RTsql/
 │   │   ├── value.rs        # Value 转换函数
 │   │   ├── ast.rs          # AST 辅助函数
 │   │   └── planner.rs      # PlanBuilder（AST → PhysicalPlan）
-│   └── network/mod.rs      # 网络层模块（占位符）
+│   └── network/            # M6 新增：网络层模块
+│       ├── mod.rs          # 模块导出
+│       ├── error.rs        # NetworkError
+│       ├── protocol.rs     # Protocol trait + JsonProtocol + Request/Response
+│       ├── connection.rs   # ConnectionHandler
+│       ├── handler.rs      # SqlHandler（mock executor）
+│       └── server.rs       # Server + TcpListener + shutdown
 ├── tests/
 │   ├── runtime_test.rs     # 运行时功能验证测试（3 个测试）
 │   ├── btree_test.rs       # M2 新增：BTree 核心测试（10 个测试）
@@ -74,7 +80,9 @@ RTsql/
 │   ├── parser_test.rs      # M4 新增：SQL 解析测试（6 个测试）
 │   ├── planner_test.rs     # M4 新增：计划构建测试（8 个测试）
 │   ├── executor_test.rs    # M5 新增：Executor 单元测试（7 个测试）
-│   └── plan_exec_test.rs   # M5 新增：集成测试（4 个测试）
+│   ├── plan_exec_test.rs   # M5 新增：集成测试（4 个测试）
+│   ├── network_protocol_test.rs # M6 新增：JSON 协议测试（5 个测试）
+│   └── network_server_test.rs   # M6 新增：Server 集成测试（4 个测试）
 └── .claude/
     └── docs/
         ├── architecture.md    - 架构决策记录
@@ -89,7 +97,7 @@ RTsql/
             └─ plans/          - 实现计划
 ```
 
-**注**: M5 异步执行引擎已完成，包含 ExecResult、Executor trait 和 5 种 Executor 实现，115 个测试全部通过。
+**注**: M6 网络层已完成，包含 Protocol trait + JsonProtocol + Server + ConnectionHandler + SqlHandler，124 个测试全部通过。
 
 ## 技术栈
 
@@ -97,8 +105,10 @@ RTsql/
 |------|------|------|
 | 语言 | Rust | 最新稳定版（建议 1.75+） |
 | 构建工具 | Cargo | Rust 内置 |
-| 异步运行时 | Tokio | 1.x（多线程 scheduler） |
+| 异步运行时 | Tokio | 1.x（多线程 scheduler + io-util） |
 | SQL 解析 | sqlparser-rs | 0.44 ✅ 已集成 |
+| 协议层 | serde + serde_json | 1.0 ✅ 已集成 |
+| Shutdown | tokio-util (CancellationToken) | 0.7 ✅ 已集成 |
 | 测试框架 | tempfile + 内置测试 | 3.x |
 | 代码格式化 | rustfmt | Rust 内置 |
 | Lint | clippy | Rust 内置 |
@@ -107,15 +117,15 @@ RTsql/
 
 - **当前分支**: master
 - **最近提交**:
-  - 689e144 docs: mark M4 complete, update project status
-  - 9fa65e6 style(m4): apply cargo fmt formatting
-  - 8202d50 feat(m4): complete SQL parser with tests
-  - e866d99 feat(m4): implement PlanBuilder for AST to PhysicalPlan conversion
-  - 5708232 feat(m4): add Value conversion from sqlparser AST
-  - a67f4fb feat(m4): add PhysicalPlan and node structures
+  - 8ac8913 style(m6): apply cargo fmt formatting
+  - dbc245c test(m6): add Server integration tests for query/insert/ping flows
+  - 46a10f9 feat(m6): implement Server with TcpListener and graceful shutdown
+  - c6ac485 feat(m6): implement ConnectionHandler for per-connection coroutine
+  - b48ab0a feat(m6): implement SqlHandler with mock executor
+  - 70748af test(m6): add JsonProtocol serialization/deserialization tests
 - **未提交更改**: 无（working tree clean）
 
-**注**: M4 代码已全部提交，104 个测试通过，clippy 有 minor warnings（无 Critical）。
+**注**: M6 代码已全部提交，124 个测试通过，clippy 有 minor warnings（无 Critical）。
 
 ## 关键文件
 
@@ -135,13 +145,21 @@ RTsql/
 | src/parser/ast.rs | AST 辅助函数 | ✅ M4 完成 |
 | src/parser/planner.rs | PlanBuilder | ✅ M4 完成 |
 | src/transaction/manager.rs | TransactionManager | ✅ M3 完成 |
-| tests/parser_test.rs | SQL 解析测试 | ✅ M4 完成（6 测试）|
-| tests/planner_test.rs | 计划构建测试 | ✅ M4 完成（8 测试）|
+| src/network/mod.rs | 网络模块导出 | ✅ M6 完成 |
+| src/network/protocol.rs | Protocol trait + JsonProtocol | ✅ M6 完成 |
+| src/network/server.rs | Server + TcpListener | ✅ M6 完成 |
+| src/network/connection.rs | ConnectionHandler | ✅ M6 完成 |
+| src/network/handler.rs | SqlHandler (mock) | ✅ M6 完成 |
+| tests/network_protocol_test.rs | JSON 协议测试 | ✅ M6 完成（5 测试）|
+| tests/network_server_test.rs | Server 集成测试 | ✅ M6 完成（4 测试）|
 
 ## 最近修改
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
+| 2026-05-20 | src/network/*, tests/network_* | M6 Protocol trait/JsonProtocol/Server/ConnectionHandler/SqlHandler 实现 |
+| 2026-05-20 | Cargo.toml | 添加 tokio-util/io-util/serde/serde_json 依赖 |
+| 2026-05-20 | .claude/docs/superpowers/* | M6 设计规范和实现计划 |
 | 2026-05-20 | src/executor/*, tests/executor_test.rs, tests/plan_exec_test.rs | M5 ExecResult/Executor trait/5 Executors 实现 |
 | 2026-05-20 | src/parser/*, tests/parser_test.rs | M4 PlanError/Value/AST/PlanBuilder 实现 |
 | 2026-05-20 | src/executor/*, tests/planner_test.rs | M4 PhysicalPlan + 5 nodes 实现 |

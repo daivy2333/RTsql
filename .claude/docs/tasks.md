@@ -102,23 +102,43 @@
 **范围**: 仅索引层执行，返回 RowId（数据层推迟 M6）
 **新增文件**: result.rs, executor_trait.rs, scan.rs, index_scan.rs, insert.rs, update.rs, delete.rs
 
-### M6: 全流程集成 + 网络层
+### M6: 网络层 ✅
 
-- [ ] 实现 TCP 服务器（`tokio::net::TcpListener`）
-- [ ] 每个连接一个协程处理
-- [ ] 实现 PostgreSQL 有线协议或自定义协议
-- [ ] 端到端测试
+- [x] 添加依赖（tokio-util, serde, serde_json）
+- [x] 实现 NetworkError 错误类型
+- [x] 实现 Protocol trait + Request/Response
+- [x] 实现 JsonProtocol（newline-delimited framing）
+- [x] 实现 SqlHandler（mock executor）
+- [x] 实现 ConnectionHandler（每连接一协程）
+- [x] 实现 Server（TcpListener + graceful shutdown）
+- [x] 单元测试（tests/network_protocol_test.rs）
+- [x] 集成测试（tests/network_server_test.rs）
 
-**异步相关重点**: 实现 TCP 服务器，每个连接一个协程
+**完成日期**: 2026-05-20
+**验证结果**: cargo test (124 passed) ✅, cargo clippy ✅, cargo fmt ✅
+**新增测试**: network_protocol_test(5), network_server_test(4)
+**范围**: 仅网络层，mock executor（数据存储层推迟后续里程碑）
+**新增文件**: error.rs, protocol.rs, connection.rs, handler.rs, server.rs
+**协议**: JSON 协议（后续升级 PostgreSQL）
 
-### M7: 性能深度优化
+### M7: 全流程集成 + 数据存储层
 
+- [ ] 实现数据存储层（TableManager、Row 数据存储）
+- [ ] 整合真实 Executor + Storage + Transaction
+- [ ] 替换 mock executor 为真实 executor
+- [ ] 端到端测试（真实 SQL 执行）
+
+**异步相关重点**: 实现数据存储层，整合全流程
+
+### M8: PostgreSQL 协议 + 性能优化
+
+- [ ] 实现 PostgreSQL 有线协议（兼容 psql 等工具）
 - [ ] 替换 `io_uring`（可选）
 - [ ] 调优协程调度策略
 - [ ] 调优页缓存策略
 - [ ] 性能基准测试
 
-**异步相关重点**: 替换 `io_uring`，调优协程调度、页缓存策略
+**异步相关重点**: PostgreSQL 协议、io_uring、性能调优
 
 ## 阻塞项
 
@@ -126,4 +146,4 @@
 
 ## 下一步
 
-- **立即开始**: M5 里程碑 - 异步执行引擎
+- **立即开始**: M7 里程碑 - 数据存储层 + 全流程集成
