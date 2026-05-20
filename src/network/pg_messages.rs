@@ -3,6 +3,7 @@
 //! M7: PostgreSQL 3.0 Simple Query Protocol message definitions
 
 use crate::executor::Value;
+use crate::network::NetworkError;
 
 /// PostgreSQL message serialization functions
 
@@ -224,4 +225,28 @@ pub fn error_response(severity: &str, code: &str, message: &str) -> Vec<u8> {
     bytes.extend(fields_data);
 
     bytes
+}
+
+/// Map error to PostgreSQL SQLSTATE code
+///
+/// Returns (severity, code) where:
+/// - severity: "ERROR", "FATAL", or "PANIC"
+/// - code: SQLSTATE code (5-character string)
+pub fn map_error_to_sqlstate(error: &NetworkError) -> (&'static str, &'static str) {
+    match error {
+        // Syntax errors: 42000 (syntax error or access rule violation)
+        NetworkError::ProtocolParse(_) => ("ERROR", "42000"),
+
+        // System errors: 58000 (system error)
+        NetworkError::Io(_) => ("ERROR", "58000"),
+
+        // SQL parse errors: 42601 (syntax error)
+        NetworkError::SqlParse(_) => ("ERROR", "42601"),
+
+        // Execution errors: 42000 (syntax error or access rule violation)
+        NetworkError::Execution(_) => ("ERROR", "42000"),
+
+        // Protocol write errors: 58000 (system error)
+        NetworkError::ProtocolWrite(_) => ("ERROR", "58000"),
+    }
 }

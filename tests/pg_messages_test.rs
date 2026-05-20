@@ -120,3 +120,18 @@ fn test_error_response_serialization() {
     // Should end with NUL terminator (after all fields)
     assert!(bytes.ends_with(&[0]));
 }
+
+#[test]
+fn test_sqlstate_mapping() {
+    use rtsql::network::NetworkError;
+
+    // Test ProtocolParse error mapping
+    let (severity, code) = pg_messages::map_error_to_sqlstate(&NetworkError::ProtocolParse("test".to_string()));
+    assert_eq!(code, "42000");
+    assert_eq!(severity, "ERROR");
+
+    // Test Io error mapping
+    let (severity, code) = pg_messages::map_error_to_sqlstate(&NetworkError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test")));
+    assert_eq!(code, "58000");
+    assert_eq!(severity, "ERROR");
+}
