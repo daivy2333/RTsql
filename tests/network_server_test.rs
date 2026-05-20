@@ -1,8 +1,8 @@
-use rtsql::network::{Server, JsonProtocol, Request, Response};
+use rtsql::network::{JsonProtocol, Request, Response, Server};
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
-use std::net::SocketAddr;
 
 async fn start_test_server(port: u16) -> CancellationToken {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -120,7 +120,10 @@ async fn test_server_multiple_requests() {
 
     // Send Query
     buffer.clear();
-    let json = serde_json::to_string(&Request::Query { sql: "SELECT 1".to_string() }).unwrap();
+    let json = serde_json::to_string(&Request::Query {
+        sql: "SELECT 1".to_string(),
+    })
+    .unwrap();
     stream.write_all(json.as_bytes()).await.unwrap();
     stream.write_all(&[b'\n']).await.unwrap();
 

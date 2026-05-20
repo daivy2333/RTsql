@@ -22,12 +22,8 @@ impl SqlHandler {
                 // M6 mock: return fixed AffectedRows
                 Response::AffectedRows { count: 1 }
             }
-            Request::Update { sql: _ } => {
-                Response::AffectedRows { count: 1 }
-            }
-            Request::Delete { sql: _ } => {
-                Response::AffectedRows { count: 1 }
-            }
+            Request::Update { sql: _ } => Response::AffectedRows { count: 1 },
+            Request::Delete { sql: _ } => Response::AffectedRows { count: 1 },
             Request::Ping => Response::Pong,
         }
     }

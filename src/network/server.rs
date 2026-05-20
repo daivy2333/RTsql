@@ -1,10 +1,10 @@
 use crate::network::connection::ConnectionHandler;
-use crate::network::protocol::JsonProtocol;
-use crate::network::handler::SqlHandler;
 use crate::network::error::NetworkError;
+use crate::network::handler::SqlHandler;
+use crate::network::protocol::JsonProtocol;
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use std::net::SocketAddr;
 
 /// TCP Server
 pub struct Server {

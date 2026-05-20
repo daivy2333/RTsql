@@ -2,14 +2,14 @@
 //!
 //! M6: Implement tokio::net::TcpListener and connection handling
 
-pub mod error;
-pub mod protocol;
-pub mod handler;
 pub mod connection;
+pub mod error;
+pub mod handler;
+pub mod protocol;
 pub mod server;
 
-pub use error::NetworkError;
-pub use protocol::{Protocol, JsonProtocol, Request, Response};
-pub use handler::SqlHandler;
 pub use connection::ConnectionHandler;
+pub use error::NetworkError;
+pub use handler::SqlHandler;
+pub use protocol::{JsonProtocol, Protocol, Request, Response};
 pub use server::Server;

@@ -2,7 +2,9 @@ use rtsql::network::{Request, Response};
 
 #[test]
 fn test_request_serialize_query() {
-    let req = Request::Query { sql: "SELECT * FROM users".to_string() };
+    let req = Request::Query {
+        sql: "SELECT * FROM users".to_string(),
+    };
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("Query"));
     assert!(json.contains("SELECT * FROM users"));

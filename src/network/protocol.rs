@@ -8,8 +8,15 @@ use crate::network::error::NetworkError;
 /// Protocol abstraction trait
 #[async_trait]
 pub trait Protocol: Send + Sync {
-    async fn parse_request(&mut self, stream: &mut TcpStream) -> Result<Option<Request>, NetworkError>;
-    async fn write_response(&mut self, stream: &mut TcpStream, response: &Response) -> Result<(), NetworkError>;
+    async fn parse_request(
+        &mut self,
+        stream: &mut TcpStream,
+    ) -> Result<Option<Request>, NetworkError>;
+    async fn write_response(
+        &mut self,
+        stream: &mut TcpStream,
+        response: &Response,
+    ) -> Result<(), NetworkError>;
 }
 
 /// Request types
@@ -64,7 +71,10 @@ impl Default for JsonProtocol {
 
 #[async_trait]
 impl Protocol for JsonProtocol {
-    async fn parse_request(&mut self, stream: &mut TcpStream) -> Result<Option<Request>, NetworkError> {
+    async fn parse_request(
+        &mut self,
+        stream: &mut TcpStream,
+    ) -> Result<Option<Request>, NetworkError> {
         self.buffer.clear();
 
         // Read until newline
@@ -89,9 +99,13 @@ impl Protocol for JsonProtocol {
         Ok(Some(request))
     }
 
-    async fn write_response(&mut self, stream: &mut TcpStream, response: &Response) -> Result<(), NetworkError> {
-        let json = serde_json::to_vec(response)
-            .map_err(|e| NetworkError::ProtocolWrite(e.to_string()))?;
+    async fn write_response(
+        &mut self,
+        stream: &mut TcpStream,
+        response: &Response,
+    ) -> Result<(), NetworkError> {
+        let json =
+            serde_json::to_vec(response).map_err(|e| NetworkError::ProtocolWrite(e.to_string()))?;
 
         stream.write_all(&json).await?;
         stream.write_all(&[b'\n']).await?;

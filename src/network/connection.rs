@@ -1,6 +1,6 @@
-use crate::network::protocol::{Protocol, Request, Response};
-use crate::network::handler::SqlHandler;
 use crate::network::error::NetworkError;
+use crate::network::handler::SqlHandler;
+use crate::network::protocol::{Protocol, Request, Response};
 use tokio::net::TcpStream;
 
 /// Connection handler, one coroutine per connection
