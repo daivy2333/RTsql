@@ -94,3 +94,29 @@ fn test_command_complete_serialization() {
     assert_eq!(bytes[0], b'C');
     assert!(bytes.ends_with(&[0]));  // NUL terminated
 }
+
+#[test]
+fn test_error_response_serialization() {
+    let bytes = pg_messages::error_response("ERROR", "42000", "syntax error");
+
+    // Format: 'E' + length + fields + NUL terminator
+    assert_eq!(bytes[0], b'E');  // Message type
+
+    // Verify severity field ('S')
+    let s_pos = bytes.iter().position(|&b| b == b'S').expect("Severity field 'S' not found");
+    let severity: Vec<u8> = bytes[s_pos + 1..].iter().take_while(|&&b| b != 0).cloned().collect();
+    assert_eq!(severity, b"ERROR".to_vec());
+
+    // Verify code field ('C')
+    let c_pos = bytes.iter().position(|&b| b == b'C').expect("Code field 'C' not found");
+    let code: Vec<u8> = bytes[c_pos + 1..].iter().take_while(|&&b| b != 0).cloned().collect();
+    assert_eq!(code, b"42000".to_vec());
+
+    // Verify message field ('M')
+    let m_pos = bytes.iter().position(|&b| b == b'M').expect("Message field 'M' not found");
+    let message: Vec<u8> = bytes[m_pos + 1..].iter().take_while(|&&b| b != 0).cloned().collect();
+    assert_eq!(message, b"syntax error".to_vec());
+
+    // Should end with NUL terminator (after all fields)
+    assert!(bytes.ends_with(&[0]));
+}

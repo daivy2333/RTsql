@@ -180,3 +180,48 @@ pub fn command_complete(tag: &str) -> Vec<u8> {
 
     bytes
 }
+
+/// ErrorResponse message: 'E' + length + fields + NUL
+///
+/// Fields format: field_type(byte) + value(NUL)
+/// Common fields:
+/// - 'S': Severity (e.g., "ERROR", "FATAL", "PANIC")
+/// - 'V': Severity (non-localized, same as 'S')
+/// - 'C': Code (SQLSTATE, e.g., "42000")
+/// - 'M': Message (human-readable error message)
+/// - Final NUL terminator
+pub fn error_response(severity: &str, code: &str, message: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(b'E');
+
+    let mut fields_data = Vec::new();
+
+    // 'S' Severity
+    fields_data.push(b'S');
+    fields_data.extend_from_slice(severity.as_bytes());
+    fields_data.push(0);
+
+    // 'V' Severity (non-localized)
+    fields_data.push(b'V');
+    fields_data.extend_from_slice(severity.as_bytes());
+    fields_data.push(0);
+
+    // 'C' Code (SQLSTATE)
+    fields_data.push(b'C');
+    fields_data.extend_from_slice(code.as_bytes());
+    fields_data.push(0);
+
+    // 'M' Message
+    fields_data.push(b'M');
+    fields_data.extend_from_slice(message.as_bytes());
+    fields_data.push(0);
+
+    // NUL terminator (end of fields)
+    fields_data.push(0);
+
+    let length = 4 + fields_data.len();
+    bytes.extend_from_slice(&(length as i32).to_be_bytes());
+    bytes.extend(fields_data);
+
+    bytes
+}
