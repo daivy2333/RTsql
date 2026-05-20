@@ -6,23 +6,26 @@
 
 - [ ] （无）
 
+## 已完成
+
+### M0: 项目骨架，引入 Tokio ✅
+
+- [x] 初始化 Rust 项目（`cargo init`）
+- [x] 添加 Tokio 依赖到 Cargo.toml
+- [x] 配置 Tokio 多线程运行时
+- [x] 创建基础模块结构
+  - [x] src/storage/
+  - [x] src/executor/
+  - [x] src/transaction/
+  - [x] src/parser/
+  - [x] src/network/
+- [x] 初始化 git 仓库
+- [x] 编写第一个基础测试验证 Tokio 运行时工作
+
+**完成日期**: 2026-05-20
+**验证结果**: cargo build ✅, cargo test (3 passed) ✅, cargo clippy ✅
+
 ## 待办 - 开发路线图
-
-### M0: 项目骨架，引入 Tokio
-
-- [ ] 初始化 Rust 项目（`cargo init`）
-- [ ] 添加 Tokio 依赖到 Cargo.toml
-- [ ] 配置 Tokio 多线程运行时
-- [ ] 创建基础模块结构
-  - [ ] src/storage/
-  - [ ] src/executor/
-  - [ ] src/transaction/
-  - [ ] src/parser/
-  - [ ] src/network/
-- [ ] 初始化 git 仓库
-- [ ] 编写第一个基础测试验证 Tokio 运行时工作
-
-**异步相关重点**: 确定异步运行时配置
 
 ### M1: 文件/缓存层
 
@@ -94,4 +97,4 @@
 
 ## 下一步
 
-- **立即开始**: M0 里程碑 - 初始化项目骨架
+- **立即开始**: M1 里程碑 - 文件/缓存层
