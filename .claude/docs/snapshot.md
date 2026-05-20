@@ -4,9 +4,9 @@
 
 ## 当前状态
 
-- **阶段**: M2 完成（B-Tree 索引与存储引擎已实现）
+- **阶段**: M3 完成（事务与 MVCC 已实现）
 - **状态**: 正常
-- **当前里程碑**: M3 准备开始
+- **当前里程碑**: M4 准备开始
 
 ## 项目结构
 
@@ -40,14 +40,22 @@ RTsql/
 │           ├── sync_loader.rs # SyncPageLoader（block_on 包装）
 │           └── index_manager.rs # IndexManager 异步 API
 │   ├── executor/mod.rs      # 执行引擎模块（占位符）
-│   ├── transaction/mod.rs   # 事务管理模块（占位符）
+│   ├── transaction/         # M3 新增：事务管理模块
+│   │   ├── mod.rs           # 模块导出
+│   │   ├── tx_id.rs         # TransactionId（AtomicU64）
+│   │   ├── error.rs         # TransactionError
+│   │   ├── snapshot.rs      # Snapshot（可见性判断）
+│   │   ├── version_chain.rs # VersionHeader（版本链）
+│   │   ├── row_lock.rs      # RowLockTable（行级锁）
+│   │   └── manager.rs       # TransactionManager
 │   ├── parser/mod.rs        # SQL 解析模块（占位符）
 │   └── network/mod.rs       # 网络层模块（占位符）
 ├── tests/
 │   ├── runtime_test.rs      # 运行时功能验证测试（3 个测试）
 │   ├── btree_test.rs        # M2 新增：BTree 核心测试（10 个测试）
 │   ├── index_manager_test.rs # M2 新增：IndexManager 异步测试（3 个测试）
-│   └── sync_loader_test.rs  # M2 新增：SyncPageLoader 测试（2 个测试）
+│   ├── sync_loader_test.rs  # M2 新增：SyncPageLoader 测试（2 个测试）
+│   └── concurrent_test.rs   # M3 新增：并发事务测试（4 个测试）
 └── .claude/
     └── docs/
         ├── architecture.md    - 架构决策记录
@@ -130,7 +138,7 @@ RTsql/
 
 ## 下一步行动
 
-1. 开始 M3 里程碑：事务与 MVCC
-2. 实现全局事务 ID 分配（`AtomicU64`）
-3. 实现 MVCC 快照读（无锁）
-4. 实现异步读写锁（`tokio::sync::RwLock`）
+1. 开始 M4 里程碑：SQL 解析与计划
+2. 集成 sqlparser-rs
+3. 实现同步解析
+4. 生成物理计划（包含 async 节点）

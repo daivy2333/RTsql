@@ -55,14 +55,19 @@
 **验证结果**: cargo test (53 passed) ✅, cargo clippy (11 warnings, acceptable) ✅, cargo fmt ✅
 **简化实现**: Split/Merge 未完整实现（推迟到后续优化），固定 Key 长度（32 bytes）
 
-### M3: 事务与 MVCC
+### M3: 事务与 MVCC ✅
 
-- [ ] 实现全局事务 ID 分配（`AtomicU64`）
-- [ ] 实现 MVCC 快照读（无锁）
-- [ ] 实现异步读写锁（`tokio::sync::RwLock`）
-- [ ] 测试并发事务正确性
+- [x] 实现 TransactionId（AtomicU64 全局分配）
+- [x] 实现 TransactionError 错误类型
+- [x] 实现 Snapshot（可见性判断）
+- [x] 实现 VersionHeader（版本链头部）
+- [x] 实现 RowLockTable（行级写锁）
+- [x] 实现 TransactionManager（begin/commit/abort）
+- [x] 测试并发事务正确性（78 测试通过）
 
-**异步相关重点**: 用异步锁实现提交等待，快照读无锁
+**完成日期**: 2026-05-20
+**验证结果**: cargo test (78 passed) ✅, cargo clippy (warnings acceptable) ✅
+**新增测试**: tx_id(2), snapshot(5), version_chain(5), row_lock(3), manager(6), concurrent(4)
 
 ### M4: SQL 解析与计划
 
@@ -106,4 +111,4 @@
 
 ## 下一步
 
-- **立即开始**: M2 里程碑 - B-Tree 索引与存储引擎
+- **立即开始**: M4 里程碑 - SQL 解析与计划
