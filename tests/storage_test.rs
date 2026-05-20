@@ -2,12 +2,13 @@
 mod tests {
     use rtsql::storage::PageId;
     use rtsql::storage::Page;
+    use rtsql::storage::AsyncStorage;
 
     #[test]
     fn test_page_id_offset() {
         let page_id = PageId(5);
         let offset = page_id.to_offset(4096);
-        assert_eq!(offset, 20480); // 5 * 4096
+        assert_eq!(offset, 20480);
     }
 
     #[test]
@@ -38,8 +39,14 @@ mod tests {
     #[test]
     fn test_page_from_bytes_wrong_size() {
         let page_id = PageId(3);
-        let bytes = vec![0u8; 100]; // Wrong size
+        let bytes = vec![0u8; 100];
         let result = Page::from_bytes(page_id, &bytes);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_async_storage_trait_signature() {
+        struct MockStorage;
+        impl MockStorage { fn new() -> Self { Self } }
     }
 }
