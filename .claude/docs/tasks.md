@@ -69,14 +69,20 @@
 **验证结果**: cargo test (78 passed) ✅, cargo clippy (warnings acceptable) ✅
 **新增测试**: tx_id(2), snapshot(5), version_chain(5), row_lock(3), manager(6), concurrent(4)
 
-### M4: SQL 解析与计划
+### M4: SQL 解析与计划 ✅
 
-- [ ] 集成 sqlparser-rs
-- [ ] 实现同步解析
-- [ ] 生成物理计划（包含 async 节点）
-- [ ] 测试解析正确性
+- [x] 集成 sqlparser-rs (0.44)
+- [x] 实现 PlanError 错误类型
+- [x] 实现 Value 类型（Int/String/Null）
+- [x] 实现 PhysicalPlan + 5 节点结构（Scan/IndexScan/Insert/Update/Delete）
+- [x] 实现 AST 辅助函数（parse_sql/extract_select_body/extract_table_name/extract_columns）
+- [x] 实现 PlanBuilder（AST → PhysicalPlan）
+- [x] 测试解析正确性（14 测试通过）
 
-**异步相关重点**: 同步解析，生成物理计划（包含 async 节点）
+**完成日期**: 2026-05-20
+**验证结果**: cargo test ✅, cargo clippy ✅, cargo fmt ✅
+**新增测试**: parser_test(6), planner_test(8)
+**范围**: DML Only（INSERT/UPDATE/DELETE/SELECT），单表+主键查询
 
 ### M5: 异步执行引擎
 
@@ -111,4 +117,4 @@
 
 ## 下一步
 
-- **立即开始**: M4 里程碑 - SQL 解析与计划
+- **立即开始**: M5 里程碑 - 异步执行引擎
