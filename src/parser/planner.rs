@@ -3,12 +3,13 @@
 //! M4: SQL Parser and Physical Plan
 
 use crate::executor::{
-    DeleteNode, IndexScanNode, InsertNode, PhysicalPlan, ScanNode, UpdateNode, Value,
+    ColumnConstraint, ColumnDef, ColumnType, CreateTableNode, DeleteNode, DropTableNode,
+    IndexScanNode, InsertNode, PhysicalPlan, ScanNode, UpdateNode, Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
-use sqlparser::ast::{Expr, Query, SetExpr, Statement};
+use sqlparser::ast::{Expr, ObjectType, Query, SetExpr, Statement};
 use std::collections::HashMap;
 
 /// PlanBuilder - Convert AST to PhysicalPlan
@@ -57,6 +58,24 @@ impl PlanBuilder {
             Statement::Delete {
                 from, selection, ..
             } => self.build_delete(from, selection),
+            Statement::CreateTable {
+                name,
+                columns,
+                constraints,
+                ..
+            } => self.build_create_table(name, columns, constraints),
+            Statement::Drop {
+                object_type,
+                if_exists,
+                names,
+                ..
+            } => {
+                if *object_type == ObjectType::Table {
+                    self.build_drop_table(names, if_exists)
+                } else {
+                    Err(PlanError::UnsupportedStatement)
+                }
+            }
             _ => Err(PlanError::UnsupportedStatement),
         }
     }
@@ -216,6 +235,212 @@ impl PlanBuilder {
             }
             _ => Err(PlanError::UnsupportedStatement),
         }
+    }
+
+    /// Convert sqlparser DataType to ColumnType
+    fn convert_data_type(&self, data_type: &sqlparser::ast::DataType) -> ColumnType {
+        use sqlparser::ast::DataType;
+        match data_type {
+            // Integer types -> Int
+            DataType::Int(_)
+            | DataType::Int4(_)
+            | DataType::Integer(_)
+            | DataType::BigInt(_)
+            | DataType::Int8(_)
+            | DataType::SmallInt(_)
+            | DataType::Int2(_)
+            | DataType::TinyInt(_)
+            | DataType::MediumInt(_) => ColumnType::Int,
+
+            // String types -> String
+            DataType::Varchar(_)
+            | DataType::Nvarchar(_)
+            | DataType::Char(_)
+            | DataType::Character(_)
+            | DataType::CharacterVarying(_)
+            | DataType::CharVarying(_)
+            | DataType::Text
+            | DataType::Clob(_)
+            | DataType::CharacterLargeObject(_)
+            | DataType::CharLargeObject(_) => ColumnType::String,
+
+            // Float types -> Float
+            DataType::Float(_)
+            | DataType::Float4
+            | DataType::Float64
+            | DataType::Real
+            | DataType::Double
+            | DataType::Float8
+            | DataType::DoublePrecision => ColumnType::Float,
+
+            // Boolean types -> Bool
+            DataType::Bool | DataType::Boolean => ColumnType::Bool,
+
+            // Unknown/unsupported types -> Null (placeholder)
+            _ => ColumnType::String, // Default to String for unknown types
+        }
+    }
+
+    /// Extract column constraints from sqlparser ColumnDef
+    fn extract_column_constraints(
+        &self,
+        column: &sqlparser::ast::ColumnDef,
+    ) -> Result<Vec<ColumnConstraint>, PlanError> {
+        let mut constraints = Vec::new();
+
+        for option in &column.options {
+            match &option.option {
+                sqlparser::ast::ColumnOption::NotNull => {
+                    constraints.push(ColumnConstraint::NotNull);
+                }
+                sqlparser::ast::ColumnOption::Unique {
+                    is_primary: false, ..
+                } => {
+                    constraints.push(ColumnConstraint::Unique);
+                }
+                sqlparser::ast::ColumnOption::Default(expr) => {
+                    let value = self.extract_default_value(expr)?;
+                    constraints.push(ColumnConstraint::DefaultValue(value));
+                }
+                // PrimaryKey (is_primary: true) is handled separately by extract_primary_key
+                // Null, ForeignKey, Check, DialectSpecific, etc. are ignored
+                _ => {}
+            }
+        }
+
+        Ok(constraints)
+    }
+
+    /// Extract default value from expression
+    fn extract_default_value(&self, expr: &Expr) -> Result<Value, PlanError> {
+        match expr {
+            Expr::Value(v) => value_from_sqlparser(v),
+            Expr::Identifier(ident) => {
+                if ident.value.to_uppercase() == "NULL" {
+                    Ok(Value::Null)
+                } else {
+                    Err(PlanError::UnsupportedValue)
+                }
+            }
+            // Handle negative numbers: -42
+            Expr::UnaryOp {
+                op: sqlparser::ast::UnaryOperator::Minus,
+                expr,
+            } => {
+                if let Expr::Value(v) = expr.as_ref() {
+                    let value = value_from_sqlparser(v)?;
+                    match value {
+                        Value::Int(n) => Ok(Value::Int(-n)),
+                        Value::Float(f) => Ok(Value::Float(-f)),
+                        _ => Err(PlanError::UnsupportedValue),
+                    }
+                } else {
+                    Err(PlanError::UnsupportedValue)
+                }
+            }
+            _ => Err(PlanError::UnsupportedValue),
+        }
+    }
+
+    /// Extract primary key from column constraints and table constraints
+    fn extract_primary_key(
+        &self,
+        columns: &[sqlparser::ast::ColumnDef],
+        constraints: &[sqlparser::ast::TableConstraint],
+    ) -> Result<Option<String>, PlanError> {
+        let mut pk_candidates = Vec::new();
+
+        // Check column-level PRIMARY KEY constraints
+        for column in columns {
+            for option in &column.options {
+                if let sqlparser::ast::ColumnOption::Unique {
+                    is_primary: true, ..
+                } = &option.option
+                {
+                    pk_candidates.push(column.name.value.to_lowercase());
+                }
+            }
+        }
+
+        // Check table-level PRIMARY KEY constraints (Unique { is_primary: true })
+        for constraint in constraints {
+            if let sqlparser::ast::TableConstraint::Unique {
+                is_primary: true,
+                columns: pk_columns,
+                ..
+            } = constraint
+            {
+                for pk_col in pk_columns {
+                    pk_candidates.push(pk_col.value.to_lowercase());
+                }
+            }
+        }
+
+        // Validate: only single-column PK supported
+        match pk_candidates.len() {
+            0 => Ok(None),
+            1 => Ok(Some(pk_candidates[0].clone())),
+            _ => Err(PlanError::MultiplePrimaryKey),
+        }
+    }
+
+    /// Build PhysicalPlan for CREATE TABLE statement
+    fn build_create_table(
+        &self,
+        name: &sqlparser::ast::ObjectName,
+        columns: &[sqlparser::ast::ColumnDef],
+        constraints: &[sqlparser::ast::TableConstraint],
+    ) -> Result<PhysicalPlan, PlanError> {
+        // Extract table name
+        let table_name = name.to_string().to_lowercase();
+
+        // Check for empty columns
+        if columns.is_empty() {
+            return Err(PlanError::EmptyColumnDefinition);
+        }
+
+        // Extract column definitions
+        let column_defs: Vec<ColumnDef> = columns
+            .iter()
+            .map(|col| {
+                let col_name = col.name.value.to_lowercase();
+                let col_type = self.convert_data_type(&col.data_type);
+                let col_constraints = self.extract_column_constraints(col)?;
+                Ok(ColumnDef {
+                    name: col_name,
+                    data_type: col_type,
+                    constraints: col_constraints,
+                })
+            })
+            .collect::<Result<Vec<_>, PlanError>>()?;
+
+        // Extract primary key
+        let primary_key = self.extract_primary_key(columns, constraints)?;
+
+        Ok(PhysicalPlan::CreateTable(CreateTableNode {
+            table_name,
+            columns: column_defs,
+            primary_key,
+        }))
+    }
+
+    /// Build PhysicalPlan for DROP TABLE statement
+    fn build_drop_table(
+        &self,
+        names: &[sqlparser::ast::ObjectName],
+        if_exists: &bool,
+    ) -> Result<PhysicalPlan, PlanError> {
+        // Extract table name (only single table supported)
+        if names.is_empty() {
+            return Err(PlanError::MissingField("table name".into()));
+        }
+
+        let table_name = names[0].to_string().to_lowercase();
+
+        Ok(PhysicalPlan::DropTable(DropTableNode {
+            table_name,
+            if_exists: *if_exists,
+        }))
     }
 
     /// Build PhysicalPlan for UPDATE statement

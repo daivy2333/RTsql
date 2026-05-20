@@ -9,5 +9,5 @@ pub mod storage;
 pub mod transaction;
 
 // Re-export common types for convenience
-pub use executor::{PhysicalPlan, Value};
+pub use executor::{ColumnConstraint, ColumnDef, ColumnType, PhysicalPlan, Value};
 pub use parser::{parse_sql, PlanBuilder, PlanError};
