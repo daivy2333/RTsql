@@ -1,4 +1,5 @@
 use thiserror::Error;
+use tokio::task::JoinError;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -16,6 +17,9 @@ pub enum StorageError {
 
     #[error("Invalid capacity: {0}, must be > 0")]
     InvalidCapacity(usize),
+
+    #[error("Task join error: {0}")]
+    JoinError(#[from] JoinError),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

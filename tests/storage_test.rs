@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use rtsql::storage::PageId;
-    use rtsql::storage::Page;
-    use rtsql::storage::AsyncStorage;
+    use rtsql::storage::{PageId, Page, AsyncStorage, FileStorage};
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_page_id_offset() {
@@ -48,5 +47,82 @@ mod tests {
     fn test_async_storage_trait_signature() {
         struct MockStorage;
         impl MockStorage { fn new() -> Self { Self } }
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_open_new_file() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = FileStorage::open(temp_file.path()).unwrap();
+        assert_eq!(storage.page_size(), 4096);
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_read_empty_page() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = FileStorage::open(temp_file.path()).unwrap();
+        let page_id = storage.allocate_page().await.unwrap();
+        let page = storage.read_page(page_id).await.unwrap();
+        assert_eq!(page.id, page_id);
+        assert_eq!(page.data.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_read_after_write() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = FileStorage::open(temp_file.path()).unwrap();
+        let page_id = storage.allocate_page().await.unwrap();
+        let mut page = Page::new(page_id);
+        page.data[0] = 42;
+        page.data[100] = 99;
+        storage.write_page(page_id, &page).await.unwrap();
+        let read_page = storage.read_page(page_id).await.unwrap();
+        assert_eq!(read_page.data[0], 42);
+        assert_eq!(read_page.data[100], 99);
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_write_multiple_pages() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = FileStorage::open(temp_file.path()).unwrap();
+        for i in 0..3u8 {
+            let page_id = storage.allocate_page().await.unwrap();
+            let mut page = Page::new(page_id);
+            page.data[0] = i;
+            page.data[1] = i * 10;
+            storage.write_page(page_id, &page).await.unwrap();
+        }
+        for i in 0..3u8 {
+            let page_id = PageId(i as u64);
+            let page = storage.read_page(page_id).await.unwrap();
+            assert_eq!(page.data[0], i);
+            assert_eq!(page.data[1], i * 10);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_allocate_page() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = FileStorage::open(temp_file.path()).unwrap();
+        assert_eq!(storage.page_count(), 0);
+        let page_id1 = storage.allocate_page().await.unwrap();
+        assert_eq!(page_id1.page_num(), 0);
+        assert_eq!(storage.page_count(), 1);
+        let page_id2 = storage.allocate_page().await.unwrap();
+        assert_eq!(page_id2.page_num(), 1);
+        assert_eq!(storage.page_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_sync() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = FileStorage::open(temp_file.path()).unwrap();
+        let page_id = storage.allocate_page().await.unwrap();
+        let mut page = Page::new(page_id);
+        page.data[0] = 123;
+        storage.write_page(page_id, &page).await.unwrap();
+        storage.sync().await.unwrap();
+        let storage2 = FileStorage::open(temp_file.path()).unwrap();
+        let read_page = storage2.read_page(page_id).await.unwrap();
+        assert_eq!(read_page.data[0], 123);
     }
 }
