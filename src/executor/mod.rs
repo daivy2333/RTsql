@@ -23,4 +23,4 @@ pub use plan::{
 pub use result::ExecResult;
 pub use scan::ScanExecutor;
 pub use update::UpdateExecutor;
-pub use value::{ColumnType, Value};
+pub use value::{ColumnType, Value, ValueError};

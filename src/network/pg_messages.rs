@@ -94,18 +94,22 @@ pub fn row_description(columns: &[(/* name */ &str, /* sample value */ Value)]) 
         // Column attr (Int16 BE): 0
         fields_data.extend_from_slice(&0i16.to_be_bytes());
 
-        // Type OID (Int32 BE): Int=23, Text=25, Null=0
+        // Type OID (Int32 BE): Int=23, Text=25, Float=701, Bool=16, Null=0
         let type_oid = match sample_value {
             Value::Int(_) => 23i32,
             Value::String(_) => 25i32,
+            Value::Float(_) => 701i32, // PostgreSQL float8 OID
+            Value::Bool(_) => 16i32,   // PostgreSQL bool OID
             Value::Null => 0i32,
         };
         fields_data.extend_from_slice(&type_oid.to_be_bytes());
 
-        // Type size (Int16 BE): Int=4, Text=-1(varlena), Null=0
+        // Type size (Int16 BE): Int=4, Text=-1(varlena), Float=8, Bool=1, Null=0
         let type_size = match sample_value {
             Value::Int(_) => 4i16,
             Value::String(_) => -1i16,
+            Value::Float(_) => 8i16,
+            Value::Bool(_) => 1i16,
             Value::Null => 0i16,
         };
         fields_data.extend_from_slice(&type_size.to_be_bytes());
@@ -149,6 +153,18 @@ pub fn data_row(row: &[Value]) -> Vec<u8> {
             Value::String(s) => {
                 columns_data.extend_from_slice(&(s.len() as i32).to_be_bytes());
                 columns_data.extend_from_slice(s.as_bytes());
+            }
+            Value::Float(f) => {
+                // Convert to text format: f64 → ASCII
+                let text = f.to_string();
+                columns_data.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                columns_data.extend_from_slice(text.as_bytes());
+            }
+            Value::Bool(b) => {
+                // Convert to text format: bool → "t"/"f"
+                let text = if *b { "t" } else { "f" };
+                columns_data.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                columns_data.extend_from_slice(text.as_bytes());
             }
             Value::Null => {
                 // Length = -1 (NULL)

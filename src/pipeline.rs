@@ -159,6 +159,19 @@ fn value_to_json(value: Value) -> serde_json::Value {
         Value::Int(n) => serde_json::Value::Number(n.into()),
         Value::String(s) => serde_json::Value::String(s),
         Value::Null => serde_json::Value::Null,
+        Value::Float(f) => {
+            // serde_json doesn't support special float values (NaN, Inf)
+            // so we need to handle them carefully
+            if f.is_finite() {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                // NaN, Infinity -> Null (not representable in JSON)
+                serde_json::Value::Null
+            }
+        }
+        Value::Bool(b) => serde_json::Value::Bool(b),
     }
 }
 

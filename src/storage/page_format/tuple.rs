@@ -4,6 +4,8 @@
 //!   Int    = [0x01][8 bytes i64 LE]
 //!   String = [0x02][2 bytes len LE][N bytes UTF-8]
 //!   Null   = [0x03]
+//!   Float  = [0x04][8 bytes f64 LE]
+//!   Bool   = [0x05][1 byte 0/1]
 
 use crate::storage::{Result, StorageError};
 use crate::Value;
@@ -13,6 +15,8 @@ use std::io;
 const TAG_INT: u8 = 0x01;
 const TAG_STRING: u8 = 0x02;
 const TAG_NULL: u8 = 0x03;
+const TAG_FLOAT: u8 = 0x04;
+const TAG_BOOL: u8 = 0x05;
 
 /// Column type descriptor used as the schema for serialization / deserialization.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +37,8 @@ pub fn compute_tuple_size(values: &[Value], schema: &[ColumnType]) -> usize {
             Value::Int(_) => 1 + 8,
             Value::String(s) => 1 + 2 + s.len(),
             Value::Null => 1,
+            Value::Float(_) => 1 + 8,
+            Value::Bool(_) => 1 + 1,
         })
         .sum()
 }
@@ -76,6 +82,22 @@ pub fn serialize_tuple(values: &[Value], schema: &[ColumnType], buf: &mut [u8]) 
                 }
                 buf[pos] = TAG_NULL;
                 pos += 1;
+            }
+            Value::Float(f) => {
+                if pos + 9 > buf.len() {
+                    return Err(err_too_small());
+                }
+                buf[pos] = TAG_FLOAT;
+                buf[pos + 1..pos + 9].copy_from_slice(&f.to_le_bytes());
+                pos += 9;
+            }
+            Value::Bool(b) => {
+                if pos + 2 > buf.len() {
+                    return Err(err_too_small());
+                }
+                buf[pos] = TAG_BOOL;
+                buf[pos + 1] = if *b { 1 } else { 0 };
+                pos += 2;
             }
         }
     }

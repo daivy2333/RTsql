@@ -30,7 +30,9 @@ impl fmt::Display for PlanError {
             PlanError::UnsupportedValue => write!(f, "Unsupported value type"),
             PlanError::UnsupportedStatement => write!(f, "Unsupported statement type"),
             PlanError::MissingField(field) => write!(f, "Missing required field: {}", field),
-            PlanError::EmptyColumnDefinition => write!(f, "Empty column definition in CREATE TABLE"),
+            PlanError::EmptyColumnDefinition => {
+                write!(f, "Empty column definition in CREATE TABLE")
+            }
             PlanError::MultiplePrimaryKey => write!(f, "Multiple primary keys in CREATE TABLE"),
             PlanError::ColumnNotFound(col) => write!(f, "Column not found: {}", col),
             PlanError::InvalidConstraint(msg) => write!(f, "Invalid constraint: {}", msg),
