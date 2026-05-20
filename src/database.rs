@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Database is the central coordinator that owns all major RTsql subsystems.
+#[derive(Clone)]
 pub struct Database {
     pub buffer_pool: Arc<BufferPool>,
     pub table_manager: Arc<TableManager>,

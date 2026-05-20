@@ -1,11 +1,13 @@
 use crate::database::Database;
 use crate::executor::{
-    DeleteExecutor, ExecResult, Executor, IndexScanExecutor, InsertExecutor, PhysicalPlan,
-    ScanExecutor, UpdateExecutor, Value,
+    CreateTableExecutor, DeleteExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
+    IndexScanExecutor, InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
+use crate::storage::Result;
 use sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
+use std::sync::Arc;
 
 pub async fn execute(database: &Database, sql: &str) -> Response {
     let statements = match parse_sql(sql) {
@@ -23,115 +25,77 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
         };
     }
 
-    let mut plan_builder = PlanBuilder::new();
-    if let Err(e) = register_table(database, &mut plan_builder, &statements[0]).await {
-        return Response::Error {
-            message: format!("Plan error: {}", e),
-        };
+    // Handle the first statement (single-statement execution)
+    if let Some(stmt) = statements.first() {
+        match stmt {
+            // DDL: CREATE TABLE - no need to register table first
+            Statement::CreateTable { .. } => {
+                let plan = match PlanBuilder::new().build_plan(stmt) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return Response::Error {
+                            message: format!("Plan error: {}", e),
+                        }
+                    }
+                };
+
+                let executor: Box<dyn Executor + Send> =
+                    Box::new(CreateTableExecutor::new(plan, Arc::new(database.clone())));
+                return execute_executor(executor).await;
+            }
+
+            // DDL: DROP TABLE - no need to register table first
+            Statement::Drop { .. } => {
+                let plan = match PlanBuilder::new().build_plan(stmt) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return Response::Error {
+                            message: format!("Plan error: {}", e),
+                        }
+                    }
+                };
+
+                let executor: Box<dyn Executor + Send> =
+                    Box::new(DropTableExecutor::new(plan, Arc::new(database.clone())));
+                return execute_executor(executor).await;
+            }
+
+            // Query, Insert, Update, Delete - need table metadata
+            _ => {
+                let mut plan_builder = PlanBuilder::new();
+                if let Err(e) = register_table(database, &mut plan_builder, stmt).await {
+                    return Response::Error { message: e };
+                }
+
+                let plan = match plan_builder.build_plan(stmt) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return Response::Error {
+                            message: format!("Plan error: {}", e),
+                        }
+                    }
+                };
+
+                let executor = match create_executor_from_plan(plan, database).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return Response::Error {
+                            message: e.to_string(),
+                        }
+                    }
+                };
+                return execute_executor(executor).await;
+            }
+        }
     }
 
-    let plan = match plan_builder.build_plan(&statements[0]) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::Error {
-                message: format!("Plan error: {}", e),
-            }
-        }
-    };
+    Response::Error {
+        message: "No statement executed".to_string(),
+    }
+}
 
-    let mut executor: Box<dyn Executor + Send> = match plan {
-        PhysicalPlan::Scan(node) => {
-            match database.table_manager.get_table(&node.table_name).await {
-                Ok(table_meta) => Box::new(ScanExecutor::new(
-                    table_meta,
-                    database.buffer_pool.clone(),
-                    None,
-                )),
-                Err(e) => {
-                    return Response::Error {
-                        message: e.to_string(),
-                    }
-                }
-            }
-        }
-        PhysicalPlan::IndexScan(node) => {
-            match database.table_manager.get_table(&node.table_name).await {
-                Ok(table_meta) => Box::new(IndexScanExecutor::new(
-                    table_meta,
-                    database.buffer_pool.clone(),
-                    node.key.as_bytes().to_vec(),
-                    None,
-                )),
-                Err(e) => {
-                    return Response::Error {
-                        message: e.to_string(),
-                    }
-                }
-            }
-        }
-        PhysicalPlan::Insert(node) => {
-            match database.table_manager.get_table(&node.table_name).await {
-                Ok(table_meta) => Box::new(InsertExecutor::new(
-                    table_meta,
-                    database.buffer_pool.clone(),
-                    node.values,
-                    0,
-                )),
-                Err(e) => {
-                    return Response::Error {
-                        message: e.to_string(),
-                    }
-                }
-            }
-        }
-        PhysicalPlan::Update(node) => {
-            match database.table_manager.get_table(&node.table_name).await {
-                Ok(table_meta) => Box::new(UpdateExecutor::new(
-                    table_meta,
-                    database.buffer_pool.clone(),
-                    node.key.as_bytes().to_vec(),
-                    node.column,
-                    node.new_value,
-                    0,
-                )),
-                Err(e) => {
-                    return Response::Error {
-                        message: e.to_string(),
-                    }
-                }
-            }
-        }
-        PhysicalPlan::Delete(node) => {
-            match database.table_manager.get_table(&node.table_name).await {
-                Ok(table_meta) => {
-                    let index_manager = table_meta.index_manager.clone();
-                    Box::new(DeleteExecutor::new(
-                        index_manager,
-                        node.key.as_bytes().to_vec(),
-                        0,
-                    ))
-                }
-                Err(e) => {
-                    return Response::Error {
-                        message: e.to_string(),
-                    }
-                }
-            }
-        }
-        PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
-            // TODO: Task 6/7 will implement these executors
-            return Response::Error {
-                message: "DDL executor not yet implemented".to_string(),
-            };
-        }
-        PhysicalPlan::Filter(_) => {
-            // TODO: Task 10 will implement FilterExecutor
-            return Response::Error {
-                message: "Filter executor not yet implemented".to_string(),
-            };
-        }
-    };
-
+/// Execute an executor and return the response
+async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut affected_rows: Option<u64> = None;
 
@@ -158,6 +122,80 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
     } else {
         Response::QueryResult { rows }
     }
+}
+
+/// Create executor from physical plan (recursive for Filter)
+fn create_executor_from_plan(
+    plan: PhysicalPlan,
+    database: &Database,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Box<dyn Executor + Send>>> + Send + '_>,
+> {
+    Box::pin(async move {
+        match plan {
+            PhysicalPlan::Filter(node) => {
+                // Recursively create input executor
+                let input = create_executor_from_plan(*node.input, database).await?;
+                Ok(Box::new(FilterExecutor::new(input, node.predicate))
+                    as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Scan(node) => {
+                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                Ok(Box::new(ScanExecutor::new(
+                    table_meta,
+                    database.buffer_pool.clone(),
+                    None,
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::IndexScan(node) => {
+                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                Ok(Box::new(IndexScanExecutor::new(
+                    table_meta,
+                    database.buffer_pool.clone(),
+                    node.key.as_bytes().to_vec(),
+                    None,
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Insert(node) => {
+                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                Ok(Box::new(InsertExecutor::new(
+                    table_meta,
+                    database.buffer_pool.clone(),
+                    node.values,
+                    0,
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Update(node) => {
+                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                Ok(Box::new(UpdateExecutor::new(
+                    table_meta,
+                    database.buffer_pool.clone(),
+                    node.key.as_bytes().to_vec(),
+                    node.column,
+                    node.new_value,
+                    0,
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Delete(node) => {
+                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let index_manager = table_meta.index_manager.clone();
+                Ok(Box::new(DeleteExecutor::new(
+                    index_manager,
+                    node.key.as_bytes().to_vec(),
+                    0,
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
+                panic!("DDL should be handled separately in execute()")
+            }
+        }
+    })
 }
 
 fn value_to_json(value: Value) -> serde_json::Value {
@@ -218,7 +256,7 @@ async fn register_table(
     database: &Database,
     builder: &mut PlanBuilder,
     stmt: &Statement,
-) -> Result<(), String> {
+) -> std::result::Result<(), String> {
     let table_name = match extract_table_name(stmt) {
         Some(name) => name,
         None => return Ok(()),
@@ -234,6 +272,6 @@ async fn register_table(
             builder.register_table(&table_meta.name, columns, &table_meta.pk_column);
             Ok(())
         }
-        Err(_) => Ok(()),
+        Err(e) => Err(format!("Table '{}' not found: {}", table_name, e)),
     }
 }
