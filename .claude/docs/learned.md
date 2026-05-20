@@ -23,8 +23,9 @@
 |------|--------------|------|----------|
 | Tokio 运行时 | `#[tokio::main]` 或 `tokio::runtime::Runtime::new()` | 启动异步运行时 | 2026-05-20 |
 | spawn_blocking | `tokio::task::spawn_blocking(|| {...})` | CPU密集型操作隔离 | 2026-05-20 |
-| 异步 RwLock | `tokio::sync::RwLock` | 异步读写锁，不阻塞线程 | 2026-05-20 |
-| Notify | `tokio::sync::Notify` | 唤醒等待协程 | 2026-05-20 |
+| Handle::current() | `tokio::runtime::Handle::current()` | 在异步上下文中获取 runtime handle | 2026-05-20 |
+| Handle::block_on | `runtime.block_on(async_future)` | 在同步代码中执行异步操作（spawn_blocking 内安全） | 2026-05-20 |
+| spawn_blocking + Mutex | `Arc<Mutex<T>>` + spawn_blocking | 在阻塞线程池中使用同步 Mutex（不阻塞异步运行时） | 2026-05-20 |
 
 ---
 
@@ -32,13 +33,15 @@
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 入口文件 | src/main.rs | 应用启动点（待创建） |
-| 配置文件 | Cargo.toml | Rust 项目配置（待创建） |
-| 存储模块 | src/storage/ | 存储引擎核心（待创建） |
-| 执行模块 | src/executor/ | 执行引擎核心（待创建） |
-| 事务模块 | src/transaction/ | 事务管理核心（待创建） |
-| 解析模块 | src/parser/ | SQL 解析核心（待创建） |
-| 网络模块 | src/network/ | 网络层核心（待创建） |
+| 入口文件 | src/main.rs | 应用启动点 |
+| 配置文件 | Cargo.toml | Rust 项目配置 |
+| 存储模块 | src/storage/ | 存储引擎核心 |
+| 页格式模块 | src/storage/page_format/ | M2: Key/RowId/SlottedPage |
+| B-Tree 模块 | src/storage/btree/ | M2: BTree 索引核心 |
+| 执行模块 | src/executor/ | 执行引擎核心（占位符） |
+| 事务模块 | src/transaction/ | 事务管理核心（占位符） |
+| 解析模块 | src/parser/ | SQL 解析核心（占位符） |
+| 网络模块 | src/network/ | 网络层核心（占位符） |
 
 ---
 
@@ -63,17 +66,35 @@
 | spawn_blocking JoinError | tokio::task::spawn_blocking 返回 JoinError，StorageError 未处理 | 在 StorageError 中添加 #[from] JoinError | 2026-05-20 |
 | Ok(()) 类型推断失败 | spawn_blocking 内部 Ok(()) 缺少类型注解 | 明确指定 Ok::<(), std::io::Error>(()) | 2026-05-20 |
 | PageGuard Deref 返回临时引用 | MutexGuard 是临时值，不能返回引用 | 移除 Deref trait，使用 page() 方法返回克隆 | 2026-05-20 |
-| MutexGuard 跨 await 点 | clippy 警告 await_holding_lock | 已在 await 前用 drop 释放，警告可接受 | 2026-05-20 |
+| Runtime nesting 错误 | 在异步测试中调用 Handle::block_on 导致 "Cannot start a runtime from within a runtime" | 将 SyncPageLoader 创建放入 spawn_blocking 内，避免在异步上下文中调用 block_on | 2026-05-20 |
+| PageGuard 写回失效 | BTree 克隆 Page 后操作，但未写回 BufferPool，修改丢失 | 添加 PageGuard::modify_page() 方法，闭包内操作 + 自动 mark_dirty | 2026-05-20 |
+| LeafNode insert 有序问题 | SlottedPage::add_slot 总是添加到末尾，无法中间插入 | 实现 shift_slots_right() 方法，调整 slot 数组保持有序 | 2026-05-20 |
 
 **详细踩坑档案**（复杂问题）：
 
-### [待记录]
+### Runtime Nesting 错误（M2 SyncPageLoader）
 
-- **症状**: （待记录）
-- **根因**: （待记录）
-- **解决**: （待记录）
-- **预防**: （待记录）
-- **时间**: （待记录）
+- **症状**: 在 #[tokio::test] 异步测试中调用 SyncPageLoader::new() → Handle::block_on → "Cannot start a runtime from within a runtime"
+- **根因**: Tokio 不允许在异步上下文（已进入 runtime）中再次调用 block_on（会尝试嵌套启动 runtime）
+- **解决**: 将 IndexManager 创建放入 spawn_blocking 内部，在阻塞线程池中调用（不处于异步上下文）
+- **预防**: spawn_blocking 内调用 block_on 安全，异步测试中不直接调用 block_on
+- **时间**: 2026-05-20
+
+### PageGuard 写回失效（M2 BTree）
+
+- **症状**: BTree insert/delete 操作后，再次 search 返回旧数据（修改未持久化）
+- **根因**: BTree 使用 `guard.page().clone()` 克隆 Page 后操作，克隆的数据未写回 BufferPool
+- **解决**: 添加 PageGuard::modify_page() 方法，闭包内直接操作 Page + 自动 mark_dirty
+- **预防**: 所有页修改使用 modify_page() 而非 clone + 操作
+- **时间**: 2026-05-20
+
+### LeafNode 有序插入问题（M2）
+
+- **症状**: LeafNode::insert 后，key 未按序排列（SlottedPage::add_slot 总是添加到末尾）
+- **根因**: SlottedPage 不支持中间插入，slot 数组只能从末尾增长
+- **解决**: 实现 shift_slots_right() 方法，insert 后调整 slot 数组保持有序
+- **预防**: 有序数据结构插入时，需考虑 slot 数组调整逻辑
+- **时间**: 2026-05-20
 
 ---
 
@@ -84,6 +105,8 @@
 | 异步迭代器 | 执行引擎流式返回 | `async fn next() -> Result<Option<Row>>` |
 | spawn_blocking 包装 | CPU密集型索引操作 | `tokio::task::spawn_blocking(|| btree_op())` |
 | 异步页加载 | Buffer Pool 管理 | `get_page(page_id) -> impl Future<Output = Page>` |
+| SyncPageLoader 模式 | 同步代码访问异步 BufferPool | `loader.load_page(page_id)` (内部 block_on) |
+| PageGuard::modify_page | 页修改自动写回 | `guard.modify_page(|page| { leaf.insert(...) })` |
 
 ---
 
@@ -109,7 +132,8 @@
 - [ ] io_uring 集成方式（M7 阶段）
 - [ ] PostgreSQL 有线协议细节（M6 阶段）
 - [ ] MVCC 实现细节（M3 阶段）
-- [ ] B-Tree 索引优化策略（M2 阶段）
+- [x] B-Tree 索引优化策略（M2 阶段）→ 简化实现（Split/Merge 未完整）
+- [x] PageGuard::modify_page() 方法（M2 添加）
 - [ ] WAL（Write-Ahead Logging）实现
 
 ---

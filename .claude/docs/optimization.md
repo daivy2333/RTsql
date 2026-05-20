@@ -4,6 +4,36 @@
 
 ## 已识别的优化点
 
+### M2 实现中的简化与优化机会（待后续处理）
+
+- [x] **B-Tree Split/Merge 未完整实现**: 当前仅支持单页 LeafNode 操作
+  - **当前状态**: BTree insert/delete 仅处理单个 LeafNode，页满返回 PageFull 错误
+  - **优化方案**: 实现 Split（页满时分配新页并迁移数据）和 Merge（删除时空合并相邻节点）
+  - **预期收益**: 支持大量数据索引，实现完整 B-Tree 平衡
+  - **时机**: M2 后续优化或 M5 执行引擎需求时
+  - **复杂度**: 高（涉及页分配、父节点更新、递归 Split/Merge）
+
+- [x] **InternalNode traversal 占位符**: 当前未实现 InternalNode 到 LeafNode 的完整路径
+  - **当前状态**: BTree 仅操作 root LeafNode，未递归遍历 InternalNode
+  - **优化方案**: 实现 InternalNode.find_child_page_id() 的完整逻辑
+  - **预期收益**: 支持多层 B-Tree 结构（索引页 + 数据页）
+  - **时机**: Split/Merge 实现时（需要父节点管理）
+  - **复杂度**: 中（需配合 Split/Merge）
+
+- [x] **固定 Key 长度（32 bytes）**: 限制 Key 最大长度，无法处理变长数据
+  - **当前状态**: Key 结构固定 32 bytes，超出 panic
+  - **优化方案**: 实现变长 Key（动态内存管理、SlottedPage 存储优化）
+  - **预期收益**: 支持任意长度 Key，减少空间浪费
+  - **时机**: M7 性能优化或需求明确时
+  - **复杂度**: 中到高（需修改 Key、LeafNode、序列化逻辑）
+
+- [x] **PageGuard 写回简化**: modify_page() 方法解决了 clone 问题，但仍有改进空间
+  - **当前状态**: 使用 modify_page() 闭包操作，需 mark_dirty
+  - **优化方案**: 实现 RAII DirtyGuard（自动标记 dirty），或零拷贝 Arc<Page> 共享
+  - **预期收益**: 减少拷贝开销，简化 API
+  - **时机**: M3 事务层或 M7 性能优化时
+  - **复杂度**: 中
+
 ### M1 实现中的优化机会（待 M7 处理）
 
 - [x] **PageGuard 零拷贝**: 当前使用 `page()` 方法返回克隆，存在拷贝开销
@@ -69,6 +99,23 @@
   - **时机**: M6 网络层阶段（可选）
 
 ## 技术债务
+
+### M2 遗留的技术债务
+
+- [x] **Split/Merge 未实现**: 当前 BTree 仅支持单页操作，无法处理大量数据
+  - **影响**: 页满后 insert 失败（PageFull），无法自动扩展
+  - **优先级**: 高（完整 B-Tree 必需）
+  - **预计处理**: M2 后续优化或 M5 执行引擎需求时
+
+- [x] **InternalNode traversal 未完整**: 仅占位符实现，无法递归查找
+  - **影响**: 无法支持多层 B-Tree（索引页 + 数据页分离）
+  - **优先级**: 中（需配合 Split/Merge）
+  - **预计处理**: Split/Merge 实现时
+
+- [x] **固定 Key 长度限制**: 32 bytes 上限，无法处理长字符串或变长数据
+  - **影响**: 部分应用场景受限，空间浪费（短 Key 填充）
+  - **优先级**: 中（依赖需求）
+  - **预计处理**: M7 性能优化或需求明确时
 
 ### M1 遗留的技术债务
 

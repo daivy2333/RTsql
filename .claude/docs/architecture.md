@@ -88,6 +88,77 @@ src/storage/
 └── page_frame.rs    # PageFrame + PageGuard
 ```
 
+### 2026-05-20 - M2 架构决策：B-Tree 索引三层分离设计
+
+- **决策**: 采用 IndexManager（异步）→ BTree（同步）→ SyncPageLoader（block_on 包装）三层架构
+- **原因**:
+  - BTree 操作（split/merge）是 CPU 密集型，需纯同步实现避免 await overhead
+  - BufferPool 是异步接口，需要 block_on 桥接同步/异步边界
+  - IndexManager 作为公开 API，必须异步以不阻塞协程调度
+- **影响**:
+  - SyncPageLoader 使用 `Handle::block_on` 在 spawn_blocking 内安全执行
+  - BTree 核心逻辑不依赖 async，便于后续优化和测试
+  - IndexManager 使用 `Arc<Mutex<BTree>>` 提供线程安全访问
+- **文件结构**:
+```
+src/storage/btree/
+├── mod.rs           # 模块导出
+├── node.rs          # LeafNode + InternalNode（纯同步）
+├── btree.rs         # BTree 核心逻辑（纯同步）
+├── sync_loader.rs   # SyncPageLoader（block_on 包装）
+└── index_manager.rs # IndexManager（全异步）
+```
+- **替代方案**:
+  - BTree 直接 async（rejected：CPU 操作无需 async，增加 overhead）
+  - IndexManager 使用 async Mutex（rejected：spawn_blocking 内用 sync Mutex 更高效）
+
+### 2026-05-20 - M2 架构决策：分离设计 LeafNode vs InternalNode
+
+- **决策**: LeafNode 和 InternalNode 分别定义结构，职责清晰
+- **原因**:
+  - LeafNode 存储 Key + RowId（指向数据页）
+  - InternalNode 存储 Key + ChildPageId（指向子节点）
+  - 分离设计便于未来扩展（如变长 Key、压缩）
+- **影响**:
+  - LeafNode entry size: 32 bytes (Key) + 6 bytes (RowId) = 38 bytes
+  - InternalNode entry size: 32 bytes (Key) + 4 bytes (ChildPageId) = 36 bytes
+  - 两者使用统一的 SlottedPage 格式存储
+- **替代方案**:
+  - 统一 Node 结构（rejected：类型检查复杂，访问需检查 is_leaf）
+
+### 2026-05-20 - M2 架构决策：固定长度 Key（32 bytes）
+
+- **决策**: M2 采用固定 32 bytes Key，简化实现
+- **原因**:
+  - 避免变长 Key 的复杂性（内存管理、序列化、比较）
+  - Slot 结构统一，便于序列化和访问
+  - 快速定位和比较（无需额外长度字段）
+- **影响**:
+  - Key 结构包含 data[32] + len（实际长度）
+  - 序列化固定写入 32 bytes（尾部填充 0）
+  - 限制 Key 最大长度为 32 bytes（超出 panic）
+- **替代方案**:
+  - 变长 Key（推迟到 M7：需要复杂内存管理和序列化）
+
+### 2026-05-20 - M2 架构决策：Slotted Page 统一格式
+
+- **决策**: 所有页（Leaf/Internal/Data）统一采用 Slotted Page 格式
+- **原因**:
+  - 通用格式，支持变长数据（为未来扩展做准备）
+  - Slot 数组从页尾向上增长，Row Data 从 header 向下增长
+  - Free Space 在中间，动态调整
+- **影响**:
+  - Header 固定 16 bytes（page_type + slot_count + free_space_offset + next_page_id）
+  - Slot 固定 4 bytes（offset + length）
+  - 统一的读写接口（add_slot、delete_slot、free_space）
+- **布局**:
+```
+┌────────────┬──────────────────┬─────────────┬─────────────┐
+│ Header     │ Free Space       │ Slot Array  │ Row Data    │
+│ (16 bytes) │ (grows ↓)        │ (grows ↑)   │ (grows ↓)   │
+└────────────┴──────────────────┴─────────────┴─────────────┘
+```
+
 ### 模块划分与职责
 
 | 模块 | 职责 | 异步策略 |
@@ -120,7 +191,7 @@ src/storage/
 |--------|------|-------------|
 | M0 | 项目骨架，引入 Tokio | 确定异步运行时配置 |
 | M1 | 文件/缓存层 | 实现 `AsyncStorage` trait，使用 `spawn_blocking` 读页 | ✅ 完成 |
-| M2 | B-Tree 索引与存储引擎 | 索引同步，通过 `spawn_blocking` 暴露为 async API |
+| M2 | B-Tree 索引与存储引擎 | 索引同步，通过 `spawn_blocking` 暴露为 async API | ✅ 完成 |
 | M3 | 事务与 MVCC | 用异步锁实现提交等待，快照读无锁 |
 | M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） |
 | M5 | 异步执行引擎 | 实现 `async fn next()` 迭代器，整合存储异步接口 |
