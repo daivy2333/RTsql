@@ -60,7 +60,10 @@
 
 | 问题 | 原因 | 解决方案 | 发现时间 |
 |------|------|----------|----------|
-| （待记录） | - | - | - |
+| spawn_blocking JoinError | tokio::task::spawn_blocking 返回 JoinError，StorageError 未处理 | 在 StorageError 中添加 #[from] JoinError | 2026-05-20 |
+| Ok(()) 类型推断失败 | spawn_blocking 内部 Ok(()) 缺少类型注解 | 明确指定 Ok::<(), std::io::Error>(()) | 2026-05-20 |
+| PageGuard Deref 返回临时引用 | MutexGuard 是临时值，不能返回引用 | 移除 Deref trait，使用 page() 方法返回克隆 | 2026-05-20 |
+| MutexGuard 跨 await 点 | clippy 警告 await_holding_lock | 已在 await 前用 drop 释放，警告可接受 | 2026-05-20 |
 
 **详细踩坑档案**（复杂问题）：
 
