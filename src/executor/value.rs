@@ -3,6 +3,19 @@
 use crate::storage::page_format::Key;
 use std::fmt;
 
+/// SQL 列类型（M9: 支持 Int/String/Null/Float/Bool）
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnType {
+    /// 整数类型
+    Int,
+    /// 字符串类型
+    String,
+    /// 浮点类型（FLOAT/DOUBLE）
+    Float,
+    /// 布尔类型（BOOLEAN）
+    Bool,
+}
+
 /// SQL 值类型（M4: 仅支持 Int/String/Null）
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {

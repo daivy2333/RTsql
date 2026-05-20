@@ -16,8 +16,11 @@ pub use delete::DeleteExecutor;
 pub use executor_trait::Executor;
 pub use index_scan::IndexScanExecutor;
 pub use insert::InsertExecutor;
-pub use plan::{DeleteNode, IndexScanNode, InsertNode, PhysicalPlan, ScanNode, UpdateNode};
+pub use plan::{
+    ColumnConstraint, ColumnDef, CreateTableNode, DeleteNode, DropTableNode, IndexScanNode,
+    InsertNode, PhysicalPlan, ScanNode, UpdateNode,
+};
 pub use result::ExecResult;
 pub use scan::ScanExecutor;
 pub use update::UpdateExecutor;
-pub use value::Value;
+pub use value::{ColumnType, Value};

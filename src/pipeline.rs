@@ -118,6 +118,12 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
                 }
             }
         }
+        PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
+            // TODO: Task 6/7 will implement these executors
+            return Response::Error {
+                message: "DDL executor not yet implemented".to_string(),
+            };
+        }
     };
 
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
