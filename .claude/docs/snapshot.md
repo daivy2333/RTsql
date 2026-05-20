@@ -127,13 +127,16 @@ RTsql/
 ## Git 状态
 
 - **当前分支**: master
-- **最近提交**:
-  - e721bec docs: update architecture, learned, and optimization for M6 completion
-  - e32cdfd docs: mark M6 complete, update project status
-  - 8ac8913 style(m6): apply cargo fmt formatting
-  - dbc245c test(m6): add Server integration tests for query/insert/ping flows
-  - 46a10f9 feat(m6): implement Server with TcpListener and graceful shutdown
-- **未提交更改**: M8 全部文件（pg_messages.rs, pg_protocol.rs, server.rs 修改, 3 个测试文件）
+- **最近提交**（M8 + 优化计划）:
+  - a3f81b6 docs: 嵌入式异步高性能优化计划（基于最佳实践）
+  - e900678 docs: 重新规划里程碑（M9-M13）
+  - 7f63e53 docs: mark M8 PostgreSQL protocol complete, update snapshot
+  - 2a25b7f test(pg_integration): add startup connection test
+  - 1e4e3fc feat(server): switch to PgProtocol (PostgreSQL protocol)
+  - ...（M8 共 15 commits：PgProtocol + pg_messages + 测试）
+- **未提交更改**: tests/pg_integration_test.rs（SQL 执行测试，DDL 不支持）
+
+**M8 总结**: PostgreSQL Simple Query Protocol 完成（159 tests），发现 Critical Issues（异步页缓存 + 零拷贝）
 
 ## 关键文件
 
@@ -163,15 +166,16 @@ RTsql/
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
+| 2026-05-20 | .claude/docs/optimization.md | 重新规划优化（Critical Issues + 嵌入式最佳实践） |
+| 2026-05-20 | .claude/docs/tasks.md | 重新规划 M9-M13（DDL/WHERE/MVCC/WAL 优先级） |
+| 2026-05-20 | .claude/docs/architecture.md | 开发路线图重新规划（优先级调整） |
+| 2026-05-20 | .claude/docs/snapshot.md | Git 状态更新（M8 完成 + Critical Issues） |
 | 2026-05-20 | src/network/pg_messages.rs | M8 PostgreSQL 消息序列化 |
 | 2026-05-20 | src/network/pg_protocol.rs | M8 PgProtocol 状态机 |
 | 2026-05-20 | src/network/server.rs | M8 切换到 PgProtocol |
 | 2026-05-20 | tests/pg_messages_test.rs | M8 消息序列化测试（9 tests） |
 | 2026-05-20 | tests/pg_protocol_test.rs | M8 协议状态机测试（9 tests） |
 | 2026-05-20 | tests/pg_integration_test.rs | M8 集成测试（1 test） |
-| 2026-05-20 | src/database.rs, src/pipeline.rs | M7 Database + Pipeline 新增 |
-| 2026-05-20 | src/storage/data_page.rs, src/storage/data/ | M7 数据存储层 |
-| 2026-05-20 | src/storage/page_format/tuple.rs | M7 Tuple 序列化 |
 | 2026-05-20 | src/executor/* | M7 5 Executor 重写（MVCC + 真实存储） |
 | 2026-05-20 | src/network/handler.rs, server.rs | M7 SqlHandler 真实 pipeline |
 | 2026-05-20 | src/storage/btree/* | M7 BTree::scan_all + IndexManager::scan_all |
