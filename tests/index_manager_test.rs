@@ -1,7 +1,7 @@
 // Test for IndexManager async API (Task 6)
+use rtsql::storage::{btree::IndexManager, page_format::RowId, BufferPool, FileStorage};
 use std::sync::Arc;
 use tempfile::tempdir;
-use rtsql::storage::{FileStorage, BufferPool, btree::IndexManager, page_format::RowId};
 
 #[tokio::test]
 async fn test_index_manager_basic_ops() {

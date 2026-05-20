@@ -28,8 +28,7 @@ impl IndexManager {
         // Key needs to be copied (to_vec()) to satisfy Send trait
         let key = key.to_vec();
 
-        tokio::task::spawn_blocking(move || btree.lock().unwrap().insert(&key, row_id))
-            .await?
+        tokio::task::spawn_blocking(move || btree.lock().unwrap().insert(&key, row_id)).await?
     }
 
     /// Search for a key in the index
@@ -38,8 +37,7 @@ impl IndexManager {
         let btree = self.btree.clone();
         let key = key.to_vec();
 
-        tokio::task::spawn_blocking(move || btree.lock().unwrap().search(&key))
-            .await?
+        tokio::task::spawn_blocking(move || btree.lock().unwrap().search(&key)).await?
     }
 
     /// Delete a key from the index
@@ -48,8 +46,7 @@ impl IndexManager {
         let btree = self.btree.clone();
         let key = key.to_vec();
 
-        tokio::task::spawn_blocking(move || btree.lock().unwrap().delete(&key))
-            .await?
+        tokio::task::spawn_blocking(move || btree.lock().unwrap().delete(&key)).await?
     }
 
     /// Update the RowId for an existing key
@@ -58,7 +55,6 @@ impl IndexManager {
         let btree = self.btree.clone();
         let key = key.to_vec();
 
-        tokio::task::spawn_blocking(move || btree.lock().unwrap().update(&key, new_row_id))
-            .await?
+        tokio::task::spawn_blocking(move || btree.lock().unwrap().update(&key, new_row_id)).await?
     }
 }
