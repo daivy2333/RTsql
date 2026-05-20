@@ -65,10 +65,7 @@ async fn test_pg_connection_startup() {
     assert!(has_auth_ok, "Expected AuthenticationOk message 'R'");
     assert!(has_param_status, "Expected ParameterStatus message 'S'");
     assert!(has_backend_key, "Expected BackendKeyData message 'K'");
-    assert!(
-        has_ready_for_query,
-        "Expected ReadyForQuery message 'Z'"
-    );
+    assert!(has_ready_for_query, "Expected ReadyForQuery message 'Z'");
 
     shutdown.cancel();
 }

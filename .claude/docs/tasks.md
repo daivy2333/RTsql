@@ -97,11 +97,26 @@
 **新增测试**: 34 个（tuple:6 + table_mgr:6 + data_page:5 + executor:+4 MVCC + e2e:7 + table_manager:6）
 **MVCC 范围**: M7 仅验证最新版本可见性，完整版本链遍历推迟到 M8
 
-## 待办 - 开发路线图
-
 ### M8: PostgreSQL 协议 + 性能优化
 
-- [ ] 实现 PostgreSQL 有线协议（兼容 psql 等工具）
+- [x] 实现 PostgreSQL 有线协议（Simple Query Protocol）
+- [x] 实现 pg_messages 消息序列化层
+- [x] 实现 PgProtocol 状态机
+- [x] Server 切换到 PgProtocol
+- [x] 集成测试（pg_integration_test.rs）
+- [ ] psql 真实连接测试（环境限制：psql 未安装）
+
+**完成日期**: 2026-05-20
+**验证结果**: cargo test (159 passed) ✅, cargo clippy ✅, cargo fmt ✅
+**新增文件**: pg_messages.rs, pg_protocol.rs, pg_integration_test.rs, pg_messages_test.rs, pg_protocol_test.rs
+**推迟功能**: Extended Protocol, SSL/TLS, 二进制格式
+
+**注意**: psql 真实连接测试需要安装 PostgreSQL 客户端工具
+
+## 待办 - 开发路线图
+
+### M9: 高级功能与优化
+
 - [ ] 实现完整版本链遍历（follow next_version）
 - [ ] 实现 WAL（Write-Ahead Logging）
 - [ ] 实现版本链 GC（清理旧版本）
@@ -111,7 +126,7 @@
 - [ ] 调优协程调度策略
 - [ ] 性能基准测试
 
-**异步相关重点**: PostgreSQL 协议、io_uring、性能调优
+**异步相关重点**: io_uring、性能调优
 
 ## 阻塞项
 

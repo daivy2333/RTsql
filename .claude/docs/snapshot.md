@@ -4,9 +4,9 @@
 
 ## 当前状态
 
-- **阶段**: M7 完成（全流程集成 + 数据存储层）
+- **阶段**: M8 完成（PostgreSQL Simple Query Protocol）
 - **状态**: 正常
-- **当前里程碑**: M8 准备开始
+- **当前里程碑**: M9 准备开始（高级功能与优化）
 
 ## 项目结构
 
@@ -75,9 +75,11 @@ RTsql/
 │       ├── mod.rs
 │       ├── error.rs
 │       ├── protocol.rs     # Protocol trait + JsonProtocol
+│       ├── pg_messages.rs  # M8 新增：PostgreSQL 消息序列化
+│       ├── pg_protocol.rs  # M8 新增：PgProtocol 状态机
 │       ├── connection.rs   # ConnectionHandler（async handler）
 │       ├── handler.rs      # SqlHandler（真实 pipeline）[M7 重写]
-│       └── server.rs       # Server（接受 Arc<Database>）
+│       └── server.rs       # Server（接受 Arc<Database>）[M8 切换 PgProtocol]
 ├── tests/
 │   ├── runtime_test.rs       (3)
 │   ├── btree_test.rs         (10)
@@ -91,6 +93,9 @@ RTsql/
 │   ├── table_manager_test.rs (6)  [M7 新增]
 │   ├── network_protocol_test.rs (5)
 │   ├── network_server_test.rs (4)  [M7 更新]
+│   ├── pg_messages_test.rs   (9)  [M8 新增]
+│   ├── pg_protocol_test.rs   (9)  [M8 新增]
+│   ├── pg_integration_test.rs (1) [M8 新增]
 │   └── e2e_test.rs          (7)  [M7 新增]
 └── .claude/
     └── docs/
@@ -103,7 +108,7 @@ RTsql/
         └── tasks.md
 ```
 
-**注**: M7 全流程集成完成，157 个测试全部通过。新增 34 个测试（含 7 个 E2E TCP 测试）。
+**注**: M8 PostgreSQL Simple Query Protocol 完成，159 个测试全部通过。新增 19 个测试（pg_messages:9 + pg_protocol:9 + pg_integration:1）。
 
 ## 技术栈
 
@@ -123,11 +128,12 @@ RTsql/
 
 - **当前分支**: master
 - **最近提交**:
-  - e721bec docs: update for M6 completion
+  - e721bec docs: update architecture, learned, and optimization for M6 completion
+  - e32cdfd docs: mark M6 complete, update project status
   - 8ac8913 style(m6): apply cargo fmt formatting
-  - dbc245c test(m6): add Server integration tests
-  - 46a10f9 feat(m6): implement Server with TcpListener
-- **未提交更改**: M7 全部文件（27 个文件修改/新增，157 测试通过）
+  - dbc245c test(m6): add Server integration tests for query/insert/ping flows
+  - 46a10f9 feat(m6): implement Server with TcpListener and graceful shutdown
+- **未提交更改**: M8 全部文件（pg_messages.rs, pg_protocol.rs, server.rs 修改, 3 个测试文件）
 
 ## 关键文件
 
@@ -144,14 +150,25 @@ RTsql/
 | src/executor/update.rs | UpdateExecutor（版本链创建） | ✅ M7 重写 |
 | src/executor/delete.rs | DeleteExecutor（含 tx_id） | ✅ M7 更新 |
 | src/network/handler.rs | SqlHandler（真实 pipeline，async） | ✅ M7 重写 |
-| src/network/server.rs | Server（接受 Arc<Database>） | ✅ M7 更新 |
+| src/network/server.rs | Server（接受 Arc<Database>） | ✅ M8 更新 PgProtocol |
+| src/network/pg_messages.rs | PostgreSQL 消息序列化（Startup/Query/Error） | ✅ M8 新增 |
+| src/network/pg_protocol.rs | PgProtocol 状态机（Startup/Ready/Query） | ✅ M8 新增 |
 | src/storage/btree/btree.rs | BTree（新增 scan_all） | ✅ M7 更新 |
 | tests/e2e_test.rs | 7 个端到端 TCP 测试 | ✅ M7 新增 |
+| tests/pg_messages_test.rs | 9 个 PostgreSQL 消息序列化测试 | ✅ M8 新增 |
+| tests/pg_protocol_test.rs | 9 个 PostgreSQL 协议状态机测试 | ✅ M8 新增 |
+| tests/pg_integration_test.rs | 1 个 PostgreSQL 集成测试 | ✅ M8 新增 |
 
 ## 最近修改
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
+| 2026-05-20 | src/network/pg_messages.rs | M8 PostgreSQL 消息序列化 |
+| 2026-05-20 | src/network/pg_protocol.rs | M8 PgProtocol 状态机 |
+| 2026-05-20 | src/network/server.rs | M8 切换到 PgProtocol |
+| 2026-05-20 | tests/pg_messages_test.rs | M8 消息序列化测试（9 tests） |
+| 2026-05-20 | tests/pg_protocol_test.rs | M8 协议状态机测试（9 tests） |
+| 2026-05-20 | tests/pg_integration_test.rs | M8 集成测试（1 test） |
 | 2026-05-20 | src/database.rs, src/pipeline.rs | M7 Database + Pipeline 新增 |
 | 2026-05-20 | src/storage/data_page.rs, src/storage/data/ | M7 数据存储层 |
 | 2026-05-20 | src/storage/page_format/tuple.rs | M7 Tuple 序列化 |
@@ -164,8 +181,9 @@ RTsql/
 
 ## 下一步行动
 
-1. 开始 M8 里程碑：PostgreSQL 有线协议 + 性能优化
+1. 开始 M9 里程碑：高级功能与优化
 2. 实现完整版本链遍历（follow next_version）
 3. 实现 WAL（Write-Ahead Logging）
 4. 实现版本链 GC（清理旧版本）
 5. 复杂 WHERE 表达式计算 + JOIN 支持
+6. 可选：安装 psql 进行真实连接测试
