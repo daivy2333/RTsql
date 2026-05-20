@@ -1,3 +1,5 @@
-//! Storage engine - Buffer pool, page cache, file I/O
-//!
-//! M1: Implement AsyncStorage trait and buffer pool
+mod error;
+mod page_id;
+
+pub use error::{StorageError, Result};
+pub use page_id::PageId;
