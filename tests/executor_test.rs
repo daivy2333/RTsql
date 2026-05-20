@@ -1,6 +1,9 @@
 //! Executor unit tests
 
-use rtsql::executor::{ExecResult, Executor, IndexScanExecutor, InsertExecutor, ScanExecutor, Value};
+use rtsql::executor::{
+    DeleteExecutor, ExecResult, Executor, IndexScanExecutor, InsertExecutor, ScanExecutor,
+    UpdateExecutor, Value,
+};
 use rtsql::storage::{btree::IndexManager, page_format::RowId, BufferPool, FileStorage, Result};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -137,6 +140,77 @@ async fn test_insert_executor_batch() -> Result<()> {
     // 第二次 next 返回 None
     let result = executor.next().await?;
     assert_eq!(result, None);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_update_executor() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    // Create IndexManager inside spawn_blocking
+    let buffer_pool_clone = buffer_pool.clone();
+    let index_manager = tokio::task::spawn_blocking(move || {
+        Arc::new(IndexManager::new(buffer_pool_clone).unwrap())
+    })
+    .await
+    .unwrap();
+
+    // 先插入一条数据
+    let key = 1i64.to_be_bytes();
+    let row_id = RowId::new(0, 1);
+    index_manager.insert(&key, row_id).await.unwrap();
+
+    // 创建 UpdateExecutor
+    let new_value = Value::Int(100);
+    let mut executor = UpdateExecutor::new(index_manager, key.to_vec(), new_value);
+
+    // 第一次 next 返回 AffectedRows(1)
+    let result = executor.next().await?;
+    assert_eq!(result, Some(ExecResult::AffectedRows(1)));
+
+    // 第二次 next 返回 None（迭代结束）
+    let result = executor.next().await?;
+    assert_eq!(result, None);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_delete_executor() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    // Create IndexManager inside spawn_blocking
+    let buffer_pool_clone = buffer_pool.clone();
+    let index_manager = tokio::task::spawn_blocking(move || {
+        Arc::new(IndexManager::new(buffer_pool_clone).unwrap())
+    })
+    .await
+    .unwrap();
+
+    // 先插入一条数据
+    let key = 1i64.to_be_bytes();
+    let row_id = RowId::new(0, 1);
+    index_manager.insert(&key, row_id).await.unwrap();
+
+    // 创建 DeleteExecutor
+    let mut executor = DeleteExecutor::new(index_manager.clone(), key.to_vec());
+
+    // 第一次 next 返回 AffectedRows(1)
+    let result = executor.next().await?;
+    assert_eq!(result, Some(ExecResult::AffectedRows(1)));
+
+    // 第二次 next 返回 None（迭代结束）
+    let result = executor.next().await?;
+    assert_eq!(result, None);
+
+    // 验证数据已被删除
+    let found = index_manager.search(&key).await?;
+    assert_eq!(found, None);
 
     Ok(())
 }
