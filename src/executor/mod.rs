@@ -9,6 +9,7 @@ mod executor_trait;
 mod index_scan;
 mod insert;
 mod plan;
+mod predicate;
 mod result;
 mod scan;
 mod update;
@@ -23,6 +24,10 @@ pub use insert::InsertExecutor;
 pub use plan::{
     ColumnConstraint, ColumnDef, CreateTableNode, DeleteNode, DropTableNode, IndexScanNode,
     InsertNode, PhysicalPlan, ScanNode, UpdateNode,
+};
+pub use predicate::{
+    ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,
+    ExpressionRef, LogicalOp, LogicalPredicate, Predicate, PredicateRef,
 };
 pub use result::ExecResult;
 pub use scan::ScanExecutor;
