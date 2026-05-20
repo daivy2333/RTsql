@@ -17,3 +17,23 @@ pub fn authentication_ok() -> Vec<u8> {
 
     bytes
 }
+
+/// ParameterStatus message: 'S' + length + name(NUL) + value(NUL)
+pub fn parameter_status(name: &str, value: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(b'S');
+
+    // Calculate length: 4 (length field) + name.len() + 1 (NUL) + value.len() + 1 (NUL)
+    let length = 4 + name.len() + 1 + value.len() + 1;
+    bytes.extend_from_slice(&(length as i32).to_be_bytes());
+
+    // Name (null-terminated)
+    bytes.extend_from_slice(name.as_bytes());
+    bytes.push(0);
+
+    // Value (null-terminated)
+    bytes.extend_from_slice(value.as_bytes());
+    bytes.push(0);
+
+    bytes
+}
