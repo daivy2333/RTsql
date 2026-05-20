@@ -7,9 +7,10 @@ use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::executor::Value;
 use crate::network::error::NetworkError;
 use crate::network::pg_messages;
-use crate::network::protocol::{Protocol, Request};
+use crate::network::protocol::{Protocol, Request, Response};
 
 /// Protocol state machine states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +185,23 @@ impl PgProtocol {
         // No payload for Terminate, just return None
         Ok(None)
     }
+
+    /// Convert serde_json::Value to internal Value type
+    fn json_to_value(json: &serde_json::Value) -> Value {
+        match json {
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Int(i)
+                } else {
+                    // Fallback for other number types
+                    Value::Int(n.as_f64().unwrap_or(0.0) as i64)
+                }
+            }
+            serde_json::Value::String(s) => Value::String(s.clone()),
+            serde_json::Value::Null => Value::Null,
+            _ => Value::Null, // Fallback for other types (bool, object, array)
+        }
+    }
 }
 
 impl Default for PgProtocol {
@@ -226,10 +244,93 @@ impl Protocol for PgProtocol {
 
     async fn write_response(
         &mut self,
-        _stream: &mut TcpStream,
-        _response: &crate::network::protocol::Response,
+        stream: &mut TcpStream,
+        response: &Response,
     ) -> Result<(), NetworkError> {
-        // TODO: Implement in Task 11
-        todo!("write_response implementation in Task 11")
+        match response {
+            Response::QueryResult { rows } => {
+                if rows.is_empty() {
+                    // Empty result: CommandComplete("SELECT 0")
+                    stream
+                        .write_all(&pg_messages::command_complete("SELECT 0"))
+                        .await?;
+                } else {
+                    // RowDescription (use first row for column metadata)
+                    // Generate column names
+                    let col_names: Vec<String> =
+                        (0..rows[0].len()).map(|i| format!("col{}", i)).collect();
+
+                    let columns: Vec<(&str, Value)> = col_names
+                        .iter()
+                        .zip(rows[0].iter())
+                        .map(|(name, v)| (name.as_str(), Self::json_to_value(v)))
+                        .collect();
+
+                    stream
+                        .write_all(&pg_messages::row_description(&columns))
+                        .await?;
+
+                    // DataRow (each row)
+                    for row in rows {
+                        let values: Vec<Value> = row.iter().map(Self::json_to_value).collect();
+                        stream.write_all(&pg_messages::data_row(&values)).await?;
+                    }
+
+                    // CommandComplete
+                    stream
+                        .write_all(&pg_messages::command_complete(&format!(
+                            "SELECT {}",
+                            rows.len()
+                        )))
+                        .await?;
+                }
+
+                // ReadyForQuery
+                stream.write_all(&pg_messages::ready_for_query('I')).await?;
+                stream.flush().await?;
+
+                // Transition back to Ready
+                self.state = ProtocolState::Ready;
+
+                Ok(())
+            }
+            Response::AffectedRows { count } => {
+                // CommandComplete + ReadyForQuery
+                stream
+                    .write_all(&pg_messages::command_complete(&format!("INSERT {}", count)))
+                    .await?;
+                stream.write_all(&pg_messages::ready_for_query('I')).await?;
+                stream.flush().await?;
+
+                self.state = ProtocolState::Ready;
+
+                Ok(())
+            }
+            Response::Error { message } => {
+                // ErrorResponse + ReadyForQuery
+                let (severity, code) = ("ERROR", "58000");
+                stream
+                    .write_all(&pg_messages::error_response(severity, code, message))
+                    .await?;
+                stream.write_all(&pg_messages::ready_for_query('I')).await?;
+                stream.flush().await?;
+
+                self.state = ProtocolState::Ready;
+
+                Ok(())
+            }
+            Response::Pong => {
+                // Custom PING response
+                stream
+                    .write_all(&pg_messages::command_complete("PING"))
+                    .await?;
+                stream.write_all(&pg_messages::ready_for_query('I')).await?;
+                stream.flush().await?;
+
+                self.state = ProtocolState::Ready;
+
+                Ok(())
+            }
+        }
     }
 }

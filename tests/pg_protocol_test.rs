@@ -2,8 +2,10 @@
 //!
 //! Task 9: PgProtocol state machine structure
 //! Task 10: PgProtocol parse_request implementation
+//! Task 11: PgProtocol write_response implementation
 
-use rtsql::network::{PgProtocol, Protocol, Request};
+use rtsql::network::{PgProtocol, Protocol, Request, Response};
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -184,4 +186,457 @@ async fn test_terminate_message() {
     // Server parses Terminate - should return None
     let result = protocol.parse_request(&mut server).await.unwrap();
     assert!(result.is_none(), "Terminate should return None");
+}
+
+#[tokio::test]
+async fn test_response_mapping_empty_query_result() {
+    let (mut client, mut server) = create_stream_pair().await;
+
+    // Complete startup
+    let startup_msg = build_startup_message(&[("user", "test")]);
+    client.write_all(&startup_msg).await.unwrap();
+
+    let mut protocol = PgProtocol::new();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Drain startup response
+    let mut buf = [0u8; 512];
+    let _ = client.read(&mut buf).await.unwrap();
+
+    // Send a query to transition to Querying state
+    let query_msg = build_query_message("SELECT 1");
+    client.write_all(&query_msg).await.unwrap();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+    assert_eq!(protocol.state(), "Querying");
+
+    // Write empty QueryResult response
+    let response = Response::QueryResult { rows: vec![] };
+    protocol
+        .write_response(&mut server, &response)
+        .await
+        .unwrap();
+
+    // State should transition back to Ready
+    assert_eq!(protocol.state(), "Ready");
+
+    // Client reads response (may need multiple reads for TCP stream)
+    let mut total_read = 0;
+    let mut all_data = Vec::new();
+
+    // Read until we have at least some data (with timeout)
+    for _ in 0..10 {
+        let n = client.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        all_data.extend_from_slice(&buf[..n]);
+        total_read += n;
+
+        // Check if we have ReadyForQuery (end of response)
+        // Look for 'Z' message type in the data
+        if all_data
+            .windows(5)
+            .any(|w| w[0] == b'Z' && w[1] == 0 && w[2] == 0 && w[3] == 0 && w[4] == 5)
+        {
+            break;
+        }
+
+        // Give a small delay for more data
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let response_data = &all_data[..total_read];
+
+    eprintln!("Response length: {}", total_read);
+    eprintln!("Response bytes: {:?}", response_data);
+
+    // Should have CommandComplete("SELECT 0") + ReadyForQuery
+    let mut pos = 0;
+    let mut has_command_complete = false;
+    let mut has_ready = false;
+
+    while pos < response_data.len() {
+        let msg_type = response_data[pos];
+        let length = i32::from_be_bytes([
+            response_data[pos + 1],
+            response_data[pos + 2],
+            response_data[pos + 3],
+            response_data[pos + 4],
+        ]) as usize;
+
+        match msg_type {
+            b'C' => {
+                has_command_complete = true;
+                // Verify tag is "SELECT 0"
+                let tag_start = pos + 5;
+                let tag_end = pos + 1 + length - 1; // Exclude NUL
+                let tag = String::from_utf8_lossy(&response_data[tag_start..tag_end]);
+                assert!(tag.contains("SELECT 0"), "Tag should be 'SELECT 0'");
+            }
+            b'Z' => {
+                has_ready = true;
+                // Verify status is 'I' (Idle)
+                assert_eq!(response_data[pos + 5], b'I');
+            }
+            _ => {}
+        }
+        pos += 1 + length;
+    }
+
+    assert!(has_command_complete, "Should have CommandComplete");
+    assert!(has_ready, "Should have ReadyForQuery");
+}
+
+#[tokio::test]
+async fn test_response_mapping_query_result_with_rows() {
+    let (mut client, mut server) = create_stream_pair().await;
+
+    // Complete startup
+    let startup_msg = build_startup_message(&[("user", "test")]);
+    client.write_all(&startup_msg).await.unwrap();
+
+    let mut protocol = PgProtocol::new();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Drain startup response
+    let mut buf = [0u8; 1024];
+    let _ = client.read(&mut buf).await.unwrap();
+
+    // Send a query to transition to Querying state
+    let query_msg = build_query_message("SELECT 1, 2");
+    client.write_all(&query_msg).await.unwrap();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Write QueryResult with rows
+    let response = Response::QueryResult {
+        rows: vec![vec![json!(1), json!(2)], vec![json!(3), json!(4)]],
+    };
+    protocol
+        .write_response(&mut server, &response)
+        .await
+        .unwrap();
+
+    // State should transition back to Ready
+    assert_eq!(protocol.state(), "Ready");
+
+    // Client reads response (may need multiple reads for TCP stream)
+    let mut total_read = 0;
+    let mut all_data = Vec::new();
+
+    for _ in 0..10 {
+        let n = client.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        all_data.extend_from_slice(&buf[..n]);
+        total_read += n;
+
+        if all_data
+            .windows(5)
+            .any(|w| w[0] == b'Z' && w[1] == 0 && w[2] == 0 && w[3] == 0 && w[4] == 5)
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let response_data = &all_data[..total_read];
+
+    // Should have RowDescription + 2 DataRow + CommandComplete + ReadyForQuery
+    let mut pos = 0;
+    let mut has_row_description = false;
+    let mut data_row_count = 0;
+    let mut has_command_complete = false;
+    let mut has_ready = false;
+
+    while pos < response_data.len() {
+        let msg_type = response_data[pos];
+        let length = i32::from_be_bytes([
+            response_data[pos + 1],
+            response_data[pos + 2],
+            response_data[pos + 3],
+            response_data[pos + 4],
+        ]) as usize;
+
+        match msg_type {
+            b'T' => {
+                has_row_description = true;
+            }
+            b'D' => {
+                data_row_count += 1;
+            }
+            b'C' => {
+                has_command_complete = true;
+            }
+            b'Z' => {
+                has_ready = true;
+            }
+            _ => {}
+        }
+        pos += 1 + length;
+    }
+
+    assert!(has_row_description, "Should have RowDescription");
+    assert_eq!(data_row_count, 2, "Should have 2 DataRow messages");
+    assert!(has_command_complete, "Should have CommandComplete");
+    assert!(has_ready, "Should have ReadyForQuery");
+}
+
+#[tokio::test]
+async fn test_response_mapping_affected_rows() {
+    let (mut client, mut server) = create_stream_pair().await;
+
+    // Complete startup
+    let startup_msg = build_startup_message(&[("user", "test")]);
+    client.write_all(&startup_msg).await.unwrap();
+
+    let mut protocol = PgProtocol::new();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Drain startup response
+    let mut buf = [0u8; 512];
+    let _ = client.read(&mut buf).await.unwrap();
+
+    // Send an INSERT query
+    let query_msg = build_query_message("INSERT INTO test VALUES (1)");
+    client.write_all(&query_msg).await.unwrap();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Write AffectedRows response
+    let response = Response::AffectedRows { count: 5 };
+    protocol
+        .write_response(&mut server, &response)
+        .await
+        .unwrap();
+
+    // State should transition back to Ready
+    assert_eq!(protocol.state(), "Ready");
+
+    // Client reads response (may need multiple reads for TCP stream)
+    let mut total_read = 0;
+    let mut all_data = Vec::new();
+
+    for _ in 0..10 {
+        let n = client.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        all_data.extend_from_slice(&buf[..n]);
+        total_read += n;
+
+        if all_data
+            .windows(5)
+            .any(|w| w[0] == b'Z' && w[1] == 0 && w[2] == 0 && w[3] == 0 && w[4] == 5)
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let response_data = &all_data[..total_read];
+
+    // Should have CommandComplete("INSERT 5") + ReadyForQuery
+    let mut pos = 0;
+    let mut has_command_complete = false;
+    let mut has_ready = false;
+
+    while pos < response_data.len() {
+        let msg_type = response_data[pos];
+        let length = i32::from_be_bytes([
+            response_data[pos + 1],
+            response_data[pos + 2],
+            response_data[pos + 3],
+            response_data[pos + 4],
+        ]) as usize;
+
+        match msg_type {
+            b'C' => {
+                has_command_complete = true;
+                let tag_start = pos + 5;
+                let tag_end = pos + 1 + length - 1;
+                let tag = String::from_utf8_lossy(&response_data[tag_start..tag_end]);
+                assert!(tag.contains("INSERT 5"), "Tag should contain 'INSERT 5'");
+            }
+            b'Z' => {
+                has_ready = true;
+            }
+            _ => {}
+        }
+        pos += 1 + length;
+    }
+
+    assert!(has_command_complete, "Should have CommandComplete");
+    assert!(has_ready, "Should have ReadyForQuery");
+}
+
+#[tokio::test]
+async fn test_response_mapping_error() {
+    let (mut client, mut server) = create_stream_pair().await;
+
+    // Complete startup
+    let startup_msg = build_startup_message(&[("user", "test")]);
+    client.write_all(&startup_msg).await.unwrap();
+
+    let mut protocol = PgProtocol::new();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Drain startup response
+    let mut buf = [0u8; 512];
+    let _ = client.read(&mut buf).await.unwrap();
+
+    // Send a query
+    let query_msg = build_query_message("SELECT * FROM nonexistent");
+    client.write_all(&query_msg).await.unwrap();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Write Error response
+    let response = Response::Error {
+        message: "Table not found".to_string(),
+    };
+    protocol
+        .write_response(&mut server, &response)
+        .await
+        .unwrap();
+
+    // State should transition back to Ready
+    assert_eq!(protocol.state(), "Ready");
+
+    // Client reads response (may need multiple reads for TCP stream)
+    let mut total_read = 0;
+    let mut all_data = Vec::new();
+
+    for _ in 0..10 {
+        let n = client.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        all_data.extend_from_slice(&buf[..n]);
+        total_read += n;
+
+        if all_data
+            .windows(5)
+            .any(|w| w[0] == b'Z' && w[1] == 0 && w[2] == 0 && w[3] == 0 && w[4] == 5)
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let response_data = &all_data[..total_read];
+
+    // Should have ErrorResponse + ReadyForQuery
+    let mut pos = 0;
+    let mut has_error_response = false;
+    let mut has_ready = false;
+
+    while pos < response_data.len() {
+        let msg_type = response_data[pos];
+        let length = i32::from_be_bytes([
+            response_data[pos + 1],
+            response_data[pos + 2],
+            response_data[pos + 3],
+            response_data[pos + 4],
+        ]) as usize;
+
+        match msg_type {
+            b'E' => {
+                has_error_response = true;
+            }
+            b'Z' => {
+                has_ready = true;
+            }
+            _ => {}
+        }
+        pos += 1 + length;
+    }
+
+    assert!(has_error_response, "Should have ErrorResponse");
+    assert!(has_ready, "Should have ReadyForQuery");
+}
+
+#[tokio::test]
+async fn test_response_mapping_pong() {
+    let (mut client, mut server) = create_stream_pair().await;
+
+    // Complete startup
+    let startup_msg = build_startup_message(&[("user", "test")]);
+    client.write_all(&startup_msg).await.unwrap();
+
+    let mut protocol = PgProtocol::new();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Drain startup response
+    let mut buf = [0u8; 512];
+    let _ = client.read(&mut buf).await.unwrap();
+
+    // Send a PING query (custom)
+    let query_msg = build_query_message("PING");
+    client.write_all(&query_msg).await.unwrap();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // Write Pong response
+    let response = Response::Pong;
+    protocol
+        .write_response(&mut server, &response)
+        .await
+        .unwrap();
+
+    // State should transition back to Ready
+    assert_eq!(protocol.state(), "Ready");
+
+    // Client reads response (may need multiple reads for TCP stream)
+    let mut total_read = 0;
+    let mut all_data = Vec::new();
+
+    for _ in 0..10 {
+        let n = client.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        all_data.extend_from_slice(&buf[..n]);
+        total_read += n;
+
+        if all_data
+            .windows(5)
+            .any(|w| w[0] == b'Z' && w[1] == 0 && w[2] == 0 && w[3] == 0 && w[4] == 5)
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let response_data = &all_data[..total_read];
+
+    // Should have CommandComplete("PING") + ReadyForQuery
+    let mut pos = 0;
+    let mut has_command_complete = false;
+    let mut has_ready = false;
+
+    while pos < response_data.len() {
+        let msg_type = response_data[pos];
+        let length = i32::from_be_bytes([
+            response_data[pos + 1],
+            response_data[pos + 2],
+            response_data[pos + 3],
+            response_data[pos + 4],
+        ]) as usize;
+
+        match msg_type {
+            b'C' => {
+                has_command_complete = true;
+                let tag_start = pos + 5;
+                let tag_end = pos + 1 + length - 1;
+                let tag = String::from_utf8_lossy(&response_data[tag_start..tag_end]);
+                assert!(tag.contains("PING"), "Tag should be 'PING'");
+            }
+            b'Z' => {
+                has_ready = true;
+            }
+            _ => {}
+        }
+        pos += 1 + length;
+    }
+
+    assert!(has_command_complete, "Should have CommandComplete");
+    assert!(has_ready, "Should have ReadyForQuery");
 }
