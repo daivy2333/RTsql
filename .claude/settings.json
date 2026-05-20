@@ -1,0 +1,8 @@
+{
+  "enabledPlugins": {
+    "systems-programming@claude-code-workflows": true,
+    "database-design@claude-code-workflows": true,
+    "database-migrations@claude-code-workflows": true,
+    "tdd-workflows@claude-code-workflows": true
+  }
+}
