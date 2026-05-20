@@ -55,6 +55,9 @@ pub enum StorageError {
 
     #[error("invalid column type: {0}")]
     InvalidColumnType(String),
+
+    #[error("execution error: {0}")]
+    ExecutionError(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

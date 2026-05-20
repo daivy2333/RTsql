@@ -6,6 +6,7 @@ mod create_table;
 mod delete;
 mod drop_table;
 mod executor_trait;
+mod filter;
 mod index_scan;
 mod insert;
 mod plan;
@@ -19,6 +20,7 @@ pub use create_table::CreateTableExecutor;
 pub use delete::DeleteExecutor;
 pub use drop_table::DropTableExecutor;
 pub use executor_trait::Executor;
+pub use filter::FilterExecutor;
 pub use index_scan::IndexScanExecutor;
 pub use insert::InsertExecutor;
 pub use plan::{

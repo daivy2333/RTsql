@@ -746,3 +746,209 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
 
     Ok(())
 }
+
+// =============================================================================
+// FilterExecutor Tests (M9)
+// =============================================================================
+
+#[tokio::test]
+async fn test_filter_executor_gt() -> Result<()> {
+    use rtsql::executor::{ColumnExpression, ConstantExpression, ExpressionRef};
+    use rtsql::executor::{ComparisonOp, ComparisonPredicate, FilterExecutor, PredicateRef};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+    let table_meta = table_mgr.get_table("test").await?;
+
+    // Insert rows: 1, 2, 3, 4, 5
+    let values = vec![
+        vec![Value::Int(1)],
+        vec![Value::Int(2)],
+        vec![Value::Int(3)],
+        vec![Value::Int(4)],
+        vec![Value::Int(5)],
+    ];
+    let mut insert_executor =
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+    insert_executor.next().await?;
+
+    // Create predicate: id > 3
+    let pred: PredicateRef = Arc::new(ComparisonPredicate {
+        left: Arc::new(ColumnExpression {
+            column_name: "id".to_string(),
+            column_index: 0,
+        }) as ExpressionRef,
+        op: ComparisonOp::Gt,
+        right: Arc::new(ConstantExpression {
+            value: Value::Int(3),
+        }) as ExpressionRef,
+    });
+
+    // Create scan executor as input
+    let scan_executor = ScanExecutor::new(table_meta, buffer_pool, None);
+
+    // Create filter executor
+    let mut filter_executor = FilterExecutor::new(Box::new(scan_executor), pred);
+
+    // Collect filtered results
+    let mut results = Vec::new();
+    while let Some(result) = filter_executor.next().await? {
+        if let ExecResult::Row(values) = result {
+            results.push(values);
+        }
+    }
+
+    // Should get rows with id > 3: [4], [5]
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0], vec![Value::Int(4)]);
+    assert_eq!(results[1], vec![Value::Int(5)]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_filter_executor_and() -> Result<()> {
+    use rtsql::executor::{ColumnExpression, ConstantExpression, ExpressionRef};
+    use rtsql::executor::{
+        ComparisonOp, ComparisonPredicate, FilterExecutor, LogicalOp, LogicalPredicate,
+        PredicateRef,
+    };
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+    let table_meta = table_mgr.get_table("test").await?;
+
+    // Insert rows: 1, 2, 3, 4, 5
+    let values = vec![
+        vec![Value::Int(1)],
+        vec![Value::Int(2)],
+        vec![Value::Int(3)],
+        vec![Value::Int(4)],
+        vec![Value::Int(5)],
+    ];
+    let mut insert_executor =
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+    insert_executor.next().await?;
+
+    // Create predicate: id >= 2 AND id < 5
+    let pred1: PredicateRef = Arc::new(ComparisonPredicate {
+        left: Arc::new(ColumnExpression {
+            column_name: "id".to_string(),
+            column_index: 0,
+        }) as ExpressionRef,
+        op: ComparisonOp::Ge,
+        right: Arc::new(ConstantExpression {
+            value: Value::Int(2),
+        }) as ExpressionRef,
+    });
+
+    let pred2: PredicateRef = Arc::new(ComparisonPredicate {
+        left: Arc::new(ColumnExpression {
+            column_name: "id".to_string(),
+            column_index: 0,
+        }) as ExpressionRef,
+        op: ComparisonOp::Lt,
+        right: Arc::new(ConstantExpression {
+            value: Value::Int(5),
+        }) as ExpressionRef,
+    });
+
+    let pred: PredicateRef = Arc::new(LogicalPredicate {
+        left: pred1,
+        op: LogicalOp::And,
+        right: pred2,
+    });
+
+    // Create scan executor as input
+    let scan_executor = ScanExecutor::new(table_meta, buffer_pool, None);
+
+    // Create filter executor
+    let mut filter_executor = FilterExecutor::new(Box::new(scan_executor), pred);
+
+    // Collect filtered results
+    let mut results = Vec::new();
+    while let Some(result) = filter_executor.next().await? {
+        if let ExecResult::Row(values) = result {
+            results.push(values);
+        }
+    }
+
+    // Should get rows with 2 <= id < 5: [2], [3], [4]
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0], vec![Value::Int(2)]);
+    assert_eq!(results[1], vec![Value::Int(3)]);
+    assert_eq!(results[2], vec![Value::Int(4)]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_filter_executor_empty_result() -> Result<()> {
+    use rtsql::executor::{ColumnExpression, ConstantExpression, ExpressionRef};
+    use rtsql::executor::{ComparisonOp, ComparisonPredicate, FilterExecutor, PredicateRef};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+    let table_meta = table_mgr.get_table("test").await?;
+
+    // Insert rows: 1, 2, 3
+    let values = vec![
+        vec![Value::Int(1)],
+        vec![Value::Int(2)],
+        vec![Value::Int(3)],
+    ];
+    let mut insert_executor =
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+    insert_executor.next().await?;
+
+    // Create predicate: id > 100 (no rows satisfy this)
+    let pred: PredicateRef = Arc::new(ComparisonPredicate {
+        left: Arc::new(ColumnExpression {
+            column_name: "id".to_string(),
+            column_index: 0,
+        }) as ExpressionRef,
+        op: ComparisonOp::Gt,
+        right: Arc::new(ConstantExpression {
+            value: Value::Int(100),
+        }) as ExpressionRef,
+    });
+
+    // Create scan executor as input
+    let scan_executor = ScanExecutor::new(table_meta, buffer_pool, None);
+
+    // Create filter executor
+    let mut filter_executor = FilterExecutor::new(Box::new(scan_executor), pred);
+
+    // Collect filtered results (should be empty)
+    let mut count = 0;
+    while let Some(result) = filter_executor.next().await? {
+        if let ExecResult::Row(_) = result {
+            count += 1;
+        }
+    }
+
+    assert_eq!(count, 0);
+
+    Ok(())
+}
