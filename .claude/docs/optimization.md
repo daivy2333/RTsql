@@ -1,258 +1,261 @@
 # 优化方向与技术债务
 
-> 记录已识别但暂不处理的问题
-> 最后更新：2026-05-20 (M6 完成)
+> 最后更新：2026-05-20（重新规划 - 嵌入式异步高性能最佳实践）
+> 来源：嵌入式数据库异步高性能低功耗优化建议清单
 
-## 已识别的优化点
+---
 
-### M6 实现中的简化与优化机会（待 M7/M8 处理）
+## 🔴 Critical Issues（M9 必须修复）
 
-- [x] **仅网络层，mock executor**: M6 SqlHandler 返回固定值
-  - **当前状态**: SqlHandler.execute() 返回 mock Response（QueryResult 固定 RowId，AffectedRows 固定 count=1）
-  - **优化方案**: M7 整合真实 Executor + Storage + Transaction，替换 mock
-  - **预期收益**: 真实 SQL 执行流程，支持索引查找 + 数据访问
-  - **时机**: M7 数据存储层阶段
-  - **复杂度**: 高（需实现 TableManager、Row 数据存储、整合全流程）
+### 1. PageGuard 使用 std::sync::Mutex（异步环境禁忌）
 
-- [x] **JSON 协议效率低**: 序列化有开销，不兼容 psql
-  - **当前状态**: 使用 serde_json，每条消息完整序列化
-  - **优化方案**: M8 实现 PostgreSQL 有线协议（兼容 psql/pgAdmin）或 TLV 二进制协议
-  - **预期收益**: 效率提升，兼容现有工具
-  - **时机**: M8 PostgreSQL 协议阶段
-  - **复杂度**: 中（PG 协议需实现 StartupMessage、RowDescription 等多种消息）
+**问题**：
+- `PageGuard` 使用 `std::sync::Mutex`（src/storage/page_frame.rs:26）
+- 在异步环境中跨 `.await` 可能死锁
+- 阻塞整个 Tokio 工作线程，导致性能严重下降
 
-- [x] **无会话状态管理**: 单语句自动提交，无多语句事务
-  - **当前状态**: 每条 SQL 独立执行，无显式 BEGIN/COMMIT/ROLLBACK
-  - **优化方案**: M7 实现会话状态管理（当前事务ID、查询结果缓存）
-  - **预期收益**: 支持多语句事务，完整事务语义
-  - **时机**: M7 数据存储层阶段
-  - **复杂度**: 中
+**示例**：
+```rust
+pub struct PageGuard {
+    frame: Arc<Mutex<PageFrame>>,  // ❌ std::sync::Mutex
+}
+```
 
-- [x] **ConnectionHandler 无超时处理**: 连接无限等待
-  - **当前状态**: ConnectionHandler.handle() 循环等待，无超时机制
-  - **优化方案**: 添加 read timeout、idle timeout，超时自动关闭连接
-  - **预期收益**: 防止僵尸连接占用资源
-  - **时机**: M8 性能优化阶段
-  - **复杂度**: 低
+**修复方案**：
+- 改用 `tokio::sync::Mutex`（异步安全）
+- 或重构为不需要持锁跨 await 的设计
 
-- [x] **Server 单线程 accept**: TcpListener.accept() 在单协程处理
-  - **当前状态**: Server.run() 单协程 accept + spawn handler
-  - **优化方案**: 多协程 accept（高并发场景），或 accept 批量化
-  - **预期收益**: 提升高并发连接性能
-  - **时机**: M8 性能优化阶段
-  - **复杂度**: 中
+**影响范围**：
+- `src/storage/page_frame.rs`
+- `src/storage/buffer_pool.rs`
 
-### M5 实现中的简化与优化机会（待 M7 处理）
+**优先级**：🔴 Critical（M9 必须修复）
 
-- [x] **仅索引层执行，返回 RowId**: M5 未实现数据存储层
-  - **当前状态**: Executor 返回 RowId（而非完整 Row 数据）
-  - **优化方案**: M7 实现 TableManager + Row 数据存储，Executor 返回 Row
-  - **预期收益**: 完整 SQL 执行流程，支持 Scan 全表扫描
-  - **时机**: M7 数据存储层阶段
-  - **复杂度**: 高（需实现数据页格式、Row 序列化）
+---
 
-- [x] **ScanExecutor 返回 NotImplemented**: 全表扫描暂未实现
-  - **当前状态**: ScanExecutor.next() 返回 NotImplemented
-  - **优化方案**: M7 实现数据存储层遍历所有数据页
-  - **预期收益**: 支持 SELECT 无 WHERE 的全表扫描
-  - **时机**: M7 数据存储层阶段
-  - **复杂度**: 中（需遍历数据页 + slot 数组）
+### 2. page() 方法每次克隆 4KB（零拷贝缺失）
 
-- [x] **RowId 测试占位值**: Insert/Update 使用测试占位 RowId
-  - **当前状态**: InsertExecutor 使用 RowId::new(0, slot_id)，UpdateExecutor 使用 RowId::new(0, 999)
-  - **优化方案**: M7 实现真实 RowId 分配（从数据页 slot 分配）
-  - **预期收益**: 真实数据存储，支持多数据页
-  - **时机**: M7 数据存储层阶段
-  - **复杂度**: 中
+**问题**：
+- `PageGuard::page()` 每次调用都克隆整个 Page（4KB）
+- 频繁内存分配，性能开销巨大
+- 违反零拷贝原则
 
-- [x] **事务未整合到 Executor**: M5 未整合 TransactionManager
-  - **当前状态**: Executor 不持有 Transaction，MVCC 可见性判断未实现
-  - **优化方案**: M7 Executor 持有 Transaction，执行时检查可见性
-  - **预期收益**: 完整事务支持，Repeatable Read 隔离
-  - **时机**: M7 数据存储层阶段
-  - **复杂度**: 高
+**示例**：
+```rust
+pub fn page(&self) -> Page {
+    self.frame.lock().unwrap().page.clone()  // ❌ 每次分配 4KB
+}
+```
 
-### M2 实现中的简化与优化机会（待后续处理）
+**修复方案**：
+- 改为返回引用：`pub fn page(&self) -> &[u8]`
+- 或使用 `zerocopy` crate 映射固定长度字段
+- 或手写安全代码直接指向页内切片
 
-- [x] **B-Tree Split/Merge 未完整实现**: 当前仅支持单页 LeafNode 操作
-  - **当前状态**: BTree insert/delete 仅处理单个 LeafNode，页满返回 PageFull 错误
-  - **优化方案**: 实现 Split（页满时分配新页并迁移数据）和 Merge（删除时空合并相邻节点）
-  - **预期收益**: 支持大量数据索引，实现完整 B-Tree 平衡
-  - **时机**: M2 后续优化或 M5 执行引擎需求时
-  - **复杂度**: 高（涉及页分配、父节点更新、递归 Split/Merge）
+**影响范围**：
+- `src/storage/page_frame.rs`
+- `src/executor/*`（所有读页的 executor）
 
-- [x] **InternalNode traversal 占位符**: 当前未实现 InternalNode 到 LeafNode 的完整路径
-  - **当前状态**: BTree 仅操作 root LeafNode，未递归遍历 InternalNode
-  - **优化方案**: 实现 InternalNode.find_child_page_id() 的完整逻辑
-  - **预期收益**: 支持多层 B-Tree 结构（索引页 + 数据页）
-  - **时机**: Split/Merge 实现时（需要父节点管理）
-  - **复杂度**: 中（需配合 Split/Merge）
+**优先级**：🔴 Critical（M9 必须修复）
 
-- [x] **固定 Key 长度（32 bytes）**: 限制 Key 最大长度，无法处理变长数据
-  - **当前状态**: Key 结构固定 32 bytes，超出 panic
-  - **优化方案**: 实现变长 Key（动态内存管理、SlottedPage 存储优化）
-  - **预期收益**: 支持任意长度 Key，减少空间浪费
-  - **时机**: M7 性能优化或需求明确时
-  - **复杂度**: 中到高（需修改 Key、LeafNode、序列化逻辑）
+---
 
-- [x] **PageGuard 写回简化**: modify_page() 方法解决了 clone 问题，但仍有改进空间
-  - **当前状态**: 使用 modify_page() 闭包操作，需 mark_dirty
-  - **优化方案**: 实现 RAII DirtyGuard（自动标记 dirty），或零拷贝 Arc<Page> 共享
-  - **预期收益**: 减少拷贝开销，简化 API
-  - **时机**: M3 事务层或 M7 性能优化时
-  - **复杂度**: 中
+### 3. BufferPool 持锁期间做 I/O（阻塞协程）
 
-### M1 实现中的优化机会（待 M7 处理）
+**问题**：
+- `get_page()` 持写锁期间执行 `storage.read_page()`
+- I/O 操作阻塞其他协程访问缓存
+- 违反异步最佳实践
 
-- [x] **PageGuard 零拷贝**: 当前使用 `page()` 方法返回克隆，存在拷贝开销
-  - **当前状态**: 使用 Box<[u8]> + clone，简单但有效率损失
-  - **优化方案**: 实现 Deref 或使用 Arc<Page> 共享所有权
-  - **预期收益**: 减少页访问时的内存拷贝
-  - **时机**: M7 或遇到性能瓶颈时
-  - **复杂度**: 中（涉及 MutexGuard 生命周期问题）
+**示例**：
+```rust
+let mut pages = self.pages.write().await;  // 持写锁
+let page = self.storage.read_page(page_id).await?;  // I/O 阻塞其他协程
+```
 
-- [x] **await_holding_lock 警告**: BufferPool::evict_one 持有 MutexGuard 跨 await 点
-  - **当前状态**: 已用 drop 释放，但 clippy 仍警告（可接受）
-  - **优化方案**: 使用 tokio::sync::Mutex 或重构为非阻塞写回
-  - **预期收益**: 完全消除 clippy 警告
-  - **时机**: M7 或并发测试发现问题
-  - **复杂度**: 低到中
+**修复方案**：
+- 使用两阶段锁：读锁检查 → 释放 → 异步 I/O → 写锁插入
+- 或使用 `tokio::sync::Notify` 实现异步等待（无锁）
+- 创建 `PageFuture`，未命中时挂起协程，唤醒后返回页
 
-- [x] **Dirty page 批量写回**: 当前淘汰时单页写回，效率低
-  - **当前状态**: 仅淘汰时写回 dirty page
-  - **优化方案**: 实现后台定期 flush 或批量淘汰
-  - **预期收益**: 减少 sync 调用次数，提升淘汰效率
-  - **时机**: M2 或 M3（事务层需要 WAL 时）
-  - **复杂度**: 中
+**影响范围**：
+- `src/storage/buffer_pool.rs`
 
-- [x] **缓存容量动态调整**: 当前固定容量，无法适应不同负载
-  - **当前状态**: BufferPool::new(capacity) 固定容量
-  - **优化方案**: 根据可用内存或负载动态调整
-  - **预期收益**: 更好利用系统资源
-  - **时机**: M7 或需要时
-  - **复杂度**: 低
+**优先级**：🔴 Critical（M9 必须修复）
 
-### 性能优化（M7 阶段）
+---
 
-- [ ] **io_uring 零拷贝**: 替换 spawn_blocking + 同步IO，实现真异步磁盘读写
-  - **预期收益**: 减少系统调用开销，提升 I/O 吞吐
-  - **复杂度**: 高，需要深入理解 io_uring API
-  - **时机**: M7 性能深度优化阶段
+## 🟡 Important Issues（M10-M11 修复）
 
-- [ ] **页缓存策略调优**: 调整缓存大小、淘汰算法
-  - **预期收益**: 减少磁盘读取次数，提升查询速度
-  - **复杂度**: 中，需要基准测试验证
-  - **时机**: M7 性能深度优化阶段
+### 4. 二进制协议替换（JSON → Binary） - 嵌入式核心需求
 
-- [ ] **协程调度调优**: 调整工作线程数、任务优先级
-  - **预期收益**: 提升并发性能，减少协程饥饿
-  - **复杂度**: 中，需要并发基准测试
-  - **时机**: M7 性能深度优化阶段
+**问题**：
+- 当前使用 JSON 序列化（serde_json）
+- 文本格式开销大，不符合嵌入式高性能低功耗目标
+- PostgreSQL 协议文本格式（format_code=0）效率低
 
-### 功能扩展（未来版本）
+**修复方案**：
+- 实现 PostgreSQL 二进制格式（format_code=1）
+- 内部数据传输使用紧凑二进制格式（已部分实现）
+- 零拷贝解析（直接映射字节）
 
-- [ ] **LSM-Tree 索引**: 作为 B-Tree 的可选替代，适合写入密集场景
-  - **预期收益**: 提升写入性能
-  - **复杂度**: 高，需要独立模块实现
-  - **时机**: 未来版本（需求明确后）
+**影响范围**：
+- `src/network/pg_messages.rs`（DataRow）
+- `src/storage/page_format/tuple.rs`（已实现二进制，但可能优化）
+- `src/executor/value.rs`
 
-- [ ] **Raft 共识层**: 支持分布式扩展
-  - **预期收益**: 多节点高可用，数据一致性保证
-  - **复杂度**: 极高，需要网络通信 + 状态机复制
-  - **时机**: 未来版本（需求明确后）
+**优先级**：🟡 Important（M10 完成）
 
-- [ ] **PostgreSQL 有线协议**: 兼容 PostgreSQL 客户端
-  - **预期收益**: 无需专用客户端，降低使用门槛
-  - **复杂度**: 中，需要实现协议细节
-  - **时机**: M6 网络层阶段（可选）
+**注意**：我们的目标是异步高性能低功耗的嵌入式场景，二进制数据格式是核心需求！
 
-## 技术债务
+---
 
-### M5 遗留的技术债务
+### 5. MVCC 完整版本链遍历（M10）
 
-- [x] **仅索引层执行**: 未实现数据存储层，Executor 返回 RowId
-  - **影响**: 无法返回完整 Row 数据，Scan 无法实现
-  - **优先级**: 高（完整执行流程必需）
-  - **预计处理**: M6 网络层阶段（TableManager + Row 数据存储）
+**问题**：
+- M7 仅验证最新版本可见性
+- 无法访问历史版本（follow `next_version`）
+- 长时间运行版本链过长
 
-- [x] **Scan NotImplemented**: 全表扫描未实现
-  - **影响**: SELECT 无 WHERE 无法执行
-  - **优先级**: 高（完整 SQL 执行必需）
-  - **预计处理**: M6 网络层阶段
+**修复方案**：
+- 实现 `follow_version_chain()` 异步遍历
+- 版本链 GC（清理已提交的旧版本）
+- 后台协程定期清理
 
-- [x] **事务未整合**: Executor 不持有 Transaction
-  - **影响**: 无法保证事务隔离性，并发执行可能出错
-  - **优先级**: 高（事务层必需）
-  - **预计处理**: M6 网络层阶段
+**影响范围**：
+- `src/executor/index_scan.rs`
+- `src/executor/scan.rs`
+- `src/transaction/version_chain.rs`
 
-- [x] **RowId 测试占位**: 使用固定 page_id=0
-  - **影响**: 无法支持多数据页，真实数据存储受限
-  - **优先级**: 中（测试验证通过，生产需修复）
-  - **预计处理**: M6 网络层阶段
+**优先级**：🟡 Important（M10 完成）
 
-### M2 遗留的技术债务
+---
 
-- [x] **Split/Merge 未实现**: 当前 BTree 仅支持单页操作，无法处理大量数据
-  - **影响**: 页满后 insert 失败（PageFull），无法自动扩展
-  - **优先级**: 高（完整 B-Tree 必需）
-  - **预计处理**: M2 后续优化或 M5 执行引擎需求时
+### 6. WAL 后台协程（M11）
 
-- [x] **InternalNode traversal 未完整**: 仅占位符实现，无法递归查找
-  - **影响**: 无法支持多层 B-Tree（索引页 + 数据页分离）
-  - **优先级**: 中（需配合 Split/Merge）
-  - **预计处理**: Split/Merge 实现时
+**问题**：
+- WAL 写入可能阻塞查询协程
+- 缺少后台 Checkpoint 协程
+- 缺少 WAL 清理协程
 
-- [x] **固定 Key 长度限制**: 32 bytes 上限，无法处理长字符串或变长数据
-  - **影响**: 部分应用场景受限，空间浪费（短 Key 填充）
-  - **优先级**: 中（依赖需求）
-  - **预计处理**: M7 性能优化或需求明确时
+**修复方案**：
+- WAL 写入用 `tokio::spawn` 后台协程
+- Checkpoint 用独立协程定期执行
+- WAL 清理用后台协程
 
-### M1 遗留的技术债务
+**影响范围**：
+- `src/storage/wal.rs`（待实现）
+- `src/transaction/manager.rs`
 
-- [x] **PageGuard 拷贝开销**: 当前实现使用 page.clone()，非零拷贝
-  - **影响**: 每次访问页都复制 4KB 数据
-  - **优先级**: 中（需性能测试验证影响）
-  - **预计处理**: M7 或 M2（索引层需要高效访问时）
+**优先级**：🟡 Important（M11 完成）
 
-- [x] **MutexGuard 跨 await**: BufferPool::evict_one 持锁跨 await 点
-  - **影响**: clippy 警告，潜在的性能隐患
-  - **优先级**: 低（当前测试未发现问题）
-  - **预计处理**: M7 或并发压力测试时
+---
 
-- [x] **无 WAL 保护**: dirty page 淘汰时写回，无崩溃恢复保护
-  - **影响**: sync() 之间的修改可能丢失
-  - **优先级**: 高（事务层必需）
-  - **预计处理**: M3 事务层实现时（配合 WAL）
+## 🟢 Performance Optimizations（M13 可选）
 
-### 当前无技术债务
+### 7. 大查询并行化
 
-项目处于初始化阶段，无历史技术债务。
+**方案**：
+- 全表扫描按页切分
+- 用 `tokio::spawn` 启动多个子协程并行处理
+- 结果通过 `mpsc` 或 `FuturesUnordered` 收集
+- 聚合操作两阶段：局部聚合子协程 + 全局聚合父协程
 
-### 需关注的风险点
+**优先级**：🟢 Low（M13 可选）
 
-- [ ] **异步正确性**: 异步代码需确保无死锁、无协程饥饿
-  - **预防**: 编写并发测试，覆盖多事务并发场景
-  - **检查工具**: `tokio-console` 监控协程状态
+---
 
-- [ ] **内存安全**: Rust 保证内存安全，但需关注 unsafe 代码
-  - **预防**: 尽量避免 unsafe，使用安全抽象
-  - **检查工具**: `cargo miri` 检测未定义行为
+### 8. 锁精简化
 
-- [ ] **持久性保证**: WAL 实现需确保数据不丢失
-  - **预防**: 测试 crash recovery 场景
-  - **检查工具**: 模拟 crash 测试框架
+**方案**：
+- 用 `AtomicU64` 管理事务时间戳（避免锁）
+- 索引修改才用 `RwLock`，短暂持有
+- 用 `tokio::sync::Semaphore` 限制并发读取页数
 
-## 待评估的替代方案
+**优先级**：🟢 Low（M13 可选）
 
-- [x] **PageGuard 设计**: Deref vs page() 方法 vs Arc<Page>
-  - **评估维度**: 零拷贝、生命周期管理、API 易用性
-  - **当前选择**: page() 方法返回克隆（简单正确）
-  - **时机**: M2 索引层或性能瓶颈时重新评估
+---
 
-- [ ] **内存分配器选择**: jemalloc vs mimalloc
-  - **评估维度**: 内存碎片、分配速度、多线程性能
-  - **时机**: M1 文件/缓存层阶段，基准测试对比
+### 9. 语义缓存
 
-- [ ] **网络协议选择**: PostgreSQL 有线协议 vs 自定义协议
-  - **评估维度**: 客户端兼容性、实现复杂度、性能
-  - **时机**: M6 网络层阶段，根据需求决定
+**方案**：
+- SQL 逻辑计划规范化作为键
+- 结果存为 `Arc<ResultSet>`，带 MVCC 版本号
+- 多个相同查询共享结果
+- 版本变更自动失效
+
+**优先级**：🟢 Low（M13 可选）
+
+---
+
+### 10. io_uring 替换
+
+**方案**：
+- 替换 `spawn_blocking` + 同步 I/O
+- 使用 `tokio-uring` 或 `io-uring` crate
+- 真正的异步磁盘读写
+
+**优先级**：🟢 Low（M13 可选，Linux 5.1+）
+
+---
+
+## 📋 优化优先级总结
+
+| 优先级 | 问题 | 里程碑 | 说明 |
+|--------|------|--------|------|
+| 🔴 Critical | std::sync::Mutex 跨 await | M9 | 死锁风险 |
+| 🔴 Critical | 零拷贝缺失（每次克隆 4KB） | M9 | 性能开销 |
+| 🔴 Critical | BufferPool 持锁期间 I/O | M9 | 阻塞协程 |
+| 🟡 Important | 二进制协议替换 | M10 | 嵌入式核心需求 |
+| 🟡 Important | MVCC 完整版本链 | M10 | 事务完整性 |
+| 🟡 Important | WAL 后台协程 | M11 | 可靠性 |
+| 🟢 Low | 大查询并行化 | M13 | 性能优化 |
+| 🟢 Low | 锁精简化 | M13 | 性能优化 |
+| 🟢 Low | 语义缓存 | M13 | 扩展功能 |
+| 🟢 Low | io_uring | M13 | 可选优化 |
+
+---
+
+## ⚠️ 常见陷阱提醒
+
+```
+❌ 绝对不要在 .await 期间持有 std::sync::Mutex（会死锁整个工作线程）
+❌ CPU 密集操作（排序、哈希）必须用 spawn_blocking 隔离
+❌ 页缓存淘汰不要用复杂锁竞争（LRU-simple 足够）
+❌ 目前先不要引入 unsafe 做零拷贝（等火焰图确认瓶颈）
+✅ 先改改动小、收益大的（异步页缓存 + 零拷贝）
+```
+
+---
+
+## 已完成的优化（M1-M8）
+
+### M1-M7 已解决的问题
+
+- [x] **网络层实现**（M6）：Protocol trait + Server + Graceful shutdown
+- [x] **数据存储层**（M7）：TableManager + Tuple 序列化 + Executor 真实执行
+- [x] **MVCC 基础**（M7）：Snapshot 可见性 + VersionHeader（单版本）
+- [x] **PostgreSQL 协议**（M8）：Simple Query Protocol + PgProtocol 状态机
+
+### M1-M2 已解决的技术债务
+
+- [x] **ScanExecutor NotImplemented**（M7）：已实现全表扫描
+- [x] **RowId 测试占位**（M7）：已实现真实 RowId 分配
+- [x] **事务未整合**（M7）：Executor 已持有 Transaction
+- [x] **仅索引层执行**（M7）：已实现数据存储层
+
+---
+
+## 下一步行动
+
+**M9 优化重点**（Critical Issues）：
+1. ✅ 修复 `PageGuard` std::sync::Mutex → tokio::sync::Mutex
+2. ✅ 实现 `page()` 零拷贝（返回引用而非克隆）
+3. ✅ 修复 `BufferPool` 持锁期间 I/O → 异步等待
+
+**M10 优化重点**（Important Issues）：
+1. ✅ 实现二进制协议（format_code=1）- **嵌入式核心需求**
+2. ✅ 完整版本链遍历 + GC
+
+**M11 优化重点**：
+1. ✅ WAL 后台协程 + Checkpoint
