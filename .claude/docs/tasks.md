@@ -113,25 +113,97 @@
 
 **注意**: psql 真实连接测试需要安装 PostgreSQL 客户端工具
 
-## 待办 - 开发路线图
+## 待办 - 开发路线图（重新规划）
 
-### M9: 高级功能与优化
+> 嵌入式数据库核心功能优先级调整（2026-05-20）
 
-- [ ] 实现完整版本链遍历（follow next_version）
-- [ ] 实现 WAL（Write-Ahead Logging）
-- [ ] 实现版本链 GC（清理旧版本）
-- [ ] 复杂 WHERE 表达式计算
-- [ ] JOIN 多表支持
-- [ ] 替换 `io_uring`（可选）
-- [ ] 调优协程调度策略
-- [ ] 性能基准测试
+### M9: SQL 基础能力完善 🔴 高优先级
 
-**异步相关重点**: io_uring、性能调优
+**目标**: 让用户能通过 SQL 正常使用数据库
+
+- [ ] DDL: CREATE TABLE/DROP TABLE（扩展 Parser + PlanBuilder）
+- [ ] 复杂 WHERE 表达式计算（ExpressionEvaluator，支持 `AND/OR/>/<`）
+- [ ] ORDER BY 排序
+- [ ] LIMIT/OFFSET 分页
+- [ ] 聚合函数（COUNT/SUM/AVG，可选）
+
+**阻塞问题**: 当前用户必须通过 TableManager API 创建表，无法用 SQL
+
+---
+
+### M10: MVCC 完整性 🟡 中优先级
+
+**目标**: 完整的多版本并发控制
+
+- [ ] 完整版本链遍历（follow `next_version` 找第一个可见版本）
+- [ ] 版本链 GC（清理已提交的旧版本，防止版本链过长）
+- [ ] Read Committed 隔离级别（除现有 Repeatable Read）
+- [ ] 事务回滚（Abort 时清理未提交版本）
+
+**当前状态**: M7 仅验证最新版本可见性，无法访问历史版本
+
+---
+
+### M11: WAL 持久化 🔴 高优先级
+
+**目标**: 嵌入式数据库崩溃恢复能力
+
+- [ ] WAL（Write-Ahead Logging）写入流程
+- [ ] WAL 重放恢复（启动时重做未完成事务）
+- [ ] Checkpoint 机制（定期刷盘 + 截断 WAL）
+- [ ] 原子性保障（事务提交前 WAL 必须持久化）
+
+**必要性**: 嵌入式数据库崩溃恢复必需，持久化保障
+
+---
+
+### M12: JOIN 多表 🟢 低优先级
+
+**目标**: 多表查询能力
+
+- [ ] INNER JOIN 实现（两表连接）
+- [ ] LEFT/RIGHT JOIN（可选）
+- [ ] 多表 WHERE 条件
+- [ ] JoinExecutor 实现
+
+**理由**: 嵌入式场景可能单表为主，但 JOIN 是 SQL 标准功能
+
+---
+
+### M13: 性能优化与完善
+
+**目标**: 高性能嵌入式数据库
+
+- [ ] io_uring 替换（可选，Linux 5.1+）
+- [ ] 协程调度优化（Tokio 配置调优）
+- [ ] 性能基准测试（sysbench/sqllogictest）
+- [ ] 连接池（嵌入式场景可选）
+- [ ] 内存分配器优化（jemalloc/mimalloc）
+
+---
+
+### 推迟/可选功能
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| PostgreSQL Extended Protocol | 推迟 | 嵌入式数据库可能不需要 prepared statement |
+| SSL/TLS | 推迟 | 嵌入式场景通常本地访问 |
+| 二进制格式（format_code=1） | 推迟 | 文本格式足够 |
+| psql 真实连接测试 | 可选 | PostgreSQL 协议层可能分离/删除 |
+
+---
 
 ## 阻塞项
 
-- （无）
+- **当前阻塞**: 用户无法通过 SQL 创建表（必须用 TableManager API）
+- **影响范围**: 所有需要测试 SQL 功能的场景
 
-## 下一步
+---
 
-- **立即开始**: M8 里程碑 - PostgreSQL 协议 + 性能优化
+## 下一步行动
+
+**立即开始**: M9 SQL 基础能力完善
+- 优先实现 CREATE TABLE DDL
+- 然后实现 WHERE 表达式计算
+
+**里程碑顺序**: M9 → M10 → M11 → M12 → M13

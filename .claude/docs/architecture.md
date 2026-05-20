@@ -484,16 +484,30 @@ src/storage/page_format/tuple.rs  # ColumnType + serialize/deserialize
 - **低延迟**: 请求延迟微秒级，无线程阻塞和唤醒开销
 - **可伸缩性**: 工作线程数固定（等于 CPU 核数），避免上下文切换
 
-### 开发路线图
+### 开发路线图（重新规划）
 
-| 里程碑 | 内容 | 异步相关重点 |
-|--------|------|-------------|
-| M0 | 项目骨架，引入 Tokio | 确定异步运行时配置 |
-| M1 | 文件/缓存层 | 实现 `AsyncStorage` trait，使用 `spawn_blocking` 读页 | ✅ 完成 |
-| M2 | B-Tree 索引与存储引擎 | 索引同步，通过 `spawn_blocking` 暴露为 async API | ✅ 完成 |
-| M3 | 事务与 MVCC | 用异步锁实现提交等待，快照读无锁 | ✅ 完成 |
-| M4 | SQL 解析与计划 | 同步解析，生成物理计划（包含 async 节点） | ✅ 完成 |
-| M5 | 异步执行引擎 | 实现 `async fn next()` 迭代器，整合存储异步接口 | ✅ 完成 |
-| M6 | 网络层 | TCP 服务器 + Protocol trait + JSON 协议 + graceful shutdown | ✅ 完成 |
-| M7 | 数据存储层 + 全流程集成 | 实现 TableManager、Row 数据存储、整合真实 executor + MVCC | ✅ 完成 |
-| M8 | PostgreSQL 协议 + 性能优化 | PG 协议 + io_uring + 版本链遍历 + WAL | 待开始 |
+> 嵌入式数据库核心功能优先级调整（2026-05-20）
+
+| 里程碑 | 内容 | 优先级 | 异步相关重点 |
+|--------|------|--------|-------------|
+| M0 | 项目骨架，引入 Tokio | ✅ 完成 | 确定异步运行时配置 |
+| M1 | 文件/缓存层 | ✅ 完成 | 实现 `AsyncStorage` trait，使用 `spawn_blocking` 读页 |
+| M2 | B-Tree 索引与存储引擎 | ✅ 完成 | 索引同步，通过 `spawn_blocking` 暴露为 async API |
+| M3 | 事务与 MVCC | ✅ 完成 | 用异步锁实现提交等待，快照读无锁 |
+| M4 | SQL 解析与计划 | ✅ 完成 | 同步解析，生成物理计划（包含 async 节点） |
+| M5 | 异步执行引擎 | ✅ 完成 | 实现 `async fn next()` 迭代器，整合存储异步接口 |
+| M6 | 网络层 | ✅ 完成 | TCP 服务器 + Protocol trait + JSON 协议 + graceful shutdown |
+| M7 | 数据存储层 + 全流程集成 | ✅ 完成 | 实现 TableManager、Row 数据存储、整合真实 executor + MVCC |
+| M8 | PostgreSQL 协议 | ✅ 完成 | Simple Query Protocol + PgProtocol 状态机 |
+| **M9** | **SQL 基础能力完善** | 🔴 **高** | DDL: CREATE TABLE/DROP TABLE + WHERE 表达式 + ORDER BY/LIMIT |
+| **M10** | **MVCC 完整性** | 🟡 **中** | 完整版本链遍历 + 版本链 GC + Read Committed 隔离级别 |
+| **M11** | **WAL 持久化** | 🔴 **高** | WAL 写入 + 重放恢复 + Checkpoint + 崩溃恢复 |
+| **M12** | **JOIN 多表** | 🟢 **低** | INNER JOIN + LEFT/RIGHT JOIN + 多表 WHERE |
+| M13 | 性能优化与完善 | 可选 | io_uring + 协程调度优化 + 性能基准测试 |
+
+**优先级说明**:
+- 🔴 高优先级: 嵌入式数据库核心必需功能（SQL 基础 + 持久化）
+- 🟡 中优先级: 事务完整性保障（MVCC 完善）
+- 🟢 低优先级: 扩展功能（JOIN，嵌入式场景可能单表为主）
+
+**PostgreSQL 协议层（M8）**: 嵌入式数据库可能不需要外部连接，考虑分离或删除
