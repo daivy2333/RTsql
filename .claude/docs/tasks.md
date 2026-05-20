@@ -25,17 +25,20 @@
 **完成日期**: 2026-05-20
 **验证结果**: cargo build ✅, cargo test (3 passed) ✅, cargo clippy ✅
 
+### M1: 文件/缓存层 ✅
+
+- [x] 实现 `AsyncStorage` trait
+- [x] 使用 `spawn_blocking` 读页
+- [x] 实现异步 Buffer Pool
+- [x] 实现 `get_page(page_id) -> PageGuard`
+- [x] 测试页加载/淘汰逻辑
+- [x] 实现 Clock 淘汰算法
+- [x] 实现 PageGuard（引用计数 + mark_dirty）
+
+**完成日期**: 2026-05-20
+**验证结果**: cargo test (17 passed) ✅, cargo clippy (1 warning, acceptable) ✅, cargo fmt ✅
+
 ## 待办 - 开发路线图
-
-### M1: 文件/缓存层
-
-- [ ] 实现 `AsyncStorage` trait
-- [ ] 使用 `spawn_blocking` 读页
-- [ ] 实现异步 Buffer Pool
-- [ ] 实现 `get_page(page_id) -> PageFuture`
-- [ ] 测试页加载/淘汰逻辑
-
-**异步相关重点**: 实现 `AsyncStorage` trait，使用 `spawn_blocking` 读页
 
 ### M2: B-Tree 索引与存储引擎
 
@@ -97,4 +100,4 @@
 
 ## 下一步
 
-- **立即开始**: M1 里程碑 - 文件/缓存层
+- **立即开始**: M2 里程碑 - B-Tree 索引与存储引擎
