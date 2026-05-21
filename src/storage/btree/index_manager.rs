@@ -1,7 +1,9 @@
 // IndexManager 异步 API（Task 6 实现）
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::storage::{page_format::RowId, BufferPool, Result};
+use tokio::sync::RwLock;
 
 use super::{BTree, SyncPageLoader};
 
@@ -9,6 +11,7 @@ use super::{BTree, SyncPageLoader};
 /// Holds an Arc<Mutex<BTree>> and uses spawn_blocking for async operations
 pub struct IndexManager {
     btree: Arc<Mutex<BTree>>,
+    row_to_key: RwLock<HashMap<RowId, Vec<u8>>>,
 }
 
 impl IndexManager {
@@ -18,6 +21,7 @@ impl IndexManager {
         let btree = BTree::new(loader)?;
         Ok(Self {
             btree: Arc::new(Mutex::new(btree)),
+            row_to_key: RwLock::new(HashMap::new()),
         })
     }
 
@@ -27,8 +31,13 @@ impl IndexManager {
         let btree = self.btree.clone();
         // Key needs to be copied (to_vec()) to satisfy Send trait
         let key = key.to_vec();
+        let key_for_btree = key.clone();
 
-        tokio::task::spawn_blocking(move || btree.lock().unwrap().insert(&key, row_id)).await?
+        tokio::task::spawn_blocking(move || btree.lock().unwrap().insert(&key_for_btree, row_id)).await??;
+
+        // Maintain reverse mapping
+        self.row_to_key.write().await.insert(row_id, key);
+        Ok(())
     }
 
     /// Search for a key in the index
@@ -68,7 +77,17 @@ impl IndexManager {
     pub async fn update(&self, key: &[u8], new_row_id: RowId) -> Result<()> {
         let btree = self.btree.clone();
         let key = key.to_vec();
+        let key_for_btree = key.clone();
 
-        tokio::task::spawn_blocking(move || btree.lock().unwrap().update(&key, new_row_id)).await?
+        tokio::task::spawn_blocking(move || btree.lock().unwrap().update(&key_for_btree, new_row_id)).await??;
+
+        // Maintain reverse mapping
+        self.row_to_key.write().await.insert(new_row_id, key);
+        Ok(())
+    }
+
+    /// Find key by RowId (M10 reverse mapping)
+    pub async fn find_key_by_row_id(&self, row_id: RowId) -> Option<Vec<u8>> {
+        self.row_to_key.read().await.get(&row_id).cloned()
     }
 }
