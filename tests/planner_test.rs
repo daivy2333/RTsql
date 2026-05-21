@@ -487,3 +487,119 @@ fn test_parse_order_by_with_limit() {
         _ => panic!("Expected Limit plan"),
     }
 }
+
+// ============================================================================
+// JOIN Tests (Task 6: M12 INNER JOIN parsing)
+// ============================================================================
+
+#[test]
+fn test_build_join_two_tables() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("orders", vec!["id".into(), "user_id".into()], "id");
+    builder.register_table("users", vec!["id".into(), "name".into()], "id");
+
+    let sql = "SELECT * FROM orders JOIN users ON orders.user_id = users.id";
+    let stmts = parse_sql(sql).unwrap();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Join(join_node) => {
+            // 验证左表是 Scan(orders)
+            match join_node.left.as_ref() {
+                PhysicalPlan::Scan(scan) => {
+                    assert_eq!(scan.table_name, "orders");
+                }
+                _ => panic!("Expected left to be Scan"),
+            }
+
+            // 验证右表是 Scan(users)
+            match join_node.right.as_ref() {
+                PhysicalPlan::Scan(scan) => {
+                    assert_eq!(scan.table_name, "users");
+                }
+                _ => panic!("Expected right to be Scan"),
+            }
+
+            // 验证 ON 条件
+            assert_eq!(join_node.conditions.len(), 1);
+            assert_eq!(join_node.conditions[0].left_column.table, Some("orders".to_string()));
+            assert_eq!(join_node.conditions[0].left_column.column, "user_id");
+            assert_eq!(join_node.conditions[0].right_column.table, Some("users".to_string()));
+            assert_eq!(join_node.conditions[0].right_column.column, "id");
+        }
+        _ => panic!("Expected Join plan"),
+    }
+}
+
+#[test]
+fn test_build_join_and_conditions() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("orders", vec!["id".into(), "user_id".into(), "status".into()], "id");
+    builder.register_table("users", vec!["id".into(), "name".into(), "status".into()], "id");
+
+    let sql = "SELECT * FROM orders JOIN users ON orders.user_id = users.id AND orders.status = users.status";
+    let stmts = parse_sql(sql).unwrap();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Join(join_node) => {
+            assert_eq!(join_node.conditions.len(), 2);
+        }
+        _ => panic!("Expected Join plan"),
+    }
+}
+
+#[test]
+fn test_build_join_three_tables() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("orders", vec!["id".into(), "user_id".into(), "product_id".into()], "id");
+    builder.register_table("users", vec!["id".into(), "name".into()], "id");
+    builder.register_table("products", vec!["id".into(), "name".into()], "id");
+
+    let sql = "SELECT * FROM orders JOIN users ON orders.user_id = users.id JOIN products ON orders.product_id = products.id";
+    let stmts = parse_sql(sql).unwrap();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    // 顶层应该是 Join(Join(orders, users), products)
+    match plan {
+        PhysicalPlan::Join(outer_join) => {
+            // 外层右表是 products
+            match outer_join.right.as_ref() {
+                PhysicalPlan::Scan(scan) => {
+                    assert_eq!(scan.table_name, "products");
+                }
+                _ => panic!("Expected outer right to be Scan(products)"),
+            }
+
+            // 外层左表是 Join(orders, users)
+            match outer_join.left.as_ref() {
+                PhysicalPlan::Join(inner_join) => {
+                    match inner_join.left.as_ref() {
+                        PhysicalPlan::Scan(scan) => assert_eq!(scan.table_name, "orders"),
+                        _ => panic!("Expected inner left to be Scan(orders)"),
+                    }
+                    match inner_join.right.as_ref() {
+                        PhysicalPlan::Scan(scan) => assert_eq!(scan.table_name, "users"),
+                        _ => panic!("Expected inner right to be Scan(users)"),
+                    }
+                }
+                _ => panic!("Expected outer left to be Join"),
+            }
+        }
+        _ => panic!("Expected outer Join plan"),
+    }
+}
+
+#[test]
+fn test_join_ambiguous_column_error() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("orders", vec!["id".into()], "id");
+    builder.register_table("users", vec!["id".into()], "id");
+
+    let sql = "SELECT id FROM orders JOIN users ON orders.user_id = users.id";
+    let stmts = parse_sql(sql).unwrap();
+    let result = builder.build_plan(&stmts[0]);
+
+    // 应该报错（id 列在两表都存在）
+    assert!(result.is_err());
+}
