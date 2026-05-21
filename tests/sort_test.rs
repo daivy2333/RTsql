@@ -16,7 +16,7 @@ impl MockExecutor {
 
 #[async_trait::async_trait]
 impl Executor for MockExecutor {
-    async fn next(&mut self) -> crate::storage::Result<Option<ExecResult>> {
+    async fn next(&mut self) -> rtsql::storage::Result<Option<ExecResult>> {
         if self.index >= self.rows.len() {
             Ok(None)
         } else {
