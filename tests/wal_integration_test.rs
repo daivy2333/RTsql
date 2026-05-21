@@ -29,7 +29,9 @@ async fn test_wal_file_created_on_insert() {
         .unwrap();
 
         // 执行 INSERT
-        let response = db.execute_sql("INSERT INTO users VALUES (1, 'Alice')").await;
+        let response = db
+            .execute_sql("INSERT INTO users VALUES (1, 'Alice')")
+            .await;
         assert!(
             matches!(response, Response::AffectedRows { .. }),
             "INSERT failed: {:?}",
@@ -83,7 +85,8 @@ async fn test_checkpoint_site_persistence() {
             .unwrap();
 
         for i in 0..5 {
-            db.execute_sql(&format!("INSERT INTO data VALUES ({})", i)).await;
+            db.execute_sql(&format!("INSERT INTO data VALUES ({})", i))
+                .await;
         }
 
         // Checkpoint 文件应在 checkpoint 后存在

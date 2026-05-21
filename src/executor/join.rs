@@ -77,7 +77,8 @@ impl JoinExecutor {
     /// 计算右表行的哈希键（ON 条件右表列值组合）
     /// 返回 None 表示键包含 NULL，在 INNER JOIN 中不会匹配任何行
     fn build_hash_key_right(&self, row: &[Value]) -> Option<Vec<Value>> {
-        let key: Vec<Value> = self.conditions
+        let key: Vec<Value> = self
+            .conditions
             .iter()
             .map(|cond| {
                 let idx = self
@@ -98,7 +99,8 @@ impl JoinExecutor {
     /// 计算左表行的哈希键（ON 条件左表列值组合）
     /// 返回 None 表示键包含 NULL，在 INNER JOIN 中不会匹配任何行
     fn build_hash_key_left(&self, row: &[Value]) -> Option<Vec<Value>> {
-        let key: Vec<Value> = self.conditions
+        let key: Vec<Value> = self
+            .conditions
             .iter()
             .map(|cond| {
                 let idx = self
@@ -146,10 +148,7 @@ impl Executor for JoinExecutor {
                     while let Some(result) = self.right_executor.next().await? {
                         if let ExecResult::Row(row) = result {
                             if let Some(hash_key) = self.build_hash_key_right(&row) {
-                                self.right_hashmap
-                                    .entry(hash_key)
-                                    .or_default()
-                                    .push(row);
+                                self.right_hashmap.entry(hash_key).or_default().push(row);
                             }
                         }
                     }

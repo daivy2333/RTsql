@@ -522,9 +522,15 @@ fn test_build_join_two_tables() {
 
             // 验证 ON 条件
             assert_eq!(join_node.conditions.len(), 1);
-            assert_eq!(join_node.conditions[0].left_column.table, Some("orders".to_string()));
+            assert_eq!(
+                join_node.conditions[0].left_column.table,
+                Some("orders".to_string())
+            );
             assert_eq!(join_node.conditions[0].left_column.column, "user_id");
-            assert_eq!(join_node.conditions[0].right_column.table, Some("users".to_string()));
+            assert_eq!(
+                join_node.conditions[0].right_column.table,
+                Some("users".to_string())
+            );
             assert_eq!(join_node.conditions[0].right_column.column, "id");
         }
         _ => panic!("Expected Join plan"),
@@ -534,8 +540,16 @@ fn test_build_join_two_tables() {
 #[test]
 fn test_build_join_and_conditions() {
     let mut builder = PlanBuilder::new();
-    builder.register_table("orders", vec!["id".into(), "user_id".into(), "status".into()], "id");
-    builder.register_table("users", vec!["id".into(), "name".into(), "status".into()], "id");
+    builder.register_table(
+        "orders",
+        vec!["id".into(), "user_id".into(), "status".into()],
+        "id",
+    );
+    builder.register_table(
+        "users",
+        vec!["id".into(), "name".into(), "status".into()],
+        "id",
+    );
 
     let sql = "SELECT * FROM orders JOIN users ON orders.user_id = users.id AND orders.status = users.status";
     let stmts = parse_sql(sql).unwrap();
@@ -552,7 +566,11 @@ fn test_build_join_and_conditions() {
 #[test]
 fn test_build_join_three_tables() {
     let mut builder = PlanBuilder::new();
-    builder.register_table("orders", vec!["id".into(), "user_id".into(), "product_id".into()], "id");
+    builder.register_table(
+        "orders",
+        vec!["id".into(), "user_id".into(), "product_id".into()],
+        "id",
+    );
     builder.register_table("users", vec!["id".into(), "name".into()], "id");
     builder.register_table("products", vec!["id".into(), "name".into()], "id");
 

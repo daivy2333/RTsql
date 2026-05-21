@@ -39,11 +39,13 @@ impl CheckpointManager {
             return Ok(None);
         }
 
-        let mut file = File::open(&self.checkpoint_path)
-            .map_err(|e| WalError::IoError(e.to_string()))?;
+        let mut file =
+            File::open(&self.checkpoint_path).map_err(|e| WalError::IoError(e.to_string()))?;
 
         let mut buf = [0u8; 16];
-        let bytes_read = file.read(&mut buf).map_err(|e| WalError::IoError(e.to_string()))?;
+        let bytes_read = file
+            .read(&mut buf)
+            .map_err(|e| WalError::IoError(e.to_string()))?;
 
         if bytes_read < 16 {
             return Ok(None); // 部分位点，视为无效
@@ -68,9 +70,11 @@ impl CheckpointManager {
         buf[..8].copy_from_slice(&lsn.to_le_bytes());
         buf[8..].copy_from_slice(&timestamp.to_le_bytes());
 
-        file.write_all(&buf).map_err(|e| WalError::IoError(e.to_string()))?;
+        file.write_all(&buf)
+            .map_err(|e| WalError::IoError(e.to_string()))?;
 
-        file.sync_all().map_err(|e| WalError::IoError(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| WalError::IoError(e.to_string()))?;
 
         Ok(())
     }

@@ -659,7 +659,9 @@ async fn test_create_table_executor_success() -> Result<()> {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap()),
+        wal_writer: Arc::new(
+            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+        ),
     });
 
     let plan = PhysicalPlan::CreateTable(rtsql::executor::CreateTableNode {
@@ -695,7 +697,9 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap()),
+        wal_writer: Arc::new(
+            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+        ),
     });
 
     // Create table first time (using storage::ColumnType)
@@ -742,7 +746,9 @@ async fn test_drop_table_executor_success() -> Result<()> {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap()),
+        wal_writer: Arc::new(
+            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+        ),
     });
 
     // Create table first
@@ -784,7 +790,9 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap()),
+        wal_writer: Arc::new(
+            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+        ),
     });
 
     // Try to drop a non-existent table without IF EXISTS
@@ -817,7 +825,9 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap()),
+        wal_writer: Arc::new(
+            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+        ),
     });
 
     // Drop a non-existent table with IF EXISTS - should succeed without error

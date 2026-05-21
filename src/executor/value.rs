@@ -68,7 +68,7 @@ impl Hash for Value {
         match self {
             Value::Int(n) => n.hash(state),
             Value::String(s) => s.hash(state),
-            Value::Null => {} // Null 没有额外数据
+            Value::Null => {}                           // Null 没有额外数据
             Value::Float(f) => f.to_bits().hash(state), // 使用位表示进行哈希
             Value::Bool(b) => b.hash(state),
         }
