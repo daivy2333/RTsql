@@ -25,7 +25,7 @@ pub use index_scan::IndexScanExecutor;
 pub use insert::InsertExecutor;
 pub use plan::{
     ColumnConstraint, ColumnDef, CreateTableNode, DeleteNode, DropTableNode, FilterNode,
-    IndexScanNode, InsertNode, PhysicalPlan, ScanNode, UpdateNode,
+    IndexScanNode, InsertNode, LimitNode, OrderByColumn, PhysicalPlan, ScanNode, SortNode, UpdateNode,
 };
 pub use predicate::{
     ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,
