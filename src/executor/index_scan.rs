@@ -51,22 +51,23 @@ impl Executor for IndexScanExecutor {
 
         match row_id {
             Some(id) => {
-                let (version_header, tuple_bytes) =
-                    read_tuple_from_data_page(&self.buffer_pool, id).await?;
-
-                // MVCC visibility check (M7: only check latest version)
                 if let Some(ref snapshot) = self.snapshot {
-                    let create_tx = version_header.create_tx_id();
-                    let commit_tx = version_header.commit_tx_id();
-                    let visible = snapshot.is_visible(create_tx, commit_tx)
-                        || snapshot.is_visible_self(create_tx, commit_tx);
-                    if !visible {
-                        return Ok(None);
-                    }
-                }
+                    // M10: Use find_visible_version for version chain traversal
+                    let tuple_bytes = self.buffer_pool.find_visible_version(id, snapshot).await?;
 
-                let values = deserialize_tuple(&tuple_bytes, &self.schema)?;
-                Ok(Some(ExecResult::Row(values)))
+                    match tuple_bytes {
+                        Some(data) => {
+                            let values = deserialize_tuple(&data, &self.schema)?;
+                            Ok(Some(ExecResult::Row(values)))
+                        }
+                        None => Ok(None), // All versions invisible
+                    }
+                } else {
+                    // No snapshot: read latest version (backward compat)
+                    let (_, tuple_bytes) = read_tuple_from_data_page(&self.buffer_pool, id).await?;
+                    let values = deserialize_tuple(&tuple_bytes, &self.schema)?;
+                    Ok(Some(ExecResult::Row(values)))
+                }
             }
             None => Ok(None),
         }
