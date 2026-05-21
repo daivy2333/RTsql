@@ -95,9 +95,9 @@
 **验证结果**: cargo test (157 passed) ✅, cargo clippy ✅, cargo fmt ✅
 **新增文件**: database.rs, pipeline.rs, tuple.rs, table_manager.rs, data_page.rs, e2e_test.rs
 **新增测试**: 34 个（tuple:6 + table_mgr:6 + data_page:5 + executor:+4 MVCC + e2e:7 + table_manager:6）
-**MVCC 范围**: M7 仅验证最新版本可见性，完整版本链遍历推迟到 M8
+**MVCC 范围**: M7 仅验证最新版本可见性，完整版本链遍历推迟到 M10
 
-### M8: PostgreSQL 协议 + 性能优化
+### M8: PostgreSQL 协议 ✅
 
 - [x] 实现 PostgreSQL 有线协议（Simple Query Protocol）
 - [x] 实现 pg_messages 消息序列化层
@@ -113,21 +113,45 @@
 
 **注意**: psql 真实连接测试需要安装 PostgreSQL 客户端工具
 
-## 待办 - 开发路线图（重新规划）
+### M9 Phase 1: SQL 基础能力完善 - DDL + WHERE ✅
+
+**目标**: 解决用户无法通过 SQL 创建表的阻塞，实现 WHERE 条件过滤
+
+- [x] DDL: CREATE TABLE（扩展 Parser + PlanBuilder + Executor）
+- [x] DDL: DROP TABLE IF EXISTS（扩展 Parser + PlanBuilder + Executor）
+- [x] 列类型扩展: FLOAT + BOOL（Value + ColumnType + 序列化）
+- [x] Value 比较方法: equals/gt/lt/ge/le（支持跨类型 Int vs Float）
+- [x] Predicate trait + Expression trait（表达式求值器）
+- [x] ComparisonPredicate（6 种比较操作）
+- [x] LogicalPredicate（AND/OR 逻辑操作）
+- [x] FilterExecutor（WHERE 条件过滤）
+- [x] WHERE 解析（build_where + build_expression）
+- [x] Pipeline 集成（DDL + WHERE 执行流程）
+- [x] 所有测试通过（232 tests）
+
+**完成日期**: 2026-05-20
+**验证结果**: cargo test (232 passed) ✅, cargo clippy ✅, cargo fmt ✅
+**新增文件**: predicate.rs, filter.rs, create_table.rs, drop_table.rs, predicate_test.rs, pipeline_test.rs, value_test.rs
+**新增测试**: 40+ 个（predicate:12 + planner:+5 + executor:+3 + pipeline:9 + value:19）
+**解决的阻塞**: 用户现在可以通过 SQL 创建表（无需 TableManager API）
+
+---
+
+## 待办 - 开发路线图（M9 第二阶段 - M13）
 
 > 嵌入式数据库核心功能优先级调整（2026-05-20）
 
-### M9: SQL 基础能力完善 🔴 高优先级
+### M9 Phase 2: ORDER BY + LIMIT/OFFSET 🔴 高优先级
 
-**目标**: 让用户能通过 SQL 正常使用数据库
+**目标**: 完善 SQL 查询能力
 
-- [ ] DDL: CREATE TABLE/DROP TABLE（扩展 Parser + PlanBuilder）
-- [ ] 复杂 WHERE 表达式计算（ExpressionEvaluator，支持 `AND/OR/>/<`）
-- [ ] ORDER BY 排序
-- [ ] LIMIT/OFFSET 分页
-- [ ] 聚合函数（COUNT/SUM/AVG，可选）
+- [ ] ORDER BY 排序（单列/多列，ASC/DESC）
+- [ ] LIMIT 分页（限制返回行数）
+- [ ] OFFSET 分页（跳过前 N 行）
+- [ ] SortExecutor 实现（排序算子）
+- [ ] LimitExecutor 实现（分页算子）
 
-**阻塞问题**: 当前用户必须通过 TableManager API 创建表，无法用 SQL
+**理由**: SQL 基础能力继续完善，WHERE + ORDER BY + LIMIT 是最常用的查询组合
 
 ---
 
@@ -190,20 +214,20 @@
 | SSL/TLS | 推迟 | 嵌入式场景通常本地访问 |
 | 二进制格式（format_code=1） | 推迟 | 文本格式足够 |
 | psql 真实连接测试 | 可选 | PostgreSQL 协议层可能分离/删除 |
+| 聚合函数（COUNT/SUM/AVG） | 推迟 | M9 Phase 2 或后续里程碑 |
 
 ---
 
 ## 阻塞项
 
-- **当前阻塞**: 用户无法通过 SQL 创建表（必须用 TableManager API）
-- **影响范围**: 所有需要测试 SQL 功能的场景
+- **当前阻塞**: 无（M9 Phase 1 已解决 DDL阻塞）
 
 ---
 
 ## 下一步行动
 
-**立即开始**: M9 SQL 基础能力完善
-- 优先实现 CREATE TABLE DDL
-- 然后实现 WHERE 表达式计算
+**立即开始**: M9 第二阶段（ORDER BY + LIMIT/OFFSET）
+- 优先实现 ORDER BY 排序（单列）
+- 然后实现 LIMIT/OFFSET 分页
 
-**里程碑顺序**: M9 → M10 → M11 → M12 → M13
+**里程碑顺序**: M9 Phase 2 → M10 → M11 → M12 → M13

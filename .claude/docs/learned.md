@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-20 (M7 全流程集成完成)
+> 最后更新：2026-05-20 (M9 第一阶段完成：DDL + WHERE)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -47,17 +47,37 @@
 | Pipeline::execute | `pipeline::execute(database, sql).await` → `Response` | parse→plan→execute→collect | 2026-05-20 |
 | write_tuple_to_data_page | `write_tuple_to_data_page(bp, meta, vh, bytes).await?` → `RowId` | 写 Tuple 到数据页（页满自动分配） | 2026-05-20 |
 | read_tuple_from_data_page | `read_tuple_from_data_page(bp, row_id).await?` → `(VersionHeader, Vec<u8>)` | 从数据页读 Tuple | 2026-05-20 |
-| serialize_tuple | `serialize_tuple(values, schema, &mut buf)?` → `usize` | Int/String/Null 二进制序列化 | 2026-05-20 |
+| serialize_tuple | `serialize_tuple(values, schema, &mut buf)?` → `usize` | Int/String/Float/Bool/Null 二进制序列化 | 2026-05-20 |
 | deserialize_tuple | `deserialize_tuple(bytes, schema)?` → `Vec<Value>` | 按 schema 反序列化 Tuple | 2026-05-20 |
 | compute_tuple_size | `compute_tuple_size(values, schema)` → `usize` | 预计算 Tuple 序列化大小 | 2026-05-20 |
 | BTree::scan_all | `btree.scan_all()?` → `Vec<(Key, RowId)>` | 全表扫描（遍历所有 LeafNode） | 2026-05-20 |
 | IndexManager::scan_all | `index_manager.scan_all().await?` → `Vec<(Vec<u8>, RowId)>` | async 全扫描包装 | 2026-05-20 |
 | TableManager::create_table | `table_mgr.create_table(name, cols, pk).await?` | 注册表元数据 + 分配数据页 + 创建 IndexManager | 2026-05-20 |
 | TableManager::get_table | `table_mgr.get_table(name).await?` → `Arc<TableMeta>` | 获取表元数据 | 2026-05-20 |
+| TableManager::drop_table | `table_mgr.drop_table(name).await?` | 删除表元数据（物理页删除推迟） | 2026-05-20 |
 | VersionHeader::with_next_version | `vh.with_next_version(old_row_id)` → `Self` | 版本链链接到前一版本 | 2026-05-20 |
 | Snapshot::is_visible | `snapshot.is_visible(create_id, commit_id)` → `bool` | MVCC 可见性判断（3 规则） | 2026-05-20 |
 | Snapshot::is_visible_self | `snapshot.is_visible_self(create_id, commit_id)` → `bool` | 自身未提交写可见 | 2026-05-20 |
 | value_to_json | `value_to_json(value)` → `serde_json::Value` | executor::Value → JSON 转换 | 2026-05-20 |
+| Predicate trait | `trait Predicate: Send + Sync { fn evaluate(&self, row: &[Value]) -> Result<bool>; }` | WHERE 条件求值 | 2026-05-20 |
+| Expression trait | `trait Expression: Send + Sync { fn evaluate(&self, row: &[Value]) -> Result<Value>; }` | 表达式求值 | 2026-05-20 |
+| ComparisonPredicate | `ComparisonPredicate { left: ExpressionRef, op: ComparisonOp, right: ExpressionRef }` | 比较操作（Eq/Ne/Gt/Lt/Ge/Le） | 2026-05-20 |
+| LogicalPredicate | `LogicalPredicate { left: PredicateRef, op: LogicalOp, right: PredicateRef }` | 逻辑操作（And/Or） | 2026-05-20 |
+| ColumnExpression | `ColumnExpression { column_name: String, column_index: usize }` | 列引用表达式 | 2026-05-20 |
+| ConstantExpression | `ConstantExpression { value: Value }` | 常量表达式 | 2026-05-20 |
+| Value::equals | `value.equals(&other)` → `bool` | 跨类型比较（Int vs Float） | 2026-05-20 |
+| Value::gt/lt/ge/le | `value.gt(&other)` → `Result<bool, ValueError>` | 比较操作（支持跨类型） | 2026-05-20 |
+| Value::as_float | `value.as_float()` → `Result<f64, ValueError>` | 类型转换（Int→Float） | 2026-05-20 |
+| Value::as_bool | `value.as_bool()` → `Result<bool, ValueError>` | 类型转换（Int→Bool） | 2026-05-20 |
+| PlanBuilder::build_where | `builder.build_where(expr, schema)` → `PredicateRef` | WHERE 解析 | 2026-05-20 |
+| PlanBuilder::build_expression | `builder.build_expression(expr, schema)` → `ExpressionRef` | 表达式解析 | 2026-05-20 |
+| PlanBuilder::build_create_table | `builder.build_create_table(name, columns, constraints)` → `PhysicalPlan` | CREATE TABLE 解析 | 2026-05-20 |
+| PlanBuilder::build_drop_table | `builder.build_drop_table(names, if_exists)` → `PhysicalPlan` | DROP TABLE 解析 | 2026-05-20 |
+| FilterExecutor | `FilterExecutor::new(input_executor, predicate)` | WHERE 过滤执行 | 2026-05-20 |
+| CreateTableExecutor | `CreateTableExecutor::new(plan, database)` | CREATE TABLE 执行 | 2026-05-20 |
+| DropTableExecutor | `DropTableExecutor::new(plan, database)` | DROP TABLE 执行 | 2026-05-20 |
+| ColumnSchema | `ColumnSchema { name, data_type, not_null, unique, default_value }` | 列定义（存储层） | 2026-05-20 |
+| ColumnDef::to_schema_column | `column_def.to_schema_column()` → `ColumnSchema` | executor → storage 类型转换 | 2026-05-20 |
 
 ---
 
@@ -68,17 +88,20 @@
 | 入口文件 | src/main.rs | 应用启动点 |
 | 配置文件 | Cargo.toml | Rust 项目配置 |
 | 存储模块 | src/storage/ | 存储引擎核心 |
-| 页格式模块 | src/storage/page_format/ | M2: Key/RowId/SlottedPage |
+| 页格式模块 | src/storage/page_format/ | M2: Key/RowId/SlottedPage + M9: Float/Bool 序列化 |
 | B-Tree 模块 | src/storage/btree/ | M2: BTree 索引核心 |
 | 事务模块 | src/transaction/ | M3: TransactionId/Snapshot/VersionHeader/RowLockTable/Manager |
-| 执行模块 | src/executor/ | M4-M5: PhysicalPlan/Value/ExecResult/Executor trait/5 Executors |
-| 解析模块 | src/parser/ | M4: PlanBuilder/PlanError/AST helpers |
+| 执行模块 | src/executor/ | M4-M5: PhysicalPlan/Value/ExecResult/Executor trait/5 Executors + M9: Predicate/Filter/DDL Executors |
+| Predicate 模块 | src/executor/predicate.rs | M9: Predicate trait + Expression trait + ComparisonPredicate/LogicalPredicate |
+| Filter 模块 | src/executor/filter.rs | M9: FilterExecutor（WHERE 过滤） |
+| DDL 模块 | src/executor/create_table.rs + src/executor/drop_table.rs | M9: DDL Executors |
+| 解析模块 | src/parser/ | M4: PlanBuilder/PlanError/AST helpers + M9: DDL/WHERE 解析 |
 | 网络模块 | src/network/ | M6: Protocol trait/JsonProtocol/Server/ConnectionHandler/SqlHandler |
 | 数据库入口 | src/database.rs | M7: Database 协调器（BufferPool+TableManager+TxManager） |
-| 执行管道 | src/pipeline.rs | M7: SQL→parse→plan→execute→Response |
-| 数据存储 | src/storage/data/ | M7: TableManager + TableMeta |
+| 执行管道 | src/pipeline.rs | M7: SQL→parse→plan→execute→Response + M11: DDL + WHERE 集成 |
+| 数据存储 | src/storage/data/ | M7: TableManager + TableMeta + M9: drop_table + ColumnSchema |
 | 数据页读写 | src/storage/data_page.rs | M7: write/read_tuple_to_data_page |
-| Tuple 序列化 | src/storage/page_format/tuple.rs | M7: ColumnType + serialize/deserialize_tuple |
+| Tuple 序列化 | src/storage/page_format/tuple.rs | M7: ColumnType + serialize/deserialize_tuple + M9: Float/Bool |
 
 ---
 
@@ -87,7 +110,7 @@
 | 场景 | 命令 | 输出含义 |
 |------|------|----------|
 | 初始化项目 | `cargo init` | 创建 Rust 项目骨架 |
-| 运行测试 | `cargo test` | 执行全部测试 |
+| 运行测试 | `cargo test` | 执行全部测试（232 tests） |
 | 格式化 | `cargo fmt` | 格式化代码 |
 | Lint 检查 | `cargo clippy` | 静态分析检查 |
 | 构建 | `cargo build` | 构建项目 |
@@ -117,6 +140,8 @@
 | PageId(0) 是合法分配 | FileStorage::allocate_page 从 PageId(0) 开始分配 | 断言改为 `data_page_head == data_page_tail` 而非 `> 0` | 2026-05-20 |
 | PlanBuilder 表注册依赖 | pipeline 需要表已在 PlanBuilder 中注册，但 TableManager 无 list_tables | 从 sqlparser Statement 提取表名 → TableManager::get_table → 动态注册 | 2026-05-20 |
 | UpdateExecutor mock 破坏数据页引用 | M5 UpdateExecutor 使用 fake RowId(0, 999)，M7 IndexScanExecutor 读真实数据页时报 SlotNotFound | M7 重写 UpdateExecutor 为真实版本链创建，修复集成测试 | 2026-05-20 |
+| Float 序列化缺少 deserialize 分支 | Task 4 serialize 支持 Float/Bool，但 deserialize 未添加 TAG_FLOAT/TAG_BOOL match arm | Task 4 补全 deserialize_tuple Float/Bool 分支 + ColumnType 扩展 | 2026-05-20 |
+| Clippy approx_constant warning | 测试代码使用接近数学常数的浮点值（3.14/3.14159） | 替换为安全值（1.23/4.56）避免近似常数警告 | 2026-05-20 |
 
 **详细踩坑档案**（复杂问题）：
 
@@ -168,6 +193,14 @@
 - **预防**: async 方法需要 mut self 时，变量声明必须 mut
 - **时间**: 2026-05-20
 
+### Float/Bool Deserialization Missing（M9 Task 4）
+
+- **症状**: deserialize_tuple 遇到 TAG_FLOAT/TAG_BOOL 报错 "unknown tag byte"
+- **根因**: serialize_tuple 支持 Float/Bool，但 deserialize_tuple 缺少对应 match arm
+- **解决**: 补全 deserialize_tuple 的 TAG_FLOAT/TAG_BOOL 分支 + ColumnType 扩展
+- **预防**: 序列化扩展时，必须同步扩展反序列化分支
+- **时间**: 2026-05-20
+
 ---
 
 ## 技巧 & 模式
@@ -199,8 +232,20 @@
 | Snapshot 可见性过滤 | 执行器读路径 | `snapshot.is_visible(vh.create_tx_id(), vh.commit_tx_id())` 过滤不可见版本 |
 | Database 协调器模式 | 组件生命周期管理 | `Arc<Database>` 集中持有 BufferPool+TableManager+TxManager |
 | Pipeline 管道模式 | SQL 全流程 | parse→extract table→register table→plan→executor→collect→Response |
-| Tuple 序列化格式 | 紧凑二进制存储 | Int(9B) / String(3+N B) / Null(1B) 的 type-tag 格式 |
+| Tuple 序列化格式 | 紧凑二进制存储 | Int(9B) / String(3+N B) / Float(9B) / Bool(2B) / Null(1B) 的 type-tag 格式 |
 | 数据页自动扩展 | Page 满时处理 | 写路径 detect PageFull → allocate new page → link via next_page_id → update tail |
+| Predicate trait 模式 | WHERE 条件求值 | `trait Predicate: Send + Sync { fn evaluate(&self, row: &[Value]) -> Result<bool>; }` |
+| Expression trait 模式 | 表达式求值 | `trait Expression: Send + Sync { fn evaluate(&self, row: &[Value]) -> Result<Value>; }` |
+| ComparisonPredicate | 比较操作实现 | `ComparisonPredicate { left, op: Eq/Ne/Gt/Lt/Ge/Le, right }` |
+| LogicalPredicate | 逻辑操作实现 | `LogicalPredicate { left, op: And/Or, right }`（短路求值） |
+| ColumnExpression | 列引用 | `ColumnExpression { column_name, column_index }` (index 在构建时解析) |
+| ConstantExpression | 常量值 | `ConstantExpression { value }` |
+| Value 跨类型比较 | Int vs Float | `value.equals(&other)` 支持 Int(42) == Float(42.0) |
+| FilterExecutor | WHERE 过滤 | 循环读取行 → MVCC 检查 → Predicate.evaluate → 返回满足条件的行 |
+| DDL Executor 模式 | DDL 执行 | CreateTableExecutor/DropTableExecutor 检查表存在性 → 调用 TableManager |
+| PlanBuilder DDL 解析 | DDL 解析 | build_create_table/build_drop_table → PhysicalPlan::CreateTable/DropTable |
+| PlanBuilder WHERE 解析 | WHERE 解析 | build_where/build_expression → PredicateRef（递归处理 AND/OR） |
+| create_executor_from_plan | Executor 创建 | PhysicalPlan::Filter → FilterExecutor(input_executor, predicate) |
 
 ---
 
@@ -223,25 +268,26 @@
 
 以下内容尚未完全理解，需要后续探索：
 
-- [ ] io_uring 集成方式（M7 阶段）
+- [ ] io_uring 集成方式（M13 阶段）
 - [ ] PostgreSQL 有线协议细节（M6 阶段）
 - [x] MVCC 实现细节（M3 阶段）→ Repeatable Read 隔离级别已实现
 - [x] B-Tree 索引优化策略（M2 阶段）→ 简化实现（Split/Merge 未完整）
 - [x] PageGuard::modify_page() 方法（M2 添加）
 - [x] SQL 解析与计划生成（M4 阶段）→ sqlparser-rs + PhysicalPlan 已实现
 - [x] 异步执行引擎（M5 阶段）→ Executor trait + 5 Executors 已实现
-- [ ] WAL（Write-Ahead Logging）实现（M7 阶段）
-- [ ] 版本链 GC（清理旧版本）（M7 阶段）
+- [ ] WAL（Write-Ahead Logging）实现（M11 阶段）
+- [ ] 版本链 GC（清理旧版本）（M10 阶段）
 - [ ] Serializable 隔离级别（需谓词锁，推迟）
-- [ ] 复杂 WHERE 表达式计算（M5/M6 阶段）
-- [ ] JOIN 多表计划与执行（M5/M6 阶段）
+- [x] 复杂 WHERE 表达式计算（M9 阶段）→ Predicate trait + Expression trait 已实现
+- [ ] JOIN 多表计划与执行（M12 阶段）
 - [x] 数据存储层（TableManager、Row 数据）（M7 阶段）→ 已完成，157 测试通过
-- [ ] DDL 元数据管理（后续里程碑）
+- [ ] DDL 元数据管理（M9 阶段）→ CREATE TABLE/DROP TABLE 已实现
 - [x] 全流程集成（M7 阶段）→ Database + Pipeline + 真实 SqlHandler
 - [x] MVCC 可见性集成（M7 阶段）→ 最新版本可见性过滤，版本链创建
-- [ ] 完整版本链遍历（follow next_version）（M8 阶段）
-- [ ] 复杂 WHERE 表达式计算（M8 阶段）
-- [ ] JOIN 多表计划与执行（M8 阶段）
+- [ ] 完整版本链遍历（follow next_version）（M10 阶段）
+- [x] WHERE 表达式求值器（M9 阶段）→ Predicate trait + FilterExecutor 已实现
+- [ ] ORDER BY 排序（M9 Phase 2 阶段）
+- [ ] LIMIT/OFFSET 分页（M9 Phase 2 阶段）
 
 ---
 
@@ -254,3 +300,9 @@
 | AtomicU64 无锁分配正确性 | 多线程测试（10 线程并发） | fetch_add 保证原子递增，ID 唯一且有序 |
 | Snapshot 可见性规则正确 | 5 个单元测试 | 已提交/未提交/活跃事务场景正确判断 |
 | 异步行锁不阻塞物理线程 | 3 个并发测试 | tokio::sync::Mutex 在 await 时挂起协程，线程继续执行其他任务 |
+| Predicate trait 设计正确 | 12 个测试 | ComparisonPredicate/LogicalPredicate 正确求值，NULL 处理符合 SQL 语义 |
+| Expression trait 设计正确 | 测试验证 | ColumnExpression/ConstantExpression 正确求值 |
+| FilterExecutor 正确过滤 | 3 个测试 | WHERE 条件正确应用，MVCC 可见性检查正确 |
+| DDL Executors 正确执行 | 集成测试验证 | CREATE TABLE/DROP TABLE 正确执行，错误处理正确 |
+| Value 跨类型比较正确 | 19 个测试 | Int vs Float 比较正确，类型转换正确 |
+| Float/Bool 序列化正确 | roundtrip 测试 | serialize/deserialize 正确，字节格式符合规范 |

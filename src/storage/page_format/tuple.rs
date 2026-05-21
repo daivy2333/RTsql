@@ -271,8 +271,8 @@ mod tests {
 
     #[test]
     fn serialize_float_roundtrip() {
-        let v = roundtrip_single(Value::Float(3.14159), ColumnType::Float);
-        assert_eq!(v, Value::Float(3.14159));
+        let v = roundtrip_single(Value::Float(1.23), ColumnType::Float);
+        assert_eq!(v, Value::Float(1.23));
     }
 
     #[test]

@@ -25,11 +25,11 @@ fn test_value_equals_string() {
 
 #[test]
 fn test_value_equals_float() {
-    let v1 = Value::Float(3.14);
-    let v2 = Value::Float(3.14);
+    let v1 = Value::Float(1.23);
+    let v2 = Value::Float(1.23);
     assert!(v1.equals(&v2));
 
-    let v3 = Value::Float(2.71);
+    let v3 = Value::Float(4.56);
     assert!(!v1.equals(&v3));
 }
 
@@ -76,8 +76,8 @@ fn test_value_gt_int() {
 
 #[test]
 fn test_value_lt_float() {
-    let v1 = Value::Float(2.71);
-    let v2 = Value::Float(3.14);
+    let v1 = Value::Float(1.23);
+    let v2 = Value::Float(4.56);
     assert!(v1.lt(&v2).unwrap());
     assert!(!v2.lt(&v1).unwrap());
 }
@@ -95,11 +95,11 @@ fn test_value_ge() {
 
 #[test]
 fn test_value_le() {
-    let v1 = Value::Float(3.14);
-    let v2 = Value::Float(3.14);
+    let v1 = Value::Float(1.23);
+    let v2 = Value::Float(1.23);
     assert!(v1.le(&v2).unwrap());
 
-    let v3 = Value::Float(2.71);
+    let v3 = Value::Float(0.99);
     assert!(v3.le(&v1).unwrap());
     assert!(!v1.le(&v3).unwrap());
 }
@@ -107,8 +107,8 @@ fn test_value_le() {
 #[test]
 fn test_as_float() {
     // Float 转 Float
-    let v1 = Value::Float(3.14);
-    assert_eq!(v1.as_float().unwrap(), 3.14);
+    let v1 = Value::Float(1.23);
+    assert_eq!(v1.as_float().unwrap(), 1.23);
 
     // Int 转 Float（隐式转换）
     let v2 = Value::Int(42);
@@ -150,7 +150,7 @@ fn test_as_bool_error() {
     assert!(matches!(v1.as_bool(), Err(ValueError::TypeMismatch)));
 
     // Float 不能转 Bool
-    let v2 = Value::Float(3.14);
+    let v2 = Value::Float(1.23);
     assert!(matches!(v2.as_bool(), Err(ValueError::TypeMismatch)));
 
     // Null 不能转 Bool
@@ -195,8 +195,8 @@ fn test_type_mismatch_comparison() {
 
 #[test]
 fn test_display_float() {
-    let v = Value::Float(3.14);
-    assert_eq!(format!("{}", v), "3.14");
+    let v = Value::Float(1.23);
+    assert_eq!(format!("{}", v), "1.23");
 }
 
 #[test]
