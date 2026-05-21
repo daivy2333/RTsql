@@ -4,12 +4,12 @@
 //! - [record_type: 1B][record_len: 4B LE][record_data: variable]
 //!
 //! 记录类型：
-//! - Insert: table_id + row_id + data
-//! - Update: table_id + row_id + old_data + new_data
-//! - Delete: table_id + row_id
-//! - Commit: tx_id
+//! - Insert: tx_id + table_name + row_id + tuple_data
+//! - Update: tx_id + table_name + row_id + old_tuple + new_tuple
+//! - Delete: tx_id + table_name + row_id
+//! - Commit: tx_id + timestamp
 //! - Abort: tx_id
-//! - Checkpoint: active_tx_ids
+//! - Checkpoint: lsn + timestamp
 
 use crate::storage::RowId;
 use std::fmt;
@@ -47,25 +47,31 @@ impl TryFrom<u8> for WalRecordType {
 pub enum WalRecord {
     /// 插入记录
     Insert {
-        table_id: u32,
+        tx_id: u64,
+        table_name: String,
         row_id: RowId,
-        data: Vec<u8>,
+        tuple_data: Vec<u8>,
     },
     /// 更新记录
     Update {
-        table_id: u32,
+        tx_id: u64,
+        table_name: String,
         row_id: RowId,
-        old_data: Vec<u8>,
-        new_data: Vec<u8>,
+        old_tuple: Vec<u8>,
+        new_tuple: Vec<u8>,
     },
     /// 删除记录
-    Delete { table_id: u32, row_id: RowId },
+    Delete {
+        tx_id: u64,
+        table_name: String,
+        row_id: RowId,
+    },
     /// 事务提交
-    Commit { tx_id: u64 },
+    Commit { tx_id: u64, timestamp: u64 },
     /// 事务回滚
     Abort { tx_id: u64 },
     /// 检查点
-    Checkpoint { active_tx_ids: Vec<u64> },
+    Checkpoint { lsn: u64, timestamp: u64 },
 }
 
 impl WalRecord {
@@ -135,43 +141,48 @@ impl WalRecord {
 
         match self {
             WalRecord::Insert {
-                table_id,
+                tx_id,
+                table_name,
                 row_id,
-                data: record_data,
+                tuple_data,
             } => {
-                data.extend_from_slice(&table_id.to_le_bytes());
-                let mut row_id_buf = vec![0u8; RowId::SIZE];
-                row_id.serialize(&mut row_id_buf);
-                data.extend(row_id_buf);
-                data.extend(serialize_bytes(record_data));
+                data.extend_from_slice(&tx_id.to_le_bytes());
+                serialize_string(&mut data, table_name);
+                serialize_row_id(&mut data, row_id);
+                data.extend(serialize_bytes(tuple_data));
             }
             WalRecord::Update {
-                table_id,
+                tx_id,
+                table_name,
                 row_id,
-                old_data,
-                new_data,
+                old_tuple,
+                new_tuple,
             } => {
-                data.extend_from_slice(&table_id.to_le_bytes());
-                let mut row_id_buf = vec![0u8; RowId::SIZE];
-                row_id.serialize(&mut row_id_buf);
-                data.extend(row_id_buf);
-                data.extend(serialize_bytes(old_data));
-                data.extend(serialize_bytes(new_data));
+                data.extend_from_slice(&tx_id.to_le_bytes());
+                serialize_string(&mut data, table_name);
+                serialize_row_id(&mut data, row_id);
+                data.extend(serialize_bytes(old_tuple));
+                data.extend(serialize_bytes(new_tuple));
             }
-            WalRecord::Delete { table_id, row_id } => {
-                data.extend_from_slice(&table_id.to_le_bytes());
-                let mut row_id_buf = vec![0u8; RowId::SIZE];
-                row_id.serialize(&mut row_id_buf);
-                data.extend(row_id_buf);
+            WalRecord::Delete {
+                tx_id,
+                table_name,
+                row_id,
+            } => {
+                data.extend_from_slice(&tx_id.to_le_bytes());
+                serialize_string(&mut data, table_name);
+                serialize_row_id(&mut data, row_id);
             }
-            WalRecord::Commit { tx_id } | WalRecord::Abort { tx_id } => {
+            WalRecord::Commit { tx_id, timestamp } => {
+                data.extend_from_slice(&tx_id.to_le_bytes());
+                data.extend_from_slice(&timestamp.to_le_bytes());
+            }
+            WalRecord::Abort { tx_id } => {
                 data.extend_from_slice(&tx_id.to_le_bytes());
             }
-            WalRecord::Checkpoint { active_tx_ids } => {
-                data.extend_from_slice(&(active_tx_ids.len() as u32).to_le_bytes());
-                for tx_id in active_tx_ids {
-                    data.extend_from_slice(&tx_id.to_le_bytes());
-                }
+            WalRecord::Checkpoint { lsn, timestamp } => {
+                data.extend_from_slice(&lsn.to_le_bytes());
+                data.extend_from_slice(&timestamp.to_le_bytes());
             }
         }
 
@@ -182,49 +193,70 @@ impl WalRecord {
     fn deserialize_data(record_type: WalRecordType, buf: &[u8]) -> Result<Self, WalError> {
         match record_type {
             WalRecordType::Insert => {
-                if buf.len() < 10 {
-                    return Err(WalError::IncompleteRecord);
-                }
-                let table_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                let row_id = RowId::deserialize(&buf[4..10]);
-                let data = deserialize_bytes(&buf[10..])?;
-                Ok(WalRecord::Insert {
-                    table_id,
-                    row_id,
-                    data,
-                })
-            }
-            WalRecordType::Update => {
-                if buf.len() < 10 {
-                    return Err(WalError::IncompleteRecord);
-                }
-                let table_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                let row_id = RowId::deserialize(&buf[4..10]);
-                let (old_data, consumed) = deserialize_bytes_with_len(&buf[10..])?;
-                let new_data = deserialize_bytes(&buf[10 + consumed..])?;
-                Ok(WalRecord::Update {
-                    table_id,
-                    row_id,
-                    old_data,
-                    new_data,
-                })
-            }
-            WalRecordType::Delete => {
-                if buf.len() < 10 {
-                    return Err(WalError::IncompleteRecord);
-                }
-                let table_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                let row_id = RowId::deserialize(&buf[4..10]);
-                Ok(WalRecord::Delete { table_id, row_id })
-            }
-            WalRecordType::Commit => {
                 if buf.len() < 8 {
                     return Err(WalError::IncompleteRecord);
                 }
                 let tx_id = u64::from_le_bytes([
                     buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
                 ]);
-                Ok(WalRecord::Commit { tx_id })
+                let (table_name, consumed1) = read_string(&buf[8..])?;
+                let offset = 8 + consumed1;
+                let row_id = read_row_id(&buf[offset..])?;
+                let tuple_data = deserialize_bytes(&buf[offset + 6..])?;
+                Ok(WalRecord::Insert {
+                    tx_id,
+                    table_name,
+                    row_id,
+                    tuple_data,
+                })
+            }
+            WalRecordType::Update => {
+                if buf.len() < 8 {
+                    return Err(WalError::IncompleteRecord);
+                }
+                let tx_id = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                let (table_name, consumed1) = read_string(&buf[8..])?;
+                let offset = 8 + consumed1;
+                let row_id = read_row_id(&buf[offset..])?;
+                let (old_tuple, consumed2) = deserialize_bytes_with_len(&buf[offset + 6..])?;
+                let new_tuple = deserialize_bytes(&buf[offset + 6 + consumed2..])?;
+                Ok(WalRecord::Update {
+                    tx_id,
+                    table_name,
+                    row_id,
+                    old_tuple,
+                    new_tuple,
+                })
+            }
+            WalRecordType::Delete => {
+                if buf.len() < 8 {
+                    return Err(WalError::IncompleteRecord);
+                }
+                let tx_id = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                let (table_name, consumed1) = read_string(&buf[8..])?;
+                let offset = 8 + consumed1;
+                let row_id = read_row_id(&buf[offset..])?;
+                Ok(WalRecord::Delete {
+                    tx_id,
+                    table_name,
+                    row_id,
+                })
+            }
+            WalRecordType::Commit => {
+                if buf.len() < 16 {
+                    return Err(WalError::IncompleteRecord);
+                }
+                let tx_id = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                let timestamp = u64::from_le_bytes([
+                    buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+                ]);
+                Ok(WalRecord::Commit { tx_id, timestamp })
             }
             WalRecordType::Abort => {
                 if buf.len() < 8 {
@@ -236,29 +268,16 @@ impl WalRecord {
                 Ok(WalRecord::Abort { tx_id })
             }
             WalRecordType::Checkpoint => {
-                if buf.len() < 4 {
+                if buf.len() < 16 {
                     return Err(WalError::IncompleteRecord);
                 }
-                let count = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-                if buf.len() < 4 + count * 8 {
-                    return Err(WalError::IncompleteRecord);
-                }
-                let mut active_tx_ids = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = 4 + i * 8;
-                    let tx_id = u64::from_le_bytes([
-                        buf[offset],
-                        buf[offset + 1],
-                        buf[offset + 2],
-                        buf[offset + 3],
-                        buf[offset + 4],
-                        buf[offset + 5],
-                        buf[offset + 6],
-                        buf[offset + 7],
-                    ]);
-                    active_tx_ids.push(tx_id);
-                }
-                Ok(WalRecord::Checkpoint { active_tx_ids })
+                let lsn = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                let timestamp = u64::from_le_bytes([
+                    buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+                ]);
+                Ok(WalRecord::Checkpoint { lsn, timestamp })
             }
         }
     }
@@ -268,44 +287,56 @@ impl fmt::Display for WalRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WalRecord::Insert {
-                table_id,
+                tx_id,
+                table_name,
                 row_id,
-                data,
+                tuple_data,
             } => {
                 write!(
                     f,
-                    "Insert(table={}, row={}, data_len={})",
-                    table_id,
+                    "Insert(tx={}, table={}, row={}, data_len={})",
+                    tx_id,
+                    table_name,
                     row_id,
-                    data.len()
+                    tuple_data.len()
                 )
             }
             WalRecord::Update {
-                table_id,
+                tx_id,
+                table_name,
                 row_id,
-                old_data,
-                new_data,
+                old_tuple,
+                new_tuple,
             } => {
                 write!(
                     f,
-                    "Update(table={}, row={}, old_len={}, new_len={})",
-                    table_id,
+                    "Update(tx={}, table={}, row={}, old_len={}, new_len={})",
+                    tx_id,
+                    table_name,
                     row_id,
-                    old_data.len(),
-                    new_data.len()
+                    old_tuple.len(),
+                    new_tuple.len()
                 )
             }
-            WalRecord::Delete { table_id, row_id } => {
-                write!(f, "Delete(table={}, row={})", table_id, row_id)
+            WalRecord::Delete {
+                tx_id,
+                table_name,
+                row_id,
+            } => {
+                write!(
+                    f,
+                    "Delete(tx={}, table={}, row={})",
+                    tx_id, table_name, row_id
+                )
             }
-            WalRecord::Commit { tx_id } => {
-                write!(f, "Commit(tx={})", tx_id)
+            WalRecord::Commit { tx_id, timestamp } => {
+                write!(f, "Commit(tx={}, ts={})", tx_id, timestamp)
             }
             WalRecord::Abort { tx_id } => {
                 write!(f, "Abort(tx={})", tx_id)
             }
-            WalRecord::Checkpoint { active_tx_ids } => {
-                write!(f, "Checkpoint(active={:?})", active_tx_ids)
+            WalRecord::Checkpoint { lsn, timestamp } => {
+                write!(f, "Checkpoint(lsn={}, ts={})", lsn, timestamp)
             }
         }
     }
@@ -318,6 +349,8 @@ pub enum WalError {
     IncompleteRecord,
     /// 无效的记录类型
     InvalidRecordType(u8),
+    /// 无效的 UTF-8 字符串
+    InvalidUtf8,
     /// IO 错误
     IoError(String),
 }
@@ -327,6 +360,7 @@ impl std::fmt::Display for WalError {
         match self {
             WalError::IncompleteRecord => write!(f, "Incomplete WAL record"),
             WalError::InvalidRecordType(t) => write!(f, "Invalid WAL record type: 0x{:02X}", t),
+            WalError::InvalidUtf8 => write!(f, "Invalid UTF-8 string in WAL record"),
             WalError::IoError(msg) => write!(f, "WAL IO error: {}", msg),
         }
     }
@@ -372,6 +406,46 @@ fn deserialize_bytes_with_len(buf: &[u8]) -> Result<(Vec<u8>, usize), WalError> 
     Ok((buf[4..4 + len].to_vec(), 4 + len))
 }
 
+/// 序列化字符串
+///
+/// 格式: [len: 2B LE][UTF-8 bytes]
+pub fn serialize_string(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    buf.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+/// 读取字符串，返回 (字符串, 消耗的字节数)
+pub fn read_string(buf: &[u8]) -> Result<(String, usize), WalError> {
+    if buf.len() < 2 {
+        return Err(WalError::IncompleteRecord);
+    }
+    let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+    if buf.len() < 2 + len {
+        return Err(WalError::IncompleteRecord);
+    }
+    let s = std::str::from_utf8(&buf[2..2 + len]).map_err(|_| WalError::InvalidUtf8)?;
+    Ok((s.to_string(), 2 + len))
+}
+
+/// 序列化 RowId
+///
+/// 格式: [page_id: 4B LE][slot_id: 2B LE]
+pub fn serialize_row_id(buf: &mut Vec<u8>, row_id: &RowId) {
+    buf.extend_from_slice(&row_id.page_id.to_le_bytes());
+    buf.extend_from_slice(&row_id.slot_id.to_le_bytes());
+}
+
+/// 读取 RowId
+pub fn read_row_id(buf: &[u8]) -> Result<RowId, WalError> {
+    if buf.len() < 6 {
+        return Err(WalError::IncompleteRecord);
+    }
+    let page_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let slot_id = u16::from_le_bytes([buf[4], buf[5]]);
+    Ok(RowId::new(page_id, slot_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,7 +466,8 @@ mod tests {
     #[test]
     fn test_delete_record() {
         let record = WalRecord::Delete {
-            table_id: 1,
+            tx_id: 123,
+            table_name: "users".to_string(),
             row_id: RowId::new(2, 3),
         };
         let serialized = record.serialize();
@@ -404,6 +479,30 @@ mod tests {
     #[test]
     fn test_abort_record() {
         let record = WalRecord::Abort { tx_id: 999 };
+        let serialized = record.serialize();
+        let (deserialized, consumed) = WalRecord::deserialize(&serialized).unwrap();
+        assert_eq!(consumed, serialized.len());
+        assert_eq!(record, deserialized);
+    }
+
+    #[test]
+    fn test_commit_record() {
+        let record = WalRecord::Commit {
+            tx_id: 12345,
+            timestamp: 67890,
+        };
+        let serialized = record.serialize();
+        let (deserialized, consumed) = WalRecord::deserialize(&serialized).unwrap();
+        assert_eq!(consumed, serialized.len());
+        assert_eq!(record, deserialized);
+    }
+
+    #[test]
+    fn test_checkpoint_record() {
+        let record = WalRecord::Checkpoint {
+            lsn: 100,
+            timestamp: 200,
+        };
         let serialized = record.serialize();
         let (deserialized, consumed) = WalRecord::deserialize(&serialized).unwrap();
         assert_eq!(consumed, serialized.len());
