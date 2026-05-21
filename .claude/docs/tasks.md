@@ -1,6 +1,6 @@
 # 任务清单
 
-> 最后更新：2026-05-20
+> 最后更新：2026-05-21
 
 ## 进行中
 
@@ -135,25 +135,29 @@
 **新增测试**: 40+ 个（predicate:12 + planner:+5 + executor:+3 + pipeline:9 + value:19）
 **解决的阻塞**: 用户现在可以通过 SQL 创建表（无需 TableManager API）
 
+### M9 Phase 2: ORDER BY + LIMIT/OFFSET ✅
+
+**目标**: 完善 SQL 查询能力（排序 + 分页）
+
+- [x] PhysicalPlan 节点：SortNode + LimitNode + OrderByColumn
+- [x] SortExecutor 实现（内存排序，列名映射，NULL 末尾处理）
+- [x] LimitExecutor 实现（OFFSET 跳过 + LIMIT 限制）
+- [x] Parser ORDER BY + LIMIT/OFFSET 解析（build_query 扩展）
+- [x] Pipeline 集成（递归 executor 创建）
+- [x] 端到端测试验证（SELECT WHERE ORDER BY LIMIT）
+- [x] 所有测试通过（256 tests）
+
+**完成日期**: 2026-05-21
+**验证结果**: cargo test (256 passed) ✅, cargo clippy ✅, cargo fmt ✅
+**新增文件**: sort.rs, limit.rs, sort_test.rs, limit_test.rs
+**新增测试**: 24 个（sort:6 + limit:5 + planner:5 + pipeline:3 + sort_unit:5）
+**关键修复**: Column index mapping bug（Task 9 发现并修复）
+
 ---
 
-## 待办 - 开发路线图（M9 第二阶段 - M13）
+## 待办 - 开发路线图（M10 - M13）
 
-> 嵌入式数据库核心功能优先级调整（2026-05-20）
-
-### M9 Phase 2: ORDER BY + LIMIT/OFFSET 🔴 高优先级
-
-**目标**: 完善 SQL 查询能力
-
-- [ ] ORDER BY 排序（单列/多列，ASC/DESC）
-- [ ] LIMIT 分页（限制返回行数）
-- [ ] OFFSET 分页（跳过前 N 行）
-- [ ] SortExecutor 实现（排序算子）
-- [ ] LimitExecutor 实现（分页算子）
-
-**理由**: SQL 基础能力继续完善，WHERE + ORDER BY + LIMIT 是最常用的查询组合
-
----
+> 嵌入式数据库核心功能优先级调整（2026-05-21）
 
 ### M10: MVCC 完整性 🟡 中优先级
 

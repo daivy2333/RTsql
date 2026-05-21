@@ -1,12 +1,12 @@
 # 项目快照
 
-> 最后更新：2026-05-20
+> 最后更新：2026-05-21
 
 ## 当前状态
 
-- **阶段**: M9 第一阶段完成（DDL + WHERE 表达式求值器）
+- **阶段**: M9 第二阶段完成（ORDER BY + LIMIT/OFFSET）
 - **状态**: 正常
-- **当前里程碑**: M9 第二阶段准备开始（ORDER BY + LIMIT/OFFSET）
+- **当前里程碑**: M10 准备开始（MVCC 完整性）
 
 ## 项目结构
 
@@ -20,7 +20,7 @@ RTsql/
 │   ├── main.rs             # 数据库服务器入口
 │   ├── lib.rs              # 库入口，导出模块公共接口
 │   ├── database.rs         # M7 新增：Database 协调器结构
-│   ├── pipeline.rs         # M7 新增：SQL 执行管道 [M11 扩展：DDL + WHERE]
+│   ├── pipeline.rs         # M7 新增：SQL 执行管道 [M9 扩展：DDL + WHERE + ORDER BY + LIMIT]
 │   └── storage/
 │       ├── mod.rs          # 存储模块导出
 │       ├── error.rs        # StorageError (含 SlotNotFound/TableNotFound/DuplicateTable) [M9 扩展：TableAlreadyExists/ConstraintViolation]
