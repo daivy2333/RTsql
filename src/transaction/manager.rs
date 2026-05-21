@@ -282,4 +282,34 @@ mod tests {
         // tx_versions should be empty initially
         assert!(manager.tx_versions().await.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_record_version_single() {
+        let manager = TransactionManager::new();
+        let row_id = RowId::new(1, 0);
+        manager.record_version(1, row_id).await;
+        let versions = manager.get_tx_versions(1).await;
+        assert!(versions.contains(&row_id));
+        assert_eq!(versions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_record_version_multiple() {
+        let manager = TransactionManager::new();
+        let row_id1 = RowId::new(1, 0);
+        let row_id2 = RowId::new(2, 0);
+        manager.record_version(1, row_id1).await;
+        manager.record_version(1, row_id2).await;
+        let versions = manager.get_tx_versions(1).await;
+        assert!(versions.contains(&row_id1));
+        assert!(versions.contains(&row_id2));
+        assert_eq!(versions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_tx_versions_empty() {
+        let manager = TransactionManager::new();
+        let versions = manager.get_tx_versions(999).await;
+        assert!(versions.is_empty());
+    }
 }
