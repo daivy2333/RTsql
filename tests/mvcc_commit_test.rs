@@ -40,7 +40,11 @@ async fn test_uncommitted_version_not_visible() -> Result<()> {
 
     // Get the row_id
     let key = 1i64.to_be_bytes();
-    let row_id = table_meta.index_manager.search(&key).await?.expect("row should exist");
+    let row_id = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("row should exist");
 
     // Create a snapshot for tx_id = 2 (which started after tx_id = 1 began)
     // tx_id = 1 is in the active list, so it should not be visible to tx_id = 2
@@ -49,10 +53,15 @@ async fn test_uncommitted_version_not_visible() -> Result<()> {
     // Check visibility: tx_id = 2 should NOT see the uncommitted version from tx_id = 1
     // Note: commit_tx_id is None because tx_id = 1 has not committed
     let visible = snapshot_tx2.is_visible(1, None);
-    assert!(!visible, "tx_id=2 should not see uncommitted version from tx_id=1");
+    assert!(
+        !visible,
+        "tx_id=2 should not see uncommitted version from tx_id=1"
+    );
 
     // Also test with find_visible_version
-    let visible_tuple = buffer_pool.find_visible_version(row_id, &snapshot_tx2).await?;
+    let visible_tuple = buffer_pool
+        .find_visible_version(row_id, &snapshot_tx2)
+        .await?;
     assert!(
         visible_tuple.is_none(),
         "find_visible_version should return None for uncommitted version"
@@ -93,7 +102,11 @@ async fn test_committed_version_visible() -> Result<()> {
 
     // Get the row_id
     let key = 100i64.to_be_bytes();
-    let row_id = table_meta.index_manager.search(&key).await?.expect("row should exist");
+    let row_id = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("row should exist");
 
     // Begin tx_id = 2 (after tx_id = 1, before tx_id = 1 commits)
     let tx2 = tx_manager.begin().await;
@@ -116,20 +129,22 @@ async fn test_committed_version_visible() -> Result<()> {
     // Create a new snapshot for tx_id = 3 (which starts after tx_id = 1 committed)
     // Active list should not include tx_id = 1
     let active_txs = tx_manager.active_transactions().await;
-    assert!(!active_txs.contains(&tx1_id), "tx_id=1 should not be in active list after commit");
+    assert!(
+        !active_txs.contains(&tx1_id),
+        "tx_id=1 should not be in active list after commit"
+    );
 
     let tx3 = tx_manager.begin().await;
     let snapshot_tx3 = tx3.snapshot();
 
     // tx_id = 3 should see tx_id = 1's committed version
     let visible = snapshot_tx3.is_visible(tx1_id, Some(tx1_id));
-    assert!(
-        visible,
-        "tx_id=3 should see committed version from tx_id=1"
-    );
+    assert!(visible, "tx_id=3 should see committed version from tx_id=1");
 
     // Also test with find_visible_version for tx_id = 3
-    let visible_tuple = buffer_pool.find_visible_version(row_id, &snapshot_tx3).await?;
+    let visible_tuple = buffer_pool
+        .find_visible_version(row_id, &snapshot_tx3)
+        .await?;
     assert!(
         visible_tuple.is_some(),
         "find_visible_version should return the tuple for committed version"
@@ -181,7 +196,11 @@ async fn test_tx_versions_cleared_after_commit() -> Result<()> {
 
     // Verify tx_versions has the version
     let versions_before = tx_manager.get_tx_versions(tx_id).await;
-    assert_eq!(versions_before.len(), 1, "tx_versions should have 1 version before commit");
+    assert_eq!(
+        versions_before.len(),
+        1,
+        "tx_versions should have 1 version before commit"
+    );
 
     // Commit the transaction
     tx_manager.commit(tx, &buffer_pool).await?;
@@ -229,7 +248,11 @@ async fn test_self_visibility() -> Result<()> {
 
     // Get the row_id
     let key = 999i64.to_be_bytes();
-    let row_id = table_meta.index_manager.search(&key).await?.expect("row should exist");
+    let row_id = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("row should exist");
 
     // The transaction should be able to see its own uncommitted version
     let visible_self = snapshot.is_visible_self(tx_id, None);

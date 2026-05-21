@@ -109,7 +109,11 @@ async fn test_abort_update_reverts_to_previous_version() {
 
     // Verify v1 is visible
     let found = table_meta.index_manager.search(key).await.unwrap();
-    assert_eq!(found, Some(row_id_v1), "v1 should be visible after tx1 commit");
+    assert_eq!(
+        found,
+        Some(row_id_v1),
+        "v1 should be visible after tx1 commit"
+    );
 
     // Tx2: Update to v2 (value=20)
     let tx2 = tx_manager.begin().await;
@@ -138,7 +142,11 @@ async fn test_abort_update_reverts_to_previous_version() {
 
     // Verify v2 is visible
     let found = table_meta.index_manager.search(key).await.unwrap();
-    assert_eq!(found, Some(row_id_v2), "v2 should be visible before tx2 abort");
+    assert_eq!(
+        found,
+        Some(row_id_v2),
+        "v2 should be visible before tx2 abort"
+    );
 
     // Abort tx2
     tx_manager
@@ -149,7 +157,8 @@ async fn test_abort_update_reverts_to_previous_version() {
     // After abort, should still see v1 (index should be updated to point back to v1)
     let found = table_meta.index_manager.search(key).await.unwrap();
     assert_eq!(
-        found, Some(row_id_v1),
+        found,
+        Some(row_id_v1),
         "v1 should still be visible after tx2 abort - index should point back to v1"
     );
 }
@@ -171,7 +180,11 @@ async fn test_multiple_aborts() {
         .unwrap();
 
     tx_manager.record_version(tx1_id, row_id).await;
-    table_meta.index_manager.insert(b"key1", row_id).await.unwrap();
+    table_meta
+        .index_manager
+        .insert(b"key1", row_id)
+        .await
+        .unwrap();
     tx_manager.commit(tx1, &buffer_pool).await.unwrap();
 
     // Tx2: Insert and abort
@@ -179,34 +192,34 @@ async fn test_multiple_aborts() {
     let tx2_id = tx2.id();
 
     let version_header2 = VersionHeader::new(tx2_id, None);
-    let row_id2 = write_tuple_to_data_page(
-        &buffer_pool,
-        &table_meta,
-        &version_header2,
-        &tuple_bytes,
-    )
-    .await
-    .unwrap();
+    let row_id2 =
+        write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header2, &tuple_bytes)
+            .await
+            .unwrap();
 
     tx_manager.record_version(tx2_id, row_id2).await;
-    table_meta.index_manager.insert(b"key2", row_id2).await.unwrap();
+    table_meta
+        .index_manager
+        .insert(b"key2", row_id2)
+        .await
+        .unwrap();
 
     // Tx3: Insert and abort
     let tx3 = tx_manager.begin().await;
     let tx3_id = tx3.id();
 
     let version_header3 = VersionHeader::new(tx3_id, None);
-    let row_id3 = write_tuple_to_data_page(
-        &buffer_pool,
-        &table_meta,
-        &version_header3,
-        &tuple_bytes,
-    )
-    .await
-    .unwrap();
+    let row_id3 =
+        write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header3, &tuple_bytes)
+            .await
+            .unwrap();
 
     tx_manager.record_version(tx3_id, row_id3).await;
-    table_meta.index_manager.insert(b"key3", row_id3).await.unwrap();
+    table_meta
+        .index_manager
+        .insert(b"key3", row_id3)
+        .await
+        .unwrap();
 
     // Abort both tx2 and tx3
     tx_manager
@@ -220,17 +233,32 @@ async fn test_multiple_aborts() {
 
     // key1 should still exist
     assert!(
-        table_meta.index_manager.search(b"key1").await.unwrap().is_some(),
+        table_meta
+            .index_manager
+            .search(b"key1")
+            .await
+            .unwrap()
+            .is_some(),
         "Committed key1 should still exist"
     );
 
     // key2 and key3 should not exist
     assert!(
-        table_meta.index_manager.search(b"key2").await.unwrap().is_none(),
+        table_meta
+            .index_manager
+            .search(b"key2")
+            .await
+            .unwrap()
+            .is_none(),
         "Aborted key2 should not exist"
     );
     assert!(
-        table_meta.index_manager.search(b"key3").await.unwrap().is_none(),
+        table_meta
+            .index_manager
+            .search(b"key3")
+            .await
+            .unwrap()
+            .is_none(),
         "Aborted key3 should not exist"
     );
 }

@@ -28,8 +28,13 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
 
     let key_bytes = 100i64.to_be_bytes();
     let values = vec![vec![Value::Int(100)]];
-    let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager,
+        values,
+        0,
+    );
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 
@@ -85,8 +90,13 @@ async fn test_insert_then_index_scan() -> Result<()> {
         vec![Value::Int(100)],
         vec![Value::Int(200)],
     ];
-    let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager,
+        values,
+        0,
+    );
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(3)));
 
@@ -137,8 +147,13 @@ async fn test_insert_update_scan_flow() -> Result<()> {
 
     let key_bytes = 1i64.to_be_bytes();
     let values = vec![vec![Value::Int(1)]];
-    let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager.clone(), values, 0);
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager.clone(),
+        values,
+        0,
+    );
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 
@@ -184,8 +199,13 @@ async fn test_multiple_operations_sequence() -> Result<()> {
 
     for i in 1i64..=3 {
         let values = vec![vec![Value::Int(i)]];
-        let mut insert_executor =
-            InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager.clone(), values, 0);
+        let mut insert_executor = InsertExecutor::new(
+            table_meta.clone(),
+            buffer_pool.clone(),
+            tx_manager.clone(),
+            values,
+            0,
+        );
         let result = insert_executor.next().await?;
         assert_eq!(result, Some(ExecResult::AffectedRows(1)));
     }

@@ -123,10 +123,7 @@ pub async fn update_version_header_in_data_page(
 
 /// Delete a tuple from a data page by marking its slot as deleted (M10 GC)
 /// This is used for garbage collection to remove old committed versions.
-pub async fn delete_tuple_from_data_page(
-    buffer_pool: &BufferPool,
-    row_id: RowId,
-) -> Result<()> {
+pub async fn delete_tuple_from_data_page(buffer_pool: &BufferPool, row_id: RowId) -> Result<()> {
     let page_id = PageId(row_id.page_id as u64);
     let slot_id = row_id.slot_id as usize;
 

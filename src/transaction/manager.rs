@@ -116,7 +116,8 @@ impl TransactionManager {
         let tx_id = tx.id();
 
         // M10: Cleanup uncommitted versions
-        self.abort_cleanup_versions(tx_id, buffer_pool, table_meta).await?;
+        self.abort_cleanup_versions(tx_id, buffer_pool, table_meta)
+            .await?;
 
         // Remove from active list
         let mut active = self.active_tx_ids.write().await;
@@ -140,12 +141,20 @@ impl TransactionManager {
     /// Called by InsertExecutor/UpdateExecutor when creating new versions
     pub async fn record_version(&self, tx_id: u64, row_id: RowId) {
         let mut versions = self.tx_versions.write().await;
-        versions.entry(tx_id).or_insert_with(HashSet::new).insert(row_id);
+        versions
+            .entry(tx_id)
+            .or_insert_with(HashSet::new)
+            .insert(row_id);
     }
 
     /// Get all versions recorded for a transaction (for testing)
     pub async fn get_tx_versions(&self, tx_id: u64) -> HashSet<RowId> {
-        self.tx_versions.read().await.get(&tx_id).cloned().unwrap_or_default()
+        self.tx_versions
+            .read()
+            .await
+            .get(&tx_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Get tx_versions (for testing)
@@ -237,7 +246,11 @@ mod tests {
     async fn create_test_table(buffer_pool: Arc<BufferPool>) -> Arc<TableMeta> {
         let table_manager = TableManager::new(buffer_pool.clone());
         table_manager
-            .create_table("test_table", vec![("id".to_string(), crate::storage::ColumnType::Int)], "id")
+            .create_table(
+                "test_table",
+                vec![("id".to_string(), crate::storage::ColumnType::Int)],
+                "id",
+            )
             .await
             .unwrap();
         table_manager.get_table("test_table").await.unwrap()

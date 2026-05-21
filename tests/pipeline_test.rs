@@ -451,7 +451,9 @@ async fn test_select_where_order_by_limit() {
 
     // Query with WHERE + ORDER BY + LIMIT
     let response = db
-        .execute_sql("SELECT id, name, price FROM products WHERE price > 10.0 ORDER BY price ASC LIMIT 2")
+        .execute_sql(
+            "SELECT id, name, price FROM products WHERE price > 10.0 ORDER BY price ASC LIMIT 2",
+        )
         .await;
 
     match response {

@@ -49,7 +49,10 @@ impl Executor for ScanExecutor {
             for (_key, row_id) in entries {
                 if let Some(ref snapshot) = self.snapshot {
                     // M10: Use find_visible_version for version chain traversal
-                    let tuple_bytes = self.buffer_pool.find_visible_version(row_id, snapshot).await?;
+                    let tuple_bytes = self
+                        .buffer_pool
+                        .find_visible_version(row_id, snapshot)
+                        .await?;
 
                     match tuple_bytes {
                         Some(data) => {

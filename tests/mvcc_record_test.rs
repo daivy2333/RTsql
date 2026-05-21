@@ -39,12 +39,23 @@ async fn test_insert_records_version() -> Result<()> {
 
     // Verify tx_versions has entry for tx_id = 5
     let versions = tx_manager.get_tx_versions(5).await;
-    assert_eq!(versions.len(), 1, "tx_id=5 should have exactly 1 version recorded");
+    assert_eq!(
+        versions.len(),
+        1,
+        "tx_id=5 should have exactly 1 version recorded"
+    );
 
     // Verify the recorded row_id is correct
     let key = 1i64.to_be_bytes();
-    let row_id = table_meta.index_manager.search(&key).await?.expect("row should exist");
-    assert!(versions.contains(&row_id), "tx_versions should contain the row_id");
+    let row_id = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("row should exist");
+    assert!(
+        versions.contains(&row_id),
+        "tx_versions should contain the row_id"
+    );
 
     Ok(())
 }
@@ -101,15 +112,30 @@ async fn test_update_records_version() -> Result<()> {
 
     // Verify tx_id = 2 has 1 version recorded
     let versions_tx2 = tx_manager.get_tx_versions(2).await;
-    assert_eq!(versions_tx2.len(), 1, "tx_id=2 should have exactly 1 version recorded");
+    assert_eq!(
+        versions_tx2.len(),
+        1,
+        "tx_id=2 should have exactly 1 version recorded"
+    );
 
     // Verify the new row_id is in tx_id=2's versions
-    let new_row_id = table_meta.index_manager.search(&key).await?.expect("row should exist");
-    assert!(versions_tx2.contains(&new_row_id), "tx_versions should contain the new row_id");
+    let new_row_id = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("row should exist");
+    assert!(
+        versions_tx2.contains(&new_row_id),
+        "tx_versions should contain the new row_id"
+    );
 
     // tx_id = 1 should still have its version (old row)
     let versions_tx1_after = tx_manager.get_tx_versions(1).await;
-    assert_eq!(versions_tx1_after.len(), 1, "tx_id=1 should still have its version");
+    assert_eq!(
+        versions_tx1_after.len(),
+        1,
+        "tx_id=1 should still have its version"
+    );
 
     Ok(())
 }
@@ -146,13 +172,25 @@ async fn test_multiple_inserts_multiple_versions() -> Result<()> {
 
     // Verify tx_id = 10 has 3 versions
     let versions = tx_manager.get_tx_versions(10).await;
-    assert_eq!(versions.len(), 3, "tx_id=10 should have 3 versions recorded");
+    assert_eq!(
+        versions.len(),
+        3,
+        "tx_id=10 should have 3 versions recorded"
+    );
 
     // Verify all row_ids are correct
     for i in 1i64..=3 {
         let key = i.to_be_bytes();
-        let row_id = table_meta.index_manager.search(&key).await?.expect("row should exist");
-        assert!(versions.contains(&row_id), "tx_versions should contain row_id for key {}", i);
+        let row_id = table_meta
+            .index_manager
+            .search(&key)
+            .await?
+            .expect("row should exist");
+        assert!(
+            versions.contains(&row_id),
+            "tx_versions should contain row_id for key {}",
+            i
+        );
     }
 
     Ok(())
@@ -193,7 +231,11 @@ async fn test_batch_insert_records_all_versions() -> Result<()> {
 
     // Verify tx_id = 100 has 5 versions
     let versions = tx_manager.get_tx_versions(100).await;
-    assert_eq!(versions.len(), 5, "tx_id=100 should have 5 versions recorded");
+    assert_eq!(
+        versions.len(),
+        5,
+        "tx_id=100 should have 5 versions recorded"
+    );
 
     Ok(())
 }
@@ -253,9 +295,21 @@ async fn test_different_tx_separate_versions() -> Result<()> {
     assert_eq!(versions_tx3.len(), 1);
 
     // Verify all row_ids are correct
-    let row_id1 = table_meta.index_manager.search(&1i64.to_be_bytes()).await?.expect("row 1");
-    let row_id2 = table_meta.index_manager.search(&2i64.to_be_bytes()).await?.expect("row 2");
-    let row_id3 = table_meta.index_manager.search(&3i64.to_be_bytes()).await?.expect("row 3");
+    let row_id1 = table_meta
+        .index_manager
+        .search(&1i64.to_be_bytes())
+        .await?
+        .expect("row 1");
+    let row_id2 = table_meta
+        .index_manager
+        .search(&2i64.to_be_bytes())
+        .await?
+        .expect("row 2");
+    let row_id3 = table_meta
+        .index_manager
+        .search(&3i64.to_be_bytes())
+        .await?
+        .expect("row 3");
 
     assert!(versions_tx1.contains(&row_id1));
     assert!(versions_tx2.contains(&row_id2));
@@ -263,7 +317,11 @@ async fn test_different_tx_separate_versions() -> Result<()> {
 
     // tx_versions map should have 3 entries
     let all_versions = tx_manager.tx_versions().await;
-    assert_eq!(all_versions.len(), 3, "tx_versions should have entries for 3 transactions");
+    assert_eq!(
+        all_versions.len(),
+        3,
+        "tx_versions should have entries for 3 transactions"
+    );
 
     Ok(())
 }

@@ -143,8 +143,7 @@ impl BufferPool {
 
     /// Read only the version header from a data page (M10)
     pub async fn read_version_header(&self, row_id: RowId) -> Result<VersionHeader> {
-        let (version_header, _) =
-            crate::storage::read_tuple_from_data_page(self, row_id).await?;
+        let (version_header, _) = crate::storage::read_tuple_from_data_page(self, row_id).await?;
         Ok(version_header)
     }
 
@@ -153,7 +152,8 @@ impl BufferPool {
         let (version_header, tuple_bytes) =
             crate::storage::read_tuple_from_data_page(self, row_id).await?;
         let new_header = version_header.commit(commit_tx_id);
-        crate::storage::update_version_header_in_data_page(self, row_id, new_header, &tuple_bytes).await?;
+        crate::storage::update_version_header_in_data_page(self, row_id, new_header, &tuple_bytes)
+            .await?;
         Ok(())
     }
 

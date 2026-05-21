@@ -62,6 +62,9 @@ pub enum StorageError {
 
     #[error("transaction error: {0}")]
     Transaction(#[from] TransactionError),
+
+    #[error("WAL error: {0}")]
+    WalError(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

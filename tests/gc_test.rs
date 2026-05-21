@@ -141,7 +141,11 @@ async fn test_gc_removes_old_versions() -> Result<()> {
             .map(|(_, ct)| ct.clone())
             .collect::<Vec<_>>(),
     )?;
-    assert_eq!(values[0], Value::Int(30), "latest version should have value=30");
+    assert_eq!(
+        values[0],
+        Value::Int(30),
+        "latest version should have value=30"
+    );
 
     Ok(())
 }

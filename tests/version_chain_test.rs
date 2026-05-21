@@ -56,7 +56,11 @@ async fn test_version_chain_traversal() -> Result<()> {
 
     // Verify Tx1's version is committed
     let key = 10i64.to_be_bytes();
-    let row_id_v1 = table_meta.index_manager.search(&key).await?.expect("v1 should exist");
+    let row_id_v1 = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("v1 should exist");
     let version_header_v1 = buffer_pool.read_version_header(row_id_v1).await?;
     assert_eq!(
         version_header_v1.commit_tx_id(),
@@ -80,7 +84,11 @@ async fn test_version_chain_traversal() -> Result<()> {
     update_executor.next().await?;
 
     // Get new row_id for v2
-    let row_id_v2 = table_meta.index_manager.search(&key).await?.expect("v2 should exist");
+    let row_id_v2 = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("v2 should exist");
     assert_ne!(row_id_v1, row_id_v2, "v2 should have different row_id");
 
     // Verify version chain: v2 -> v1
@@ -118,7 +126,11 @@ async fn test_version_chain_traversal() -> Result<()> {
     update_executor.next().await?;
 
     // Get new row_id for v3
-    let row_id_v3 = table_meta.index_manager.search(&key).await?.expect("v3 should exist");
+    let row_id_v3 = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("v3 should exist");
     assert_ne!(row_id_v2, row_id_v3, "v3 should have different row_id");
 
     // Verify version chain: v3 -> v2 -> v1
@@ -136,11 +148,20 @@ async fn test_version_chain_traversal() -> Result<()> {
     let tx4_snapshot = tx4.snapshot();
 
     // Tx4 should see v2 (committed by Tx2), not v3 (uncommitted by Tx3)
-    let visible_tuple = buffer_pool.find_visible_version(row_id_v3, &tx4_snapshot).await?;
+    let visible_tuple = buffer_pool
+        .find_visible_version(row_id_v3, &tx4_snapshot)
+        .await?;
     assert!(visible_tuple.is_some(), "Tx4 should see a visible version");
 
     // Deserialize and check value
-    let values = rtsql::storage::page_format::deserialize_tuple(&visible_tuple.unwrap(), &table_meta.columns.iter().map(|(_, ct)| ct.clone()).collect::<Vec<_>>())?;
+    let values = rtsql::storage::page_format::deserialize_tuple(
+        &visible_tuple.unwrap(),
+        &table_meta
+            .columns
+            .iter()
+            .map(|(_, ct)| ct.clone())
+            .collect::<Vec<_>>(),
+    )?;
     assert_eq!(values[0], Value::Int(20), "Tx4 should see value=20 (v2)");
 
     // Step 5: Tx3 commits
@@ -156,12 +177,25 @@ async fn test_version_chain_traversal() -> Result<()> {
 
     // Step 6: Tx4 still sees v2 (Repeatable Read)
     // Tx4's snapshot was taken before Tx3 committed, so it still sees v2
-    let visible_tuple_after = buffer_pool.find_visible_version(row_id_v3, &tx4_snapshot).await?;
-    assert!(visible_tuple_after.is_some(), "Tx4 should still see a visible version");
+    let visible_tuple_after = buffer_pool
+        .find_visible_version(row_id_v3, &tx4_snapshot)
+        .await?;
+    assert!(
+        visible_tuple_after.is_some(),
+        "Tx4 should still see a visible version"
+    );
 
-    let values_after = rtsql::storage::page_format::deserialize_tuple(&visible_tuple_after.unwrap(), &table_meta.columns.iter().map(|(_, ct)| ct.clone()).collect::<Vec<_>>())?;
+    let values_after = rtsql::storage::page_format::deserialize_tuple(
+        &visible_tuple_after.unwrap(),
+        &table_meta
+            .columns
+            .iter()
+            .map(|(_, ct)| ct.clone())
+            .collect::<Vec<_>>(),
+    )?;
     assert_eq!(
-        values_after[0], Value::Int(20),
+        values_after[0],
+        Value::Int(20),
         "Tx4 should still see value=20 (v2) - Repeatable Read"
     );
 
@@ -169,11 +203,27 @@ async fn test_version_chain_traversal() -> Result<()> {
     let tx5 = tx_manager.begin().await;
     let tx5_snapshot = tx5.snapshot();
 
-    let visible_tuple_tx5 = buffer_pool.find_visible_version(row_id_v3, &tx5_snapshot).await?;
-    assert!(visible_tuple_tx5.is_some(), "Tx5 should see a visible version");
+    let visible_tuple_tx5 = buffer_pool
+        .find_visible_version(row_id_v3, &tx5_snapshot)
+        .await?;
+    assert!(
+        visible_tuple_tx5.is_some(),
+        "Tx5 should see a visible version"
+    );
 
-    let values_tx5 = rtsql::storage::page_format::deserialize_tuple(&visible_tuple_tx5.unwrap(), &table_meta.columns.iter().map(|(_, ct)| ct.clone()).collect::<Vec<_>>())?;
-    assert_eq!(values_tx5[0], Value::Int(30), "Tx5 should see value=30 (v3)");
+    let values_tx5 = rtsql::storage::page_format::deserialize_tuple(
+        &visible_tuple_tx5.unwrap(),
+        &table_meta
+            .columns
+            .iter()
+            .map(|(_, ct)| ct.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    assert_eq!(
+        values_tx5[0],
+        Value::Int(30),
+        "Tx5 should see value=30 (v3)"
+    );
 
     // Cleanup
     tx_manager.commit(tx4, &buffer_pool).await?;
@@ -246,17 +296,34 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
     tx_manager.commit(tx3, &buffer_pool).await?;
 
     // Get latest row_id (v3)
-    let row_id_v3 = table_meta.index_manager.search(&key).await?.expect("v3 should exist");
+    let row_id_v3 = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("v3 should exist");
 
     // Tx4 (new transaction) should see v3 (value=300), not v2 (uncommitted)
     let tx4 = tx_manager.begin().await;
     let tx4_snapshot = tx4.snapshot();
 
-    let visible_tuple = buffer_pool.find_visible_version(row_id_v3, &tx4_snapshot).await?;
+    let visible_tuple = buffer_pool
+        .find_visible_version(row_id_v3, &tx4_snapshot)
+        .await?;
     assert!(visible_tuple.is_some(), "Tx4 should see a visible version");
 
-    let values = rtsql::storage::page_format::deserialize_tuple(&visible_tuple.unwrap(), &table_meta.columns.iter().map(|(_, ct)| ct.clone()).collect::<Vec<_>>())?;
-    assert_eq!(values[0], Value::Int(300), "Tx4 should see value=300 (v3), not v2 (uncommitted)");
+    let values = rtsql::storage::page_format::deserialize_tuple(
+        &visible_tuple.unwrap(),
+        &table_meta
+            .columns
+            .iter()
+            .map(|(_, ct)| ct.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    assert_eq!(
+        values[0],
+        Value::Int(300),
+        "Tx4 should see value=300 (v3), not v2 (uncommitted)"
+    );
 
     // Cleanup
     tx_manager.commit(tx4, &buffer_pool).await?;
@@ -294,13 +361,19 @@ async fn test_all_versions_invisible() -> Result<()> {
     insert_executor.next().await?;
 
     let key = 999i64.to_be_bytes();
-    let row_id = table_meta.index_manager.search(&key).await?.expect("row should exist");
+    let row_id = table_meta
+        .index_manager
+        .search(&key)
+        .await?
+        .expect("row should exist");
 
     // Tx2 (different transaction) should see nothing
     let tx2 = tx_manager.begin().await;
     let tx2_snapshot = tx2.snapshot();
 
-    let visible_tuple = buffer_pool.find_visible_version(row_id, &tx2_snapshot).await?;
+    let visible_tuple = buffer_pool
+        .find_visible_version(row_id, &tx2_snapshot)
+        .await?;
     assert!(
         visible_tuple.is_none(),
         "Tx2 should see nothing (all versions invisible)"
