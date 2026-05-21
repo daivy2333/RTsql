@@ -6,7 +6,7 @@ use crate::executor::Value;
 use crate::storage::btree::IndexManager;
 use crate::storage::page_format::ColumnType;
 use crate::storage::page_id::PageId;
-use crate::storage::{BufferPool, Result, StorageError};
+use crate::storage::{delete_tuple_from_data_page, BufferPool, Result, StorageError};
 
 /// Column schema with constraints
 #[derive(Debug, Clone)]
@@ -50,6 +50,46 @@ pub struct TableMeta {
     pub index_manager: Arc<IndexManager>,
     pub data_page_head: PageId,
     pub data_page_tail: Mutex<PageId>,
+}
+
+impl TableMeta {
+    /// Garbage collect old committed versions from the version chain (M10 GC)
+    ///
+    /// This is an optional maintenance operation that removes old committed
+    /// versions that are no longer the latest version for a key.
+    ///
+    /// Returns the number of versions cleaned up.
+    pub async fn gc_table(&self, buffer_pool: &BufferPool) -> Result<usize> {
+        let mut cleaned_count = 0;
+
+        let all_entries = self.index_manager.scan_all().await?;
+
+        for (_key, row_id) in all_entries {
+            let mut current = Some(row_id);
+            let mut old_versions = Vec::new();
+
+            // Traverse version chain, collect old committed versions
+            while let Some(current_id) = current {
+                let header = buffer_pool.read_version_header(current_id).await?;
+
+                // Collect committed old versions (not the latest)
+                // The latest version is the one pointed to by the index (row_id)
+                if header.commit_tx_id().is_some() && current_id != row_id {
+                    old_versions.push(current_id);
+                }
+
+                current = header.next_version();
+            }
+
+            // Delete old versions
+            for old_id in old_versions {
+                delete_tuple_from_data_page(buffer_pool, old_id).await?;
+                cleaned_count += 1;
+            }
+        }
+
+        Ok(cleaned_count)
+    }
 }
 
 /// Manages table schemas and per-table metadata.
