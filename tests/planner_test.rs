@@ -368,3 +368,110 @@ fn test_build_where_logical_or() {
         _ => panic!("Expected Filter plan for OR WHERE, got {:?}", plan),
     }
 }
+
+// ============================================================================
+// ORDER BY + LIMIT/OFFSET Tests (Task 7: M9 Phase 2)
+// ============================================================================
+
+#[test]
+fn test_parse_order_by_single_column_asc() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("users", vec!["id".into(), "name".into(), "age".into()], "id");
+
+    let sql = "SELECT id, name FROM users ORDER BY age ASC";
+    let stmt = parse_sql(sql).unwrap().first().unwrap().clone();
+    let plan = builder.build_plan(&stmt).unwrap();
+
+    match plan {
+        PhysicalPlan::Sort(node) => {
+            assert_eq!(node.order_by.len(), 1);
+            assert_eq!(node.order_by[0].column, "age");
+            assert_eq!(node.order_by[0].asc, true);
+        }
+        _ => panic!("Expected Sort plan"),
+    }
+}
+
+#[test]
+fn test_parse_order_by_multi_column() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("users", vec!["id".into(), "name".into(), "age".into()], "id");
+
+    let sql = "SELECT * FROM users ORDER BY age DESC, name ASC";
+    let stmt = parse_sql(sql).unwrap().first().unwrap().clone();
+    let plan = builder.build_plan(&stmt).unwrap();
+
+    match plan {
+        PhysicalPlan::Sort(node) => {
+            assert_eq!(node.order_by.len(), 2);
+            assert_eq!(node.order_by[0].column, "age");
+            assert_eq!(node.order_by[0].asc, false);
+            assert_eq!(node.order_by[1].column, "name");
+            assert_eq!(node.order_by[1].asc, true);
+        }
+        _ => panic!("Expected Sort plan"),
+    }
+}
+
+#[test]
+fn test_parse_limit_only() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("users", vec!["id".into(), "name".into()], "id");
+
+    let sql = "SELECT * FROM users LIMIT 10";
+    let stmt = parse_sql(sql).unwrap().first().unwrap().clone();
+    let plan = builder.build_plan(&stmt).unwrap();
+
+    match plan {
+        PhysicalPlan::Limit(node) => {
+            assert_eq!(node.limit, 10);
+            assert_eq!(node.offset, 0);
+        }
+        _ => panic!("Expected Limit plan"),
+    }
+}
+
+#[test]
+fn test_parse_limit_with_offset() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("users", vec!["id".into(), "name".into()], "id");
+
+    let sql = "SELECT * FROM users LIMIT 5 OFFSET 10";
+    let stmt = parse_sql(sql).unwrap().first().unwrap().clone();
+    let plan = builder.build_plan(&stmt).unwrap();
+
+    match plan {
+        PhysicalPlan::Limit(node) => {
+            assert_eq!(node.limit, 5);
+            assert_eq!(node.offset, 10);
+        }
+        _ => panic!("Expected Limit plan"),
+    }
+}
+
+#[test]
+fn test_parse_order_by_with_limit() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("users", vec!["id".into(), "name".into(), "age".into()], "id");
+
+    let sql = "SELECT * FROM users ORDER BY age DESC LIMIT 10 OFFSET 5";
+    let stmt = parse_sql(sql).unwrap().first().unwrap().clone();
+    let plan = builder.build_plan(&stmt).unwrap();
+
+    // 期望：Limit -> Sort -> Scan
+    match plan {
+        PhysicalPlan::Limit(limit_node) => {
+            assert_eq!(limit_node.limit, 10);
+            assert_eq!(limit_node.offset, 5);
+
+            match *limit_node.input {
+                PhysicalPlan::Sort(sort_node) => {
+                    assert_eq!(sort_node.order_by[0].column, "age");
+                    assert_eq!(sort_node.order_by[0].asc, false);
+                }
+                _ => panic!("Expected Sort inside Limit"),
+            }
+        }
+        _ => panic!("Expected Limit plan"),
+    }
+}
