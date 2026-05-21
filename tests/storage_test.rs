@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use rtsql::storage::{AsyncStorage, BufferPool, FileStorage, Page, PageId};
+    use rtsql::storage::{AsyncStorage, BufferPool, FileStorage, Page, PageId, RowId};
+    use rtsql::transaction::Snapshot;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
 
@@ -184,5 +185,26 @@ mod tests {
         }
         let guard = pool.get_page(PageId(0)).await.unwrap();
         assert_eq!(guard.page().id, PageId(0));
+    }
+
+    /// M10: Test find_visible_version method (TDD compliance)
+    /// Tests that the method exists and handles non-existent RowId correctly.
+    /// Full version chain traversal tests require UpdateExecutor which creates version chains.
+    #[tokio::test]
+    async fn test_find_visible_version_empty_row() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = Arc::new(FileStorage::open(temp_file.path()).unwrap());
+        let pool = BufferPool::new(10, storage.clone()).unwrap();
+
+        // Create a snapshot for tx_id=1 with no active transactions
+        let snapshot = Snapshot::new(1, vec![]);
+
+        // Test with non-existent RowId (page 0, slot 0 doesn't exist)
+        let row_id = RowId::new(0, 0);
+        let result = pool.find_visible_version(row_id, &snapshot).await;
+
+        // Should return an error since the page doesn't exist
+        // (BufferPool::get_page will fail to load non-existent page)
+        assert!(result.is_err());
     }
 }
