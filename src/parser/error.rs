@@ -23,6 +23,14 @@ pub enum PlanError {
     ColumnNotFound(String),
     /// 无效约束
     InvalidConstraint(String),
+    /// 列名歧义（多表存在同名列）
+    AmbiguousColumn(String),
+    /// 表不存在
+    TableNotFound(String),
+    /// JOIN 缺少 ON 子句
+    MissingOnClause,
+    /// 不支持的 JOIN 类型（非 INNER）
+    UnsupportedJoinType,
 }
 
 impl fmt::Display for PlanError {
@@ -39,6 +47,12 @@ impl fmt::Display for PlanError {
             PlanError::MultiplePrimaryKey => write!(f, "Multiple primary keys in CREATE TABLE"),
             PlanError::ColumnNotFound(col) => write!(f, "Column not found: {}", col),
             PlanError::InvalidConstraint(msg) => write!(f, "Invalid constraint: {}", msg),
+            PlanError::AmbiguousColumn(col) => {
+                write!(f, "Ambiguous column: '{}' exists in multiple tables", col)
+            }
+            PlanError::TableNotFound(table) => write!(f, "Table not found: {}", table),
+            PlanError::MissingOnClause => write!(f, "INNER JOIN requires ON clause"),
+            PlanError::UnsupportedJoinType => write!(f, "Only INNER JOIN is supported"),
         }
     }
 }
