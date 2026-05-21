@@ -6,7 +6,7 @@ use crate::storage::{
     page_frame::{PageFrame, PageGuard},
     AsyncStorage, Page, PageId, Result, RowId, StorageError,
 };
-use crate::transaction::Snapshot;
+use crate::transaction::{Snapshot, VersionHeader};
 
 pub struct BufferPool {
     pages: RwLock<HashMap<PageId, Arc<std::sync::Mutex<PageFrame>>>>,
@@ -139,6 +139,13 @@ impl BufferPool {
         }
 
         Ok(())
+    }
+
+    /// Read only the version header from a data page (M10)
+    pub async fn read_version_header(&self, row_id: RowId) -> Result<VersionHeader> {
+        let (version_header, _) =
+            crate::storage::read_tuple_from_data_page(self, row_id).await?;
+        Ok(version_header)
     }
 
     /// Traverse version chain to find first visible version (M10)
