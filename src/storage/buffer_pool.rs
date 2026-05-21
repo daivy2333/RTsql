@@ -148,6 +148,15 @@ impl BufferPool {
         Ok(version_header)
     }
 
+    /// Write commit transaction ID to version header (M10)
+    pub async fn write_commit_tx_id(&self, row_id: RowId, commit_tx_id: u64) -> Result<()> {
+        let (version_header, tuple_bytes) =
+            crate::storage::read_tuple_from_data_page(self, row_id).await?;
+        let new_header = version_header.commit(commit_tx_id);
+        crate::storage::update_version_header_in_data_page(self, row_id, new_header, &tuple_bytes).await?;
+        Ok(())
+    }
+
     /// Traverse version chain to find first visible version (M10)
     ///
     /// Returns: visible tuple bytes, or None if all versions invisible

@@ -90,6 +90,37 @@ pub async fn read_tuple_from_data_page(
     Ok((version_header, tuple_bytes))
 }
 
+/// Update only the version header in a data page slot (M10)
+pub async fn update_version_header_in_data_page(
+    buffer_pool: &BufferPool,
+    row_id: RowId,
+    new_header: VersionHeader,
+    _tuple_bytes: &[u8],
+) -> Result<()> {
+    let page_id = PageId(row_id.page_id as u64);
+    let slot_id = row_id.slot_id as usize;
+
+    let page_guard = buffer_pool.get_page(page_id).await?;
+
+    let result: std::result::Result<(), String> = page_guard.modify_page(|page| {
+        let slotted = SlottedPage::new(page);
+
+        let slot = slotted
+            .get_slot(slot_id)
+            .ok_or_else(|| format!("slot {} not found", slot_id))?;
+        let slot_offset = slot.offset as usize;
+
+        // Write the new header in place
+        let header_bytes = new_header.to_bytes();
+        page.data[slot_offset..slot_offset + VersionHeader::SIZE].copy_from_slice(&header_bytes);
+
+        Ok(())
+    });
+
+    result.map_err(|_| StorageError::SlotNotFound(row_id))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
