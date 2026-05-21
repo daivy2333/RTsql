@@ -81,16 +81,23 @@ impl TransactionManager {
 
     /// Commit a transaction
     ///
+    /// - Marks all versions as committed
     /// - Removes from active list
-    /// - (Future: write commit marker to versions)
-    pub async fn commit(&self, tx: Transaction) -> Result<()> {
+    /// - Clears tx_versions
+    pub async fn commit(&self, tx: Transaction, buffer_pool: &BufferPool) -> Result<()> {
         let tx_id = tx.id();
 
-        let mut active = self.active_tx_ids.write().await;
+        // M10: Mark all versions as committed
+        self.commit_mark_versions(tx_id, buffer_pool).await?;
 
+        // Remove from active list
+        let mut active = self.active_tx_ids.write().await;
         if !active.remove(&tx_id) {
             return Err(TransactionError::AlreadyCommitted(tx_id).into());
         }
+
+        // Clear tx_versions
+        self.tx_versions.write().await.remove(&tx_id);
 
         Ok(())
     }
@@ -172,6 +179,16 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{BufferPool, FileStorage};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    /// Create a test buffer pool for tests that need it
+    fn create_test_buffer_pool() -> Arc<BufferPool> {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        Arc::new(BufferPool::new(10, storage).unwrap())
+    }
 
     #[tokio::test]
     async fn test_transaction_begin() {
@@ -187,11 +204,12 @@ mod tests {
     #[tokio::test]
     async fn test_transaction_commit() {
         let manager = TransactionManager::new();
+        let buffer_pool = create_test_buffer_pool();
 
         let tx = manager.begin().await;
         let tx_id = tx.id();
 
-        manager.commit(tx).await.unwrap();
+        manager.commit(tx, &buffer_pool).await.unwrap();
 
         // Verify transaction not in active list
         let active = manager.active_transactions().await;
@@ -215,6 +233,7 @@ mod tests {
     #[tokio::test]
     async fn test_transaction_multiple() {
         let manager = TransactionManager::new();
+        let buffer_pool = create_test_buffer_pool();
 
         let tx1 = manager.begin().await;
         let tx2 = manager.begin().await;
@@ -232,9 +251,9 @@ mod tests {
         assert_eq!(active.len(), 3);
 
         // Commit tx1 and tx3, abort tx2
-        manager.commit(tx1).await.unwrap();
+        manager.commit(tx1, &buffer_pool).await.unwrap();
         manager.abort(tx2).await.unwrap();
-        manager.commit(tx3).await.unwrap();
+        manager.commit(tx3, &buffer_pool).await.unwrap();
 
         // Active list should be empty
         let active = manager.active_transactions().await;
@@ -244,6 +263,7 @@ mod tests {
     #[tokio::test]
     async fn test_transaction_snapshot_active_list() {
         let manager = TransactionManager::new();
+        let buffer_pool = create_test_buffer_pool();
 
         // Start two transactions
         let tx1 = manager.begin().await;
@@ -265,21 +285,22 @@ mod tests {
         let tx3 = manager.begin().await;
 
         // Commit tx1
-        manager.commit(tx1).await.unwrap();
+        manager.commit(tx1, &buffer_pool).await.unwrap();
 
         // tx2 and tx3 snapshots were taken before tx1 committed
         // They should still see tx1 as not visible (based on snapshot rules)
 
         manager.abort(tx2).await.unwrap();
-        manager.commit(tx3).await.unwrap();
+        manager.commit(tx3, &buffer_pool).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_double_commit_error() {
         let manager = TransactionManager::new();
+        let buffer_pool = create_test_buffer_pool();
 
         let tx = manager.begin().await;
-        manager.commit(tx).await.unwrap();
+        manager.commit(tx, &buffer_pool).await.unwrap();
 
         // Second commit on same tx_id should fail
         // But we can't reuse the same tx object after commit (it was moved)
