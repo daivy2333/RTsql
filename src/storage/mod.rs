@@ -16,7 +16,10 @@ pub use btree::{
 };
 pub use buffer_pool::BufferPool;
 pub use data::{TableManager, TableMeta};
-pub use data_page::{read_tuple_from_data_page, update_version_header_in_data_page, write_tuple_to_data_page};
+pub use data_page::{
+    delete_tuple_from_data_page, read_tuple_from_data_page, update_version_header_in_data_page,
+    write_tuple_to_data_page,
+};
 pub use error::{Result, StorageError};
 pub use file_storage::FileStorage;
 pub use page::Page;

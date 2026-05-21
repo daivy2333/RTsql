@@ -121,6 +121,26 @@ pub async fn update_version_header_in_data_page(
     Ok(())
 }
 
+/// Delete a tuple from a data page by marking its slot as deleted (M10 GC)
+/// This is used for garbage collection to remove old committed versions.
+pub async fn delete_tuple_from_data_page(
+    buffer_pool: &BufferPool,
+    row_id: RowId,
+) -> Result<()> {
+    let page_id = PageId(row_id.page_id as u64);
+    let slot_id = row_id.slot_id as usize;
+
+    let page_guard = buffer_pool.get_page(page_id).await?;
+
+    let result: std::result::Result<(), String> = page_guard.modify_page(|page| {
+        let mut slotted = SlottedPage::new(page);
+        slotted.delete_slot(slot_id)
+    });
+
+    result.map_err(|_| StorageError::SlotNotFound(row_id))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
