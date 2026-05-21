@@ -28,7 +28,8 @@ pub use insert::InsertExecutor;
 pub use limit::LimitExecutor;
 pub use plan::{
     ColumnConstraint, ColumnDef, CreateTableNode, DeleteNode, DropTableNode, FilterNode,
-    IndexScanNode, InsertNode, LimitNode, OrderByColumn, PhysicalPlan, ScanNode, SortNode, UpdateNode,
+    IndexScanNode, InsertNode, LimitNode, OrderByColumn, PhysicalPlan, ScanNode, SortNode,
+    UpdateNode,
 };
 pub use predicate::{
     ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,

@@ -16,7 +16,11 @@ pub struct SortExecutor {
 
 impl SortExecutor {
     /// Create a new sort executor
-    pub fn new(input: Box<dyn Executor + Send>, order_by: Vec<OrderByColumn>, columns: Vec<String>) -> Self {
+    pub fn new(
+        input: Box<dyn Executor + Send>,
+        order_by: Vec<OrderByColumn>,
+        columns: Vec<String>,
+    ) -> Self {
         Self {
             input,
             order_by,
@@ -53,7 +57,10 @@ impl SortExecutor {
     fn compare_rows(&self, a: &[Value], b: &[Value]) -> Ordering {
         for order_col in &self.order_by {
             // Find the index of the column in the result columns
-            let col_idx = self.columns.iter().position(|c| c.to_lowercase() == order_col.column.to_lowercase());
+            let col_idx = self
+                .columns
+                .iter()
+                .position(|c| c.to_lowercase() == order_col.column.to_lowercase());
 
             if let Some(idx) = col_idx {
                 if idx < a.len() && idx < b.len() {
@@ -81,23 +88,17 @@ fn compare_values(a: &Value, b: &Value) -> Ordering {
         // NULL handling: NULL < non-NULL (so NULL sorts to end in ASC)
         (Value::Null, Value::Null) => Ordering::Equal,
         (Value::Null, _) => Ordering::Greater, // NULL > non-NULL (to end)
-        (_, Value::Null) => Ordering::Less,     // non-NULL < NULL (to end)
+        (_, Value::Null) => Ordering::Less,    // non-NULL < NULL (to end)
 
         // Int vs Int
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
 
         // Float vs Float
-        (Value::Float(x), Value::Float(y)) => {
-            x.partial_cmp(y).unwrap_or(Ordering::Equal)
-        }
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
 
         // Int vs Float (cross-type comparison)
-        (Value::Int(x), Value::Float(y)) => {
-            (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal)
-        }
-        (Value::Float(x), Value::Int(y)) => {
-            x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)
-        }
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
 
         // String vs String
         (Value::String(x), Value::String(y)) => x.cmp(y),
@@ -135,36 +136,75 @@ mod tests {
 
     #[test]
     fn test_compare_values_int() {
-        assert_eq!(compare_values(&Value::Int(1), &Value::Int(2)), Ordering::Less);
-        assert_eq!(compare_values(&Value::Int(2), &Value::Int(1)), Ordering::Greater);
-        assert_eq!(compare_values(&Value::Int(1), &Value::Int(1)), Ordering::Equal);
+        assert_eq!(
+            compare_values(&Value::Int(1), &Value::Int(2)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_values(&Value::Int(2), &Value::Int(1)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&Value::Int(1), &Value::Int(1)),
+            Ordering::Equal
+        );
     }
 
     #[test]
     fn test_compare_values_float() {
-        assert_eq!(compare_values(&Value::Float(1.0), &Value::Float(2.0)), Ordering::Less);
-        assert_eq!(compare_values(&Value::Float(2.5), &Value::Float(1.5)), Ordering::Greater);
+        assert_eq!(
+            compare_values(&Value::Float(1.0), &Value::Float(2.0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_values(&Value::Float(2.5), &Value::Float(1.5)),
+            Ordering::Greater
+        );
     }
 
     #[test]
     fn test_compare_values_cross_type() {
         // Int vs Float
-        assert_eq!(compare_values(&Value::Int(1), &Value::Float(2.0)), Ordering::Less);
-        assert_eq!(compare_values(&Value::Float(2.0), &Value::Int(1)), Ordering::Greater);
-        assert_eq!(compare_values(&Value::Int(2), &Value::Float(2.0)), Ordering::Equal);
+        assert_eq!(
+            compare_values(&Value::Int(1), &Value::Float(2.0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_values(&Value::Float(2.0), &Value::Int(1)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&Value::Int(2), &Value::Float(2.0)),
+            Ordering::Equal
+        );
     }
 
     #[test]
     fn test_compare_values_null() {
         // NULL < non-NULL (so NULL sorts to end in ASC)
-        assert_eq!(compare_values(&Value::Null, &Value::Int(1)), Ordering::Greater);
+        assert_eq!(
+            compare_values(&Value::Null, &Value::Int(1)),
+            Ordering::Greater
+        );
         assert_eq!(compare_values(&Value::Int(1), &Value::Null), Ordering::Less);
         assert_eq!(compare_values(&Value::Null, &Value::Null), Ordering::Equal);
     }
 
     #[test]
     fn test_compare_values_string() {
-        assert_eq!(compare_values(&Value::String("a".to_string()), &Value::String("b".to_string())), Ordering::Less);
-        assert_eq!(compare_values(&Value::String("b".to_string()), &Value::String("a".to_string())), Ordering::Greater);
+        assert_eq!(
+            compare_values(
+                &Value::String("a".to_string()),
+                &Value::String("b".to_string())
+            ),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_values(
+                &Value::String("b".to_string()),
+                &Value::String("a".to_string())
+            ),
+            Ordering::Greater
+        );
     }
 }

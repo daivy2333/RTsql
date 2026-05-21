@@ -199,8 +199,10 @@ fn create_executor_from_plan(
             PhysicalPlan::Sort(node) => {
                 // Recursively create input executor
                 let input = create_executor_from_plan(*node.input, database).await?;
-                Ok(Box::new(SortExecutor::new(input, node.order_by, node.columns))
-                    as Box<dyn Executor + Send>)
+                Ok(
+                    Box::new(SortExecutor::new(input, node.order_by, node.columns))
+                        as Box<dyn Executor + Send>,
+                )
             }
 
             PhysicalPlan::Limit(node) => {

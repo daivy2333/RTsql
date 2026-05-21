@@ -1,6 +1,6 @@
 //! SortExecutor unit tests
 
-use rtsql::executor::{ExecResult, Executor, SortExecutor, OrderByColumn, Value};
+use rtsql::executor::{ExecResult, Executor, OrderByColumn, SortExecutor, Value};
 
 /// Mock executor that returns predefined rows
 struct MockExecutor {
@@ -37,7 +37,10 @@ async fn test_sort_single_column_asc() {
     ];
 
     let columns = vec!["id".to_string()];
-    let order_by = vec![OrderByColumn { column: "id".to_string(), asc: true }];
+    let order_by = vec![OrderByColumn {
+        column: "id".to_string(),
+        asc: true,
+    }];
     let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by, columns);
 
     let mut results = vec![];
@@ -45,11 +48,14 @@ async fn test_sort_single_column_asc() {
         results.push(row);
     }
 
-    assert_eq!(results, vec![
-        vec![Value::Int(1)],
-        vec![Value::Int(2)],
-        vec![Value::Int(3)],
-    ]);
+    assert_eq!(
+        results,
+        vec![
+            vec![Value::Int(1)],
+            vec![Value::Int(2)],
+            vec![Value::Int(3)],
+        ]
+    );
 }
 
 #[tokio::test]
@@ -62,7 +68,10 @@ async fn test_sort_single_column_desc() {
     ];
 
     let columns = vec!["id".to_string()];
-    let order_by = vec![OrderByColumn { column: "id".to_string(), asc: false }];
+    let order_by = vec![OrderByColumn {
+        column: "id".to_string(),
+        asc: false,
+    }];
     let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by, columns);
 
     let mut results = vec![];
@@ -70,11 +79,14 @@ async fn test_sort_single_column_desc() {
         results.push(row);
     }
 
-    assert_eq!(results, vec![
-        vec![Value::Int(3)],
-        vec![Value::Int(2)],
-        vec![Value::Int(1)],
-    ]);
+    assert_eq!(
+        results,
+        vec![
+            vec![Value::Int(3)],
+            vec![Value::Int(2)],
+            vec![Value::Int(1)],
+        ]
+    );
 }
 
 #[tokio::test]
@@ -88,8 +100,14 @@ async fn test_sort_multi_column() {
 
     let columns = vec!["age".to_string(), "name".to_string()];
     let order_by = vec![
-        OrderByColumn { column: "age".to_string(), asc: true },
-        OrderByColumn { column: "name".to_string(), asc: true },
+        OrderByColumn {
+            column: "age".to_string(),
+            asc: true,
+        },
+        OrderByColumn {
+            column: "name".to_string(),
+            asc: true,
+        },
     ];
     let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by, columns);
 
@@ -98,11 +116,14 @@ async fn test_sort_multi_column() {
         results.push(row);
     }
 
-    assert_eq!(results, vec![
-        vec![Value::Int(1), Value::String("a".to_string())],
-        vec![Value::Int(1), Value::String("b".to_string())],
-        vec![Value::Int(2), Value::String("c".to_string())],
-    ]);
+    assert_eq!(
+        results,
+        vec![
+            vec![Value::Int(1), Value::String("a".to_string())],
+            vec![Value::Int(1), Value::String("b".to_string())],
+            vec![Value::Int(2), Value::String("c".to_string())],
+        ]
+    );
 }
 
 #[tokio::test]
@@ -117,7 +138,10 @@ async fn test_sort_null_at_end() {
     ];
 
     let columns = vec!["val".to_string()];
-    let order_by = vec![OrderByColumn { column: "val".to_string(), asc: true }];
+    let order_by = vec![OrderByColumn {
+        column: "val".to_string(),
+        asc: true,
+    }];
     let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by, columns);
 
     let mut results = vec![];
@@ -138,7 +162,10 @@ async fn test_sort_empty_input() {
     let rows = vec![];
 
     let columns = vec!["id".to_string()];
-    let order_by = vec![OrderByColumn { column: "id".to_string(), asc: true }];
+    let order_by = vec![OrderByColumn {
+        column: "id".to_string(),
+        asc: true,
+    }];
     let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by, columns);
 
     let result = executor.next().await.unwrap();
@@ -156,7 +183,10 @@ async fn test_sort_with_float() {
     ];
 
     let columns = vec!["val".to_string()];
-    let order_by = vec![OrderByColumn { column: "val".to_string(), asc: true }];
+    let order_by = vec![OrderByColumn {
+        column: "val".to_string(),
+        asc: true,
+    }];
     let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by, columns);
 
     let mut results = vec![];

@@ -376,7 +376,11 @@ fn test_build_where_logical_or() {
 #[test]
 fn test_parse_order_by_single_column_asc() {
     let mut builder = PlanBuilder::new();
-    builder.register_table("users", vec!["id".into(), "name".into(), "age".into()], "id");
+    builder.register_table(
+        "users",
+        vec!["id".into(), "name".into(), "age".into()],
+        "id",
+    );
 
     let sql = "SELECT id, name FROM users ORDER BY age ASC";
     let stmt = parse_sql(sql).unwrap().first().unwrap().clone();
@@ -395,7 +399,11 @@ fn test_parse_order_by_single_column_asc() {
 #[test]
 fn test_parse_order_by_multi_column() {
     let mut builder = PlanBuilder::new();
-    builder.register_table("users", vec!["id".into(), "name".into(), "age".into()], "id");
+    builder.register_table(
+        "users",
+        vec!["id".into(), "name".into(), "age".into()],
+        "id",
+    );
 
     let sql = "SELECT * FROM users ORDER BY age DESC, name ASC";
     let stmt = parse_sql(sql).unwrap().first().unwrap().clone();
@@ -452,7 +460,11 @@ fn test_parse_limit_with_offset() {
 #[test]
 fn test_parse_order_by_with_limit() {
     let mut builder = PlanBuilder::new();
-    builder.register_table("users", vec!["id".into(), "name".into(), "age".into()], "id");
+    builder.register_table(
+        "users",
+        vec!["id".into(), "name".into(), "age".into()],
+        "id",
+    );
 
     let sql = "SELECT * FROM users ORDER BY age DESC LIMIT 10 OFFSET 5";
     let stmt = parse_sql(sql).unwrap().first().unwrap().clone();
