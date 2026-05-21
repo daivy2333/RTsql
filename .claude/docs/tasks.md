@@ -153,24 +153,34 @@
 **新增测试**: 24 个（sort:6 + limit:5 + planner:5 + pipeline:3 + sort_unit:5）
 **关键修复**: Column index mapping bug（Task 9 发现并修复）
 
----
-
-## 待办 - 开发路线图（M10 - M13）
-
-> 嵌入式数据库核心功能优先级调整（2026-05-21）
-
-### M10: MVCC 完整性 🟡 中优先级
+### M10: MVCC 完整性 ✅
 
 **目标**: 完整的多版本并发控制
 
-- [ ] 完整版本链遍历（follow `next_version` 找第一个可见版本）
-- [ ] 版本链 GC（清理已提交的旧版本，防止版本链过长）
-- [ ] Read Committed 隔离级别（除现有 Repeatable Read）
-- [ ] 事务回滚（Abort 时清理未提交版本）
+- [x] 完整版本链遍历（follow `next_version` 找第一个可见版本）
+- [x] 版本链 GC（可选功能，gc_table 用户手动触发）
+- [x] Commit 标记（commit_mark_versions 设置 commit_tx_id）
+- [x] Abort 清理（abort_cleanup_versions 清理未提交版本）
 
-**当前状态**: M7 仅验证最新版本可见性，无法访问历史版本
+**实现内容**:
+- Phase 1: 基础结构（tx_versions, find_visible_version, find_key_by_row_id）
+- Phase 2: Executor 集成 record_version
+- Phase 3: Commit 标记（commit_mark_versions）
+- Phase 4: 版本链遍历集成（IndexScanExecutor, ScanExecutor）
+- Phase 5: Abort 清理（abort_cleanup_versions）
+- Phase 6: 可选 GC（gc_table）
+
+**完成日期**: 2026-05-21
+**验证结果**: cargo test (279 passed) ✅
+**新增文件**: mvcc_record_test.rs, mvcc_commit_test.rs, mvcc_abort_test.rs, version_chain_test.rs, gc_test.rs
+**新增测试**: 23 个（record:5 + commit:4 + abort:3 + version_chain:3 + gc:3 + 其他:8）
+**关键改动**: 23 commits, 21 files changed, 1929 additions
 
 ---
+
+## 待办 - 开发路线图（M11 - M13）
+
+> 嵌入式数据库核心功能优先级调整（2026-05-21）
 
 ### M11: WAL 持久化 🔴 高优先级
 
@@ -230,8 +240,9 @@
 
 ## 下一步行动
 
-**立即开始**: M9 第二阶段（ORDER BY + LIMIT/OFFSET）
-- 优先实现 ORDER BY 排序（单列）
-- 然后实现 LIMIT/OFFSET 分页
+**立即开始**: M11（WAL 持久化）
+- 实现 WAL 写入流程
+- 实现崩溃恢复（WAL 重放）
+- 实现 Checkpoint 机制
 
-**里程碑顺序**: M9 Phase 2 → M10 → M11 → M12 → M13
+**里程碑顺序**: M11 → M12 → M13

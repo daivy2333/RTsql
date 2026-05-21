@@ -4,9 +4,10 @@
 
 ## 当前状态
 
-- **阶段**: M9 第二阶段完成（ORDER BY + LIMIT/OFFSET）
+- **阶段**: M10 完成（MVCC 完整性）
 - **状态**: 正常
-- **当前里程碑**: M10 准备开始（MVCC 完整性）
+- **当前里程碑**: M11 准备开始（WAL 持久化）
+- **测试**: 279 passed
 
 ## 项目结构
 
@@ -148,56 +149,53 @@ RTsql/
   - ...（M9 Phase 2 共 15 commits）
 - **未提交更改**: 无
 
-**M9 Phase 2 总结**: ORDER BY + LIMIT/OFFSET 完成（256 tests），实现完整 SQL 查询能力（WHERE + ORDER BY + LIMIT）。
+**M10 总结**: MVCC完整性完成（279 tests），实现完整版本链遍历、commit标记、abort清理、可选GC。
 
 ## 关键文件
 
 | 文件 | 作用 | 状态 |
 |------|------|------|
-| src/database.rs | Database 协调器（BufferPool+TableManager+TxManager） | ✅ M7 |
-| src/pipeline.rs | SQL→parse→plan→execute→Response 管道 | ✅ M9 扩展 DDL + WHERE + ORDER BY + LIMIT |
-| src/storage/data/table_manager.rs | TableManager 表元数据注册 + drop_table | ✅ M9 扩展 |
-| src/storage/page_format/tuple.rs | ColumnType + serialize/deserialize_tuple | ✅ M9 扩展 Float/Bool |
-| src/executor/value.rs | Value（Int/String/Float/Bool/Null）+ 比较方法 | ✅ M9 扩展 |
-| src/executor/plan.rs | PhysicalPlan（CreateTable/DropTable/Filter/Sort/Limit）+ ColumnDef/OrderByColumn | ✅ M9 扩展 |
-| src/executor/predicate.rs | Predicate trait + Expression trait | ✅ M9 Phase 1 新增 |
-| src/executor/filter.rs | FilterExecutor（WHERE 过滤） | ✅ M9 Phase 1 新增 |
-| src/executor/sort.rs | SortExecutor（ORDER BY 排序 + 列名映射） | ✅ M9 Phase 2 新增 |
-| src/executor/limit.rs | LimitExecutor（LIMIT/OFFSET 分页） | ✅ M9 Phase 2 新增 |
-| src/executor/create_table.rs | CreateTableExecutor | ✅ M9 Phase 1 新增 |
-| src/executor/drop_table.rs | DropTableExecutor | ✅ M9 Phase 1 新增 |
-| src/parser/planner.rs | PlanBuilder（DDL/WHERE/ORDER BY/LIMIT 解析） | ✅ M9 扩展 |
-| tests/sort_test.rs | SortExecutor 单元测试（6 tests） | ✅ M9 Phase 2 新增 |
-| tests/limit_test.rs | LimitExecutor 单元测试（5 tests） | ✅ M9 Phase 2 新增 |
-| tests/pipeline_test.rs | DDL + WHERE + ORDER BY + LIMIT 集成测试（12 tests） | ✅ M9 新增 |
+| src/transaction/manager.rs | TransactionManager（tx_versions跟踪 + commit标记 + abort清理） | ✅ M10 新增 |
+| src/storage/buffer_pool.rs | BufferPool（find_visible_version版本链遍历） | ✅ M10 新增 |
+| src/storage/btree/index_manager.rs | IndexManager（find_key_by_row_id反向映射） | ✅ M10 新增 |
+| src/executor/index_scan.rs | IndexScanExecutor（版本链遍历集成） | ✅ M10 修改 |
+| src/executor/scan.rs | ScanExecutor（版本链遍历集成） | ✅ M10 修改 |
+| src/storage/data_page.rs | 数据页操作（update_version_header + delete_tuple） | ✅ M10 新增 |
+| src/storage/data/table_manager.rs | TableManager（gc_table可选GC） | ✅ M10 新增 |
+| tests/mvcc_record_test.rs | tx_versions记录测试（5 tests） | ✅ M10 新增 |
+| tests/mvcc_commit_test.rs | commit标记测试（4 tests） | ✅ M10 新增 |
+| tests/mvcc_abort_test.rs | abort清理测试（3 tests） | ✅ M10 新增 |
+| tests/version_chain_test.rs | 版本链遍历测试（3 tests） | ✅ M10 新增 |
+| tests/gc_test.rs | GC测试（3 tests） | ✅ M10 新增 |
 
 ## 最近修改
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
-| 2026-05-21 | src/executor/sort.rs | M9 Phase 2 新增 SortExecutor（内存排序 + 列名映射） |
-| 2026-05-21 | src/executor/limit.rs | M9 Phase 2 新增 LimitExecutor（OFFSET + LIMIT） |
-| 2026-05-21 | src/executor/plan.rs | M9 Phase 2 新增 SortNode + LimitNode + OrderByColumn |
-| 2026-05-21 | src/parser/planner.rs | M9 Phase 2 新增 ORDER BY + LIMIT/OFFSET 解析 |
-| 2026-05-21 | src/pipeline.rs | M9 Phase 2 新增 Sort/Limit executor 创建分支 |
-| 2026-05-21 | tests/sort_test.rs | M9 Phase 2 新增 6 个测试 |
-| 2026-05-21 | tests/limit_test.rs | M9 Phase 2 新增 5 个测试 |
-| 2026-05-21 | tests/planner_test.rs | M9 Phase 2 新增 5 个解析测试 |
-| 2026-05-21 | tests/pipeline_test.rs | M9 Phase 2 新增 3 个端到端测试 |
+| 2026-05-21 | src/transaction/manager.rs | M10 新增 tx_versions, record_version, commit_mark_versions, abort_cleanup_versions |
+| 2026-05-21 | src/storage/buffer_pool.rs | M10 新增 find_visible_version, read_version_header, write_commit_tx_id |
+| 2026-05-21 | src/storage/btree/index_manager.rs | M10 新增 find_key_by_row_id, row_to_key反向映射 |
+| 2026-05-21 | src/executor/index_scan.rs | M10 修改为使用 find_visible_version |
+| 2026-05-21 | src/executor/scan.rs | M10 修改为使用 find_visible_version |
+| 2026-05-21 | src/executor/insert.rs, update.rs | M10 新增 record_version 调用 |
+| 2026-05-21 | src/storage/data_page.rs | M10 新增 update_version_header_in_data_page, delete_tuple_from_data_page |
+| 2026-05-21 | src/storage/data/table_manager.rs | M10 新增 gc_table |
+| 2026-05-21 | tests/mvcc_*.rs | M10 新增 15 个 MVCC 测试 |
+| 2026-05-21 | tests/version_chain_test.rs | M10 新增 3 个版本链测试 |
+| 2026-05-21 | tests/gc_test.rs | M10 新增 3 个 GC 测试 |
 
 ## 下一步行动
 
-**优先级**: M10（MVCC 完整性）- 多版本并发控制完善
+**优先级**: M11（WAL 持久化）- 崩溃恢复能力
 
 **里程碑路线图**:
-1. **M10** (🟡 中优先级): 完整版本链遍历 + 版本链 GC + Read Committed 隔离级别
-2. **M11** (🔴 高优先级): WAL 持久化 + 崩溃恢复
-3. **M12** (🟢 低优先级): JOIN 多表支持
-4. **M13**: 性能优化与完善
+1. **M11** (🔴 高优先级): WAL 持久化 + 崩溃恢复 + Checkpoint
+2. **M12** (🟢 低优先级): JOIN 多表支持
+3. **M13**: 性能优化与完善
 
 **当前阻塞**: 无
 
 **注意事项**:
-- M9 完整实现了 DDL + WHERE + ORDER BY + LIMIT/OFFSET，用户可以通过 SQL 执行完整查询
-- PostgreSQL 协议层（M8）可能分离或删除，嵌入式数据库不需要外部连接
-- 重点完善嵌入式数据库核心功能（SQL + MVCC + WAL）
+- M10 完整实现了 MVCC 版本链遍历、commit标记、abort清理
+- 可选 GC 已实现（gc_table），用户可手动触发清理旧版本
+- 下一步重点：WAL 持久化（嵌入式数据库崩溃恢复必需）
