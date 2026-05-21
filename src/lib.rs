@@ -7,6 +7,7 @@ pub mod parser;
 pub mod pipeline;
 pub mod storage;
 pub mod transaction;
+pub mod wal;
 
 // Re-export common types for convenience
 pub use executor::{ColumnConstraint, ColumnDef, ColumnType, PhysicalPlan, Value};
