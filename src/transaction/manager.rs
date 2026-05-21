@@ -116,6 +116,19 @@ impl TransactionManager {
         self.active_tx_ids.read().await.iter().copied().collect()
     }
 
+    /// Record a version created by this transaction (M10)
+    ///
+    /// Called by InsertExecutor/UpdateExecutor when creating new versions
+    pub async fn record_version(&self, tx_id: u64, row_id: RowId) {
+        let mut versions = self.tx_versions.write().await;
+        versions.entry(tx_id).or_insert_with(HashSet::new).insert(row_id);
+    }
+
+    /// Get all versions recorded for a transaction (for testing)
+    pub async fn get_tx_versions(&self, tx_id: u64) -> HashSet<RowId> {
+        self.tx_versions.read().await.get(&tx_id).cloned().unwrap_or_default()
+    }
+
     /// Get tx_versions (for testing)
     pub async fn tx_versions(&self) -> HashMap<u64, HashSet<RowId>> {
         self.tx_versions.read().await.clone()
