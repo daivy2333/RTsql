@@ -9,6 +9,7 @@ mod executor_trait;
 mod filter;
 mod index_scan;
 mod insert;
+mod limit;
 mod plan;
 mod predicate;
 mod result;
@@ -24,6 +25,7 @@ pub use executor_trait::Executor;
 pub use filter::FilterExecutor;
 pub use index_scan::IndexScanExecutor;
 pub use insert::InsertExecutor;
+pub use limit::LimitExecutor;
 pub use plan::{
     ColumnConstraint, ColumnDef, CreateTableNode, DeleteNode, DropTableNode, FilterNode,
     IndexScanNode, InsertNode, LimitNode, OrderByColumn, PhysicalPlan, ScanNode, SortNode, UpdateNode,

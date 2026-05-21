@@ -38,7 +38,7 @@ async fn test_limit_only() {
         vec![Value::Int(5)],
     ];
 
-    let executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), 3, 0);
+    let mut executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), 3, 0);
 
     let mut results = vec![];
     while let Some(ExecResult::Row(row)) = executor.next().await.unwrap() {
@@ -63,7 +63,7 @@ async fn test_offset_only() {
     ];
 
     // LIMIT 设为 usize::MAX 表示无限制
-    let executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), usize::MAX, 2);
+    let mut executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), usize::MAX, 2);
 
     let mut results = vec![];
     while let Some(ExecResult::Row(row)) = executor.next().await.unwrap() {
@@ -87,7 +87,7 @@ async fn test_limit_with_offset() {
         vec![Value::Int(5)],
     ];
 
-    let executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), 2, 2);
+    let mut executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), 2, 2);
 
     let mut results = vec![];
     while let Some(ExecResult::Row(row)) = executor.next().await.unwrap() {
@@ -108,7 +108,7 @@ async fn test_offset_exceeds_total() {
         vec![Value::Int(3)],
     ];
 
-    let executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), usize::MAX, 10);
+    let mut executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), usize::MAX, 10);
 
     let result = executor.next().await.unwrap();
     assert!(result.is_none());
@@ -123,7 +123,7 @@ async fn test_limit_zero() {
         vec![Value::Int(3)],
     ];
 
-    let executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), 0, 0);
+    let mut executor = LimitExecutor::new(Box::new(MockExecutor::new(rows)), 0, 0);
 
     let result = executor.next().await.unwrap();
     assert!(result.is_none());
