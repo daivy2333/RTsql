@@ -62,7 +62,7 @@ pub async fn write_tuple_to_data_page(
 
 /// Read a tuple and its version header from a data page by RowId.
 pub async fn read_tuple_from_data_page(
-    buffer_pool: &Arc<BufferPool>,
+    buffer_pool: &BufferPool,
     row_id: RowId,
 ) -> Result<(VersionHeader, Vec<u8>)> {
     let page_id = PageId(row_id.page_id as u64);

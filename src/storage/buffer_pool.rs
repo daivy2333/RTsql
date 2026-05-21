@@ -4,8 +4,9 @@ use tokio::sync::RwLock;
 
 use crate::storage::{
     page_frame::{PageFrame, PageGuard},
-    AsyncStorage, Page, PageId, Result, StorageError,
+    AsyncStorage, Page, PageId, Result, RowId, StorageError,
 };
+use crate::transaction::Snapshot;
 
 pub struct BufferPool {
     pages: RwLock<HashMap<PageId, Arc<std::sync::Mutex<PageFrame>>>>,
@@ -138,5 +139,39 @@ impl BufferPool {
         }
 
         Ok(())
+    }
+
+    /// Traverse version chain to find first visible version (M10)
+    ///
+    /// Returns: visible tuple bytes, or None if all versions invisible
+    pub async fn find_visible_version(
+        &self,
+        row_id: RowId,
+        snapshot: &Snapshot,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut current_row_id = Some(row_id);
+
+        while let Some(current) = current_row_id {
+            // Read current version from data page
+            let (version_header, tuple_bytes) =
+                crate::storage::read_tuple_from_data_page(self, current).await?;
+
+            // Check visibility
+            let create_tx = version_header.create_tx_id();
+            let commit_tx = version_header.commit_tx_id();
+
+            let visible = snapshot.is_visible(create_tx, commit_tx)
+                || snapshot.is_visible_self(create_tx, commit_tx);
+
+            if visible {
+                return Ok(Some(tuple_bytes));
+            }
+
+            // Not visible, follow next_version pointer
+            current_row_id = version_header.next_version();
+        }
+
+        // All versions invisible
+        Ok(None)
     }
 }
