@@ -37,7 +37,7 @@ async fn test_sort_single_column_asc() {
     ];
 
     let order_by = vec![OrderByColumn { column: "id".to_string(), asc: true }];
-    let executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
+    let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
 
     let mut results = vec![];
     while let Some(ExecResult::Row(row)) = executor.next().await.unwrap() {
@@ -61,7 +61,7 @@ async fn test_sort_single_column_desc() {
     ];
 
     let order_by = vec![OrderByColumn { column: "id".to_string(), asc: false }];
-    let executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
+    let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
 
     let mut results = vec![];
     while let Some(ExecResult::Row(row)) = executor.next().await.unwrap() {
@@ -88,7 +88,7 @@ async fn test_sort_multi_column() {
         OrderByColumn { column: "age".to_string(), asc: true },
         OrderByColumn { column: "name".to_string(), asc: true },
     ];
-    let executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
+    let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
 
     let mut results = vec![];
     while let Some(ExecResult::Row(row)) = executor.next().await.unwrap() {
@@ -114,7 +114,7 @@ async fn test_sort_null_at_end() {
     ];
 
     let order_by = vec![OrderByColumn { column: "val".to_string(), asc: true }];
-    let executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
+    let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
 
     let mut results = vec![];
     while let Some(ExecResult::Row(row)) = executor.next().await.unwrap() {
@@ -134,7 +134,7 @@ async fn test_sort_empty_input() {
     let rows = vec![];
 
     let order_by = vec![OrderByColumn { column: "id".to_string(), asc: true }];
-    let executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
+    let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
 
     let result = executor.next().await.unwrap();
     assert!(result.is_none());
@@ -151,7 +151,7 @@ async fn test_sort_with_float() {
     ];
 
     let order_by = vec![OrderByColumn { column: "val".to_string(), asc: true }];
-    let executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
+    let mut executor = SortExecutor::new(Box::new(MockExecutor::new(rows)), order_by);
 
     let mut results = vec![];
     while let Some(ExecResult::Row(row)) = executor.next().await.unwrap() {

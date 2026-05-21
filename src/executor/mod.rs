@@ -13,6 +13,7 @@ mod plan;
 mod predicate;
 mod result;
 mod scan;
+mod sort;
 mod update;
 mod value;
 
@@ -33,5 +34,6 @@ pub use predicate::{
 };
 pub use result::ExecResult;
 pub use scan::ScanExecutor;
+pub use sort::SortExecutor;
 pub use update::UpdateExecutor;
 pub use value::{ColumnType, Value, ValueError};
