@@ -1,6 +1,6 @@
 # 优化方向与技术债务
 
-> 最后更新：2026-05-20（重新规划 - 嵌入式异步高性能最佳实践）
+> 最后更新：2026-05-21（M11 完成：WAL 持久化）
 > 来源：嵌入式数据库异步高性能低功耗优化建议清单
 
 ---
@@ -131,7 +131,7 @@ let page = self.storage.read_page(page_id).await?;  // I/O 阻塞其他协程
 
 ---
 
-### 6. WAL 后台协程（M11）
+### 6. WAL 后台协程（M11） ✅
 
 **问题**：
 - WAL 写入可能阻塞查询协程
@@ -139,15 +139,32 @@ let page = self.storage.read_page(page_id).await?;  // I/O 阻塞其他协程
 - 缺少 WAL 清理协程
 
 **修复方案**：
-- WAL 写入用 `tokio::spawn` 后台协程
-- Checkpoint 用独立协程定期执行
-- WAL 清理用后台协程
+- WAL 写入用 `spawn_blocking` 避免阻塞协程 ✅
+- Checkpoint 用 CheckpointManager 封装（位点读写） ✅
+- WAL 清理推迟（当前保留历史记录） ⏳
+
+**实现内容**：
+- WalRecord enum（Insert/Update/Delete/Commit/Abort/Checkpoint） ✅
+- WalWriter（async write_record + fsync + truncate） ✅
+- WalReader（read_next + seek_to + read_all） ✅
+- CheckpointManager（checkpoint flow + 位点文件） ✅
+- RecoveryManager（recover commit/abort 标记） ✅
+- Database 集成 wal_writer + RecoveryManager::recover ✅
+
+**推迟功能**：
+- Executor 层 WAL 写入集成（InsertExecutor/UpdateExecutor/DeleteExecutor）
+- 完整数据重放（当前仅返回 commit/abort 标记）
+- WAL 截断（Checkpoint 后）
 
 **影响范围**：
-- `src/storage/wal.rs`（待实现）
-- `src/transaction/manager.rs`
+- `src/wal/record.rs` ✅
+- `src/wal/writer.rs` ✅
+- `src/wal/reader.rs` ✅
+- `src/wal/checkpoint.rs` ✅
+- `src/wal/recovery.rs` ✅
+- `src/database.rs` ✅
 
-**优先级**：🟡 Important（M11 完成）
+**优先级**：✅ 完成（M11 基础实现）
 
 ---
 
@@ -228,7 +245,7 @@ let page = self.storage.read_page(page_id).await?;  // I/O 阻塞其他协程
 
 ---
 
-## 已完成的优化（M1-M8）
+## 已完成的优化（M1-M11）
 
 ### M1-M7 已解决的问题
 
@@ -236,6 +253,27 @@ let page = self.storage.read_page(page_id).await?;  // I/O 阻塞其他协程
 - [x] **数据存储层**（M7）：TableManager + Tuple 序列化 + Executor 真实执行
 - [x] **MVCC 基础**（M7）：Snapshot 可见性 + VersionHeader（单版本）
 - [x] **PostgreSQL 协议**（M8）：Simple Query Protocol + PgProtocol 状态机
+
+### M9 优化完成
+
+- [x] **DDL 能力**：CREATE TABLE/DROP TABLE IF EXISTS
+- [x] **WHERE 过滤**：Predicate trait + FilterExecutor
+- [x] **ORDER BY 排序**：SortExecutor + 列名映射
+- [x] **LIMIT/OFFSET 分页**：LimitExecutor
+
+### M10 优化完成
+
+- [x] **完整版本链遍历**：find_visible_version + follow next_version
+- [x] **Commit 标记**：commit_mark_versions 设置 commit_tx_id
+- [x] **Abort 清理**：abort_cleanup_versions 恢复索引/删除版本
+- [x] **可选 GC**：gc_table 清理旧版本
+
+### M11 优化完成
+
+- [x] **WAL 基础实现**：WalRecord + WalWriter + WalReader + WalError
+- [x] **Checkpoint 机制**：CheckpointManager + 位点文件 + checkpoint flow
+- [x] **RecoveryManager**：启动恢复 commit/abort 标记
+- [x] **Database 集成**：wal_writer + RecoveryManager::recover
 
 ### M1-M2 已解决的技术债务
 
@@ -258,4 +296,15 @@ let page = self.storage.read_page(page_id).await?;  // I/O 阻塞其他协程
 2. ✅ 完整版本链遍历 + GC
 
 **M11 优化重点**：
-1. ✅ WAL 后台协程 + Checkpoint
+1. ✅ WAL 基础实现（WalRecord/WalWriter/WalReader）
+2. ✅ CheckpointManager + 位点文件
+3. ✅ RecoveryManager + Database 集成
+
+**M12 优化重点**：
+1. JOIN 多表支持
+2. Executor 层 WAL 写入集成（回填 M11 推迟功能）
+
+**M13 优化重点**：
+1. io_uring 替换（可选）
+2. 性能基准测试
+3. 连接池（嵌入式可选）

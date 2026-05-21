@@ -13,6 +13,16 @@
 | mimalloc | https://github.com/microsoft/mimalloc | 内存分配器，高性能 |
 | sqllogictest | https://github.com/ballista-compute/sqllogictest | SQL 逻辑测试框架 |
 | proptest | https://docs.rs/proptest/latest/proptest/ | 属性测试框架，覆盖边界场景 |
+| tempfile | https://docs.rs/tempfile/latest/tempfile/ | 临时文件/目录测试 | 2026-05-21 |
+
+## WAL（Write-Ahead Logging）
+
+| 主题 | 链接 | 说明 |
+|------|------|------|
+| WAL 基础概念 | https://www.sqlite.org/wal.html | SQLite WAL 文档（简单追加 WAL 设计参考） | 2026-05-21 |
+| ARIES 恢复算法 | https://cs.stanford.edu/people/csilv-22/aries.pdf | 学术经典：WAL + Redo/Undo 恢复（复杂方案参考） | 2026-05-21 |
+| PostgreSQL WAL | https://www.postgresql.org/docs/current/wal-internals.html | PG WAL 内部实现（位点截断参考） | 2026-05-21 |
+| Checkpoint 机制 | https://www.sqlite.org/fileformat2.html#walformat | SQLite checkpoint 格式（位点文件设计参考） | 2026-05-21 |
 
 ## 领域知识笔记
 

@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-21 (M10 完成：MVCC 完整性)
+> 最后更新：2026-05-21 (M11 完成：WAL 持久化)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -97,6 +97,25 @@
 | update_version_header_in_data_page | `update_version_header_in_data_page(bp, row_id, header, bytes).await` | 更新版本头（不改变 tuple） | 2026-05-21 |
 | delete_tuple_from_data_page | `delete_tuple_from_data_page(bp, row_id).await` | 删除数据页条目（GC） | 2026-05-21 |
 | TableMeta.gc_table | `table_meta.gc_table(bp).await` → `usize` | 可选 GC，清理旧版本 | 2026-05-21 |
+| WalRecord::serialize | `record.serialize()` → `Vec<u8>` | WAL 记录序列化（type+len+data） | 2026-05-21 |
+| WalRecord::deserialize | `WalRecord::deserialize(&buf)` → `Result<(Self, usize), WalError>` | WAL 记录反序列化 | 2026-05-21 |
+| WalWriter::open | `WalWriter::open(db_path)` → `Result<Self, WalError>` | 打开/创建 WAL 文件 | 2026-05-21 |
+| WalWriter::write_record | `writer.write_record(record).await` → `Result<u64, WalError>` | 异步写入 WAL 记录，返回 LSN | 2026-05-21 |
+| WalWriter::fsync | `writer.fsync().await` → `Result<(), WalError>` | 异步 fsync WAL 文件 | 2026-05-21 |
+| WalWriter::truncate_to | `writer.truncate_to(lsn).await` → `Result<(), WalError>` | 截断 WAL 到指定 LSN | 2026-05-21 |
+| WalWriter::get_current_lsn | `writer.get_current_lsn().await` → `Result<u64, WalError>` | 获取 WAL 文件当前大小 | 2026-05-21 |
+| WalWriter::should_checkpoint | `writer.should_checkpoint()` → `bool` | 检查是否应触发 checkpoint | 2026-05-21 |
+| WalReader::open | `WalReader::open(&wal_path)` → `Result<Self, WalError>` | 打开 WAL 文件读取 | 2026-05-21 |
+| WalReader::read_next | `reader.read_next()` → `Result<Option<WalRecord>, WalError>` | 读取下一条记录（迭代） | 2026-05-21 |
+| WalReader::read_all | `reader.read_all()` → `Result<Vec<WalRecord>, WalError>` | 读取所有 WAL 记录 | 2026-05-21 |
+| WalReader::seek_to | `reader.seek_to(lsn)` → `Result<(), WalError>` | 定位到指定 LSN | 2026-05-21 |
+| CheckpointManager::new | `CheckpointManager::new(db_path, wal_writer, buffer_pool)` | 创建 Checkpoint 管理器 | 2026-05-21 |
+| CheckpointManager::checkpoint | `manager.checkpoint().await` → `Result<u64, WalError>` | 执行 checkpoint（刷脏页+写位点） | 2026-05-21 |
+| CheckpointManager::read_checkpoint_site | `manager.read_checkpoint_site()` → `Result<Option<(u64, u64)>, WalError>` | 读取 checkpoint 位点（lsn+timestamp） | 2026-05-21 |
+| CheckpointManager::write_checkpoint_site | `manager.write_checkpoint_site(lsn, ts)` → `Result<(), WalError>` | 写入 checkpoint 位点 | 2026-05-21 |
+| RecoveryManager::recover | `RecoveryManager::recover(db_path)` → `Result<(HashSet<u64>, HashSet<u64>), WalError>` | 恢复 commit/abort 标记 | 2026-05-21 |
+| RecoveryManager::needs_recovery | `RecoveryManager::needs_recovery(db_path)` → `Result<bool, WalError>` | 检查是否需要恢复 | 2026-05-21 |
+| RecoveryManager::read_wal | `RecoveryManager::read_wal(db_path)` → `Result<Vec<WalRecord>, WalError>` | 读取所有 WAL 记录 | 2026-05-21 |
 
 ---
 
@@ -123,6 +142,12 @@
 | 数据存储 | src/storage/data/ | M7: TableManager + TableMeta + M9: drop_table + ColumnSchema |
 | 数据页读写 | src/storage/data_page.rs | M7: write/read_tuple_to_data_page |
 | Tuple 序列化 | src/storage/page_format/tuple.rs | M7: ColumnType + serialize/deserialize_tuple + M9: Float/Bool |
+| WAL 模块 | src/wal/ | M11: WalRecord/WalWriter/WalReader/CheckpointManager/RecoveryManager |
+| WAL 记录 | src/wal/record.rs | M11: WalRecord enum + serialize/deserialize + WalError |
+| WAL 写入器 | src/wal/writer.rs | M11: async write_record + fsync + truncate |
+| WAL 读取器 | src/wal/reader.rs | M11: read_next + seek_to + read_all |
+| Checkpoint | src/wal/checkpoint.rs | M11: checkpoint flow + 位点读写 |
+| Recovery | src/wal/recovery.rs | M11: recover + needs_recovery + read_wal |
 
 ---
 
@@ -165,6 +190,9 @@
 | Clippy approx_constant warning | 测试代码使用接近数学常数的浮点值（3.14/3.14159） | 替换为安全值（1.23/4.56）避免近似常数警告 | 2026-05-20 |
 | SortExecutor column index mapping bug | Task 9 发现 ORDER BY 排序结果错误，列名未正确映射到行索引 | 在 SortExecutor 中添加 `columns: Vec<String>` 字段，compare_rows 使用列名查找索引 | 2026-05-21 |
 | MockExecutor path error | 测试文件使用 `crate::storage::Result` 而非 `rtsql::storage::Result` | 在测试中使用 `rtsql::` 前缀而非 `crate::` | 2026-05-21 |
+| WalRecord field mismatch | spec 要求 tx_id + table_name，实现用 table_id | 按 spec 修正字段名，添加 Commit timestamp | 2026-05-21 |
+| Worktree isolation | subagent 在 worktree 工作，变更不自动合并到 main | 手动读取 worktree 文件 + Write 到 main 目录 | 2026-05-21 |
+| Database missing wal_writer | executor_test 直接构造 Database 缺少 wal_writer 字段 | 添加 wal_writer: Arc::new(WalWriter::open(...)) | 2026-05-21 |
 
 **详细踩坑档案**（复杂问题）：
 
@@ -285,6 +313,12 @@
 | Parser ORDER BY 解析 | ORDER BY 解析 | query.order_by → Vec<OrderByColumn> → PhysicalPlan::Sort |
 | Parser LIMIT/OFFSET 解析 | 分页解析 | query.limit + query.offset → PhysicalPlan::Limit |
 | Pipeline 递归 Executor 创建 | 嵌套 Plan 处理 | Limit(Sort(Filter(Scan))) → 递归 create_executor_from_plan |
+| WalRecord 序列化格式 | WAL 紧凑格式 | [type:1B][len:4B LE][data:var]（手动序列化比 serde 紧凑） | 2026-05-21 |
+| WalWriter spawn_blocking | 异步文件写入 | spawn_blocking(|| File::open().append().write()) 避免阻塞协程 | 2026-05-21 |
+| Checkpoint 位点文件 | 位点持久化 | `<db_path>.checkpoint` 存储 (lsn:8B + timestamp:8B) | 2026-05-21 |
+| Checkpoint flow | checkpoint 执行顺序 | 获取 LSN → flush_all → 写位点 → 写 WAL Checkpoint 记录 → 重置计数 | 2026-05-21 |
+| RecoveryManager commit/abort | 崩溃恢复标记 | 遍历 WAL → 收集 Commit/Abort tx_id → 返回 HashSet | 2026-05-21 |
+| Database WAL 集成 | 启动恢复 | RecoveryManager::recover → WalWriter::open → 添加到 Database 结构 | 2026-05-21 |
 
 ---
 
@@ -327,6 +361,9 @@
 - [x] WHERE 表达式求值器（M9 阶段）→ Predicate trait + FilterExecutor 已实现
 - [x] ORDER BY 排序（M9 Phase 2 阶段）→ SortExecutor + 列名映射已实现
 - [x] LIMIT/OFFSET 分页（M9 Phase 2 阶段）→ LimitExecutor 已实现
+- [x] WAL（Write-Ahead Logging）基础实现（M11 阶段）→ WalRecord/WalWriter/WalReader/CheckpointManager/RecoveryManager 已实现
+- [ ] Executor 层 WAL 写入集成（M11 推迟）
+- [ ] WAL 完整数据重放（M11 推迟）
 
 ---
 
