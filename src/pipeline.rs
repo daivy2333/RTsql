@@ -1,13 +1,14 @@
 use crate::database::Database;
 use crate::executor::{
     CreateTableExecutor, DeleteExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
-    IndexScanExecutor, InsertExecutor, LimitExecutor, PhysicalPlan, ScanExecutor, SortExecutor,
+    IndexScanExecutor, InsertExecutor, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor, SortExecutor,
     UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
 use crate::storage::Result;
 use sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub async fn execute(database: &Database, sql: &str) -> Response {
@@ -214,9 +215,27 @@ fn create_executor_from_plan(
                     as Box<dyn Executor + Send>)
             }
 
-            PhysicalPlan::Join(_) => {
-                // JoinExecutor will be implemented in later tasks
-                unimplemented!("Join executor not yet implemented")
+            PhysicalPlan::Join(join_node) => {
+                // Build column index mappings from ScanNodes (must do before moving)
+                let (left_column_indices, left_table_name) = extract_column_indices(&join_node.left)?;
+                let (right_column_indices, right_table_name) = extract_column_indices(&join_node.right)?;
+
+                // Build left executor recursively
+                let left_executor = create_executor_from_plan(*join_node.left, database).await?;
+
+                // Build right executor recursively
+                let right_executor = create_executor_from_plan(*join_node.right, database).await?;
+
+                Ok(Box::new(JoinExecutor::new(
+                    left_executor,
+                    right_executor,
+                    join_node.conditions.clone(),
+                    join_node.output_columns.clone(),
+                    left_column_indices,
+                    right_column_indices,
+                    left_table_name,
+                    right_table_name,
+                )) as Box<dyn Executor + Send>)
             }
         }
     })
@@ -240,6 +259,41 @@ fn value_to_json(value: Value) -> serde_json::Value {
             }
         }
         Value::Bool(b) => serde_json::Value::Bool(b),
+    }
+}
+
+fn extract_column_indices(
+    plan: &PhysicalPlan,
+) -> Result<(HashMap<String, usize>, String)> {
+    match plan {
+        PhysicalPlan::Scan(scan_node) => {
+            let indices: HashMap<String, usize> = scan_node
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, scan_node.table_name.clone()))
+        }
+        PhysicalPlan::Join(join_node) => {
+            // For nested joins, use output_columns to build indices
+            let indices: HashMap<String, usize> = join_node
+                .output_columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.column.to_lowercase(), idx))
+                .collect();
+            // Use first condition's left table as "table name"
+            let table_name = join_node
+                .conditions
+                .first()
+                .map(|c| c.left_column.table.clone().unwrap_or_default())
+                .unwrap_or_default();
+            Ok((indices, table_name))
+        }
+        _ => Err(crate::storage::StorageError::ExecutionError(
+            "Expected Scan or Join".into(),
+        )),
     }
 }
 
