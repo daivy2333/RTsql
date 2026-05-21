@@ -48,3 +48,11 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
 pub fn extract_name_from_object(obj: &ObjectName) -> String {
     obj.to_string().to_lowercase()
 }
+
+/// 从 JOIN 关系的 TableFactor 提取表名
+pub fn extract_join_table_name(relation: &TableFactor) -> Result<String, PlanError> {
+    match relation {
+        TableFactor::Table { name, .. } => Ok(name.to_string().to_lowercase()),
+        _ => Err(PlanError::UnsupportedStatement),
+    }
+}
