@@ -2,6 +2,7 @@ use thiserror::Error;
 use tokio::task::JoinError;
 
 use super::RowId;
+use crate::transaction::TransactionError;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -58,6 +59,9 @@ pub enum StorageError {
 
     #[error("execution error: {0}")]
     ExecutionError(String),
+
+    #[error("transaction error: {0}")]
+    Transaction(#[from] TransactionError),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

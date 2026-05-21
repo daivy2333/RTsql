@@ -1,5 +1,5 @@
-use crate::storage::RowId;
-use crate::transaction::{Result, Snapshot, TransactionError, TransactionId};
+use crate::storage::{BufferPool, Result, RowId};
+use crate::transaction::{Snapshot, TransactionError, TransactionId};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::RwLock;
 
@@ -89,7 +89,7 @@ impl TransactionManager {
         let mut active = self.active_tx_ids.write().await;
 
         if !active.remove(&tx_id) {
-            return Err(TransactionError::AlreadyCommitted(tx_id));
+            return Err(TransactionError::AlreadyCommitted(tx_id).into());
         }
 
         Ok(())
@@ -105,7 +105,7 @@ impl TransactionManager {
         let mut active = self.active_tx_ids.write().await;
 
         if !active.remove(&tx_id) {
-            return Err(TransactionError::AlreadyAborted(tx_id));
+            return Err(TransactionError::AlreadyAborted(tx_id).into());
         }
 
         Ok(())
@@ -144,7 +144,19 @@ impl TransactionManager {
         let mut active = self.active_tx_ids.write().await;
 
         if !active.remove(&tx_id) {
-            return Err(TransactionError::NotFound(tx_id));
+            return Err(TransactionError::NotFound(tx_id).into());
+        }
+
+        Ok(())
+    }
+
+    /// Mark all versions as committed (M10)
+    pub async fn commit_mark_versions(&self, tx_id: u64, buffer_pool: &BufferPool) -> Result<()> {
+        let versions = self.tx_versions.read().await;
+        let tx_versions = versions.get(&tx_id).cloned().unwrap_or_default();
+
+        for row_id in tx_versions {
+            buffer_pool.write_commit_tx_id(row_id, tx_id).await?;
         }
 
         Ok(())
