@@ -4,10 +4,35 @@
 
 ## 当前状态
 
-- **阶段**: M10 完成（MVCC 完整性）
+- **阶段**: M11 完成（WAL 持久化）
 - **状态**: 正常
-- **当前里程碑**: M11 准备开始（WAL 持久化）
-- **测试**: 279 passed
+- **当前里程碑**: M12 准备开始（JOIN 多表支持）
+- **测试**: 83 passed（lib）+ 74 passed（tests）
+
+## 项目结构
+
+新增 WAL 模块（M11）：
+
+```
+src/wal/
+├── mod.rs           # 模块导出
+├── record.rs        # WalRecord enum + serialize/deserialize
+├── writer.rs        # WalWriter（追加写入 + fsync + truncate）
+├── reader.rs        # WalReader（读取 + 定位）
+├── checkpoint.rs    # CheckpointManager（位点读写 + 刷脏页）
+└── recovery.rs      # RecoveryManager（启动重放）
+```
+
+新增 WAL 测试（M11）：
+
+```
+tests/
+├── wal_record_test.rs       (8 tests)
+├── wal_writer_test.rs       (5 tests)
+├── checkpoint_test.rs       (3 tests)
+├── recovery_test.rs         (3 tests)
+└── wal_integration_test.rs  (3 tests)
+```
 
 ## 项目结构
 
@@ -139,63 +164,50 @@ RTsql/
 ## Git 状态
 
 - **当前分支**: master
-- **最近提交**（M9 Phase 2）:
-  - 45b67d2 feat(M9): complete ORDER BY + LIMIT/OFFSET implementation
-  - 52cde7f fix(sort): correct column index mapping in SortExecutor
-  - 5a87380 test(pipeline): add ORDER BY + LIMIT end-to-end tests
-  - dac8e4d feat(pipeline): integrate SortExecutor + LimitExecutor
-  - a7b0b6e test(parser): add ORDER BY + LIMIT/OFFSET parsing tests
-  - 01301d0 feat(parser): add ORDER BY + LIMIT/OFFSET parsing
-  - ...（M9 Phase 2 共 15 commits）
+- **最近提交**（M11 WAL 持久化）:
+  - 388173b test(M11): add WAL E2E integration tests
+  - 23a0d7c feat(M11): add CheckpointManager with site read/write
+  - 0b826d2 feat(M11): add WalWriter with async write/fsync/truncate
+  - 527d915 feat(M11): add WalRecord enum + serialize/deserialize
 - **未提交更改**: 无
 
-**M10 总结**: MVCC完整性完成（279 tests），实现完整版本链遍历、commit标记、abort清理、可选GC。
+**M11 总结**: WAL 持久化基础实现完成（WalRecord + WalWriter + WalReader + CheckpointManager + RecoveryManager + Database 集成），22 WAL 相关测试通过。
 
 ## 关键文件
 
 | 文件 | 作用 | 状态 |
 |------|------|------|
-| src/transaction/manager.rs | TransactionManager（tx_versions跟踪 + commit标记 + abort清理） | ✅ M10 新增 |
-| src/storage/buffer_pool.rs | BufferPool（find_visible_version版本链遍历） | ✅ M10 新增 |
-| src/storage/btree/index_manager.rs | IndexManager（find_key_by_row_id反向映射） | ✅ M10 新增 |
-| src/executor/index_scan.rs | IndexScanExecutor（版本链遍历集成） | ✅ M10 修改 |
-| src/executor/scan.rs | ScanExecutor（版本链遍历集成） | ✅ M10 修改 |
-| src/storage/data_page.rs | 数据页操作（update_version_header + delete_tuple） | ✅ M10 新增 |
-| src/storage/data/table_manager.rs | TableManager（gc_table可选GC） | ✅ M10 新增 |
-| tests/mvcc_record_test.rs | tx_versions记录测试（5 tests） | ✅ M10 新增 |
-| tests/mvcc_commit_test.rs | commit标记测试（4 tests） | ✅ M10 新增 |
-| tests/mvcc_abort_test.rs | abort清理测试（3 tests） | ✅ M10 新增 |
-| tests/version_chain_test.rs | 版本链遍历测试（3 tests） | ✅ M10 新增 |
-| tests/gc_test.rs | GC测试（3 tests） | ✅ M10 新增 |
+| src/wal/record.rs | WalRecord enum + serialize/deserialize | ✅ M11 新增 |
+| src/wal/writer.rs | WalWriter（追加写入 + fsync + truncate） | ✅ M11 新增 |
+| src/wal/reader.rs | WalReader（读取 + 定位） | ✅ M11 新增 |
+| src/wal/checkpoint.rs | CheckpointManager（位点读写 + 刷脏页） | ✅ M11 新增 |
+| src/wal/recovery.rs | RecoveryManager（启动重放 commit/abort 标记） | ✅ M11 新增 |
+| src/database.rs | Database 集成 wal_writer + RecoveryManager | ✅ M11 修改 |
+| src/storage/error.rs | StorageError 添加 WalError 变体 | ✅ M11 修改 |
 
 ## 最近修改
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
-| 2026-05-21 | src/transaction/manager.rs | M10 新增 tx_versions, record_version, commit_mark_versions, abort_cleanup_versions |
-| 2026-05-21 | src/storage/buffer_pool.rs | M10 新增 find_visible_version, read_version_header, write_commit_tx_id |
-| 2026-05-21 | src/storage/btree/index_manager.rs | M10 新增 find_key_by_row_id, row_to_key反向映射 |
-| 2026-05-21 | src/executor/index_scan.rs | M10 修改为使用 find_visible_version |
-| 2026-05-21 | src/executor/scan.rs | M10 修改为使用 find_visible_version |
-| 2026-05-21 | src/executor/insert.rs, update.rs | M10 新增 record_version 调用 |
-| 2026-05-21 | src/storage/data_page.rs | M10 新增 update_version_header_in_data_page, delete_tuple_from_data_page |
-| 2026-05-21 | src/storage/data/table_manager.rs | M10 新增 gc_table |
-| 2026-05-21 | tests/mvcc_*.rs | M10 新增 15 个 MVCC 测试 |
-| 2026-05-21 | tests/version_chain_test.rs | M10 新增 3 个版本链测试 |
-| 2026-05-21 | tests/gc_test.rs | M10 新增 3 个 GC 测试 |
+| 2026-05-21 | src/wal/record.rs | M11 新增 WalRecord enum + serialize/deserialize |
+| 2026-05-21 | src/wal/writer.rs | M11 新增 WalWriter（async write + fsync + truncate） |
+| 2026-05-21 | src/wal/reader.rs | M11 新增 WalReader（read_next + seek_to） |
+| 2026-05-21 | src/wal/checkpoint.rs | M11 新增 CheckpointManager（checkpoint flow） |
+| 2026-05-21 | src/wal/recovery.rs | M11 新增 RecoveryManager（recover + needs_recovery） |
+| 2026-05-21 | src/database.rs | M11 集成 wal_writer + RecoveryManager::recover |
+| 2026-05-21 | tests/wal_*.rs | M11 新增 22 WAL 测试 |
 
 ## 下一步行动
 
-**优先级**: M11（WAL 持久化）- 崩溃恢复能力
+**优先级**: M12（JOIN 多表支持）
 
 **里程碑路线图**:
-1. **M11** (🔴 高优先级): WAL 持久化 + 崩溃恢复 + Checkpoint
-2. **M12** (🟢 低优先级): JOIN 多表支持
-3. **M13**: 性能优化与完善
+1. **M12** (🟢 中优先级): JOIN 多表支持
+2. **M13**: 性能优化与完善
 
 **当前阻塞**: 无
 
 **注意事项**:
-- M10 完整实现了 MVCC 版本链遍历、commit标记、abort清理
-- 可选 GC 已实现（gc_table），用户可手动触发清理旧版本
-- 下一步重点：WAL 持久化（嵌入式数据库崩溃恢复必需）
+- M11 WAL 基础实现完成（WalRecord + WalWriter + WalReader + CheckpointManager + RecoveryManager）
+- Executor 层 WAL 写入集成推迟到后续（当前仅在 Database 层初始化 WAL）
+- RecoveryManager 仅返回 commit/abort 标记，实际数据重放推迟

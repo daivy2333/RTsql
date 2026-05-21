@@ -4,6 +4,36 @@
 
 ## 决策列表
 
+### 2026-05-21 - M11 WAL 持久化架构决策
+
+- **决策**: 简单追加 WAL + 位点截断（方案 1）
+- **原因**: 嵌入式数据库核心追求轻量、便捷，单文件管理符合用户期望。操作级 WAL 记录提供完整恢复信息。
+- **影响**:
+  - WalWriter/WalReader/WalRecord/WalError 完整 WAL 写入/读取流程
+  - CheckpointManager 位点读写 + 刷脏页 + 截断 WAL
+  - RecoveryManager 启动重放 WAL（仅 Commit/Abort 标记，实际数据重放推迟）
+  - Database 集成 wal_writer + RecoveryManager::recover
+- **关键组件**:
+  - WalRecord enum（Insert/Update/Delete/Commit/Abort/Checkpoint）
+  - WalWriter::write_record + fsync + truncate_to（spawn_blocking 包装）
+  - CheckpointManager::checkpoint（刷脏页 + 写位点 + 重置计数）
+  - RecoveryManager::recover（读取 commit/abort 标记）
+- **替代方案**:
+  - 事务级 WAL（rejected：信息不足，Update/Delete 需要操作级记录）
+  - 多文件 WAL（rejected：管理复杂，违背嵌入式轻量理念）
+- **文件结构**:
+```
+新增/修改：
+src/wal/record.rs     # WalRecord enum + serialize/deserialize
+src/wal/writer.rs     # WalWriter（async write + fsync + truncate）
+src/wal/reader.rs     # WalReader（read_next + seek_to）
+src/wal/checkpoint.rs # CheckpointManager（checkpoint flow）
+src/wal/recovery.rs   # RecoveryManager（recover + needs_recovery）
+src/database.rs       # + wal_writer field + RecoveryManager::recover call
+src/storage/error.rs  # + WalError variant
+```
+- **推迟功能**: Executor 层 WAL 写入集成、完整数据重放
+
 ### 2026-05-21 - M10 MVCC 完整性架构决策
 
 - **决策**: 采用 tx_versions HashMap 跟踪未提交版本 + BufferPool.find_visible_version 版本链遍历 + IndexManager.row_to_key 反向映射

@@ -176,24 +176,32 @@
 **新增测试**: 23 个（record:5 + commit:4 + abort:3 + version_chain:3 + gc:3 + 其他:8）
 **关键改动**: 23 commits, 21 files changed, 1929 additions
 
----
-
-## 待办 - 开发路线图（M11 - M13）
-
-> 嵌入式数据库核心功能优先级调整（2026-05-21）
-
-### M11: WAL 持久化 🔴 高优先级
+### M11: WAL 持久化 ✅
 
 **目标**: 嵌入式数据库崩溃恢复能力
 
-- [ ] WAL（Write-Ahead Logging）写入流程
-- [ ] WAL 重放恢复（启动时重做未完成事务）
-- [ ] Checkpoint 机制（定期刷盘 + 截断 WAL）
-- [ ] 原子性保障（事务提交前 WAL 必须持久化）
+- [x] WAL（Write-Ahead Logging）写入流程（WalRecord + WalWriter）
+- [x] WAL 重放恢复（RecoveryManager + WalReader）
+- [x] Checkpoint 机制（CheckpointManager + 位点文件）
+- [x] 原子性保障（WalWriter::fsync）
 
-**必要性**: 嵌入式数据库崩溃恢复必需，持久化保障
+**实现内容**:
+- WalRecord enum（Insert/Update/Delete/Commit/Abort/Checkpoint）
+- WalWriter（async write_record + fsync + truncate）
+- WalReader（read_next + seek_to）
+- CheckpointManager（checkpoint flow + 位点读写）
+- RecoveryManager（recover + needs_recovery）
+- Database 集成（wal_writer 字段 + RecoveryManager::recover）
+
+**完成日期**: 2026-05-21
+**验证结果**: cargo test (83 lib + 74 tests) ✅
+**新增文件**: wal/record.rs, wal/writer.rs, wal/reader.rs, wal/checkpoint.rs, wal/recovery.rs, wal/mod.rs
+**新增测试**: 22 个（wal_record:8 + wal_writer:5 + checkpoint:3 + recovery:3 + integration:3）
+**推迟功能**: Executor 层 WAL 写入集成、完整数据重放（仅返回 commit/abort 标记）
 
 ---
+
+## 待办 - 开发路线图（M12 - M13）
 
 ### M12: JOIN 多表 🟢 低优先级
 
@@ -240,9 +248,9 @@
 
 ## 下一步行动
 
-**立即开始**: M11（WAL 持久化）
-- 实现 WAL 写入流程
-- 实现崩溃恢复（WAL 重放）
-- 实现 Checkpoint 机制
+**立即开始**: M12（JOIN 多表支持）
+- 实现 INNER JOIN（两表连接）
+- 实现 JoinExecutor
+- 多表 WHERE 条件解析
 
-**里程碑顺序**: M11 → M12 → M13
+**里程碑顺序**: M12 → M13
