@@ -191,7 +191,7 @@ impl PlanBuilder {
             let right_ref = self.resolve_column_ref(right, &[right_table.to_string()])?;
 
             // 验证：左边列来自左表，右边列来自右表（或反序）
-            if left_ref.table.as_ref().map(|t| t.as_str()) == Some(right_table) {
+            if left_ref.table.as_deref() == Some(right_table) {
                 // 反序：right.col = left.col，交换
                 return Ok(vec![crate::executor::JoinCondition {
                     left_column: right_ref,
@@ -258,26 +258,26 @@ impl PlanBuilder {
             let output_columns: Vec<crate::executor::OutputColumn> = current_tables
                 .iter()
                 .flat_map(|t| {
-                    self.tables
-                        .get(t)
-                        .unwrap()
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, col)| crate::executor::OutputColumn {
-                            table: Some(t.clone()),
-                            column: col.clone(),
-                            table_alias: t.clone(),
-                            column_index: idx,
-                        })
-                })
-                .chain(self.tables.get(&right_table).unwrap().iter().enumerate().map(
-                    |(idx, col)| crate::executor::OutputColumn {
-                        table: Some(right_table.clone()),
+                    // SAFE: current_tables only contains tables that were validated via validate_table()
+                    let columns = self.tables.get(t).expect("validated table must exist in metadata");
+                    columns.iter().enumerate().map(|(idx, col)| crate::executor::OutputColumn {
+                        table: Some(t.clone()),
                         column: col.clone(),
-                        table_alias: right_table.clone(),
+                        table_alias: t.clone(),
                         column_index: idx,
-                    },
-                ))
+                    })
+                })
+                .chain(
+                    // SAFE: right_table was validated earlier via validate_table()
+                    self.tables.get(&right_table).expect("validated right_table must exist").iter().enumerate().map(
+                        |(idx, col)| crate::executor::OutputColumn {
+                            table: Some(right_table.clone()),
+                            column: col.clone(),
+                            table_alias: right_table.clone(),
+                            column_index: idx,
+                        },
+                    ),
+                )
                 .collect();
 
             // 构建 Join 节点
