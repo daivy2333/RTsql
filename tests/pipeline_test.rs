@@ -332,3 +332,146 @@ async fn test_pipeline_full_flow() {
         rtsql::network::protocol::Response::AffectedRows { count: 0 }
     ));
 }
+
+#[tokio::test]
+async fn test_select_order_by_asc() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db"))
+        .await
+        .expect("Failed to open database");
+
+    // Create table
+    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
+        .await;
+
+    // Insert rows
+    db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+        .await;
+    db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+        .await;
+    db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+        .await;
+
+    // Query with ORDER BY ASC
+    let response = db
+        .execute_sql("SELECT id, name, age FROM users ORDER BY age ASC")
+        .await;
+
+    match response {
+        rtsql::network::protocol::Response::QueryResult { rows } => {
+            // Should return rows ordered by age: Bob(25), Alice(30), Charlie(35)
+            assert_eq!(rows.len(), 3, "Expected 3 rows");
+
+            // Verify order: [Bob, Alice, Charlie] by age ascending
+            // Row 0: Bob (id=2, age=25)
+            assert_eq!(rows[0].len(), 3);
+            assert_eq!(rows[0][0], serde_json::json!(2)); // id
+            assert_eq!(rows[0][2], serde_json::json!(25)); // age
+
+            // Row 1: Alice (id=1, age=30)
+            assert_eq!(rows[1][0], serde_json::json!(1)); // id
+            assert_eq!(rows[1][2], serde_json::json!(30)); // age
+
+            // Row 2: Charlie (id=3, age=35)
+            assert_eq!(rows[2][0], serde_json::json!(3)); // id
+            assert_eq!(rows[2][2], serde_json::json!(35)); // age
+        }
+        rtsql::network::protocol::Response::Error { message } => {
+            panic!("SELECT with ORDER BY ASC failed: {}", message);
+        }
+        _ => panic!("Expected QueryResult response"),
+    }
+}
+
+#[tokio::test]
+async fn test_select_order_by_desc_with_limit() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db"))
+        .await
+        .expect("Failed to open database");
+
+    // Create table
+    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
+        .await;
+
+    // Insert rows
+    db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+        .await;
+    db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+        .await;
+    db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+        .await;
+
+    // Query with ORDER BY DESC LIMIT 2
+    let response = db
+        .execute_sql("SELECT id, name, age FROM users ORDER BY age DESC LIMIT 2")
+        .await;
+
+    match response {
+        rtsql::network::protocol::Response::QueryResult { rows } => {
+            // Should return 2 rows: Charlie(35), Alice(30) by age descending
+            assert_eq!(rows.len(), 2, "Expected 2 rows with LIMIT 2");
+
+            // Row 0: Charlie (id=3, age=35)
+            assert_eq!(rows[0].len(), 3);
+            assert_eq!(rows[0][0], serde_json::json!(3)); // id
+            assert_eq!(rows[0][2], serde_json::json!(35)); // age
+
+            // Row 1: Alice (id=1, age=30)
+            assert_eq!(rows[1][0], serde_json::json!(1)); // id
+            assert_eq!(rows[1][2], serde_json::json!(30)); // age
+        }
+        rtsql::network::protocol::Response::Error { message } => {
+            panic!("SELECT with ORDER BY DESC LIMIT failed: {}", message);
+        }
+        _ => panic!("Expected QueryResult response"),
+    }
+}
+
+#[tokio::test]
+async fn test_select_where_order_by_limit() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db"))
+        .await
+        .expect("Failed to open database");
+
+    // Create table
+    db.execute_sql("CREATE TABLE products (id INT PRIMARY KEY, name VARCHAR, price FLOAT)")
+        .await;
+
+    // Insert rows
+    db.execute_sql("INSERT INTO products (id, name, price) VALUES (1, 'Apple', 5.0)")
+        .await;
+    db.execute_sql("INSERT INTO products (id, name, price) VALUES (2, 'Banana', 8.0)")
+        .await;
+    db.execute_sql("INSERT INTO products (id, name, price) VALUES (3, 'Cherry', 12.0)")
+        .await;
+    db.execute_sql("INSERT INTO products (id, name, price) VALUES (4, 'Date', 15.0)")
+        .await;
+
+    // Query with WHERE + ORDER BY + LIMIT
+    let response = db
+        .execute_sql("SELECT id, name, price FROM products WHERE price > 10.0 ORDER BY price ASC LIMIT 2")
+        .await;
+
+    match response {
+        rtsql::network::protocol::Response::QueryResult { rows } => {
+            // Should return 2 rows: Cherry(12.0), Date(15.0)
+            // WHERE filters to price > 10.0 (Cherry, Date)
+            // ORDER BY price ASC sorts them ascending
+            // LIMIT 2 returns both
+            assert_eq!(rows.len(), 2, "Expected 2 rows after WHERE + LIMIT");
+
+            // Row 0: Cherry (id=3, price=12.0)
+            assert_eq!(rows[0].len(), 3);
+            assert_eq!(rows[0][0], serde_json::json!(3)); // id
+
+            // Row 1: Date (id=4, price=15.0)
+            assert_eq!(rows[1][0], serde_json::json!(4)); // id
+        }
+        rtsql::network::protocol::Response::Error { message } => {
+            panic!("SELECT with WHERE + ORDER BY + LIMIT failed: {}", message);
+        }
+        _ => panic!("Expected QueryResult response"),
+    }
+}
