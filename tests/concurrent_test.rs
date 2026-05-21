@@ -5,12 +5,23 @@
 //! - Transaction ID uniqueness under concurrency
 //! - Read-write non-blocking behavior
 
+use rtsql::storage::{BufferPool, FileStorage};
 use rtsql::transaction::{Snapshot, TransactionManager};
+use std::sync::Arc;
+use tempfile::tempdir;
+
+/// Create a test buffer pool for tests that need it
+fn create_test_buffer_pool() -> Arc<BufferPool> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    Arc::new(BufferPool::new(10, storage).unwrap())
+}
 
 #[tokio::test]
 async fn test_concurrent_snapshot_consistency() {
     // Two concurrent transactions see different views based on their snapshots
     let manager = std::sync::Arc::new(TransactionManager::new());
+    let buffer_pool = create_test_buffer_pool();
 
     // Tx1 starts
     let tx1 = manager.begin().await;
@@ -32,7 +43,7 @@ async fn test_concurrent_snapshot_consistency() {
     assert!(!snap2.is_visible(tx1_id, None)); // Tx1 uncommitted, not visible
 
     // Commit Tx1
-    manager.commit(tx1).await.unwrap();
+    manager.commit(tx1, &buffer_pool).await.unwrap();
 
     // Tx2's snapshot still considers Tx1 not visible
     // (snapshot taken before Tx1 committed, Tx1 was in active list)
@@ -45,6 +56,7 @@ async fn test_concurrent_read_write_no_block() {
     // Read operations should not block write operations
     // (This is guaranteed by MVCC snapshot design)
     let manager = std::sync::Arc::new(TransactionManager::new());
+    let buffer_pool = create_test_buffer_pool();
 
     let tx1 = manager.begin().await;
     let tx2 = manager.begin().await;
@@ -57,24 +69,26 @@ async fn test_concurrent_read_write_no_block() {
     assert!(snap1.tx_id() > 0);
     assert!(snap2.tx_id() > 0);
 
-    manager.commit(tx1).await.unwrap();
-    manager.commit(tx2).await.unwrap();
+    manager.commit(tx1, &buffer_pool).await.unwrap();
+    manager.commit(tx2, &buffer_pool).await.unwrap();
 }
 
 #[tokio::test]
 async fn test_concurrent_transactions_unique_ids() {
     let manager = std::sync::Arc::new(TransactionManager::new());
+    let buffer_pool = create_test_buffer_pool();
 
     let mut tasks = vec![];
 
     for _ in 0..10 {
         let manager_clone = manager.clone();
+        let buffer_pool_clone = buffer_pool.clone();
         tasks.push(tokio::spawn(async move {
             let tx = manager_clone.begin().await;
             let id = tx.id();
             // Hold transaction briefly
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            manager_clone.commit(tx).await.unwrap();
+            manager_clone.commit(tx, &buffer_pool_clone).await.unwrap();
             id
         }));
     }
@@ -98,6 +112,7 @@ async fn test_concurrent_transactions_unique_ids() {
 #[tokio::test]
 async fn test_snapshot_visibility_rules() {
     let manager = TransactionManager::new();
+    let buffer_pool = create_test_buffer_pool();
 
     // Sequence of transactions
     let tx1 = manager.begin().await;
@@ -117,7 +132,7 @@ async fn test_snapshot_visibility_rules() {
     assert!(!snap3.is_visible(tx2_id, None));
 
     // Commit tx1
-    manager.commit(tx1).await.unwrap();
+    manager.commit(tx1, &buffer_pool).await.unwrap();
 
     // tx3's snapshot still considers tx1 not visible
     // (tx1 was in active list when snapshot was taken)
@@ -137,6 +152,6 @@ async fn test_snapshot_visibility_rules() {
 
     // Cleanup
     manager.abort(tx2).await.unwrap();
-    manager.commit(tx3).await.unwrap();
-    manager.commit(tx4).await.unwrap();
+    manager.commit(tx3, &buffer_pool).await.unwrap();
+    manager.commit(tx4, &buffer_pool).await.unwrap();
 }
