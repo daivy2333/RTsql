@@ -4,6 +4,35 @@
 
 ## 决策列表
 
+### 2026-05-21 - M10 MVCC 完整性架构决策
+
+- **决策**: 采用 tx_versions HashMap 跟踪未提交版本 + BufferPool.find_visible_version 版本链遍历 + IndexManager.row_to_key 反向映射
+- **原因**:
+  - tx_versions HashMap<tx_id, HashSet<RowId>> 跟踪每个事务创建的版本，commit/abort 时批量操作
+  - find_visible_version 循环遍历版本链（next_version 指针），找到第一个可见版本
+  - row_to_key 反向映射支持 abort 时恢复索引指向（find_key_by_row_id）
+- **影响**:
+  - Executor（Insert/Update）调用 record_version 记录新版本
+  - commit 时调用 commit_mark_versions 设置所有版本的 commit_tx_id
+  - abort 时调用 abort_cleanup_versions 清理未提交版本（恢复索引或删除）
+  - IndexScanExecutor/ScanExecutor 使用 find_visible_version 替代直接读取
+- **关键组件**:
+  - TransactionManager.tx_versions: RwLock<HashMap<u64, HashSet<RowId>>>
+  - BufferPool.find_visible_version(row_id, snapshot) → Result<Option<Vec<u8>>>
+  - IndexManager.row_to_key: RwLock<HashMap<RowId, Vec<u8>>>
+- **替代方案**:
+  - 每个版本单独跟踪（rejected：开销大，难以批量操作）
+  - 不实现反向映射（rejected：abort 无法恢复索引）
+- **文件结构**:
+```
+新增/修改：
+src/transaction/manager.rs    # + tx_versions, record_version, commit_mark_versions, abort_cleanup_versions
+src/storage/buffer_pool.rs    # + find_visible_version, read_version_header, write_commit_tx_id
+src/storage/btree/index_manager.rs # + row_to_key, find_key_by_row_id
+src/storage/data_page.rs      # + update_version_header_in_data_page, delete_tuple_from_data_page
+src/storage/data/table_manager.rs # + gc_table (可选)
+```
+
 ### 2026-05-20 - 项目初始化：异步协程架构
 
 - **决策**: 采用 Tokio 无栈协程为调度核心的嵌入式关系型数据库架构

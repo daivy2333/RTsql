@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-21 (M9 Phase 2 完成：ORDER BY + LIMIT/OFFSET)
+> 最后更新：2026-05-21 (M10 完成：MVCC 完整性)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -86,6 +86,17 @@
 | extract_column_name | `extract_column_name(&expr)` → `String` | ORDER BY 列名提取 | 2026-05-21 |
 | parse_limit_value | `parse_limit_value(&expr)` → `usize` | LIMIT 常量解析 | 2026-05-21 |
 | parse_offset_value | `parse_offset_value(&expr)` → `usize` | OFFSET 常量解析 | 2026-05-21 |
+| TransactionManager.record_version | `tx_manager.record_version(tx_id, row_id).await` | 记录事务创建的版本 | 2026-05-21 |
+| TransactionManager.get_tx_versions | `tx_manager.get_tx_versions(tx_id).await` → `HashSet<RowId>` | 获取事务的所有版本（测试） | 2026-05-21 |
+| TransactionManager.commit_mark_versions | `tx_manager.commit_mark_versions(tx_id, bp).await` | Commit 时标记所有版本 | 2026-05-21 |
+| TransactionManager.abort_cleanup_versions | `tx_manager.abort_cleanup_versions(tx_id, bp, meta).await` | Abort 时清理未提交版本 | 2026-05-21 |
+| BufferPool.find_visible_version | `bp.find_visible_version(row_id, snapshot).await` → `Option<Vec<u8>>` | 版本链遍历，找第一个可见版本 | 2026-05-21 |
+| BufferPool.read_version_header | `bp.read_version_header(row_id).await` → `VersionHeader` | 仅读取版本头 | 2026-05-21 |
+| BufferPool.write_commit_tx_id | `bp.write_commit_tx_id(row_id, tx_id).await` | 设置版本的 commit_tx_id | 2026-05-21 |
+| IndexManager.find_key_by_row_id | `index_mgr.find_key_by_row_id(row_id).await` → `Option<Vec<u8>>` | 反向查询：row_id → key | 2026-05-21 |
+| update_version_header_in_data_page | `update_version_header_in_data_page(bp, row_id, header, bytes).await` | 更新版本头（不改变 tuple） | 2026-05-21 |
+| delete_tuple_from_data_page | `delete_tuple_from_data_page(bp, row_id).await` | 删除数据页条目（GC） | 2026-05-21 |
+| TableMeta.gc_table | `table_meta.gc_table(bp).await` → `usize` | 可选 GC，清理旧版本 | 2026-05-21 |
 
 ---
 
@@ -304,15 +315,15 @@
 - [x] SQL 解析与计划生成（M4 阶段）→ sqlparser-rs + PhysicalPlan 已实现
 - [x] 异步执行引擎（M5 阶段）→ Executor trait + 5 Executors 已实现
 - [ ] WAL（Write-Ahead Logging）实现（M11 阶段）
-- [ ] 版本链 GC（清理旧版本）（M10 阶段）
+- [x] 版本链 GC（清理旧版本）（M10 阶段）→ gc_table 已实现（可选）
 - [ ] Serializable 隔离级别（需谓词锁，推迟）
 - [x] 复杂 WHERE 表达式计算（M9 阶段）→ Predicate trait + Expression trait 已实现
 - [ ] JOIN 多表计划与执行（M12 阶段）
 - [x] 数据存储层（TableManager、Row 数据）（M7 阶段）→ 已完成，157 测试通过
-- [ ] DDL 元数据管理（M9 阶段）→ CREATE TABLE/DROP TABLE 已实现
+- [x] DDL 元数据管理（M9 阶段）→ CREATE TABLE/DROP TABLE 已实现
 - [x] 全流程集成（M7 阶段）→ Database + Pipeline + 真实 SqlHandler
 - [x] MVCC 可见性集成（M7 阶段）→ 最新版本可见性过滤，版本链创建
-- [ ] 完整版本链遍历（follow next_version）（M10 阶段）
+- [x] 完整版本链遍历（follow next_version）（M10 阶段）→ find_visible_version 已实现
 - [x] WHERE 表达式求值器（M9 阶段）→ Predicate trait + FilterExecutor 已实现
 - [x] ORDER BY 排序（M9 Phase 2 阶段）→ SortExecutor + 列名映射已实现
 - [x] LIMIT/OFFSET 分页（M9 Phase 2 阶段）→ LimitExecutor 已实现
