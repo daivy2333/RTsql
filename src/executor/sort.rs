@@ -8,6 +8,7 @@ use std::cmp::Ordering;
 pub struct SortExecutor {
     input: Box<dyn Executor + Send>,
     order_by: Vec<OrderByColumn>,
+    columns: Vec<String>,
     sorted_rows: Vec<Vec<Value>>,
     position: usize,
     initialized: bool,
@@ -15,10 +16,11 @@ pub struct SortExecutor {
 
 impl SortExecutor {
     /// Create a new sort executor
-    pub fn new(input: Box<dyn Executor + Send>, order_by: Vec<OrderByColumn>) -> Self {
+    pub fn new(input: Box<dyn Executor + Send>, order_by: Vec<OrderByColumn>, columns: Vec<String>) -> Self {
         Self {
             input,
             order_by,
+            columns,
             sorted_rows: Vec::new(),
             position: 0,
             initialized: false,
@@ -50,9 +52,8 @@ impl SortExecutor {
     /// Compare two rows based on order_by specification
     fn compare_rows(&self, a: &[Value], b: &[Value]) -> Ordering {
         for order_col in &self.order_by {
-            // For now, we assume column index matches position in order_by
-            // In a more complete implementation, we'd look up column index by name
-            let col_idx = self.order_by.iter().position(|c| c.column == order_col.column);
+            // Find the index of the column in the result columns
+            let col_idx = self.columns.iter().position(|c| c.to_lowercase() == order_col.column.to_lowercase());
 
             if let Some(idx) = col_idx {
                 if idx < a.len() && idx < b.len() {

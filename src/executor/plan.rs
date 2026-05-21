@@ -199,6 +199,7 @@ pub struct SortNode {
     pub input: Box<PhysicalPlan>,
     pub order_by: Vec<OrderByColumn>,
     pub table_name: String,
+    pub columns: Vec<String>,
 }
 
 /// 分页节点（LIMIT + OFFSET）

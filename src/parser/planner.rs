@@ -111,7 +111,7 @@ impl PlanBuilder {
         // Build base plan (scan)
         let base_plan = PhysicalPlan::Scan(ScanNode {
             table_name: table_name.clone(),
-            columns,
+            columns: columns.clone(),
         });
 
         // Handle WHERE clause
@@ -169,6 +169,7 @@ impl PlanBuilder {
                 input: Box::new(plan_with_where),
                 order_by,
                 table_name: table_name.clone(),
+                columns: columns.clone(),
             })
         } else {
             plan_with_where
