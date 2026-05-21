@@ -1,5 +1,6 @@
+use crate::storage::RowId;
 use crate::transaction::{Result, Snapshot, TransactionError, TransactionId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::RwLock;
 
 /// Transaction state
@@ -47,6 +48,8 @@ impl Transaction {
 pub struct TransactionManager {
     tx_id_allocator: TransactionId,
     active_tx_ids: RwLock<HashSet<u64>>,
+    // M10: 跟踪每个事务的未提交版本
+    tx_versions: RwLock<HashMap<u64, HashSet<RowId>>>,
 }
 
 impl TransactionManager {
@@ -54,6 +57,7 @@ impl TransactionManager {
         Self {
             tx_id_allocator: TransactionId::new(),
             active_tx_ids: RwLock::new(HashSet::new()),
+            tx_versions: RwLock::new(HashMap::new()),
         }
     }
 
