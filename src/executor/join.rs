@@ -30,7 +30,7 @@ pub struct JoinExecutor {
     /// 左表名称
     left_table_name: String,
     /// 右表名称
-    right_table_name: String,
+    _right_table_name: String,
 
     // 哈希连接状态
     right_hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>>,
@@ -63,7 +63,7 @@ impl JoinExecutor {
             left_column_indices,
             right_column_indices,
             left_table_name,
-            right_table_name,
+            _right_table_name: right_table_name,
             right_hashmap: HashMap::new(),
             left_rows: Vec::new(),
             current_left_index: 0,
@@ -75,8 +75,9 @@ impl JoinExecutor {
     }
 
     /// 计算右表行的哈希键（ON 条件右表列值组合）
-    fn build_hash_key_right(&self, row: &[Value]) -> Vec<Value> {
-        self.conditions
+    /// 返回 None 表示键包含 NULL，在 INNER JOIN 中不会匹配任何行
+    fn build_hash_key_right(&self, row: &[Value]) -> Option<Vec<Value>> {
+        let key: Vec<Value> = self.conditions
             .iter()
             .map(|cond| {
                 let idx = self
@@ -85,12 +86,19 @@ impl JoinExecutor {
                     .expect("right column index must exist");
                 row[*idx].clone()
             })
-            .collect()
+            .collect();
+
+        // SQL semantics: NULL never matches NULL in joins
+        if key.iter().any(|v| matches!(v, Value::Null)) {
+            return None;
+        }
+        Some(key)
     }
 
     /// 计算左表行的哈希键（ON 条件左表列值组合）
-    fn build_hash_key_left(&self, row: &[Value]) -> Vec<Value> {
-        self.conditions
+    /// 返回 None 表示键包含 NULL，在 INNER JOIN 中不会匹配任何行
+    fn build_hash_key_left(&self, row: &[Value]) -> Option<Vec<Value>> {
+        let key: Vec<Value> = self.conditions
             .iter()
             .map(|cond| {
                 let idx = self
@@ -99,7 +107,13 @@ impl JoinExecutor {
                     .expect("left column index must exist");
                 row[*idx].clone()
             })
-            .collect()
+            .collect();
+
+        // SQL semantics: NULL never matches NULL in joins
+        if key.iter().any(|v| matches!(v, Value::Null)) {
+            return None;
+        }
+        Some(key)
     }
 
     /// 构建输出行（根据 output_columns 从左/右表提取列）
@@ -131,11 +145,12 @@ impl Executor for JoinExecutor {
                     // Phase 1: 执行右表，构建哈希表
                     while let Some(result) = self.right_executor.next().await? {
                         if let ExecResult::Row(row) = result {
-                            let hash_key = self.build_hash_key_right(&row);
-                            self.right_hashmap
-                                .entry(hash_key)
-                                .or_insert_with(Vec::new)
-                                .push(row);
+                            if let Some(hash_key) = self.build_hash_key_right(&row) {
+                                self.right_hashmap
+                                    .entry(hash_key)
+                                    .or_default()
+                                    .push(row);
+                            }
                         }
                     }
                     self.phase = JoinPhase::ScanLeft;
@@ -155,7 +170,15 @@ impl Executor for JoinExecutor {
                     // Phase 3: 逐行匹配输出
                     while self.current_left_index < self.left_rows.len() {
                         let left_row = &self.left_rows[self.current_left_index];
-                        let hash_key = self.build_hash_key_left(left_row);
+
+                        // Skip NULL keys (no match possible)
+                        let hash_key = match self.build_hash_key_left(left_row) {
+                            Some(key) => key,
+                            None => {
+                                self.current_left_index += 1;
+                                continue;
+                            }
+                        };
 
                         // 查找匹配的右表行
                         if self.current_right_index == 0 {
