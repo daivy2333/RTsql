@@ -9,6 +9,7 @@ mod executor_trait;
 mod filter;
 mod index_scan;
 mod insert;
+mod join;
 mod limit;
 mod plan;
 mod predicate;
@@ -25,11 +26,12 @@ pub use executor_trait::Executor;
 pub use filter::FilterExecutor;
 pub use index_scan::IndexScanExecutor;
 pub use insert::InsertExecutor;
+pub use join::JoinExecutor;
 pub use limit::LimitExecutor;
 pub use plan::{
-    ColumnConstraint, ColumnDef, CreateTableNode, DeleteNode, DropTableNode, FilterNode,
-    IndexScanNode, InsertNode, LimitNode, OrderByColumn, PhysicalPlan, ScanNode, SortNode,
-    UpdateNode,
+    ColumnConstraint, ColumnDef, ColumnRef, CreateTableNode, DeleteNode, DropTableNode,
+    FilterNode, IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode, OutputColumn,
+    OrderByColumn, PhysicalPlan, ScanNode, SortNode, UpdateNode,
 };
 pub use predicate::{
     ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,
