@@ -1,7 +1,8 @@
 use crate::database::Database;
 use crate::executor::{
     CreateTableExecutor, DeleteExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
-    IndexScanExecutor, InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value,
+    IndexScanExecutor, InsertExecutor, LimitExecutor, PhysicalPlan, ScanExecutor, SortExecutor,
+    UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
@@ -196,15 +197,17 @@ fn create_executor_from_plan(
             }
 
             PhysicalPlan::Sort(node) => {
+                // Recursively create input executor
                 let input = create_executor_from_plan(*node.input, database).await?;
-                // TODO: Task 3 - Implement SortExecutor
-                Ok(input)
+                Ok(Box::new(SortExecutor::new(input, node.order_by))
+                    as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Limit(node) => {
+                // Recursively create input executor
                 let input = create_executor_from_plan(*node.input, database).await?;
-                // TODO: Task 5 - Implement LimitExecutor
-                Ok(input)
+                Ok(Box::new(LimitExecutor::new(input, node.limit, node.offset))
+                    as Box<dyn Executor + Send>)
             }
         }
     })
