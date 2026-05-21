@@ -52,6 +52,11 @@ impl IndexManager {
     /// Delete a key from the index
     /// Returns error if key not found
     pub async fn delete(&self, key: &[u8]) -> Result<()> {
+        // Clean reverse mapping first
+        if let Some(row_id) = self.search(key).await? {
+            self.row_to_key.write().await.remove(&row_id);
+        }
+
         let btree = self.btree.clone();
         let key = key.to_vec();
 

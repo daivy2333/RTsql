@@ -5,7 +5,7 @@
 //! - Transaction ID uniqueness under concurrency
 //! - Read-write non-blocking behavior
 
-use rtsql::storage::{BufferPool, FileStorage};
+use rtsql::storage::{BufferPool, FileStorage, TableManager};
 use rtsql::transaction::{Snapshot, TransactionManager};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -15,6 +15,20 @@ fn create_test_buffer_pool() -> Arc<BufferPool> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
     Arc::new(BufferPool::new(10, storage).unwrap())
+}
+
+/// Create a test table for abort tests
+async fn create_test_table(buffer_pool: Arc<BufferPool>) -> Arc<rtsql::storage::TableMeta> {
+    let table_manager = TableManager::new(buffer_pool.clone());
+    table_manager
+        .create_table(
+            "test_table",
+            vec![("id".to_string(), rtsql::storage::ColumnType::Int)],
+            "id",
+        )
+        .await
+        .unwrap();
+    table_manager.get_table("test_table").await.unwrap()
 }
 
 #[tokio::test]
@@ -113,6 +127,7 @@ async fn test_concurrent_transactions_unique_ids() {
 async fn test_snapshot_visibility_rules() {
     let manager = TransactionManager::new();
     let buffer_pool = create_test_buffer_pool();
+    let table_meta = create_test_table(buffer_pool.clone()).await;
 
     // Sequence of transactions
     let tx1 = manager.begin().await;
@@ -151,7 +166,7 @@ async fn test_snapshot_visibility_rules() {
     assert!(!snap4.is_visible(tx3_id, None));
 
     // Cleanup
-    manager.abort(tx2).await.unwrap();
+    manager.abort(tx2, &buffer_pool, &table_meta).await.unwrap();
     manager.commit(tx3, &buffer_pool).await.unwrap();
     manager.commit(tx4, &buffer_pool).await.unwrap();
 }

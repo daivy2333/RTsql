@@ -1,4 +1,4 @@
-use crate::storage::{BufferPool, Result, RowId};
+use crate::storage::{BufferPool, Result, RowId, TableMeta};
 use crate::transaction::{Snapshot, TransactionError, TransactionId};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::RwLock;
@@ -104,16 +104,28 @@ impl TransactionManager {
 
     /// Abort a transaction
     ///
+    /// - Cleans up uncommitted versions (M10)
     /// - Removes from active list
-    /// - (Future: cleanup uncommitted versions)
-    pub async fn abort(&self, tx: Transaction) -> Result<()> {
+    /// - Clears tx_versions
+    pub async fn abort(
+        &self,
+        tx: Transaction,
+        buffer_pool: &BufferPool,
+        table_meta: &TableMeta,
+    ) -> Result<()> {
         let tx_id = tx.id();
 
-        let mut active = self.active_tx_ids.write().await;
+        // M10: Cleanup uncommitted versions
+        self.abort_cleanup_versions(tx_id, buffer_pool, table_meta).await?;
 
+        // Remove from active list
+        let mut active = self.active_tx_ids.write().await;
         if !active.remove(&tx_id) {
             return Err(TransactionError::AlreadyAborted(tx_id).into());
         }
+
+        // Clear tx_versions
+        self.tx_versions.write().await.remove(&tx_id);
 
         Ok(())
     }
@@ -168,6 +180,37 @@ impl TransactionManager {
 
         Ok(())
     }
+
+    /// Cleanup uncommitted versions on abort (M10)
+    ///
+    /// For each uncommitted version created by this transaction:
+    /// - If it has a previous version, update index to point to previous
+    /// - If it has no previous version, delete from index
+    pub async fn abort_cleanup_versions(
+        &self,
+        tx_id: u64,
+        buffer_pool: &BufferPool,
+        table_meta: &TableMeta,
+    ) -> Result<()> {
+        let versions = self.tx_versions.read().await;
+        let tx_versions = versions.get(&tx_id).cloned().unwrap_or_default();
+
+        for row_id in tx_versions {
+            let header = buffer_pool.read_version_header(row_id).await?;
+
+            let key = table_meta.index_manager.find_key_by_row_id(row_id).await;
+
+            if let Some(key) = key {
+                if let Some(prev_row_id) = header.next_version() {
+                    table_meta.index_manager.update(&key, prev_row_id).await?;
+                } else {
+                    table_meta.index_manager.delete(&key).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for TransactionManager {
@@ -179,7 +222,7 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{BufferPool, FileStorage};
+    use crate::storage::{BufferPool, FileStorage, TableManager};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -188,6 +231,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
         Arc::new(BufferPool::new(10, storage).unwrap())
+    }
+
+    /// Create a test table for abort tests
+    async fn create_test_table(buffer_pool: Arc<BufferPool>) -> Arc<TableMeta> {
+        let table_manager = TableManager::new(buffer_pool.clone());
+        table_manager
+            .create_table("test_table", vec![("id".to_string(), crate::storage::ColumnType::Int)], "id")
+            .await
+            .unwrap();
+        table_manager.get_table("test_table").await.unwrap()
     }
 
     #[tokio::test]
@@ -219,11 +272,13 @@ mod tests {
     #[tokio::test]
     async fn test_transaction_abort() {
         let manager = TransactionManager::new();
+        let buffer_pool = create_test_buffer_pool();
+        let table_meta = create_test_table(buffer_pool.clone()).await;
 
         let tx = manager.begin().await;
         let tx_id = tx.id();
 
-        manager.abort(tx).await.unwrap();
+        manager.abort(tx, &buffer_pool, &table_meta).await.unwrap();
 
         // Verify transaction not in active list
         let active = manager.active_transactions().await;
@@ -234,6 +289,7 @@ mod tests {
     async fn test_transaction_multiple() {
         let manager = TransactionManager::new();
         let buffer_pool = create_test_buffer_pool();
+        let table_meta = create_test_table(buffer_pool.clone()).await;
 
         let tx1 = manager.begin().await;
         let tx2 = manager.begin().await;
@@ -252,7 +308,7 @@ mod tests {
 
         // Commit tx1 and tx3, abort tx2
         manager.commit(tx1, &buffer_pool).await.unwrap();
-        manager.abort(tx2).await.unwrap();
+        manager.abort(tx2, &buffer_pool, &table_meta).await.unwrap();
         manager.commit(tx3, &buffer_pool).await.unwrap();
 
         // Active list should be empty
@@ -264,6 +320,7 @@ mod tests {
     async fn test_transaction_snapshot_active_list() {
         let manager = TransactionManager::new();
         let buffer_pool = create_test_buffer_pool();
+        let table_meta = create_test_table(buffer_pool.clone()).await;
 
         // Start two transactions
         let tx1 = manager.begin().await;
@@ -290,7 +347,7 @@ mod tests {
         // tx2 and tx3 snapshots were taken before tx1 committed
         // They should still see tx1 as not visible (based on snapshot rules)
 
-        manager.abort(tx2).await.unwrap();
+        manager.abort(tx2, &buffer_pool, &table_meta).await.unwrap();
         manager.commit(tx3, &buffer_pool).await.unwrap();
     }
 
