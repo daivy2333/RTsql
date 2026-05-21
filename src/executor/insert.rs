@@ -1,12 +1,13 @@
 use crate::executor::{ExecResult, Executor, Value};
 use crate::storage::page_format::{compute_tuple_size, serialize_tuple, ColumnType};
 use crate::storage::{write_tuple_to_data_page, BufferPool, Result, StorageError, TableMeta};
-use crate::transaction::VersionHeader;
+use crate::transaction::{TransactionManager, VersionHeader};
 use std::sync::Arc;
 
 pub struct InsertExecutor {
     table_meta: Arc<TableMeta>,
     buffer_pool: Arc<BufferPool>,
+    tx_manager: Arc<TransactionManager>,
     values: Vec<Vec<Value>>,
     schema: Vec<ColumnType>,
     pk_index: usize,
@@ -18,6 +19,7 @@ impl InsertExecutor {
     pub fn new(
         table_meta: Arc<TableMeta>,
         buffer_pool: Arc<BufferPool>,
+        tx_manager: Arc<TransactionManager>,
         values: Vec<Vec<Value>>,
         tx_id: u64,
     ) -> Self {
@@ -30,6 +32,7 @@ impl InsertExecutor {
         Self {
             table_meta,
             buffer_pool,
+            tx_manager,
             values,
             schema,
             pk_index,
@@ -80,6 +83,9 @@ impl Executor for InsertExecutor {
                 &buf,
             )
             .await?;
+
+            // Record version in tx_versions (M10)
+            self.tx_manager.record_version(self.tx_id, row_id).await;
 
             self.table_meta
                 .index_manager

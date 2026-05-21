@@ -8,6 +8,7 @@ use rtsql::storage::{
     data::TableManager, page_format::ColumnType, read_tuple_from_data_page, BufferPool,
     FileStorage, Result, StorageError,
 };
+use rtsql::transaction::TransactionManager;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -23,6 +24,7 @@ async fn test_scan_executor_full_table() -> Result<()> {
         .await?;
 
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![
         vec![Value::Int(1)],
@@ -30,7 +32,7 @@ async fn test_scan_executor_full_table() -> Result<()> {
         vec![Value::Int(3)],
     ];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(3)));
 
@@ -62,10 +64,11 @@ async fn test_index_scan_executor_found() -> Result<()> {
         .await?;
 
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(1)]];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
     insert_executor.next().await?;
 
     let key = 1i64.to_be_bytes();
@@ -119,9 +122,10 @@ async fn test_insert_executor_single_row() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(1)]];
-    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
 
     let result = executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -151,13 +155,14 @@ async fn test_insert_executor_batch() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![
         vec![Value::Int(1)],
         vec![Value::Int(2)],
         vec![Value::Int(3)],
     ];
-    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
 
     let result = executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(3)));
@@ -189,10 +194,11 @@ async fn test_update_executor() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(1)]];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager.clone(), values, 0);
     insert_executor.next().await?;
 
     let key = 1i64.to_be_bytes();
@@ -200,6 +206,7 @@ async fn test_update_executor() -> Result<()> {
     let mut executor = UpdateExecutor::new(
         table_meta.clone(),
         buffer_pool,
+        tx_manager,
         key.to_vec(),
         "id".to_string(),
         new_value,
@@ -259,14 +266,15 @@ async fn test_insert_duplicate_key_error() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(1)]];
-    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager.clone(), values, 0);
     let result = executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 
     let values2 = vec![vec![Value::Int(1)]];
-    let mut executor2 = InsertExecutor::new(table_meta, buffer_pool.clone(), values2, 0);
+    let mut executor2 = InsertExecutor::new(table_meta, buffer_pool.clone(), tx_manager, values2, 0);
     let err = executor2.next().await.unwrap_err();
     assert!(matches!(err, rtsql::storage::StorageError::DuplicateKey));
 
@@ -293,9 +301,10 @@ async fn test_insert_stores_tuple_data() -> Result<()> {
         )
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(42), Value::String("hello".to_string())]];
-    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_poul.clone(), values, 0);
+    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_poul.clone(), tx_manager, values, 0);
 
     let result = executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -335,10 +344,11 @@ async fn test_index_scan_returns_row_data() -> Result<()> {
         )
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(42), Value::String("hello".to_string())]];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
     insert_executor.next().await?;
 
     let key = 42i64.to_be_bytes();
@@ -403,9 +413,10 @@ async fn test_insert_creates_version_header() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(1)]];
-    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 5);
+    let mut executor = InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 5);
 
     let result = executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -438,10 +449,11 @@ async fn test_snapshot_hides_uncommitted() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(1)]];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 1);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 1);
     insert_executor.next().await?;
 
     let snapshot = Snapshot::new(2, vec![1]);
@@ -471,10 +483,11 @@ async fn test_snapshot_shows_committed() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(42)]];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 1);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 1);
     insert_executor.next().await?;
 
     let key = 42i64.to_be_bytes();
@@ -529,16 +542,18 @@ async fn test_update_creates_new_version() -> Result<()> {
         )
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     let values = vec![vec![Value::Int(1), Value::String("alice".to_string())]];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 1);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager.clone(), values, 1);
     insert_executor.next().await?;
 
     let key = 1i64.to_be_bytes();
     let mut update_executor = UpdateExecutor::new(
         table_meta.clone(),
         buffer_pool.clone(),
+        tx_manager,
         key.to_vec(),
         "name".to_string(),
         Value::String("bob".to_string()),
@@ -766,6 +781,7 @@ async fn test_filter_executor_gt() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     // Insert rows: 1, 2, 3, 4, 5
     let values = vec![
@@ -776,7 +792,7 @@ async fn test_filter_executor_gt() -> Result<()> {
         vec![Value::Int(5)],
     ];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
     insert_executor.next().await?;
 
     // Create predicate: id > 3
@@ -831,6 +847,7 @@ async fn test_filter_executor_and() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     // Insert rows: 1, 2, 3, 4, 5
     let values = vec![
@@ -841,7 +858,7 @@ async fn test_filter_executor_and() -> Result<()> {
         vec![Value::Int(5)],
     ];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
     insert_executor.next().await?;
 
     // Create predicate: id >= 2 AND id < 5
@@ -911,6 +928,7 @@ async fn test_filter_executor_empty_result() -> Result<()> {
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
 
     // Insert rows: 1, 2, 3
     let values = vec![
@@ -919,7 +937,7 @@ async fn test_filter_executor_empty_result() -> Result<()> {
         vec![Value::Int(3)],
     ];
     let mut insert_executor =
-        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), values, 0);
+        InsertExecutor::new(table_meta.clone(), buffer_pool.clone(), tx_manager, values, 0);
     insert_executor.next().await?;
 
     // Create predicate: id > 100 (no rows satisfy this)
