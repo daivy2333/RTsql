@@ -5,8 +5,8 @@
 use crate::executor::{
     ColumnConstraint, ColumnDef, ColumnType, ComparisonOp, ComparisonPredicate, ConstantExpression,
     CreateTableNode, DeleteNode, DropTableNode, ExpressionRef, FilterNode, IndexScanNode,
-    InsertNode, LogicalOp, LogicalPredicate, PhysicalPlan, PredicateRef, ScanNode, UpdateNode,
-    Value,
+    InsertNode, LimitNode, LogicalOp, LogicalPredicate, OrderByColumn, PhysicalPlan, PredicateRef,
+    ScanNode, SortNode, UpdateNode, Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -115,39 +115,80 @@ impl PlanBuilder {
         });
 
         // Handle WHERE clause
-        if let Some(where_expr) = &select.selection {
+        let plan_with_where = if let Some(where_expr) = &select.selection {
             // Try to extract primary key from WHERE clause for index scan
             if let Some(key) = self.extract_pk_from_where(&table_name, where_expr)? {
                 // Simple PK equality check - use index scan
                 // Note: This is a simplification. A more sophisticated optimizer would
                 // check if the WHERE clause is ONLY pk = value, not part of a complex expression
                 if self.is_simple_pk_equality(&table_name, where_expr)? {
-                    Ok(PhysicalPlan::IndexScan(IndexScanNode {
-                        table_name,
+                    PhysicalPlan::IndexScan(IndexScanNode {
+                        table_name: table_name.clone(),
                         key,
                         columns: extract_columns(&select.projection)?,
-                    }))
+                    })
                 } else {
                     // Complex WHERE with PK - use Filter over Scan
                     let predicate = self.build_where(&table_name, where_expr)?;
-                    Ok(PhysicalPlan::Filter(FilterNode {
+                    PhysicalPlan::Filter(FilterNode {
                         input: Box::new(base_plan),
                         predicate,
-                        table_name,
-                    }))
+                        table_name: table_name.clone(),
+                    })
                 }
             } else {
                 // Non-PK WHERE - use Filter over Scan
                 let predicate = self.build_where(&table_name, where_expr)?;
-                Ok(PhysicalPlan::Filter(FilterNode {
+                PhysicalPlan::Filter(FilterNode {
                     input: Box::new(base_plan),
                     predicate,
-                    table_name,
-                }))
+                    table_name: table_name.clone(),
+                })
             }
         } else {
             // No WHERE clause - full table scan
-            Ok(base_plan)
+            base_plan
+        };
+
+        // Parse ORDER BY
+        let plan_with_order = if !query.order_by.is_empty() {
+            let order_by: Vec<OrderByColumn> = query.order_by.iter()
+                .map(|o| {
+                    let column = extract_column_name(&o.expr)?;
+                    // sqlparser: asc field is Option<bool>
+                    // None or Some(true) = ASC, Some(false) = DESC
+                    let asc = o.asc.unwrap_or(true);
+                    Ok(OrderByColumn {
+                        column,
+                        asc,
+                    })
+                })
+                .collect::<Result<Vec<_>, PlanError>>()?;
+
+            PhysicalPlan::Sort(SortNode {
+                input: Box::new(plan_with_where),
+                order_by,
+                table_name: table_name.clone(),
+            })
+        } else {
+            plan_with_where
+        };
+
+        // Parse LIMIT/OFFSET
+        if let Some(limit_expr) = &query.limit {
+            let limit = parse_limit_value(limit_expr)?;
+            let offset = query.offset.as_ref()
+                .map(|o| parse_offset_value(&o.value))
+                .transpose()?
+                .unwrap_or(0);
+
+            Ok(PhysicalPlan::Limit(LimitNode {
+                input: Box::new(plan_with_order),
+                limit,
+                offset,
+            }))
+        } else {
+            Ok(plan_with_order)
         }
     }
 
@@ -698,6 +739,34 @@ impl PlanBuilder {
             })?;
 
         Ok(PhysicalPlan::Delete(DeleteNode { table_name, key }))
+    }
+}
+
+/// Extract column name from ORDER BY expression
+fn extract_column_name(expr: &Expr) -> Result<String, PlanError> {
+    match expr {
+        Expr::Identifier(ident) => Ok(ident.value.clone()),
+        _ => Err(PlanError::ParseError("ORDER BY only supports column names".to_string())),
+    }
+}
+
+/// Parse LIMIT value from expression
+fn parse_limit_value(expr: &Expr) -> Result<usize, PlanError> {
+    match expr {
+        Expr::Value(sqlparser::ast::Value::Number(n, _)) => {
+            n.parse::<usize>().map_err(|_| PlanError::ParseError("Invalid LIMIT value".to_string()))
+        }
+        _ => Err(PlanError::ParseError("LIMIT must be a number".to_string())),
+    }
+}
+
+/// Parse OFFSET value from expression
+fn parse_offset_value(expr: &Expr) -> Result<usize, PlanError> {
+    match expr {
+        Expr::Value(sqlparser::ast::Value::Number(n, _)) => {
+            n.parse::<usize>().map_err(|_| PlanError::ParseError("Invalid OFFSET value".to_string()))
+        }
+        _ => Err(PlanError::ParseError("OFFSET must be a number".to_string())),
     }
 }
 
