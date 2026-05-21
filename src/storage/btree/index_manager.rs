@@ -33,7 +33,8 @@ impl IndexManager {
         let key = key.to_vec();
         let key_for_btree = key.clone();
 
-        tokio::task::spawn_blocking(move || btree.lock().unwrap().insert(&key_for_btree, row_id)).await??;
+        tokio::task::spawn_blocking(move || btree.lock().unwrap().insert(&key_for_btree, row_id))
+            .await??;
 
         // Maintain reverse mapping
         self.row_to_key.write().await.insert(row_id, key);
@@ -84,7 +85,10 @@ impl IndexManager {
         let key = key.to_vec();
         let key_for_btree = key.clone();
 
-        tokio::task::spawn_blocking(move || btree.lock().unwrap().update(&key_for_btree, new_row_id)).await??;
+        tokio::task::spawn_blocking(move || {
+            btree.lock().unwrap().update(&key_for_btree, new_row_id)
+        })
+        .await??;
 
         // Maintain reverse mapping
         self.row_to_key.write().await.insert(new_row_id, key);
