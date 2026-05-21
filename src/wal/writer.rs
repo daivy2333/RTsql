@@ -116,6 +116,16 @@ impl WalWriter {
         self.checkpoint_threshold = threshold;
     }
 
+    /// 检查是否应该触发 checkpoint
+    pub fn should_checkpoint(&self) -> bool {
+        self.write_count.load(Ordering::SeqCst) >= self.checkpoint_threshold
+    }
+
+    /// 重置写入计数（checkpoint 后调用）
+    pub fn reset_write_count(&self) {
+        self.write_count.store(0, Ordering::SeqCst);
+    }
+
     pub async fn get_current_lsn(&self) -> Result<u64, WalError> {
         let wal_path = self.wal_path.clone();
 
