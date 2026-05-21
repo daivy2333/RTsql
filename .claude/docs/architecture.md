@@ -477,6 +477,108 @@ src/storage/page_format/tuple.rs  # ColumnType + serialize/deserialize
 - **锁等待**: 通过 `tokio::sync` 实现，不阻塞物理线程
 - **CPU隔离**: 重操作（排序、哈希）通过 `spawn_blocking` 移至阻塞线程池
 
+### 2026-05-21 - M9 Phase 2 架构决策：两算子分离（SortExecutor + LimitExecutor）
+
+- **决策**: ORDER BY + LIMIT/OFFSET 采用两算子分离方案（SortExecutor + LimitExecutor）
+- **原因**:
+  - 职责单一，符合现有 FilterExecutor 包装器模式
+  - Plan 节点清晰（SortNode + LimitNode）
+  - 可独立测试（SortExecutor test, LimitExecutor test）
+- **影响**:
+  - SortExecutor 必须收集全部数据后排序（流水线中断）
+  - LimitExecutor 增量计数处理（无需全收集）
+  - Pipeline 递归创建 Executor（Limit(Sort(Filter(Scan)))）
+- **替代方案**:
+  - SortLimitExecutor 合并算子（rejected：职责不单一，难以测试）
+- **Pipeline 示例**:
+```
+SELECT ... WHERE age > 28 ORDER BY age DESC LIMIT 10 OFFSET 5
+
+Plan:
+  Limit(limit=10, offset=5)
+    → Sort(order_by=[OrderByColumn("age", false)])
+      → Filter(predicate=ComparisonPredicate(age > 28))
+        → Scan(table="users", columns=["id", "name", "age"])
+
+Executor 递归创建:
+  LimitExecutor(input=SortExecutor, limit=10, offset=5)
+    → SortExecutor(input=FilterExecutor, order_by=[...], columns=[...])
+      → FilterExecutor(input=ScanExecutor, predicate=...)
+        → ScanExecutor(table_meta, buffer_pool)
+```
+
+### 2026-05-21 - M9 Phase 2 架构决策：SortExecutor 列名映射
+
+- **决策**: SortExecutor 添加 `columns: Vec<String>` 字段，compare_rows 通过列名查找索引
+- **原因**:
+  - ORDER BY 列名与 Scan 返回行顺序可能不一致
+  - 例如 `SELECT name, age FROM users ORDER BY age`，age 在行索引 1 而非 0
+  - 需列名→索引映射才能正确比较
+- **影响**:
+  - PlanBuilder 需传递 SELECT projection 列名到 SortNode.columns
+  - compare_rows 使用 `self.columns.iter().position(|c| c == order_col.column)`
+  - 支持任意列顺序的排序
+- **实现关键**:
+```rust
+pub struct SortNode {
+    pub input: Box<PhysicalPlan>,
+    pub order_by: Vec<OrderByColumn>,
+    pub columns: Vec<String>,  // SELECT projection 列名列表
+    pub table_name: String,
+}
+
+fn compare_rows(&self, a: &[Value], b: &[Value]) -> Ordering {
+    for order_col in &self.order_by {
+        // 查找列名在 columns 中的索引
+        let col_idx = self.columns.iter()
+            .position(|c| c.to_lowercase() == order_col.column.to_lowercase());
+        
+        if let Some(idx) = col_idx {
+            // 比较 a[idx] 和 b[idx]
+        }
+    }
+}
+```
+
+### 2026-05-21 - M9 Phase 2 架构决策：NULL 排末尾
+
+- **决策**: NULL 值在排序中固定排在末尾（无论 ASC/DESC）
+- **原因**:
+  - SQL 标准常见行为（PostgreSQL 默认）
+  - 嵌入式数据库简单默认足够
+  - NULLS FIRST/LAST 语法推迟到后续优化
+- **影响**:
+  - compare_values 处理 NULL：`(Null, non-Null) → Ordering::Greater`
+  - 排序后 NULL 值出现在末尾
+  - 测试验证 NULL 排序行为
+- **实现**:
+```rust
+fn compare_values(a: &Value, b: &Value) -> Ordering {
+    // NULL handling: NULL sorts to end
+    (Value::Null, Value::Null) => Ordering::Equal,
+    (Value::Null, _) => Ordering::Greater,  // NULL > non-NULL
+    (_, Value::Null) => Ordering::Less,     // non-NULL < NULL
+    // ... 其他类型比较
+}
+```
+
+### 2026-05-21 - M9 Phase 2 架构决策：内存排序策略
+
+- **决策**: SortExecutor 使用 `Vec::sort_unstable_by` 进行内存排序
+- **原因**:
+  - 嵌入式数据库数据量预期不大
+  - 内存排序实现简单，性能足够
+  - sort_unstable_by 比 sort 快（不保持相等元素顺序）
+- **影响**:
+  - 首次 next() 调用收集所有行到 Vec
+  - 排序后逐行输出
+  - 未来数据量大时可扩展外部排序（推迟到 M13）
+- **替代方案**:
+  - 外部排序（rejected：嵌入式场景可能不需要）
+- **性能考虑**:
+  - sort_unstable: O(n log n)，快于 sort
+  - 内存分配: Vec clone 整行（可优化为 drain 或 VecDeque）
+
 ### 性能目标
 
 - **海量连接**: 单台机器支持数万长连接，每个连接仅占用极少量内存

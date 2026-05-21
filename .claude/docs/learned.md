@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-20 (M9 第一阶段完成：DDL + WHERE)
+> 最后更新：2026-05-21 (M9 Phase 2 完成：ORDER BY + LIMIT/OFFSET)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -78,6 +78,14 @@
 | DropTableExecutor | `DropTableExecutor::new(plan, database)` | DROP TABLE 执行 | 2026-05-20 |
 | ColumnSchema | `ColumnSchema { name, data_type, not_null, unique, default_value }` | 列定义（存储层） | 2026-05-20 |
 | ColumnDef::to_schema_column | `column_def.to_schema_column()` → `ColumnSchema` | executor → storage 类型转换 | 2026-05-20 |
+| SortExecutor | `SortExecutor::new(input, order_by, columns)` | ORDER BY 排序执行（内存排序） | 2026-05-21 |
+| LimitExecutor | `LimitExecutor::new(input, limit, offset)` | LIMIT/OFFSET 分页执行 | 2026-05-21 |
+| OrderByColumn | `OrderByColumn { column: String, asc: bool }` | 排序列定义（ASC/DESC） | 2026-05-21 |
+| compare_values | `compare_values(&a, &b)` → `Ordering` | Value 比较（支持跨类型 Int/Float） | 2026-05-21 |
+| Vec::sort_unstable_by | `rows.sort_unstable_by(|a, b| compare_rows(a, b))` | 高效内存排序（比 sort 快） | 2026-05-21 |
+| extract_column_name | `extract_column_name(&expr)` → `String` | ORDER BY 列名提取 | 2026-05-21 |
+| parse_limit_value | `parse_limit_value(&expr)` → `usize` | LIMIT 常量解析 | 2026-05-21 |
+| parse_offset_value | `parse_offset_value(&expr)` → `usize` | OFFSET 常量解析 | 2026-05-21 |
 
 ---
 
@@ -95,7 +103,9 @@
 | Predicate 模块 | src/executor/predicate.rs | M9: Predicate trait + Expression trait + ComparisonPredicate/LogicalPredicate |
 | Filter 模块 | src/executor/filter.rs | M9: FilterExecutor（WHERE 过滤） |
 | DDL 模块 | src/executor/create_table.rs + src/executor/drop_table.rs | M9: DDL Executors |
-| 解析模块 | src/parser/ | M4: PlanBuilder/PlanError/AST helpers + M9: DDL/WHERE 解析 |
+| Sort 模块 | src/executor/sort.rs | M9 Phase 2: SortExecutor（ORDER BY 排序） |
+| Limit 模块 | src/executor/limit.rs | M9 Phase 2: LimitExecutor（LIMIT/OFFSET 分页） |
+| 解析模块 | src/parser/ | M4: PlanBuilder/PlanError/AST helpers + M9: DDL/WHERE/ORDER BY/LIMIT 解析 |
 | 网络模块 | src/network/ | M6: Protocol trait/JsonProtocol/Server/ConnectionHandler/SqlHandler |
 | 数据库入口 | src/database.rs | M7: Database 协调器（BufferPool+TableManager+TxManager） |
 | 执行管道 | src/pipeline.rs | M7: SQL→parse→plan→execute→Response + M11: DDL + WHERE 集成 |
@@ -110,7 +120,7 @@
 | 场景 | 命令 | 输出含义 |
 |------|------|----------|
 | 初始化项目 | `cargo init` | 创建 Rust 项目骨架 |
-| 运行测试 | `cargo test` | 执行全部测试（232 tests） |
+| 运行测试 | `cargo test` | 执行全部测试（256 tests） |
 | 格式化 | `cargo fmt` | 格式化代码 |
 | Lint 检查 | `cargo clippy` | 静态分析检查 |
 | 构建 | `cargo build` | 构建项目 |
@@ -142,6 +152,8 @@
 | UpdateExecutor mock 破坏数据页引用 | M5 UpdateExecutor 使用 fake RowId(0, 999)，M7 IndexScanExecutor 读真实数据页时报 SlotNotFound | M7 重写 UpdateExecutor 为真实版本链创建，修复集成测试 | 2026-05-20 |
 | Float 序列化缺少 deserialize 分支 | Task 4 serialize 支持 Float/Bool，但 deserialize 未添加 TAG_FLOAT/TAG_BOOL match arm | Task 4 补全 deserialize_tuple Float/Bool 分支 + ColumnType 扩展 | 2026-05-20 |
 | Clippy approx_constant warning | 测试代码使用接近数学常数的浮点值（3.14/3.14159） | 替换为安全值（1.23/4.56）避免近似常数警告 | 2026-05-20 |
+| SortExecutor column index mapping bug | Task 9 发现 ORDER BY 排序结果错误，列名未正确映射到行索引 | 在 SortExecutor 中添加 `columns: Vec<String>` 字段，compare_rows 使用列名查找索引 | 2026-05-21 |
+| MockExecutor path error | 测试文件使用 `crate::storage::Result` 而非 `rtsql::storage::Result` | 在测试中使用 `rtsql::` 前缀而非 `crate::` | 2026-05-21 |
 
 **详细踩坑档案**（复杂问题）：
 
@@ -201,6 +213,14 @@
 - **预防**: 序列化扩展时，必须同步扩展反序列化分支
 - **时间**: 2026-05-20
 
+### Column Index Mapping Bug（M9 Phase 2 Task 9）
+
+- **症状**: ORDER BY age ASC 排序结果错误，返回未排序数据
+- **根因**: SortExecutor.compare_rows 假设列索引等于 order_by 数组位置，而非实际列在结果中的位置
+- **解决**: 添加 `columns: Vec<String>` 字段，使用列名查找实际索引：`self.columns.iter().position(|c| c == order_col.column)`
+- **预防**: Executor 需要列名→索引映射才能正确处理列引用，PlanBuilder 必须传递 SELECT projection 列名
+- **时间**: 2026-05-21
+
 ---
 
 ## 技巧 & 模式
@@ -246,6 +266,14 @@
 | PlanBuilder DDL 解析 | DDL 解析 | build_create_table/build_drop_table → PhysicalPlan::CreateTable/DropTable |
 | PlanBuilder WHERE 解析 | WHERE 解析 | build_where/build_expression → PredicateRef（递归处理 AND/OR） |
 | create_executor_from_plan | Executor 创建 | PhysicalPlan::Filter → FilterExecutor(input_executor, predicate) |
+| SortExecutor 内存排序 | ORDER BY 执行 | 收集所有行 → Vec::sort_unstable_by → 逐行输出（流水线中断） |
+| LimitExecutor 增量计数 | LIMIT/OFFSET 执行 | skipped < offset → skip；taken >= limit → stop |
+| NULL 排末尾 | SQL NULL 排序 | (Value::Null, non-Null) → Ordering::Greater（排在后面） |
+| Vec::sort_unstable_by | 高效排序 | 比 sort 快，但可能改变相等元素顺序（可接受） |
+| 列名→索引映射 | Executor 列引用 | SortNode.columns → compare_rows 使用列名查找实际位置 |
+| Parser ORDER BY 解析 | ORDER BY 解析 | query.order_by → Vec<OrderByColumn> → PhysicalPlan::Sort |
+| Parser LIMIT/OFFSET 解析 | 分页解析 | query.limit + query.offset → PhysicalPlan::Limit |
+| Pipeline 递归 Executor 创建 | 嵌套 Plan 处理 | Limit(Sort(Filter(Scan))) → 递归 create_executor_from_plan |
 
 ---
 
@@ -286,8 +314,8 @@
 - [x] MVCC 可见性集成（M7 阶段）→ 最新版本可见性过滤，版本链创建
 - [ ] 完整版本链遍历（follow next_version）（M10 阶段）
 - [x] WHERE 表达式求值器（M9 阶段）→ Predicate trait + FilterExecutor 已实现
-- [ ] ORDER BY 排序（M9 Phase 2 阶段）
-- [ ] LIMIT/OFFSET 分页（M9 Phase 2 阶段）
+- [x] ORDER BY 排序（M9 Phase 2 阶段）→ SortExecutor + 列名映射已实现
+- [x] LIMIT/OFFSET 分页（M9 Phase 2 阶段）→ LimitExecutor 已实现
 
 ---
 
