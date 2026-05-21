@@ -34,6 +34,8 @@ pub enum PhysicalPlan {
     Sort(SortNode),
     /// 分页节点（LIMIT + OFFSET）
     Limit(LimitNode),
+    /// JOIN 节点（INNER JOIN）
+    Join(JoinNode),
 }
 
 /// 全表扫描节点
@@ -208,4 +210,48 @@ pub struct LimitNode {
     pub input: Box<PhysicalPlan>,
     pub limit: usize,
     pub offset: usize,
+}
+
+/// JOIN 条件（等值连接）
+#[derive(Debug, Clone)]
+pub struct JoinCondition {
+    /// 左表列引用
+    pub left_column: ColumnRef,
+    /// 右表列引用
+    pub right_column: ColumnRef,
+}
+
+/// 列引用（支持 t.col 格式）
+#[derive(Debug, Clone)]
+pub struct ColumnRef {
+    /// 表名（可选，t.col 格式时为 Some）
+    pub table: Option<String>,
+    /// 列名
+    pub column: String,
+}
+
+/// 输出列定义
+#[derive(Debug, Clone)]
+pub struct OutputColumn {
+    /// 表名（可选）
+    pub table: Option<String>,
+    /// 列名
+    pub column: String,
+    /// 实际表名（解析后确定）
+    pub table_alias: String,
+    /// 在源表中的列索引
+    pub column_index: usize,
+}
+
+/// JOIN 节点（INNER JOIN）
+#[derive(Debug, Clone)]
+pub struct JoinNode {
+    /// 左表计划（可以是 Scan 或另一个 Join）
+    pub left: Box<PhysicalPlan>,
+    /// 右表计划（必须是 Scan）
+    pub right: Box<PhysicalPlan>,
+    /// ON 等值条件列表（AND 组合）
+    pub conditions: Vec<JoinCondition>,
+    /// 输出列映射
+    pub output_columns: Vec<OutputColumn>,
 }

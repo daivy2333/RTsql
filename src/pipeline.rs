@@ -213,6 +213,11 @@ fn create_executor_from_plan(
                 Ok(Box::new(LimitExecutor::new(input, node.limit, node.offset))
                     as Box<dyn Executor + Send>)
             }
+
+            PhysicalPlan::Join(_) => {
+                // JoinExecutor will be implemented in later tasks
+                unimplemented!("Join executor not yet implemented")
+            }
         }
     })
 }
