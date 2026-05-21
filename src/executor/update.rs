@@ -8,12 +8,13 @@ use crate::storage::{
     read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, Result, StorageError,
     TableMeta,
 };
-use crate::transaction::VersionHeader;
+use crate::transaction::{TransactionManager, VersionHeader};
 use std::sync::Arc;
 
 pub struct UpdateExecutor {
     table_meta: Arc<TableMeta>,
     buffer_pool: Arc<BufferPool>,
+    tx_manager: Arc<TransactionManager>,
     key: Vec<u8>,
     column_name: String,
     new_value: Value,
@@ -26,6 +27,7 @@ impl UpdateExecutor {
     pub fn new(
         table_meta: Arc<TableMeta>,
         buffer_pool: Arc<BufferPool>,
+        tx_manager: Arc<TransactionManager>,
         key: Vec<u8>,
         column_name: String,
         new_value: Value,
@@ -39,6 +41,7 @@ impl UpdateExecutor {
         Self {
             table_meta,
             buffer_pool,
+            tx_manager,
             key,
             column_name,
             new_value,
@@ -90,6 +93,11 @@ impl Executor for UpdateExecutor {
         let new_row_id =
             write_tuple_to_data_page(&self.buffer_pool, &self.table_meta, &version_header, &buf)
                 .await?;
+
+        // Step 6.1: Record version in tx_versions (M10)
+        self.tx_manager
+            .record_version(self.tx_id, new_row_id)
+            .await;
 
         // Step 7: Update index → new RowId
         self.table_meta

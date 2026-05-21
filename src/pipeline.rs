@@ -165,6 +165,7 @@ fn create_executor_from_plan(
                 Ok(Box::new(InsertExecutor::new(
                     table_meta,
                     database.buffer_pool.clone(),
+                    database.transaction_manager.clone(),
                     node.values,
                     0,
                 )) as Box<dyn Executor + Send>)
@@ -175,6 +176,7 @@ fn create_executor_from_plan(
                 Ok(Box::new(UpdateExecutor::new(
                     table_meta,
                     database.buffer_pool.clone(),
+                    database.transaction_manager.clone(),
                     node.key.as_bytes().to_vec(),
                     node.column,
                     node.new_value,
