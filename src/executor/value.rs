@@ -2,6 +2,7 @@
 
 use crate::storage::page_format::Key;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// SQL 列类型（M9: 支持 Int/String/Null/Float/Bool）
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +53,26 @@ pub enum Value {
     Float(f64),
     /// 布尔值（M9: 新增）
     Bool(bool),
+}
+
+// 手动实现 Eq，因为 f64 不实现 Eq
+// 对于 Float，使用 to_bits() 进行相等比较
+impl Eq for Value {}
+
+// 手动实现 Hash，因为 f64 不实现 Hash
+// 使用 to_bits() 将 f64 转换为 u64 进行哈希
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // 使用 discriminant 区分不同变体
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Int(n) => n.hash(state),
+            Value::String(s) => s.hash(state),
+            Value::Null => {} // Null 没有额外数据
+            Value::Float(f) => f.to_bits().hash(state), // 使用位表示进行哈希
+            Value::Bool(b) => b.hash(state),
+        }
+    }
 }
 
 impl Value {
