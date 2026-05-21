@@ -208,10 +208,11 @@ impl PlanBuilder {
         }
     }
 
-    /// 构建 FROM + JOIN 链计划
-    fn build_from_clause(
+    /// 构建 FROM + JOIN 链计划（支持列投影）
+    fn build_from_clause_with_projection(
         &self,
         from: &[sqlparser::ast::TableWithJoins],
+        qualified_columns: &[(Option<String>, String)],
     ) -> Result<PhysicalPlan, PlanError> {
         use crate::parser::ast::extract_join_table_name;
         use sqlparser::ast::JoinOperator;
@@ -252,33 +253,67 @@ impl PlanBuilder {
 
             // 解析 ON 条件
             let on_clause = on_clause.ok_or(PlanError::MissingOnClause)?;
-            let conditions = self.extract_join_conditions(&current_tables, &right_table, on_clause)?;
+            let conditions =
+                self.extract_join_conditions(&current_tables, &right_table, on_clause)?;
 
-            // 构建输出列（当前为所有列）
-            let output_columns: Vec<crate::executor::OutputColumn> = current_tables
+            // 构建输出列（根据 qualified_columns 过滤）
+            let all_columns: Vec<crate::executor::OutputColumn> = current_tables
                 .iter()
                 .flat_map(|t| {
-                    // SAFE: current_tables only contains tables that were validated via validate_table()
-                    let columns = self.tables.get(t).expect("validated table must exist in metadata");
-                    columns.iter().enumerate().map(|(idx, col)| crate::executor::OutputColumn {
-                        table: Some(t.clone()),
-                        column: col.clone(),
-                        table_alias: t.clone(),
-                        column_index: idx,
-                    })
+                    let columns = self
+                        .tables
+                        .get(t)
+                        .expect("validated table must exist in metadata");
+                    columns
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, col)| crate::executor::OutputColumn {
+                            table: Some(t.clone()),
+                            column: col.clone(),
+                            table_alias: t.clone(),
+                            column_index: idx,
+                        })
                 })
                 .chain(
-                    // SAFE: right_table was validated earlier via validate_table()
-                    self.tables.get(&right_table).expect("validated right_table must exist").iter().enumerate().map(
-                        |(idx, col)| crate::executor::OutputColumn {
+                    self.tables
+                        .get(&right_table)
+                        .expect("validated right_table must exist")
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, col)| crate::executor::OutputColumn {
                             table: Some(right_table.clone()),
                             column: col.clone(),
                             table_alias: right_table.clone(),
                             column_index: idx,
-                        },
-                    ),
+                        }),
                 )
                 .collect();
+
+            // 根据 qualified_columns 过滤输出列
+            let output_columns = if qualified_columns.iter().any(|(_, c)| c == "*") {
+                // SELECT *: 输出所有列
+                all_columns
+            } else {
+                // SELECT col1, col2... 或 SELECT t.col1, t.col2...
+                all_columns
+                    .into_iter()
+                    .filter(|col| {
+                        qualified_columns.iter().any(|(qual_table, qual_col)| {
+                            match qual_table {
+                                Some(table) => {
+                                    // Qualified column: table.column
+                                    col.table.as_deref() == Some(table.as_str())
+                                        && col.column.to_lowercase() == qual_col.to_lowercase()
+                                }
+                                None => {
+                                    // Unqualified column: column
+                                    col.column.to_lowercase() == qual_col.to_lowercase()
+                                }
+                            }
+                        })
+                    })
+                    .collect()
+            };
 
             // 构建 Join 节点
             current_plan = PhysicalPlan::Join(crate::executor::JoinNode {
@@ -299,8 +334,14 @@ impl PlanBuilder {
         // Extract Select body
         let select = extract_select_body(query)?;
 
-        // Build FROM + JOIN chain
-        let base_plan = self.build_from_clause(&select.from)?;
+        // Extract columns from projection (for filtering JOIN output)
+        let projection_columns = extract_columns(&select.projection)?;
+
+        // Extract qualified columns for JOIN filtering
+        let qualified_columns = extract_qualified_columns(&select.projection)?;
+
+        // Build FROM + JOIN chain (with projection columns for filtering)
+        let base_plan = self.build_from_clause_with_projection(&select.from, &qualified_columns)?;
 
         // Extract table name from base plan for single-table queries (for WHERE/ORDER BY processing)
         let table_name = match &base_plan {
@@ -308,9 +349,6 @@ impl PlanBuilder {
             PhysicalPlan::Join(_) => "join_result".to_string(), // 虚拟表名用于 JOIN 结果
             _ => "unknown".to_string(),
         };
-
-        // Extract columns (placeholder for JOIN output columns)
-        let columns = extract_columns(&select.projection)?;
 
         // Handle WHERE clause
         let plan_with_where = if let Some(where_expr) = &select.selection {
@@ -371,7 +409,7 @@ impl PlanBuilder {
                 input: Box::new(plan_with_where),
                 order_by,
                 table_name: table_name.clone(),
-                columns: columns.clone(),
+                columns: projection_columns.clone(),
             })
         } else {
             plan_with_where

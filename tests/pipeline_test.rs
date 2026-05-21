@@ -477,3 +477,89 @@ async fn test_select_where_order_by_limit() {
         _ => panic!("Expected QueryResult response"),
     }
 }
+
+#[tokio::test]
+async fn test_pipeline_join_execution_basic() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db"))
+        .await
+        .expect("Failed to open database");
+
+    // Create tables
+    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
+        .await;
+    db.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT)")
+        .await;
+
+    // Insert data
+    db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+        .await;
+    db.execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+        .await;
+    db.execute_sql("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+        .await;
+    db.execute_sql("INSERT INTO orders (id, user_id) VALUES (20, 1)")
+        .await;
+    db.execute_sql("INSERT INTO orders (id, user_id) VALUES (30, 2)")
+        .await;
+
+    // Execute JOIN
+    let response = db
+        .execute_sql("SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id")
+        .await;
+
+    match response {
+        rtsql::network::protocol::Response::QueryResult { rows } => {
+            // Should return 3 rows: (Alice, 10), (Alice, 20), (Bob, 30)
+            assert_eq!(rows.len(), 3, "Expected 3 rows from JOIN");
+
+            // Each row should have 2 columns: users.name, orders.id
+            for row in &rows {
+                assert_eq!(row.len(), 2, "Expected 2 columns per row");
+            }
+        }
+        rtsql::network::protocol::Response::Error { message } => {
+            panic!("JOIN query failed: {}", message);
+        }
+        _ => panic!("Expected QueryResult response"),
+    }
+}
+
+#[tokio::test]
+async fn test_pipeline_join_with_null_keys() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db"))
+        .await
+        .expect("Failed to open database");
+
+    // Create tables
+    db.execute_sql("CREATE TABLE a (id INT PRIMARY KEY)").await;
+    db.execute_sql("CREATE TABLE b (id INT PRIMARY KEY)").await;
+
+    // Insert data with NULL values
+    db.execute_sql("INSERT INTO a (id) VALUES (1)").await;
+    db.execute_sql("INSERT INTO a (id) VALUES (NULL)").await;
+    db.execute_sql("INSERT INTO b (id) VALUES (1)").await;
+    db.execute_sql("INSERT INTO b (id) VALUES (NULL)").await;
+
+    // Execute JOIN - NULL should not match NULL in SQL
+    let response = db
+        .execute_sql("SELECT * FROM a JOIN b ON a.id = b.id")
+        .await;
+
+    match response {
+        rtsql::network::protocol::Response::QueryResult { rows } => {
+            // Should return 1 row: (1, 1) - NULL rows should not match
+            assert_eq!(rows.len(), 1, "Expected 1 row from JOIN (NULLs should not match)");
+
+            // Row should have 2 columns: a.id, b.id
+            assert_eq!(rows[0].len(), 2);
+            assert_eq!(rows[0][0], serde_json::json!(1)); // a.id
+            assert_eq!(rows[0][1], serde_json::json!(1)); // b.id
+        }
+        rtsql::network::protocol::Response::Error { message } => {
+            panic!("JOIN with NULL keys failed: {}", message);
+        }
+        _ => panic!("Expected QueryResult response"),
+    }
+}

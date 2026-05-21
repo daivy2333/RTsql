@@ -29,16 +29,49 @@ pub fn extract_table_name(from: &[TableWithJoins]) -> Result<String, PlanError> 
     }
 }
 
-/// 从 projection 提取列名列表
+/// 从 projection 提取列名列表（支持 table.column 格式）
+/// 对于 CompoundIdentifier，返回 "column" 格式（仅列名）
+/// 对于简单 Identifier，返回 "column" 格式
 pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanError> {
     projection
         .iter()
         .map(|item| match item {
             SelectItem::UnnamedExpr(expr) => match expr {
+                // Simple column: name
                 Expr::Identifier(ident) => Ok(ident.value.to_string().to_lowercase()),
+                // Qualified column: table.name -> return just the column name
+                Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                    Ok(parts[1].value.to_string().to_lowercase())
+                }
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::Wildcard(_) => Ok("*".into()),
+            _ => Err(PlanError::UnsupportedStatement),
+        })
+        .collect()
+}
+
+/// 从 projection 提取完整的列信息（table.column 格式）
+/// 返回 Vec<(Option<String>, String)> - (table_name, column_name)
+pub fn extract_qualified_columns(
+    projection: &[SelectItem],
+) -> Result<Vec<(Option<String>, String)>, PlanError> {
+    projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::UnnamedExpr(expr) => match expr {
+                // Simple column: name
+                Expr::Identifier(ident) => Ok((None, ident.value.to_string().to_lowercase())),
+                // Qualified column: table.name
+                Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                    Ok((
+                        Some(parts[0].value.to_string().to_lowercase()),
+                        parts[1].value.to_string().to_lowercase(),
+                    ))
+                }
+                _ => Err(PlanError::UnsupportedStatement),
+            },
+            SelectItem::Wildcard(_) => Ok((None, "*".into())),
             _ => Err(PlanError::UnsupportedStatement),
         })
         .collect()

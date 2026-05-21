@@ -297,37 +297,57 @@ fn extract_column_indices(
     }
 }
 
-fn extract_table_name(stmt: &Statement) -> Option<String> {
+/// Extract all table names from a statement (including JOIN tables)
+fn extract_all_table_names(stmt: &Statement) -> Vec<String> {
     match stmt {
-        Statement::Query(query) => extract_query_table_name(query),
-        Statement::Insert { table_name, .. } => Some(table_name.to_string().to_lowercase()),
-        Statement::Update { table, .. } => extract_from_table_with_joins(table),
+        Statement::Query(query) => extract_all_query_table_names(query),
+        Statement::Insert { table_name, .. } => vec![table_name.to_string().to_lowercase()],
+        Statement::Update { table, .. } => extract_all_from_table_with_joins_item(table),
         Statement::Delete { from, .. } => {
             let tables = match from {
                 sqlparser::ast::FromTable::WithFromKeyword(t) => t.clone(),
                 sqlparser::ast::FromTable::WithoutKeyword(t) => t.clone(),
             };
-            tables.first().and_then(extract_from_table_with_joins)
+            tables
+                .iter()
+                .flat_map(extract_all_from_table_with_joins_item)
+                .collect()
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
-fn extract_query_table_name(query: &Query) -> Option<String> {
+/// Extract all table names from a query (including JOIN tables)
+fn extract_all_query_table_names(query: &Query) -> Vec<String> {
     match query.body.as_ref() {
         SetExpr::Select(select) => {
-            let from = &select.from;
-            from.first().and_then(extract_from_table_with_joins)
+            select
+                .from
+                .iter()
+                .flat_map(extract_all_from_table_with_joins_item)
+                .collect()
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
-fn extract_from_table_with_joins(twj: &TableWithJoins) -> Option<String> {
-    match &twj.relation {
-        TableFactor::Table { name, .. } => Some(name.to_string().to_lowercase()),
-        _ => None,
+/// Extract all table names from a TableWithJoins (including JOIN tables)
+fn extract_all_from_table_with_joins_item(twj: &TableWithJoins) -> Vec<String> {
+    let mut tables = Vec::new();
+
+    // Main table
+    if let TableFactor::Table { name, .. } = &twj.relation {
+        tables.push(name.to_string().to_lowercase());
     }
+
+    // JOIN tables
+    for join in &twj.joins {
+        if let TableFactor::Table { name, .. } = &join.relation {
+            tables.push(name.to_string().to_lowercase());
+        }
+    }
+
+    tables
 }
 
 async fn register_table(
@@ -335,21 +355,24 @@ async fn register_table(
     builder: &mut PlanBuilder,
     stmt: &Statement,
 ) -> std::result::Result<(), String> {
-    let table_name = match extract_table_name(stmt) {
-        Some(name) => name,
-        None => return Ok(()),
-    };
-
-    match database.table_manager.get_table(&table_name).await {
-        Ok(table_meta) => {
-            let columns: Vec<String> = table_meta
-                .columns
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
-            builder.register_table(&table_meta.name, columns, &table_meta.pk_column);
-            Ok(())
-        }
-        Err(e) => Err(format!("Table '{}' not found: {}", table_name, e)),
+    let table_names = extract_all_table_names(stmt);
+    if table_names.is_empty() {
+        return Ok(());
     }
+
+    for table_name in table_names {
+        match database.table_manager.get_table(&table_name).await {
+            Ok(table_meta) => {
+                let columns: Vec<String> = table_meta
+                    .columns
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                builder.register_table(&table_meta.name, columns, &table_meta.pk_column);
+            }
+            Err(e) => return Err(format!("Table '{}' not found: {}", table_name, e)),
+        }
+    }
+
+    Ok(())
 }
