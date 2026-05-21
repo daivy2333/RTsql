@@ -96,26 +96,229 @@ impl PlanBuilder {
         }
     }
 
+    /// 解析列引用（支持 t.col 格式和纯列名）
+    fn resolve_column_ref(
+        &self,
+        expr: &Expr,
+        available_tables: &[String],
+    ) -> Result<crate::executor::ColumnRef, PlanError> {
+        match expr {
+            // t.col 格式
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let table = parts[0].value.to_lowercase();
+                let column = parts[1].value.to_lowercase();
+
+                // 验证表存在
+                self.validate_table(&table)?;
+
+                // 验证列存在
+                let columns = self
+                    .tables
+                    .get(&table)
+                    .ok_or_else(|| PlanError::TableNotFound(table.clone()))?;
+                if !columns.iter().any(|c| c.to_lowercase() == column) {
+                    return Err(PlanError::ColumnNotFound(column));
+                }
+
+                Ok(crate::executor::ColumnRef {
+                    table: Some(table),
+                    column,
+                })
+            }
+
+            // 纯列名格式
+            Expr::Identifier(ident) => {
+                let column = ident.value.to_lowercase();
+
+                // 查找列来源（检查所有可用表）
+                let sources: Vec<String> = available_tables
+                    .iter()
+                    .filter(|t| {
+                        self.tables
+                            .get(*t)
+                            .map(|cols| cols.iter().any(|c| c.to_lowercase() == column))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+
+                match sources.len() {
+                    0 => Err(PlanError::ColumnNotFound(column)),
+                    1 => Ok(crate::executor::ColumnRef {
+                        table: None,
+                        column,
+                    }),
+                    _ => Err(PlanError::AmbiguousColumn(column)),
+                }
+            }
+
+            _ => Err(PlanError::UnsupportedExpression),
+        }
+    }
+
+    /// 提取 JOIN ON 条件（支持 AND 组合等值条件）
+    fn extract_join_conditions(
+        &self,
+        left_tables: &[String],
+        right_table: &str,
+        on_expr: &Expr,
+    ) -> Result<Vec<crate::executor::JoinCondition>, PlanError> {
+        use sqlparser::ast::BinaryOperator;
+
+        // 处理 AND 组合
+        if let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } = on_expr
+        {
+            let left_conditions = self.extract_join_conditions(left_tables, right_table, left)?;
+            let right_conditions = self.extract_join_conditions(left_tables, right_table, right)?;
+            return Ok(left_conditions
+                .into_iter()
+                .chain(right_conditions)
+                .collect());
+        }
+
+        // 处理单一等值条件
+        if let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = on_expr
+        {
+            let left_ref = self.resolve_column_ref(left, left_tables)?;
+            let right_ref = self.resolve_column_ref(right, &[right_table.to_string()])?;
+
+            // 验证：左边列来自左表，右边列来自右表（或反序）
+            if left_ref.table.as_ref().map(|t| t.as_str()) == Some(right_table) {
+                // 反序：right.col = left.col，交换
+                return Ok(vec![crate::executor::JoinCondition {
+                    left_column: right_ref,
+                    right_column: left_ref,
+                }]);
+            }
+
+            Ok(vec![crate::executor::JoinCondition {
+                left_column: left_ref,
+                right_column: right_ref,
+            }])
+        } else {
+            Err(PlanError::UnsupportedExpression)
+        }
+    }
+
+    /// 构建 FROM + JOIN 链计划
+    fn build_from_clause(
+        &self,
+        from: &[sqlparser::ast::TableWithJoins],
+    ) -> Result<PhysicalPlan, PlanError> {
+        use crate::parser::ast::extract_join_table_name;
+        use sqlparser::ast::JoinOperator;
+
+        if from.is_empty() {
+            return Err(PlanError::MissingField("FROM clause".into()));
+        }
+
+        // 基础表
+        let base_table = crate::parser::ast::extract_table_name(from)?;
+        self.validate_table(&base_table)?;
+        let base_columns = self.tables.get(&base_table).cloned().unwrap_or_default();
+        let base_plan = PhysicalPlan::Scan(ScanNode {
+            table_name: base_table.clone(),
+            columns: base_columns.clone(),
+        });
+
+        // 递归处理 JOIN 链
+        let mut current_plan = base_plan;
+        let mut current_tables = vec![base_table.clone()];
+
+        for join in &from[0].joins {
+            // 验证 JOIN 类型（仅支持 INNER）
+            let on_clause = match &join.join_operator {
+                JoinOperator::Inner(sqlparser::ast::JoinConstraint::On(expr)) => Some(expr),
+                JoinOperator::Inner(_) => None, // USING or None constraint
+                _ => return Err(PlanError::UnsupportedJoinType),
+            };
+
+            // 解析右表
+            let right_table = extract_join_table_name(&join.relation)?;
+            self.validate_table(&right_table)?;
+            let right_columns = self.tables.get(&right_table).cloned().unwrap_or_default();
+            let right_plan = PhysicalPlan::Scan(ScanNode {
+                table_name: right_table.clone(),
+                columns: right_columns.clone(),
+            });
+
+            // 解析 ON 条件
+            let on_clause = on_clause.ok_or(PlanError::MissingOnClause)?;
+            let conditions = self.extract_join_conditions(&current_tables, &right_table, on_clause)?;
+
+            // 构建输出列（当前为所有列）
+            let output_columns: Vec<crate::executor::OutputColumn> = current_tables
+                .iter()
+                .flat_map(|t| {
+                    self.tables
+                        .get(t)
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, col)| crate::executor::OutputColumn {
+                            table: Some(t.clone()),
+                            column: col.clone(),
+                            table_alias: t.clone(),
+                            column_index: idx,
+                        })
+                })
+                .chain(self.tables.get(&right_table).unwrap().iter().enumerate().map(
+                    |(idx, col)| crate::executor::OutputColumn {
+                        table: Some(right_table.clone()),
+                        column: col.clone(),
+                        table_alias: right_table.clone(),
+                        column_index: idx,
+                    },
+                ))
+                .collect();
+
+            // 构建 Join 节点
+            current_plan = PhysicalPlan::Join(crate::executor::JoinNode {
+                left: Box::new(current_plan),
+                right: Box::new(right_plan),
+                conditions,
+                output_columns,
+            });
+
+            current_tables.push(right_table);
+        }
+
+        Ok(current_plan)
+    }
+
     /// Build PhysicalPlan for SELECT query
     fn build_query(&self, query: &Query) -> Result<PhysicalPlan, PlanError> {
         // Extract Select body
         let select = extract_select_body(query)?;
 
-        // Extract table name
-        let table_name = extract_table_name(&select.from)?;
-        self.validate_table(&table_name)?;
+        // Build FROM + JOIN chain
+        let base_plan = self.build_from_clause(&select.from)?;
 
-        // Extract columns
+        // Extract table name from base plan for single-table queries (for WHERE/ORDER BY processing)
+        let table_name = match &base_plan {
+            PhysicalPlan::Scan(scan_node) => scan_node.table_name.clone(),
+            PhysicalPlan::Join(_) => "join_result".to_string(), // 虚拟表名用于 JOIN 结果
+            _ => "unknown".to_string(),
+        };
+
+        // Extract columns (placeholder for JOIN output columns)
         let columns = extract_columns(&select.projection)?;
-
-        // Build base plan (scan)
-        let base_plan = PhysicalPlan::Scan(ScanNode {
-            table_name: table_name.clone(),
-            columns: columns.clone(),
-        });
 
         // Handle WHERE clause
         let plan_with_where = if let Some(where_expr) = &select.selection {
+            // Skip WHERE processing for JOIN queries (will be handled in future tasks)
+            if matches!(base_plan, PhysicalPlan::Join(_)) {
+                return Err(PlanError::UnsupportedStatement);
+            }
+
             // Try to extract primary key from WHERE clause for index scan
             if let Some(key) = self.extract_pk_from_where(&table_name, where_expr)? {
                 // Simple PK equality check - use index scan
