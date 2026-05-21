@@ -116,6 +116,11 @@ impl TransactionManager {
         self.active_tx_ids.read().await.iter().copied().collect()
     }
 
+    /// Get tx_versions (for testing)
+    pub async fn tx_versions(&self) -> HashMap<u64, HashSet<RowId>> {
+        self.tx_versions.read().await.clone()
+    }
+
     /// Get current max TxId (for testing)
     pub fn current_tx_id(&self) -> u64 {
         self.tx_id_allocator.current()
@@ -256,5 +261,12 @@ mod tests {
         // Test with a non-existent tx_id
         let result = manager.commit_by_id(999).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tx_versions_initialization() {
+        let manager = TransactionManager::new();
+        // tx_versions should be empty initially
+        assert!(manager.tx_versions().await.is_empty());
     }
 }
