@@ -1,26 +1,26 @@
 # 项目快照
 
-> 最后更新：2026-05-22（M14 部分完成 + 性能瓶颈重新定位）
+> 最后更新：2026-05-22（M14 Phase 2 T1 profiling 验证完成）
 
 ## 当前状态
 
-- **阶段**: M14 部分完成（零拷贝+缓存已实现，性能目标未达成，需继续优化）
+- **阶段**: M14 Phase 2 T1 profiling 验证完成
 - **状态**: 正常
-- **当前里程碑**: M14 继续（精确性能测试 + 消除 spawn_blocking 调度瓶颈）
-- **测试**: 全量通过（lib + integration + 新增缓存测试）
-- **代码量**: src ~9500 行 + tests ~8700 行 + benches ~1000 行
+- **当前里程碑**: 准备进入 M14 Phase 2 T2（IndexManager 优化）
+- **测试**: 83 lib tests + 74 integration tests（全部通过）
+- **代码量**: src 9190 行 + tests 8463 行 + benches 750 行 + profiling 68 行
 
 ## 项目结构
 
 ```
 RTsql/
-├── Cargo.toml              # Rust 项目配置（criterion + rusqlite + lru dev-deps）
+├── Cargo.toml              # Rust 项目配置（criterion + rusqlite dev-deps）
 ├── CLAUDE.md               # 文档入口
 ├── src/
 │   ├── main.rs             # 数据库服务器入口
 │   ├── lib.rs              # 库入口
-│   ├── database.rs         # Database 协调器（BufferPool+TableManager+TxManager+WalWriter+plan_cache）
-│   ├── pipeline.rs         # SQL 执行管道（parse→plan→execute + plan cache）
+│   ├── database.rs         # Database 协调器（BufferPool+TableManager+TxManager+WalWriter）
+│   ├── pipeline.rs         # SQL 执行管道（parse→plan→execute→Response）
 │   ├── storage/
 │   │   ├── mod.rs          # 存储模块导出（含 PageDataGuard, SlottedPageRef）
 │   │   ├── error.rs        # StorageError
@@ -38,14 +38,14 @@ RTsql/
 │   │   │   ├── slotted_page.rs # SlottedPage + SlottedPageRef（只读零拷贝）
 │   │   │   └── tuple.rs    # ColumnType + serialize/deserialize_tuple
 │   │   └── btree/
-│   │       ├── btree.rs     # BTree 核心（读路径零拷贝）
-│   │       ├── node.rs      # LeafNode + LeafNodeRef + InternalNode + InternalNodeRef
+│   │       ├── btree.rs     # BTree 核心
+│   │       ├── node.rs      # LeafNode + InternalNode
 │   │       ├── sync_loader.rs # SyncPageLoader
 │   │       └── index_manager.rs # IndexManager（含 scan_all）
 │   ├── executor/
 │   │   ├── mod.rs           # 模块导出
 │   │   ├── value.rs         # Value（Int/String/Float/Bool/Null + Eq+Hash）
-│   │   ├── plan.rs          # PhysicalPlan（13 种节点，derive Clone）
+│   │   ├── plan.rs          # PhysicalPlan（13 种节点）
 │   │   ├── result.rs        # ExecResult
 │   │   ├── executor_trait.rs # Executor trait
 │   │   ├── scan.rs          # ScanExecutor
@@ -88,11 +88,10 @@ RTsql/
 ├── benches/
 │   ├── common/mod.rs        # 共享 helper（setup_db, insert_rows, create_join_tables）
 │   ├── micro_bench.rs       # 9 种 SQL 操作微基准
-│   ├── concurrent_bench.rs  # 并发压力测试
-│   ├── scale_bench.rs       # 规模扩展测试
-│   ├── sqlite_compare.rs    # SQLite 对比测试
-│   └── cache_bench.rs       # 缓存命中/未命中对比基准
-├── tests/                   # 集成测试 + cache_perf_test
+│   ├── concurrent_bench.rs  # 并发压力测试（read/write/mixed/conflict）
+│   ├── scale_bench.rs       # 规模扩展测试（1K/10K/100K）
+│   └── sqlite_compare.rs    # SQLite 对比测试
+├── tests/                   # 集成测试（74 tests）
 └── .claude/docs/            # 项目文档
 ```
 
@@ -103,7 +102,6 @@ RTsql/
 | 语言 | Rust | 1.75+ |
 | 异步运行时 | Tokio | 1.x（multi-thread） |
 | SQL 解析 | sqlparser-rs | 0.44 |
-| Plan 缓存 | lru | 0.12 |
 | 序列化 | serde + serde_json | 1.0 |
 | Shutdown | tokio-util (CancellationToken) | 0.7 |
 | 基准测试 | criterion.rs | 0.5（html_reports + async_tokio） |
@@ -113,33 +111,96 @@ RTsql/
 ## Git 状态
 
 - **当前分支**: master
-- **最近提交**（M14）:
-  - 9358c0c docs(M14): update project docs with performance analysis findings
-  - 4a97330 feat(M14): integrate plan cache into Pipeline execute_sql
-  - d0d3312 feat(M14): add plan_cache LRU field to Database
-  - e403369 perf(M14): migrate BTree read path to zero-copy
-  - 458981e feat(M14): add LeafNodeRef and InternalNodeRef
-  - f663389 chore(M14): add lru crate dependency
+- **最近提交**（M13 性能优化）:
+  - b7b6865 docs(M13): update project docs
+  - dd777fb perf(M13): PageGuard zero-copy + BufferPool two-phase lock
+  - 0d4d0a7 feat(M13): implement all benchmark suites
+  - 2b68835 feat(M13): add benchmark common helper module
+  - ac32658 chore(M13): add criterion + rusqlite dev-dependencies
 
 ## 关键文件
 
 | 文件 | 作用 | 状态 |
 |------|------|------|
-| src/database.rs | Database + plan_cache | ✅ M14 新增 |
-| src/pipeline.rs | Pipeline + cache hit/miss | ✅ M14 新增 |
-| src/storage/btree/node.rs | LeafNodeRef + InternalNodeRef | ✅ M14 新增 |
-| src/storage/btree/btree.rs | BTree 零拷贝读路径 | ✅ M14 修改 |
-| src/executor/plan.rs | PhysicalPlan Clone | ✅ M14 验证 |
+| src/storage/page_frame.rs | PageGuard + PageDataGuard（零拷贝） | ✅ M13 优化 |
+| src/storage/page_format/slotted_page.rs | SlottedPage + SlottedPageRef | ✅ M13 新增 SlottedPageRef |
+| src/storage/buffer_pool.rs | BufferPool（两阶段锁） | ✅ M13 优化 |
+| src/storage/data_page.rs | read_tuple_from_data_page（零拷贝） | ✅ M13 优化 |
+| benches/micro_bench.rs | 9 种 SQL 微基准 | ✅ M13 新增 |
+| benches/concurrent_bench.rs | 并发压力测试 | ✅ M13 新增 |
+| benches/scale_bench.rs | 规模扩展测试 | ✅ M13 新增 |
+| benches/sqlite_compare.rs | SQLite 对比测试 | ✅ M13 新增 |
 
 ## 下一步行动
 
-**优先级**: M14 继续 — 精确性能测试 + 消除 spawn_blocking 瓶颈
+**优先级**: M14 Phase 2 T2（IndexManager.search 优化）
 
-**性能瓶颈定位**：
-1. spawn_blocking + SyncPageLoader::block_on 调度链（~25µs）
-2. Mutex<BTree> 全局锁（~5µs）
-3. parse+plan 已不是瓶颈（仅 ~5µs）
+**里程碑路线图**:
+1. **M14 Phase 2 T2**: IndexManager.search 优化（目标：PK 查询 3-5x 提速）
+   - 瓶颈已定位：index_manager_search 占 79-81% 总时间
+   - 优化方向：BTree 零拷贝 + async search 优化
+2. **M15**: 聚合函数与 GROUP BY
+3. **M16**: 子查询支持
+4. **M17**: 索引优化（B-Tree split/merge + 非唯一索引）
+5. **M18**: WAL 集成 + 写入优化（INSERT 5-10x 提速）
 
-**M14 剩余任务**：
-1. 精确性能参数测试（分阶段计时，量化各环节开销）
-2. 消除 spawn_blocking 调度瓶颈（async BTree 或专用线程池）
+**当前阻塞**: 无
+
+---
+
+## M14 Phase 2 T1 验证结果
+
+运行 `cargo run --example bench_minimal`（RTSQL_PROFILING=1）：
+
+### 缓存命中场景（warm up 后）
+
+典型输出：
+```
+Stage                    | Time (µs) | % Total
+-------------------------|-----------|--------
+executor_execution      |      57.0 |   90.5%
+index_manager_search    |      51.0 |   81.0%
+executor_creation       |       2.0 |    3.2%
+cache_hit_check         |       0.0 |    0.0%
+parse_and_plan          |       0.0 |    0.0%
+-------------------------|-----------|--------
+Total                   |      63.0 |  100.0%
+```
+
+### 性能瓶颈定位
+
+- **IndexManager.search**: ~51µs (81% of total) — **主要瓶颈**
+- **Executor execution**: ~57µs (90.5% of total) — 包含 IndexManager.search
+- **Executor creation**: ~2-3µs (3.2-4.7%)
+- **Cache hit check**: ~0µs (0%)
+- **Parse and plan**: ~0µs (0%) — 缓存命中时跳过
+
+**PK lookup 平均耗时**: ~129-138µs（包含缓存检查）
+
+### 关键发现
+
+1. **IndexManager.search 是主要瓶颈**，占总执行时间的 79-81%
+2. **Plan cache 有效性已验证**，缓存命中时 parse_and_plan 时间为 0µs
+3. **Executor creation overhead 很小**（~2-3µs），不是优化重点
+4. **Profiling 框架运行正常**，task-local storage + scope 方案可行
+
+### 下一步优化方向
+
+根据 profiling 结果，M14 Phase 2 T2 应重点优化 **IndexManager.search**：
+- BTree 零拷贝（使用 `page_data()` + `SlottedPageRef`）
+- Async search 优化（减少 await overhead）
+- LeafNode/InternalNode 直接访问优化
+
+### 文件变更
+
+**新增文件**:
+- `src/profiling.rs` (68 行) — task-local storage + timing API
+- `src/plan_cache.rs` (68 行) — simple plan cache implementation
+- `examples/bench_minimal.rs` (34 行) — profiling-enabled benchmark
+
+**修改文件**:
+- `src/pipeline.rs` — 添加 profiling timing points + plan cache integration
+- `src/executor/index_scan.rs` — 添加 `index_manager_search` timing
+- `src/database.rs` — 添加 `plan_cache` field
+- `src/lib.rs` — 导出 profiling + plan_cache modules
+- `tests/executor_test.rs` — 添加 plan_cache field 到测试 Database 构造
