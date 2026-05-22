@@ -343,6 +343,12 @@
 | ON 条件解析 | AND 组合递归 | extract_join_conditions 递归处理 AND → 返回 Vec<JoinCondition> | 2026-05-22 |
 | 列名歧义检测 | 多表同名列 | resolve_column_ref 检查 sources.len()，>1 返回 AmbiguousColumn 错误 | 2026-05-22 |
 | 链式 JOIN | 多表连接 | Join(Join(A, B), C) 递归结构，每个 Join 节点独立哈希连接 | 2026-05-22 |
+| PageGuard::page_data() | 零拷贝读取页数据 | 返回 PageDataGuard（Deref to &[u8]），避免 4KB clone | 2026-05-22 |
+| SlottedPageRef | 从 &[u8] 只读访问 slot | 配合 page_data() 使用，不需要 &mut Page | 2026-05-22 |
+| BufferPool 两阶段锁 | 释放写锁后再做 I/O | get_page() 读锁检查→释放→I/O→写锁插入（double-check） | 2026-05-22 |
+| criterion.rs async bench | 异步 benchmark | 用 b.to_async(&rt) 包装，rt = tokio::runtime::Runtime | 2026-05-22 |
+| AtomicI64 避免并发写冲突 | 并发 benchmark key 分配 | static AtomicI64::fetch_add 分配不重叠的 key 范围 | 2026-05-22 |
+| std::mem::forget(TempDir) | benchmark 临时目录 | leak TempDir 防止临时目录在 bench 期间被清理 | 2026-05-22 |
 
 ---
 
