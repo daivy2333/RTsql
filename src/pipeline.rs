@@ -6,12 +6,68 @@ use crate::executor::{
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
+use crate::profiling::{init_profiling, is_profiling_enabled, print_timings, record_time};
 use crate::storage::Result;
 use sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub async fn execute(database: &Database, sql: &str) -> Response {
+    let profiling = is_profiling_enabled();
+
+    if profiling {
+        init_profiling();
+    }
+
+    let total_start = if profiling { Some(Instant::now()) } else { None };
+
+    // Check plan cache first
+    let cached_plan = {
+        if profiling {
+            let t0 = Instant::now();
+            let result = {
+                let mut cache = database.plan_cache.lock().unwrap();
+                cache.get(sql).cloned()
+            };
+            record_time("cache_hit_check", t0.elapsed());
+            result
+        } else {
+            let mut cache = database.plan_cache.lock().unwrap();
+            cache.get(sql).cloned()
+        }
+    };
+
+    if let Some(plan) = cached_plan {
+        // Cache hit — skip parse + plan
+        if profiling {
+            record_time("parse_and_plan", Duration::ZERO);
+        }
+
+        let executor_start = if profiling { Some(Instant::now()) } else { None };
+        let executor = match create_executor_from_plan(plan, database).await {
+            Ok(e) => e,
+            Err(e) => {
+                return Response::Error {
+                    message: e.to_string(),
+                }
+            }
+        };
+        if profiling {
+            record_time("executor_creation", executor_start.unwrap().elapsed());
+        }
+
+        let exec_start = if profiling { Some(Instant::now()) } else { None };
+        let response = execute_executor(executor).await;
+        if profiling {
+            record_time("executor_execution", exec_start.unwrap().elapsed());
+            print_timings(total_start.unwrap().elapsed());
+        }
+        return response;
+    }
+
+    // Cache miss — parse and plan
+    let parse_start = if profiling { Some(Instant::now()) } else { None };
     let statements = match parse_sql(sql) {
         Ok(s) => s,
         Err(e) => {
@@ -20,6 +76,9 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
             }
         }
     };
+    if profiling {
+        record_time("parse_and_plan", parse_start.unwrap().elapsed());
+    }
 
     if statements.is_empty() {
         return Response::Error {
@@ -27,10 +86,10 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
         };
     }
 
-    // Handle the first statement (single-statement execution)
+    // Handle the first statement
     if let Some(stmt) = statements.first() {
         match stmt {
-            // DDL: CREATE TABLE - no need to register table first
+            // DDL: CREATE TABLE
             Statement::CreateTable { .. } => {
                 let plan = match PlanBuilder::new().build_plan(stmt) {
                     Ok(p) => p,
@@ -43,10 +102,18 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
 
                 let executor: Box<dyn Executor + Send> =
                     Box::new(CreateTableExecutor::new(plan, Arc::new(database.clone())));
-                return execute_executor(executor).await;
+                let response = execute_executor(executor).await;
+
+                database.plan_cache.lock().unwrap().clear();
+
+                if profiling {
+                    print_timings(total_start.unwrap().elapsed());
+                }
+
+                return response;
             }
 
-            // DDL: DROP TABLE - no need to register table first
+            // DDL: DROP TABLE
             Statement::Drop { .. } => {
                 let plan = match PlanBuilder::new().build_plan(stmt) {
                     Ok(p) => p,
@@ -59,14 +126,26 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
 
                 let executor: Box<dyn Executor + Send> =
                     Box::new(DropTableExecutor::new(plan, Arc::new(database.clone())));
-                return execute_executor(executor).await;
+                let response = execute_executor(executor).await;
+
+                database.plan_cache.lock().unwrap().clear();
+
+                if profiling {
+                    print_timings(total_start.unwrap().elapsed());
+                }
+
+                return response;
             }
 
-            // Query, Insert, Update, Delete - need table metadata
+            // Query, Insert, Update, Delete
             _ => {
+                let table_lookup_start = if profiling { Some(Instant::now()) } else { None };
                 let mut plan_builder = PlanBuilder::new();
                 if let Err(e) = register_table(database, &mut plan_builder, stmt).await {
                     return Response::Error { message: e };
+                }
+                if profiling {
+                    record_time("table_metadata_lookup", table_lookup_start.unwrap().elapsed());
                 }
 
                 let plan = match plan_builder.build_plan(stmt) {
@@ -78,6 +157,12 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
                     }
                 };
 
+                if is_cacheable(stmt) {
+                    let mut cache = database.plan_cache.lock().unwrap();
+                    cache.put(sql.to_string(), plan.clone());
+                }
+
+                let executor_start = if profiling { Some(Instant::now()) } else { None };
                 let executor = match create_executor_from_plan(plan, database).await {
                     Ok(e) => e,
                     Err(e) => {
@@ -86,7 +171,17 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
                         }
                     }
                 };
-                return execute_executor(executor).await;
+                if profiling {
+                    record_time("executor_creation", executor_start.unwrap().elapsed());
+                }
+
+                let exec_start = if profiling { Some(Instant::now()) } else { None };
+                let response = execute_executor(executor).await;
+                if profiling {
+                    record_time("executor_execution", exec_start.unwrap().elapsed());
+                    print_timings(total_start.unwrap().elapsed());
+                }
+                return response;
             }
         }
     }
@@ -375,4 +470,10 @@ async fn register_table(
     }
 
     Ok(())
+}
+
+/// Check if a statement is cacheable
+/// Only SELECT queries are cacheable, DDL and DML statements are not
+fn is_cacheable(stmt: &Statement) -> bool {
+    matches!(stmt, Statement::Query(_))
 }
