@@ -237,16 +237,16 @@ cargo bench --bench sqlite_compare
 
 ### 已完成里程碑
 
-- ✅ **M1-M12**: 核心功能实现（Storage, Executor, Parser, WAL, MVCC）
-- ✅ **M13**: PageGuard 零拷贝 + BufferPool 两阶段锁
-- ✅ **M14 Phase 2 T2**: Async search 路径 + AtomicPageId（17x internal, 8x SQLite）
+-  **M1-M12**: 核心功能实现（Storage, Executor, Parser, WAL, MVCC）
+-  **M13**: PageGuard 零拷贝 + BufferPool 两阶段锁
+-  **M14 Phase 2 T2**: Async search 路径 + AtomicPageId（17x internal, 8x SQLite）
 
 ### 下一里程碑
 
-- ⏳ **M15**: 聚合函数与 GROUP BY
-- ⏳ **M16**: 子查询支持
-- ⏳ **M17**: B-Tree split/merge + 非唯一索引
-- ⏳ **M18**: WAL Group Commit（写入优化，预期 INSERT 5-10x 提速）
+-  **M15**: 聚合函数与 GROUP BY
+-  **M16**: 子查询支持
+-  **M17**: B-Tree split/merge + 非唯一索引
+-  **M18**: WAL Group Commit（写入优化，预期 INSERT 5-10x 提速）
 
 ---
 
