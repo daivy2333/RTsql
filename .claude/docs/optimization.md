@@ -292,6 +292,31 @@ execute_sql()
 
 ## 🟢 Performance Optimizations
 
+### 15. SQLite 全面对比基准（资源消耗维度）
+
+**问题**: 当前仅对比性能（PK lookup 8x），缺少资源消耗对比
+**影响**: 无法全面评估 RTsql 的实际生产价值
+**缺失对比维度**：
+
+| 维度 | 测试方法 | 优先级 |
+|------|----------|--------|
+| **内存消耗** | 启动时内存 + 工作时内存峰值 | **高** |
+| **启动时间** | Database::open() 耗时 | 中 |
+| **并发资源消耗** | 线程数 + 协程数 + 锁争用 | 中 |
+| **数据文件大小** | 相同数据量下的文件大小 | 低 |
+| **编译产物大小** | Release binary 大小 | 低 |
+
+**修复方案**：
+- 创建 `benches/resource_comparison.rs`（资源消耗对比）
+- 内存测量：`std::alloc::GlobalAlloc` + jemalloc statistics
+- 启动时间：criterion benchmark `Database::open()`
+- 并发资源：Tokio runtime metrics + `tokio::runtime::Runtime::metrics()`
+
+**预期收益**：全面评估 RTsql 生产价值，发现潜在资源瓶颈
+**优先级**: P1（M15 后补充）
+**难度**: 中
+**依赖**: M15 聚合函数完成，功能更完整
+
 ### 7. io_uring 替换
 
 **方案**: 替换 spawn_blocking + 同步 I/O → tokio-uring
