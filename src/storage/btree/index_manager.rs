@@ -1,8 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::future::Future;
 
-use crate::storage::{page_format::RowId, BufferPool, Result};
+use crate::storage::{
+    btree::node::{InternalNodeRef, LeafNodeRef, LEAF_NODE},
+    page_format::{Key, RowId},
+    PageId, BufferPool, Result,
+};
 use tokio::sync::RwLock;
 
 use super::{AsyncPageLoader, BTree, SyncPageLoader};
@@ -34,16 +39,41 @@ impl IndexManager {
         })
     }
 
-    /// Search for a key — spawn_blocking with read lock (concurrent reads OK)
-    /// Uses binary search via BTree::search, which now calls find_key_position_binary
+    /// Async search — direct async path without spawn_blocking
     pub async fn search(&self, key: &[u8]) -> Result<Option<RowId>> {
-        let btree = self.btree.clone();
-        let key_vec = key.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let btree_guard = btree.read().unwrap();
-            btree_guard.search(&key_vec)
-        })
-        .await?
+        let root_page_id = PageId(self.root_page_id.load(Ordering::Acquire));
+        let key_obj = Key::new(key);
+
+        self.search_from_page_async(root_page_id, &key_obj).await
+    }
+
+    /// Recursive async search from a page
+    fn search_from_page_async(
+        &self,
+        page_id: PageId,
+        key: &Key,
+    ) -> impl Future<Output = Result<Option<RowId>>> + Send {
+        async move {
+            let child_page_id = {
+                let guard = self.async_loader.load_page(page_id).await?;
+                let data_guard = guard.page_data();
+
+                if data_guard[0] == LEAF_NODE {
+                    let leaf = LeafNodeRef::new(&data_guard);
+                    let (found, pos) = leaf.find_key_position_binary(key);
+                    if found {
+                        return Ok(leaf.get_row_id(pos));
+                    } else {
+                        return Ok(None);
+                    }
+                } else {
+                    let internal = InternalNodeRef::new(&data_guard);
+                    internal.find_child_page_id_binary(key)
+                }
+            }; // guard and data_guard dropped here
+
+            self.search_from_page_async(PageId(child_page_id as u64), key).await
+        }
     }
 
     /// Insert a key-value pair — spawn_blocking with write lock
