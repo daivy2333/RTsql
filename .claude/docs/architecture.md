@@ -97,6 +97,24 @@
 - **约束**: **绝不跨 .await 持有**，SAFETY 注释标记所有锁获取点
 - **影响**: 页操作性能更优，但需要严格审查 .await 使用
 
+### ADR-009: SQL 文本级 Plan 缓存
+
+- **日期**: 2026-05-22
+- **决策**: Database 持有 LruCache<String, PhysicalPlan>，相同 SQL 跳过 parse+plan
+- **原因**: 预期 parse+plan 占 PK 查询 ~60% 时间
+- **实际**: parse+plan 仅占 ~10%（~5µs），缓存收益有限（1.1x）
+- **教训**: 性能假设需先验证再优化
+- **影响**: 缓存机制保留，但不是主要提速手段
+
+### ADR-010: BTree 零拷贝读路径
+
+- **日期**: 2026-05-22
+- **决策**: BTree 读操作用 page_data() + LeafNodeRef/InternalNodeRef
+- **原因**: 消除 4KB page clone + modify_page 写锁开销
+- **实际**: PK 查询 1.2x 提速，收益有限
+- **教训**: 零拷贝收益被 spawn_blocking 调度开销掩盖
+- **影响**: 零拷贝路径保留，但真正瓶颈在调度层
+
 ## 数据流
 
 ### SQL 执行流程
