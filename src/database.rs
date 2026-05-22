@@ -35,7 +35,7 @@ impl Database {
 
         // 2. Initialize storage
         let storage: Arc<dyn crate::storage::AsyncStorage> = Arc::new(FileStorage::open(path)?);
-        let buffer_pool = Arc::new(BufferPool::new(100, storage)?);
+        let buffer_pool = Arc::new(BufferPool::new(1024, storage)?);
         let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
         let transaction_manager = Arc::new(TransactionManager::new());
 
