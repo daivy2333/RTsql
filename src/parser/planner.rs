@@ -3,10 +3,11 @@
 //! M4: SQL Parser and Physical Plan
 
 use crate::executor::{
-    ColumnConstraint, ColumnDef, ColumnType, ComparisonOp, ComparisonPredicate, ConstantExpression,
-    CreateTableNode, DeleteNode, DropTableNode, ExpressionRef, FilterNode, IndexScanNode,
-    InsertNode, LimitNode, LogicalOp, LogicalPredicate, OrderByColumn, PhysicalPlan, PredicateRef,
-    ScanNode, SortNode, UpdateNode, Value,
+    AggregateFunc, AggregateNode, ColumnConstraint, ColumnDef, ColumnType, ComparisonOp,
+    ComparisonPredicate, ConstantExpression, CreateTableNode, DeleteNode, DropTableNode,
+    ExpressionRef, FilterNode, HavingNode, IndexScanNode, InsertNode, LimitNode, LogicalOp,
+    LogicalPredicate, OrderByColumn, PhysicalPlan, PredicateRef, ScanNode, SortNode, UpdateNode,
+    Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -391,6 +392,112 @@ impl PlanBuilder {
             base_plan
         };
 
+        // === Aggregate function detection ===
+        // Check if SELECT projection contains aggregate functions
+        let mut aggregates = Vec::new();
+        let mut non_agg_columns = Vec::new();
+        let mut agg_output_columns = Vec::new();
+
+        for item in &select.projection {
+            match item {
+                sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
+                    if is_aggregate_expr(expr) {
+                        let func = extract_aggregate_func(expr)?
+                            .ok_or_else(|| PlanError::InvalidAggregateArgument(
+                                "Unknown aggregate function".to_string(),
+                            ))?;
+                        agg_output_columns.push(func.result_column_name());
+                        aggregates.push(func);
+                    } else {
+                        let col = expr_to_column_name(expr)?;
+                        non_agg_columns.push(col.clone());
+                        agg_output_columns.push(col);
+                    }
+                }
+                sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
+                    if is_aggregate_expr(expr) {
+                        let func = extract_aggregate_func(expr)?
+                            .ok_or_else(|| PlanError::InvalidAggregateArgument(
+                                "Unknown aggregate function".to_string(),
+                            ))?;
+                        agg_output_columns.push(alias.value.clone());
+                        aggregates.push(func);
+                    } else {
+                        let col = expr_to_column_name(expr)?;
+                        non_agg_columns.push(col.clone());
+                        agg_output_columns.push(alias.value.clone());
+                    }
+                }
+                _ => {} // Wildcard etc. — not relevant for aggregate queries
+            }
+        }
+
+        let has_aggregates = !aggregates.is_empty();
+
+        // Build aggregate plan if needed
+        let plan_with_aggregate = if has_aggregates {
+            // Extract GROUP BY columns
+            let group_by: Vec<String> = match &select.group_by {
+                sqlparser::ast::GroupByExpr::Expressions(exprs) => {
+                    exprs.iter()
+                        .map(|expr| expr_to_column_name(expr))
+                        .collect::<Result<Vec<_>, _>>()?
+                }
+                sqlparser::ast::GroupByExpr::All => {
+                    // GROUP BY ALL: all non-aggregate columns
+                    non_agg_columns.clone()
+                }
+            };
+
+            // Strict mode: non-aggregate columns must appear in GROUP BY
+            for col in &non_agg_columns {
+                if !group_by.contains(col) {
+                    return Err(PlanError::NonAggregatedColumn(col.clone()));
+                }
+            }
+
+            // Build column index mapping from input plan
+            let input_schema = match &plan_with_where {
+                PhysicalPlan::Scan(node) => node.columns.clone(),
+                PhysicalPlan::Filter(node) => {
+                    // Get schema from input of filter
+                    match node.input.as_ref() {
+                        PhysicalPlan::Scan(scan) => scan.columns.clone(),
+                        _ => vec![],
+                    }
+                }
+                _ => vec![],
+            };
+            let column_indices: HashMap<String, usize> = input_schema
+                .iter()
+                .enumerate()
+                .map(|(i, col)| (col.to_lowercase(), i))
+                .collect();
+
+            let agg_plan = PhysicalPlan::Aggregate(AggregateNode {
+                input: Box::new(plan_with_where),
+                group_by,
+                aggregates,
+                output_columns: agg_output_columns,
+                table_name: table_name.clone(),
+                column_indices,
+            });
+
+            // Build HAVING if present
+            if let Some(having_expr) = &select.having {
+                let having_pred = self.build_where(&table_name, having_expr)?;
+                PhysicalPlan::Having(HavingNode {
+                    input: Box::new(agg_plan),
+                    predicate: having_pred,
+                    table_name: table_name.clone(),
+                })
+            } else {
+                agg_plan
+            }
+        } else {
+            plan_with_where
+        };
+
         // Parse ORDER BY
         let plan_with_order = if !query.order_by.is_empty() {
             let order_by: Vec<OrderByColumn> = query
@@ -406,13 +513,13 @@ impl PlanBuilder {
                 .collect::<Result<Vec<_>, PlanError>>()?;
 
             PhysicalPlan::Sort(SortNode {
-                input: Box::new(plan_with_where),
+                input: Box::new(plan_with_aggregate),
                 order_by,
                 table_name: table_name.clone(),
                 columns: projection_columns.clone(),
             })
         } else {
-            plan_with_where
+            plan_with_aggregate
         };
 
         // Parse LIMIT/OFFSET
@@ -1012,6 +1119,98 @@ fn parse_offset_value(expr: &Expr) -> Result<usize, PlanError> {
             .parse::<usize>()
             .map_err(|_| PlanError::ParseError("Invalid OFFSET value".to_string())),
         _ => Err(PlanError::ParseError("OFFSET must be a number".to_string())),
+    }
+}
+
+/// Check if an Expr is an aggregate function
+fn is_aggregate_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Function(f) if {
+        let name = f.name.to_string().to_uppercase();
+        matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
+    })
+}
+
+/// Extract AggregateFunc from an Expr, returns None if not an aggregate
+fn extract_aggregate_func(expr: &Expr) -> Result<Option<AggregateFunc>, PlanError> {
+    match expr {
+        Expr::Function(f) => {
+            let name = f.name.to_string().to_uppercase();
+            match name.as_str() {
+                "COUNT" => {
+                    if f.args.is_empty() {
+                        return Err(PlanError::InvalidAggregateArgument(
+                            "COUNT requires argument or *".to_string(),
+                        ));
+                    }
+                    match &f.args[0] {
+                        sqlparser::ast::FunctionArg::Unnamed(
+                            sqlparser::ast::FunctionArgExpr::Wildcard,
+                        ) => Ok(Some(AggregateFunc::CountStar)),
+                        sqlparser::ast::FunctionArg::Unnamed(
+                            sqlparser::ast::FunctionArgExpr::Expr(inner),
+                        ) => {
+                            let col = expr_to_column_name(inner)?;
+                            Ok(Some(AggregateFunc::Count(col)))
+                        }
+                        _ => Err(PlanError::InvalidAggregateArgument(
+                            "COUNT argument must be * or column".to_string(),
+                        )),
+                    }
+                }
+                "SUM" => {
+                    let col = extract_single_column_arg(&f.args, "SUM")?;
+                    Ok(Some(AggregateFunc::Sum(col)))
+                }
+                "AVG" => {
+                    let col = extract_single_column_arg(&f.args, "AVG")?;
+                    Ok(Some(AggregateFunc::Avg(col)))
+                }
+                "MIN" => {
+                    let col = extract_single_column_arg(&f.args, "MIN")?;
+                    Ok(Some(AggregateFunc::Min(col)))
+                }
+                "MAX" => {
+                    let col = extract_single_column_arg(&f.args, "MAX")?;
+                    Ok(Some(AggregateFunc::Max(col)))
+                }
+                _ => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn extract_single_column_arg(
+    args: &[sqlparser::ast::FunctionArg],
+    func_name: &str,
+) -> Result<String, PlanError> {
+    if args.len() != 1 {
+        return Err(PlanError::InvalidAggregateArgument(format!(
+            "{} requires exactly one argument",
+            func_name
+        )));
+    }
+    match &args[0] {
+        sqlparser::ast::FunctionArg::Unnamed(
+            sqlparser::ast::FunctionArgExpr::Expr(expr),
+        ) => expr_to_column_name(expr),
+        _ => Err(PlanError::InvalidAggregateArgument(format!(
+            "{} argument must be a column",
+            func_name
+        ))),
+    }
+}
+
+/// Extract column name from Expr (Identifier or CompoundIdentifier)
+fn expr_to_column_name(expr: &Expr) -> Result<String, PlanError> {
+    match expr {
+        Expr::Identifier(ident) => Ok(ident.value.clone()),
+        Expr::CompoundIdentifier(parts) if !parts.is_empty() => {
+            Ok(parts.last().unwrap().value.clone())
+        }
+        _ => Err(PlanError::InvalidAggregateArgument(
+            "Expected column name".to_string(),
+        )),
     }
 }
 

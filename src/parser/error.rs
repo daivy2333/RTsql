@@ -31,6 +31,14 @@ pub enum PlanError {
     MissingOnClause,
     /// 不支持的 JOIN 类型（非 INNER）
     UnsupportedJoinType,
+    /// 非聚合列未出现在 GROUP BY 中（严格模式）
+    NonAggregatedColumn(String),
+    /// 聚合函数参数错误
+    InvalidAggregateArgument(String),
+    /// GROUP BY 列不存在
+    GroupByColumnNotFound(String),
+    /// HAVING 中引用非聚合列
+    HavingNonAggregatedReference(String),
 }
 
 impl fmt::Display for PlanError {
@@ -53,6 +61,10 @@ impl fmt::Display for PlanError {
             PlanError::TableNotFound(table) => write!(f, "Table not found: {}", table),
             PlanError::MissingOnClause => write!(f, "INNER JOIN requires ON clause"),
             PlanError::UnsupportedJoinType => write!(f, "Only INNER JOIN is supported"),
+            PlanError::NonAggregatedColumn(col) => write!(f, "Non-aggregated column '{}' must appear in GROUP BY clause", col),
+            PlanError::InvalidAggregateArgument(msg) => write!(f, "Invalid aggregate argument: {}", msg),
+            PlanError::GroupByColumnNotFound(col) => write!(f, "GROUP BY column not found: {}", col),
+            PlanError::HavingNonAggregatedReference(col) => write!(f, "HAVING references non-aggregated column: {}", col),
         }
     }
 }
