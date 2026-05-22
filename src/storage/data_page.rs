@@ -1,6 +1,6 @@
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::data::TableMeta;
-use crate::storage::page_format::{RowId, SlottedPage};
+use crate::storage::page_format::{RowId, SlottedPage, SlottedPageRef};
 use crate::storage::{PageId, Result, StorageError};
 use crate::transaction::VersionHeader;
 use std::sync::Arc;
@@ -61,6 +61,7 @@ pub async fn write_tuple_to_data_page(
 }
 
 /// Read a tuple and its version header from a data page by RowId.
+/// Uses zero-copy page access (page_data + SlottedPageRef).
 pub async fn read_tuple_from_data_page(
     buffer_pool: &BufferPool,
     row_id: RowId,
@@ -68,8 +69,8 @@ pub async fn read_tuple_from_data_page(
     let page_id = PageId(row_id.page_id as u64);
     let guard = buffer_pool.get_page(page_id).await?;
 
-    let mut page_clone = guard.page();
-    let slotted = SlottedPage::new(&mut page_clone);
+    let data_guard = guard.page_data();
+    let slotted = SlottedPageRef::new(&*data_guard);
 
     let slot = slotted
         .get_slot(row_id.slot_id as usize)
