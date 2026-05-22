@@ -1,8 +1,10 @@
+mod async_loader;
 mod btree;
 mod index_manager;
 mod node;
 mod sync_loader;
 
+pub use async_loader::AsyncPageLoader;
 pub use btree::BTree;
 pub use index_manager::IndexManager;
 pub use node::{InternalNode, InternalNodeRef, LeafNode, LeafNodeRef, Node, INTERNAL_NODE, LEAF_NODE};
