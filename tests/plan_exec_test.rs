@@ -253,3 +253,6 @@ async fn test_multiple_operations_sequence() -> Result<()> {
 
     Ok(())
 }
+
+    Ok(())
+}
