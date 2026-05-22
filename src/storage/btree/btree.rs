@@ -7,7 +7,7 @@ use crate::storage::{
     PageId, Result, StorageError,
 };
 
-use super::SyncPageLoader;
+use super::{AsyncPageLoader, SyncPageLoader};
 
 pub struct BTree {
     loader: Arc<SyncPageLoader>,
@@ -78,6 +78,39 @@ impl BTree {
 
             self.search_from_page(PageId(child_page_id as u64), key)
         }
+    }
+
+    /// Async search — direct async path without spawn_blocking/block_on
+    pub async fn search_async(&self, key: &Key, loader: &AsyncPageLoader) -> Result<Option<RowId>> {
+        self.search_from_page_async(self.root_page_id, key, loader).await
+    }
+
+    fn search_from_page_async<'a>(
+        &'a self,
+        page_id: PageId,
+        key: &'a Key,
+        loader: &'a AsyncPageLoader,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<RowId>>> + 'a>> {
+        Box::pin(async move {
+            let guard = loader.load_page(page_id).await?;
+            let data_guard = guard.page_data();
+
+            if data_guard[0] == LEAF_NODE {
+                let leaf = LeafNodeRef::new(&data_guard);
+                let (found, pos) = leaf.find_key_position_binary(key);
+                if found {
+                    Ok(leaf.get_row_id(pos))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                let internal = InternalNodeRef::new(&data_guard);
+                let child_page_id = internal.find_child_page_id_binary(key);
+                drop(data_guard);
+                drop(guard);
+                self.search_from_page_async(PageId(child_page_id as u64), key, loader).await
+            }
+        })
     }
 
     /// Insert a key and RowId into the BTree
