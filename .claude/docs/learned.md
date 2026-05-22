@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-22
+> 最后更新：2026-05-22（性能分析后路线更新）
 
 ## API 路径速查
 
@@ -76,8 +76,11 @@
 
 | 主题 | 优先级 | 备注 |
 |------|--------|------|
+| Prepared Statement 缓存 | 高 | M14，PK 查询 3-5x 提速 |
+| BTree 零拷贝迁移 | 高 | M14，page_data() 替代 page() |
+| WAL Group Commit | 中 | M18，INSERT 5-10x 提速 |
 | io_uring 替换 | 低 | Linux 5.1+，需 tokio-uring |
 | jemalloc/mimalloc | 低 | 内存分配器优化 |
-| B-Tree split/merge | 高 | M16 索引优化 |
-| 聚合函数 | 高 | M14 |
-| 子查询 | 中 | M15 |
+| B-Tree split/merge | 中 | M17 索引优化 |
+| 聚合函数 | 中 | M15 |
+| 子查询 | 中 | M16 |
