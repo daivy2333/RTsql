@@ -90,26 +90,27 @@ impl BTree {
         page_id: PageId,
         key: &'a Key,
         loader: &'a AsyncPageLoader,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<RowId>>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<RowId>>> + Send + 'a>> {
         Box::pin(async move {
-            let guard = loader.load_page(page_id).await?;
-            let data_guard = guard.page_data();
+            let child_page_id = {
+                let guard = loader.load_page(page_id).await?;
+                let data_guard = guard.page_data();
 
-            if data_guard[0] == LEAF_NODE {
-                let leaf = LeafNodeRef::new(&data_guard);
-                let (found, pos) = leaf.find_key_position_binary(key);
-                if found {
-                    Ok(leaf.get_row_id(pos))
+                if data_guard[0] == LEAF_NODE {
+                    let leaf = LeafNodeRef::new(&data_guard);
+                    let (found, pos) = leaf.find_key_position_binary(key);
+                    if found {
+                        return Ok(leaf.get_row_id(pos));
+                    } else {
+                        return Ok(None);
+                    }
                 } else {
-                    Ok(None)
+                    let internal = InternalNodeRef::new(&data_guard);
+                    internal.find_child_page_id_binary(key)
                 }
-            } else {
-                let internal = InternalNodeRef::new(&data_guard);
-                let child_page_id = internal.find_child_page_id_binary(key);
-                drop(data_guard);
-                drop(guard);
-                self.search_from_page_async(PageId(child_page_id as u64), key, loader).await
-            }
+            }; // guard and data_guard dropped here, before recursive await
+
+            self.search_from_page_async(PageId(child_page_id as u64), key, loader).await
         })
     }
 
