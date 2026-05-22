@@ -1,5 +1,6 @@
 //! Physical plan types for query execution
 
+use crate::executor::aggregate::AggregateFunc;
 use crate::executor::predicate::PredicateRef;
 use crate::executor::{ColumnType, Value};
 use crate::storage::page_format::Key;
@@ -36,6 +37,10 @@ pub enum PhysicalPlan {
     Limit(LimitNode),
     /// JOIN 节点（INNER JOIN）
     Join(JoinNode),
+    /// 聚合节点（GROUP BY + 聚合函数）
+    Aggregate(AggregateNode),
+    /// HAVING 过滤节点
+    Having(HavingNode),
 }
 
 /// 全表扫描节点
@@ -254,4 +259,22 @@ pub struct JoinNode {
     pub conditions: Vec<JoinCondition>,
     /// 输出列映射
     pub output_columns: Vec<OutputColumn>,
+}
+
+/// 聚合节点（GROUP BY + 聚合函数）
+#[derive(Debug, Clone)]
+pub struct AggregateNode {
+    pub input: Box<PhysicalPlan>,
+    pub group_by: Vec<String>,
+    pub aggregates: Vec<AggregateFunc>,
+    pub output_columns: Vec<String>,
+    pub table_name: String,
+}
+
+/// HAVING 过滤节点
+#[derive(Debug, Clone)]
+pub struct HavingNode {
+    pub input: Box<PhysicalPlan>,
+    pub predicate: PredicateRef,
+    pub table_name: String,
 }

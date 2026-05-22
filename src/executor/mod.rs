@@ -32,9 +32,9 @@ pub use insert::InsertExecutor;
 pub use join::JoinExecutor;
 pub use limit::LimitExecutor;
 pub use plan::{
-    ColumnConstraint, ColumnDef, ColumnRef, CreateTableNode, DeleteNode, DropTableNode, FilterNode,
-    IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode, OrderByColumn, OutputColumn,
-    PhysicalPlan, ScanNode, SortNode, UpdateNode,
+    AggregateNode, ColumnConstraint, ColumnDef, ColumnRef, CreateTableNode, DeleteNode,
+    DropTableNode, FilterNode, HavingNode, IndexScanNode, InsertNode, JoinCondition, JoinNode,
+    LimitNode, OrderByColumn, OutputColumn, PhysicalPlan, ScanNode, SortNode, UpdateNode,
 };
 pub use predicate::{
     ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,
