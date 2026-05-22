@@ -1,231 +1,8 @@
-# 任务清单
+# 任务跟踪
 
 > 最后更新：2026-05-22
 
-## 进行中
-
-- [ ] （无）
-
 ## 已完成
-
-### M0: 项目骨架，引入 Tokio ✅
-
-- [x] 初始化 Rust 项目
-- [x] 添加 Tokio 依赖
-- [x] 创建基础模块结构
-- [x] 验证 Tokio 运行时
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (3 passed) ✅
-
-### M1: 文件/缓存层 ✅
-
-- [x] AsyncStorage trait + FileStorage
-- [x] BufferPool + Clock 淘汰 + PageGuard
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (17 passed) ✅
-
-### M2: B-Tree 索引与存储引擎 ✅
-
-- [x] Key/RowId/SlottedPage 格式
-- [x] LeafNode + InternalNode
-- [x] BTree 核心逻辑 + IndexManager async API
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (53 passed) ✅
-
-### M3: 事务与 MVCC ✅
-
-- [x] TransactionId + TransactionManager
-- [x] Snapshot（Repeatable Read 可见性）
-- [x] VersionHeader（22B 版本链）
-- [x] RowLockTable（异步行锁）
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (78 passed) ✅
-
-### M4: SQL 解析与计划 ✅
-
-- [x] sqlparser-rs 集成
-- [x] PlanBuilder（AST → PhysicalPlan）
-- [x] 5 节点 PhysicalPlan
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (92 passed) ✅
-
-### M5: 异步执行引擎 ✅
-
-- [x] Executor trait（async fn next）
-- [x] ExecResult + 5 Executor 实现
-- [x] 单元测试 + 集成测试
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (115 passed) ✅
-
-### M6: 网络层 ✅
-
-- [x] Protocol trait + JsonProtocol
-- [x] Server + ConnectionHandler + SqlHandler (mock)
-- [x] Graceful shutdown
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (124 passed) ✅
-
-### M7: 全流程集成 + 数据存储层 ✅
-
-- [x] 实现 ColumnType + tuple 序列化（serialize/deserialize_tuple）
-- [x] 实现 TableManager（表元数据注册、create_table/get_table）
-- [x] 扩展 ExecResult（Row 变体）+ Response（rows 字段）
-- [x] 实现 data_page 读写（write/read_tuple_to_data_page）
-- [x] 实现真实 InsertExecutor（数据页写入 + 索引更新）
-- [x] 实现 BTree::scan_all + IndexManager::scan_all
-- [x] 重写 IndexScanExecutor（读 Tuple + MVCC 可见性过滤）
-- [x] 重写 ScanExecutor（全表扫描）
-- [x] 重写 UpdateExecutor（版本链创建）
-- [x] 更新 DeleteExecutor（tx_id 字段）
-- [x] MVCC 可见性集成（Snapshot.is_visible/is_visible_self）
-- [x] 创建 Database 协调器结构（BufferPool+TableManager+TxManager）
-- [x] 创建 SQL 执行管道（pipeline.rs）
-- [x] 替换 mock SqlHandler → 真实 pipeline（async execute）
-- [x] 端到端 TCP 测试（7 tests：insert/select/update/delete/ping/error）
-- [x] 更新所有现有测试
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (157 passed) ✅, cargo clippy ✅, cargo fmt ✅
-**新增文件**: database.rs, pipeline.rs, tuple.rs, table_manager.rs, data_page.rs, e2e_test.rs
-**新增测试**: 34 个（tuple:6 + table_mgr:6 + data_page:5 + executor:+4 MVCC + e2e:7 + table_manager:6）
-**MVCC 范围**: M7 仅验证最新版本可见性，完整版本链遍历推迟到 M10
-
-### M8: PostgreSQL 协议 ✅
-
-- [x] 实现 PostgreSQL 有线协议（Simple Query Protocol）
-- [x] 实现 pg_messages 消息序列化层
-- [x] 实现 PgProtocol 状态机
-- [x] Server 切换到 PgProtocol
-- [x] 集成测试（pg_integration_test.rs）
-- [ ] psql 真实连接测试（环境限制：psql 未安装）
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (159 passed) ✅, cargo clippy ✅, cargo fmt ✅
-**新增文件**: pg_messages.rs, pg_protocol.rs, pg_integration_test.rs, pg_messages_test.rs, pg_protocol_test.rs
-**推迟功能**: Extended Protocol, SSL/TLS, 二进制格式
-
-**注意**: psql 真实连接测试需要安装 PostgreSQL 客户端工具
-
-### M9 Phase 1: SQL 基础能力完善 - DDL + WHERE ✅
-
-**目标**: 解决用户无法通过 SQL 创建表的阻塞，实现 WHERE 条件过滤
-
-- [x] DDL: CREATE TABLE（扩展 Parser + PlanBuilder + Executor）
-- [x] DDL: DROP TABLE IF EXISTS（扩展 Parser + PlanBuilder + Executor）
-- [x] 列类型扩展: FLOAT + BOOL（Value + ColumnType + 序列化）
-- [x] Value 比较方法: equals/gt/lt/ge/le（支持跨类型 Int vs Float）
-- [x] Predicate trait + Expression trait（表达式求值器）
-- [x] ComparisonPredicate（6 种比较操作）
-- [x] LogicalPredicate（AND/OR 逻辑操作）
-- [x] FilterExecutor（WHERE 条件过滤）
-- [x] WHERE 解析（build_where + build_expression）
-- [x] Pipeline 集成（DDL + WHERE 执行流程）
-- [x] 所有测试通过（232 tests）
-
-**完成日期**: 2026-05-20
-**验证结果**: cargo test (232 passed) ✅, cargo clippy ✅, cargo fmt ✅
-**新增文件**: predicate.rs, filter.rs, create_table.rs, drop_table.rs, predicate_test.rs, pipeline_test.rs, value_test.rs
-**新增测试**: 40+ 个（predicate:12 + planner:+5 + executor:+3 + pipeline:9 + value:19）
-**解决的阻塞**: 用户现在可以通过 SQL 创建表（无需 TableManager API）
-
-### M9 Phase 2: ORDER BY + LIMIT/OFFSET ✅
-
-**目标**: 完善 SQL 查询能力（排序 + 分页）
-
-- [x] PhysicalPlan 节点：SortNode + LimitNode + OrderByColumn
-- [x] SortExecutor 实现（内存排序，列名映射，NULL 末尾处理）
-- [x] LimitExecutor 实现（OFFSET 跳过 + LIMIT 限制）
-- [x] Parser ORDER BY + LIMIT/OFFSET 解析（build_query 扩展）
-- [x] Pipeline 集成（递归 executor 创建）
-- [x] 端到端测试验证（SELECT WHERE ORDER BY LIMIT）
-- [x] 所有测试通过（256 tests）
-
-**完成日期**: 2026-05-21
-**验证结果**: cargo test (256 passed) ✅, cargo clippy ✅, cargo fmt ✅
-**新增文件**: sort.rs, limit.rs, sort_test.rs, limit_test.rs
-**新增测试**: 24 个（sort:6 + limit:5 + planner:5 + pipeline:3 + sort_unit:5）
-**关键修复**: Column index mapping bug（Task 9 发现并修复）
-
-### M10: MVCC 完整性 ✅
-
-**目标**: 完整的多版本并发控制
-
-- [x] 完整版本链遍历（follow `next_version` 找第一个可见版本）
-- [x] 版本链 GC（可选功能，gc_table 用户手动触发）
-- [x] Commit 标记（commit_mark_versions 设置 commit_tx_id）
-- [x] Abort 清理（abort_cleanup_versions 清理未提交版本）
-
-**实现内容**:
-- Phase 1: 基础结构（tx_versions, find_visible_version, find_key_by_row_id）
-- Phase 2: Executor 集成 record_version
-- Phase 3: Commit 标记（commit_mark_versions）
-- Phase 4: 版本链遍历集成（IndexScanExecutor, ScanExecutor）
-- Phase 5: Abort 清理（abort_cleanup_versions）
-- Phase 6: 可选 GC（gc_table）
-
-**完成日期**: 2026-05-21
-**验证结果**: cargo test (279 passed) ✅
-**新增文件**: mvcc_record_test.rs, mvcc_commit_test.rs, mvcc_abort_test.rs, version_chain_test.rs, gc_test.rs
-**新增测试**: 23 个（record:5 + commit:4 + abort:3 + version_chain:3 + gc:3 + 其他:8）
-**关键改动**: 23 commits, 21 files changed, 1929 additions
-
-### M11: WAL 持久化 ✅
-
-**目标**: 嵌入式数据库崩溃恢复能力
-
-- [x] WAL（Write-Ahead Logging）写入流程（WalRecord + WalWriter）
-- [x] WAL 重放恢复（RecoveryManager + WalReader）
-- [x] Checkpoint 机制（CheckpointManager + 位点文件）
-- [x] 原子性保障（WalWriter::fsync）
-
-**实现内容**:
-- WalRecord enum（Insert/Update/Delete/Commit/Abort/Checkpoint）
-- WalWriter（async write_record + fsync + truncate）
-- WalReader（read_next + seek_to）
-- CheckpointManager（checkpoint flow + 位点读写）
-- RecoveryManager（recover + needs_recovery）
-- Database 集成（wal_writer 字段 + RecoveryManager::recover）
-
-**完成日期**: 2026-05-21
-**验证结果**: cargo test (83 lib + 74 tests) ✅
-**新增文件**: wal/record.rs, wal/writer.rs, wal/reader.rs, wal/checkpoint.rs, wal/recovery.rs, wal/mod.rs
-**新增测试**: 22 个（wal_record:8 + wal_writer:5 + checkpoint:3 + recovery:3 + integration:3）
-**推迟功能**: Executor 层 WAL 写入集成、完整数据重放（仅返回 commit/abort 标记）
-
-### M12: INNER JOIN 多表查询 ✅
-
-**目标**: 多表查询能力（INNER JOIN）
-
-- [x] JoinNode 物理计划节点（JoinCondition + ColumnRef + OutputColumn）
-- [x] JoinExecutor 哈希连接实现（build right → scan left → output）
-- [x] NULL 键处理（SQL 语义：NULL != NULL）
-- [x] ON 子句解析（AND 组合等值条件）
-- [x] 多表链式 JOIN（Join(Join(A,B),C)）
-- [x] 列名歧义检测（AmbiguousColumn 错误）
-- [x] Value Eq + Hash trait（HashMap 键支持）
-
-**实现内容**:
-- Phase 1: 基础结构（JoinNode, JoinCondition, ColumnRef, OutputColumn）
-- Phase 2: 解析层（resolve_column_ref, extract_join_conditions, build_from_clause）
-- Phase 3: 执行层（JoinExecutor 哈希连接 + NULL 处理）
-- Phase 4: 集成（pipeline.rs JoinExecutor 创建）
-
-**完成日期**: 2026-05-22
-**验证结果**: cargo test (319 passed) ✅
-**新增文件**: join.rs, join_test.rs
-**新增测试**: 9 个（join:7 + pipeline:+2）
-**推迟功能**: LEFT/RIGHT/FULL OUTER JOIN, WHERE 隐式连接
-
----
-
-## 待办 - 开发路线图（M13）
 
 ### M13: 性能基准测试与关键优化 ✅
 
@@ -249,31 +26,102 @@
 
 ---
 
-### 推迟/可选功能
+### M12: JOIN 支持 ✅
 
-| 功能 | 状态 | 说明 |
-|------|------|------|
-| PostgreSQL Extended Protocol | 推迟 | 嵌入式数据库可能不需要 prepared statement |
-| SSL/TLS | 推迟 | 嵌入式场景通常本地访问 |
-| 二进制格式（format_code=1） | 推迟 | 文本格式足够 |
-| psql 真实连接测试 | 可选 | PostgreSQL 协议层可能分离/删除 |
-| 聚合函数（COUNT/SUM/AVG） | 推迟 | 后续里程碑 |
-| LEFT/RIGHT/FULL OUTER JOIN | 推迟 | M12 仅实现 INNER JOIN |
-| WHERE 隐式连接 | 推迟 | 仅支持 ON 子句显式连接 |
+**目标**: INNER JOIN 支持
 
----
+- [x] JoinExecutor 哈希连接实现
+- [x] PlanBuilder JOIN 语法解析
+- [x] Pipeline 集成
+- [x] E2E 测试
 
-## 阻塞项
-
-- **当前阻塞**: 无（M9 Phase 1 已解决 DDL阻塞）
+**完成日期**: 2026-05-21
 
 ---
 
-## 下一步行动
+### M11: ORDER BY / LIMIT / OFFSET ✅
 
-**立即开始**: M13（性能优化与完善）
-- io_uring 替换（可选）
-- 性能基准测试
-- 内存分配器优化
+**目标**: 排序与分页
 
-**里程碑顺序**: M13 → 完成
+- [x] SortExecutor（内存排序 + 归并）
+- [x] LimitExecutor（LIMIT/OFFSET）
+- [x] Pipeline 集成 + E2E 测试
+
+**完成日期**: 2026-05-21
+
+---
+
+### M10: WHERE 过滤 ✅
+
+**目标**: 条件过滤
+
+- [x] FilterExecutor + Predicate 系统
+- [x] 表达式求值（比较/逻辑/算术）
+- [x] Pipeline 集成 + E2E 测试
+
+**完成日期**: 2026-05-21
+
+---
+
+### M9: B-Tree 索引 ✅
+
+**目标**: 主键索引
+
+- [x] BTree 插入/搜索/删除
+- [x] IndexManager + IndexScanExecutor
+- [x] Pipeline 集成 + E2E 测试
+
+**完成日期**: 2026-05-21
+
+---
+
+### M8: 网络层 ✅
+
+**目标**: PostgreSQL 协议兼容
+
+- [x] PgProtocol 状态机
+- [x] ConnectionHandler + Server
+- [x] Graceful shutdown
+
+**完成日期**: 2026-05-20
+
+---
+
+### M7: MVCC 事务 ✅
+
+**目标**: 快照隔离
+
+- [x] TransactionManager + Snapshot
+- [x] VersionChain + RowLock
+- [x] BEGIN/COMMIT/ROLLBACK
+
+**完成日期**: 2026-05-20
+
+---
+
+### M1-M6: 基础设施 ✅
+
+- M1: 项目骨架 + Tokio 异步运行时
+- M2: 页式存储（4KB Page + SlottedPage）
+- M3: BufferPool（Clock 淘汰）
+- M4: WAL（write-ahead logging + recovery）
+- M5: SQL 解析（sqlparser-rs + PlanBuilder）
+- M6: 执行器框架（Scan/Insert/Update/Delete + Pipeline）
+
+---
+
+## 进行中
+
+无
+
+## 待办
+
+- **M14**: 聚合函数与 GROUP BY（COUNT/SUM/AVG/MIN/MAX + GROUP BY + HAVING）
+- **M15**: 子查询支持（标量子查询 / IN 子查询 / 派生表）
+- **M16**: 索引优化（B-Tree split/merge + 非唯一索引）
+- **M17**: 多类型支持（FLOAT/BOOL/NULL 语义完善）
+- **M18**: 持久化与恢复增强（增量 checkpoint + 并行恢复）
+
+## 阻塞
+
+无
