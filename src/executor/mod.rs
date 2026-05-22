@@ -27,6 +27,7 @@ pub use delete::DeleteExecutor;
 pub use drop_table::DropTableExecutor;
 pub use executor_trait::Executor;
 pub use filter::FilterExecutor;
+pub use having::HavingExecutor;
 pub use index_scan::IndexScanExecutor;
 pub use insert::InsertExecutor;
 pub use join::JoinExecutor;
