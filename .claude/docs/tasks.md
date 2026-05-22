@@ -1,14 +1,13 @@
 # 任务清单
 
-> 最后更新：2026-05-22（M14 Phase 2 T2 性能优化完成 + test_multiple_operations_sequence 测试失败）
+> 最后更新：2026-05-22（M14 Phase 2 T2 完成，性能优化 + bug 修复）
 
-## 当前任务：修复 test_multiple_operations_sequence 测试失败
+## 当前任务：M15 聚合函数与 GROUP BY
 
-**状态**: 待修复
-**优先级**: 高（影响功能正确性）
-**问题**: IndexManager.delete 操作意外删除了其他行（删除 key=2 后，key=3 也消失）
+**状态**: 待开始
+**优先级**: 高（下一里程碑）
 
-### M14 Phase 2 T2 已完成 ✅
+### M14 Phase 2 T2 已完成 ✅✅
 
 **性能优化成功**（目标 5-6x，实际 **17x 提速**）：
 - ✅ 架构重构：移除 RwLock<BTree>，改用 AtomicPageId
@@ -22,15 +21,15 @@
 - **优化后**：index_manager_search ~1-3µs（平均 3µs）
 - **提速**：51µs → 3µs = **17x 提速**（远超预期 5-6x）
 
-**测试状态**：
-- ✅ index_manager_test：所有测试通过（基本功能验证）
-- ❌ plan_exec_test.test_multiple_operations_sequence：delete 操作意外删除其他行
-- ⚠️ 其他测试：通过（83 lib tests + 73 integration tests，1 个失败）
+**Bug 修复完成**：
+- ✅ 根因：SlottedPage.delete_slot 不减少 slot_count
+- ✅ 修复：实现 slot compacting（移动 slots backward）
+- ✅ 验证：所有测试通过（88 lib + 74 integration）
+- ✅ 性能：修复后性能仍然达标（1-3µs）
 
-**待修复问题**：
-- [ ] 调查 LeafNode.delete 或 BufferPool 缓存问题
-- [ ] 修复 delete 操作意外删除其他行的 bug
-- [ ] 验证修复后所有测试通过
+**测试状态**：
+- ✅ **所有测试通过**：88 lib tests + 74 integration tests
+- ✅ **性能验证**：index_manager_search ~1-3µs（17x 提速）
 
 ### M14 Phase 2 T1 已完成 ✅
 
