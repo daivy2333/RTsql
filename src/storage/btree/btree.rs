@@ -51,31 +51,19 @@ impl BTree {
         let guard = self.loader.load_page(page_id)?;
         let data_guard = guard.page_data();
 
-        // Check page type from first byte
         if data_guard[0] == LEAF_NODE {
-            // Leaf node: search for key using zero-copy LeafNodeRef
             let leaf = LeafNodeRef::new(&data_guard);
-            let (found, pos) = leaf.find_key_position(key);
-
+            let (found, pos) = leaf.find_key_position_binary(key);
             if found {
                 Ok(leaf.get_row_id(pos))
             } else {
                 Ok(None)
             }
         } else {
-            // Internal node: find the child page and recurse
             let internal = InternalNodeRef::new(&data_guard);
-            let child_page_id = internal
-                .find_child_page_id(key)
-                .ok_or_else(|| StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Internal node has no child page id",
-                )))?;
-
-            // Drop the data_guard before recursive call (avoids holding mutex across recursion)
+            let child_page_id = internal.find_child_page_id_binary(key);
             drop(data_guard);
             drop(guard);
-
             self.search_from_page(PageId(child_page_id as u64), key)
         }
     }

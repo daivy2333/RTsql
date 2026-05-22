@@ -7,91 +7,86 @@ use tokio::sync::RwLock;
 use super::{AsyncPageLoader, BTree, SyncPageLoader};
 
 /// IndexManager: Async API wrapper for BTree
-/// Uses RwLock<BTree> for concurrent reads, spawn_blocking for writes
+/// Uses std::sync::RwLock<BTree> for concurrent reads with spawn_blocking
+/// Read ops use read lock (concurrent), write ops use write lock (exclusive)
 pub struct IndexManager {
-    btree: Arc<RwLock<BTree>>,
+    btree: Arc<std::sync::RwLock<BTree>>,
     async_loader: AsyncPageLoader,
     row_to_key: RwLock<HashMap<RowId, Vec<u8>>>,
 }
 
 impl IndexManager {
-    /// Create a new IndexManager with the given buffer pool
-    /// Must be called within a Tokio runtime context (for SyncPageLoader)
     pub fn new(buffer_pool: Arc<BufferPool>) -> Result<Self> {
         let sync_loader = Arc::new(SyncPageLoader::new(buffer_pool.clone()));
         let async_loader = AsyncPageLoader::new(buffer_pool.clone());
         let btree = BTree::new(sync_loader)?;
         Ok(Self {
-            btree: Arc::new(RwLock::new(btree)),
+            btree: Arc::new(std::sync::RwLock::new(btree)),
             async_loader,
             row_to_key: RwLock::new(HashMap::new()),
         })
     }
 
-    /// Search for a key in the index — async path (no spawn_blocking)
-    /// Uses RwLock read lock + BTree::search_async
+    /// Search for a key — spawn_blocking with read lock (concurrent reads OK)
+    /// Uses binary search via BTree::search, which now calls find_key_position_binary
     pub async fn search(&self, key: &[u8]) -> Result<Option<RowId>> {
-        let btree = self.btree.read().await;
-        let key_obj = crate::storage::page_format::Key::new(key);
-        btree.search_async(&key_obj, &self.async_loader).await
+        let btree = self.btree.clone();
+        let key_vec = key.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let btree_guard = btree.read().unwrap();
+            btree_guard.search(&key_vec)
+        })
+        .await?
     }
 
-    /// Insert a key-value pair into the index
-    /// Uses spawn_blocking to wrap the synchronous BTree operation
+    /// Insert a key-value pair — spawn_blocking with write lock
     pub async fn insert(&self, key: &[u8], row_id: RowId) -> Result<()> {
         let btree = self.btree.clone();
-        let key_for_btree = key.to_vec();
-
+        let key_vec = key.to_vec();
         tokio::task::spawn_blocking(move || {
-            btree.blocking_write().insert(&key_for_btree, row_id)
-        })
-        .await??;
+            btree.write().unwrap().insert(&key_vec, row_id)
+        }).await??;
 
-        // Maintain reverse mapping
         self.row_to_key.write().await.insert(row_id, key.to_vec());
         Ok(())
     }
 
-    /// Delete a key from the index
-    /// Returns error if key not found
+    /// Delete a key — spawn_blocking with write lock
     pub async fn delete(&self, key: &[u8]) -> Result<()> {
-        // Clean reverse mapping first
         if let Some(row_id) = self.search(key).await? {
             self.row_to_key.write().await.remove(&row_id);
         }
 
         let btree = self.btree.clone();
-        let key_for_btree = key.to_vec();
-
+        let key_vec = key.to_vec();
         tokio::task::spawn_blocking(move || {
-            btree.blocking_write().delete(&key_for_btree)
+            btree.write().unwrap().delete(&key_vec)
         })
         .await?
     }
 
-    /// Scan all entries in the index — async path
-    /// Returns all (key, RowId) pairs in key order.
+    /// Scan all entries — spawn_blocking with read lock
     pub async fn scan_all(&self) -> Result<Vec<(Vec<u8>, RowId)>> {
-        let btree = self.btree.read().await;
-        let results = btree.scan_all()?;
+        let btree = self.btree.clone();
+        let results = tokio::task::spawn_blocking(move || {
+            let btree_guard = btree.read().unwrap();
+            btree_guard.scan_all()
+        })
+        .await??;
         Ok(results
             .into_iter()
             .map(|(k, r)| (k.as_bytes().to_vec(), r))
             .collect())
     }
 
-    /// Update the RowId for an existing key
-    /// Returns error if key not found
+    /// Update the RowId for an existing key — spawn_blocking with write lock
     pub async fn update(&self, key: &[u8], new_row_id: RowId) -> Result<()> {
         let btree = self.btree.clone();
-        let key_for_btree = key.to_vec();
-
+        let key_vec = key.to_vec();
         tokio::task::spawn_blocking(move || {
-            btree.blocking_write().update(&key_for_btree, new_row_id)
-        })
-        .await??;
+            btree.write().unwrap().update(&key_vec, new_row_id)
+        }).await??;
 
-        // Maintain reverse mapping
         self.row_to_key.write().await.insert(new_row_id, key.to_vec());
         Ok(())
     }
