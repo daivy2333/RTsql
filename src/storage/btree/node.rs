@@ -329,6 +329,26 @@ impl<'a> LeafNodeRef<'a> {
         (false, count)
     }
 
+    /// Binary search for key position — O(log n) instead of O(n)
+    pub fn find_key_position_binary(&self, key: &Key) -> (bool, usize) {
+        let count = self.key_count();
+        let mut lo: usize = 0;
+        let mut hi: usize = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if let Some(mid_key) = self.get_key(mid) {
+                match mid_key.cmp(key) {
+                    std::cmp::Ordering::Less => lo = mid + 1,
+                    std::cmp::Ordering::Greater => hi = mid,
+                    std::cmp::Ordering::Equal => return (true, mid),
+                }
+            } else {
+                hi = mid;
+            }
+        }
+        (false, lo)
+    }
+
     /// 获取下一叶子节点页ID
     pub fn next_leaf_page_id(&self) -> u32 {
         self.slotted.header().next_page_id
@@ -469,13 +489,51 @@ impl<'a> InternalNodeRef<'a> {
         for i in 0..count {
             if let Some(current_key) = self.get_key(i) {
                 if *key < current_key {
-                    return self.get_child_page_id(if i == 0 { 0 } else { i });
+                    if i == 0 {
+                        return Some(self.leftmost_child());
+                    }
+                    return self.get_child_page_id(i);
                 }
             }
         }
 
-        // 返回最后一个 child
-        self.get_child_page_id(count)
+        // key >= all separators: go to last child (child at last slot)
+        if count > 0 {
+            self.get_child_page_id(count - 1)
+        } else {
+            Some(self.leftmost_child())
+        }
+    }
+
+    /// Binary search for child page id — O(log n) instead of O(n)
+    /// Returns the child page id for the subtree that should contain the given key.
+    /// In an internal node: leftmost_child | key_0 → child_1 | key_1 → child_2 | ...
+    /// If key < key_0, go to leftmost_child; if key < key_i, go to child_i; else go to last child.
+    pub fn find_child_page_id_binary(&self, key: &Key) -> u32 {
+        let count = self.key_count();
+        let mut lo: usize = 0;
+        let mut hi: usize = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if let Some(mid_key) = self.get_key(mid) {
+                match mid_key.cmp(key) {
+                    std::cmp::Ordering::Less => lo = mid + 1,
+                    std::cmp::Ordering::Greater => hi = mid,
+                    std::cmp::Ordering::Equal => {
+                        // key == separator: go to right subtree (child at mid+1)
+                        return self.get_child_page_id(mid + 1).unwrap_or(self.leftmost_child());
+                    }
+                }
+            } else {
+                hi = mid;
+            }
+        }
+        // lo is the insertion position; child at lo is the subtree for keys < key_lo
+        if lo == 0 {
+            self.leftmost_child()
+        } else {
+            self.get_child_page_id(lo).unwrap_or(self.leftmost_child())
+        }
     }
 }
 
@@ -630,5 +688,79 @@ mod tests {
         assert_eq!(internal_ref.get_key(1).unwrap().as_bytes(), b"d");
         assert_eq!(internal_ref.get_child_page_id(1).unwrap(), 200);
         assert_eq!(internal_ref.leftmost_child(), 0);
+    }
+
+    #[test]
+    fn test_leaf_node_ref_binary_search_matches_linear() {
+        let mut page = Page::new(PageId(0));
+        let mut leaf = LeafNode::init(&mut page);
+
+        for ch in b"acegikm" {
+            leaf.insert(&Key::new(&[*ch]), &RowId::new(*ch as u32, 0)).unwrap();
+        }
+
+        let data: &[u8] = page.data.as_ref();
+        let leaf_ref = LeafNodeRef::new(data);
+
+        // Test all existing keys
+        for ch in b"acegikm" {
+            let linear = leaf_ref.find_key_position(&Key::new(&[*ch]));
+            let binary = leaf_ref.find_key_position_binary(&Key::new(&[*ch]));
+            assert_eq!(linear, binary, "Mismatch for existing key {}", *ch as char);
+        }
+
+        // Test missing keys
+        for ch in b"bdfhjlnz" {
+            let linear = leaf_ref.find_key_position(&Key::new(&[*ch]));
+            let binary = leaf_ref.find_key_position_binary(&Key::new(&[*ch]));
+            assert_eq!(linear, binary, "Mismatch for missing key {}", *ch as char);
+        }
+    }
+
+    #[test]
+    fn test_internal_node_ref_binary_search_matches_linear() {
+        let mut page = Page::new(PageId(0));
+        // Initialize as INTERNAL_NODE and write slots
+        {
+            let mut slotted = SlottedPage::init(&mut page, INTERNAL_NODE);
+            // Write separators: b(100), d(200), f(300)
+            for (ch, child) in [(b'b', 100u32), (b'd', 200u32), (b'f', 300u32)] {
+                let mut entry = vec![0u8; MAX_KEY_LEN + 4];
+                Key::new(&[ch]).serialize(&mut entry[..MAX_KEY_LEN]);
+                entry[MAX_KEY_LEN..MAX_KEY_LEN + 4].copy_from_slice(&child.to_le_bytes());
+                slotted.add_slot(&entry).unwrap();
+            }
+        }
+        // Now slotted is dropped, we can modify page.data directly
+        // Set leftmost_child (next_page_id in header) to 50
+        page.data[5..9].copy_from_slice(&50u32.to_le_bytes());
+
+        let data: &[u8] = page.data.as_ref();
+        let internal_ref = InternalNodeRef::new(data);
+
+        // key "a" → leftmost_child (50)
+        let linear = internal_ref.find_child_page_id(&Key::new(b"a"));
+        let binary = internal_ref.find_child_page_id_binary(&Key::new(b"a"));
+        assert_eq!(linear.unwrap(), binary, "Mismatch for key 'a'");
+
+        // key "c" → child 100 (between b and d)
+        let linear = internal_ref.find_child_page_id(&Key::new(b"c"));
+        let binary = internal_ref.find_child_page_id_binary(&Key::new(b"c"));
+        assert_eq!(linear.unwrap(), binary, "Mismatch for key 'c'");
+
+        // key "e" → child 200 (between d and f)
+        let linear = internal_ref.find_child_page_id(&Key::new(b"e"));
+        let binary = internal_ref.find_child_page_id_binary(&Key::new(b"e"));
+        assert_eq!(linear.unwrap(), binary, "Mismatch for key 'e'");
+
+        // key "g" → last child (300)
+        let linear = internal_ref.find_child_page_id(&Key::new(b"g"));
+        let binary = internal_ref.find_child_page_id_binary(&Key::new(b"g"));
+        assert_eq!(linear.unwrap(), binary, "Mismatch for key 'g'");
+
+        // key "b" → child 100 (equal to separator b)
+        let linear = internal_ref.find_child_page_id(&Key::new(b"b"));
+        let binary = internal_ref.find_child_page_id_binary(&Key::new(b"b"));
+        assert_eq!(linear.unwrap(), binary, "Mismatch for key 'b'");
     }
 }
