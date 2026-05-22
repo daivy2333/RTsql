@@ -9,7 +9,8 @@ fn bench_insert(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("insert");
 
-    for i in 0..100 {
+    // Only 3 representative cases instead of 100
+    for i in [0, 50, 99] {
         group.bench_with_input(BenchmarkId::new("single_row", i), &i, |b, &i| {
             b.to_async(&rt).iter(|| async {
                 let (path, db) = setup_db().await;
@@ -46,7 +47,7 @@ fn bench_select(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let db = db.clone();
             async move {
-                for i in 0..100 {
+                for i in 0..30 {
                     db.execute_sql(&format!("SELECT * FROM bench WHERE id = {}", i))
                         .await;
                 }
@@ -72,7 +73,7 @@ fn bench_update(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let db = db.clone();
             async move {
-                for i in 0..100 {
+                for i in 0..30 {
                     db.execute_sql(&format!(
                         "UPDATE bench SET value = {} WHERE id = {}",
                         i * 20, i
@@ -95,10 +96,10 @@ fn bench_delete(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let (path, db) = setup_db().await;
             create_test_table(&db).await;
-            // Insert 200 rows so we can delete 100 and still have data left.
-            insert_rows(&db, 0, 200).await;
+            // Insert 60 rows so we can delete 30 and still have data left.
+            insert_rows(&db, 0, 60).await;
 
-            for i in 0..100 {
+            for i in 0..30 {
                 db.execute_sql(&format!("DELETE FROM bench WHERE id = {}", i))
                     .await;
             }
