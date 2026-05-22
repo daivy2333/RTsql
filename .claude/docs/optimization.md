@@ -29,58 +29,61 @@
 
 ## 性能分析结论（2026-05-22）
 
-### 核心瓶颈
+### M14 后最新数据
 
-| 瓶颈 | 现状 | 对标 SQLite | 差距 | 根因 |
-|------|------|-------------|------|------|
-| PK 点查询 | ~50µs/次 | ~5.5µs/次 | **~10x** | 每次 parse→plan→execute 全流程，无缓存 |
-| INSERT | ~440µs/行 | ~2.2ms/100行 | ~20x | WAL 逐行 fsync，无 group commit |
-| 并发混合 80r/20w | 16并发 ~53ms | — | — | 写操作拖慢整体吞吐 |
-| 冲突更新 | 16并发 ~1.17ms | — | — | 行锁竞争 |
+| 操作 | M13 baseline | M14 当前 | 提速 |
+|------|-------------|---------|------|
+| PK lookup (cached, same SQL) | ~49µs | ~36µs | **1.4x** |
+| PK lookup (uncached) | ~49µs | ~41µs | **1.2x** |
+| PK lookup (diff SQL, 100 unique) | ~49µs | ~49µs | **~1x** |
+| Full scan 100 rows | ~84µs | ~74µs | **1.1x** |
 
-### 热路径分析
+### 核心瓶颈（M14 后更新）
+
+| 瓶颈 | 现状 | 根因 | 下一步 |
+|------|------|------|--------|
+| PK 点查询 | ~36µs/次 | spawn_blocking + Mutex + block_on 调度链 | 消除 spawn_blocking，async BTree |
+| INSERT | ~440µs/行 | WAL 逐行 fsync | WAL Group Commit |
+| 并发混合 | 16并发 ~53ms | 写操作拖慢吞吐 | 行缓存 + 并发写入优化 |
+
+### 热路径分析（M14 后）
 
 ```
 execute_sql()
-  → parse_sql()          ← 每次重新解析，无 prepared statement 缓存
-  → PlanBuilder::build() ← 每次重新生成计划
-  → Pipeline::execute()
-    → Executor::next()
-      → BTree::search()  ← 仍用 page() 克隆 4KB，未迁移 page_data()
-      → BufferPool::get_page()
-        → [可能的磁盘 I/O + spawn_blocking 调度开销]
+  → [cache hit] parse+plan skipped (~5µs saved)
+  → create_executor_from_plan() (~2µs)
+  → IndexScanExecutor::next()
+    → IndexManager::search()
+      → spawn_blocking()          ← ~10-15µs 线程调度
+      → Mutex<BTree>::lock()      ← ~5µs 锁获取
+      → SyncPageLoader::block_on  ← ~10µs 两次 async→sync 转换
+      → BTree::search()           ← ~5µs 实际计算
+      → BufferPool::get_page()    ← ~5µs 页缓存命中
 ```
 
-### 差距归因
+### 差距归因（M14 后更新）
 
-1. **查询路径开销（主因）**: parse + plan 占 PK 查询 ~60% 时间，SQLite 有 prepared statement 跳过解析
-2. **BTree 零拷贝缺失**: B-Tree 操作仍用 `page()` 克隆，未迁移到 `page_data()`
-3. **WAL fsync 瓶颈**: 每次 INSERT 独立 fsync，无批量提交
-4. **spawn_blocking 调度**: B-Tree 操作在阻塞线程池，有上下文切换成本
+1. **线程调度开销（主因）**: spawn_blocking + block_on 占 ~25µs，是 PK 查询最大瓶颈
+2. **Mutex<BTree> 锁**: 每次 search 需获取全局 Mutex，~5µs
+3. **parse+plan 开销（已解决）**: 仅 ~5µs，缓存可消除但收益有限
 
 ---
 
 ## 🔴 Critical — 查询路径优化
 
-### 10. Prepared Statement 缓存
+### 10. Prepared Statement 缓存 ✅
 
-**问题**: 每次 `execute_sql()` 都完整走 parse→plan→execute，PK 查询 ~60% 时间花在解析和计划生成
-**影响**: PK 点查询比 SQLite 慢 ~10x（~50µs vs ~5.5µs）
-**修复方案**: 实现 PreparedStatement 缓存，相同 SQL 模板跳过 parse/plan 阶段
-**预期收益**: PK 查询 3-5x 提速
-**优先级**: P0（M14 前置或并行）
-**难度**: 中
-**依赖**: 无
+**问题**: 每次 `execute_sql()` 都完整走 parse→plan→execute
+**修复**: LruCache<String, PhysicalPlan>，容量 256，SELECT 缓存，DDL 清缓存
+**实际收益**: 相同 SQL 1.1x 提速（parse+plan 仅 ~5µs，非主要瓶颈）
+**教训**: parse+plan 开销远低于预期（~10% 而非 ~60%）
 
-### 11. BTree 迁移到 page_data() 零拷贝
+### 11. BTree 迁移到 page_data() 零拷贝 ✅
 
-**问题**: B-Tree 操作仍用 `page()` 克隆 4KB 页数据，未迁移到 `page_data()` 零拷贝
-**影响**: B-Tree search/insert/delete 每次操作多一次 4KB 分配和拷贝
-**修复方案**: BTree 内部读操作改用 `page_data() + SlottedPageRef`，写操作保留 `modify_page()`
-**预期收益**: PK 查询 10-20% 提速
-**优先级**: P0（M14 前置或并行）
-**难度**: 低
-**依赖**: 无
+**问题**: B-Tree 读操作用 `page()` 克隆 4KB
+**修复**: 新增 LeafNodeRef/InternalNodeRef，基于 SlottedPageRef 零拷贝
+**实际收益**: PK 查询 1.2x 提速（零拷贝消除 4KB clone + modify_page 开销）
+**教训**: 零拷贝收益有限，真正瓶颈在 spawn_blocking 调度链
 
 ---
 

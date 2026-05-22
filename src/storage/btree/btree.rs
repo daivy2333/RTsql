@@ -54,7 +54,7 @@ impl BTree {
         // Check page type from first byte
         if data_guard[0] == LEAF_NODE {
             // Leaf node: search for key using zero-copy LeafNodeRef
-            let leaf = LeafNodeRef::new(&*data_guard);
+            let leaf = LeafNodeRef::new(&data_guard);
             let (found, pos) = leaf.find_key_position(key);
 
             if found {
@@ -64,7 +64,7 @@ impl BTree {
             }
         } else {
             // Internal node: find the child page and recurse
-            let internal = InternalNodeRef::new(&*data_guard);
+            let internal = InternalNodeRef::new(&data_guard);
             let child_page_id = internal
                 .find_child_page_id(key)
                 .ok_or_else(|| StorageError::Io(std::io::Error::new(
@@ -151,7 +151,7 @@ impl BTree {
         while page_id.0 != 0 {
             let guard = self.loader.load_page(page_id)?;
             let data_guard = guard.page_data();
-            let leaf = LeafNodeRef::new(&*data_guard);
+            let leaf = LeafNodeRef::new(&data_guard);
 
             let count = leaf.key_count();
             let mut entries = Vec::with_capacity(count);
