@@ -305,6 +305,10 @@ fn create_executor_from_plan(
                 panic!("DDL should be handled separately in execute()")
             }
 
+            PhysicalPlan::Aggregate(_) | PhysicalPlan::Having(_) => {
+                todo!("Aggregate/Having not yet implemented")
+            }
+
             PhysicalPlan::Sort(node) => {
                 // Recursively create input executor
                 let input = create_executor_from_plan(*node.input, database).await?;
