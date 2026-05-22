@@ -9,6 +9,11 @@ use crate::storage::{
 use crate::transaction::{Snapshot, VersionHeader};
 
 pub struct BufferPool {
+    /// Page cache: PageId → Arc<Mutex<PageFrame>>
+    /// SAFETY: Each PageFrame uses std::sync::Mutex. This is safe because:
+    /// 1. PageGuard/PageDataGuard are never held across .await points
+    /// 2. All Mutex lock/unlock operations are in sync code (no .await between lock and unlock)
+    /// 3. The RwLock on the HashMap itself is tokio::sync::RwLock (async-safe)
     pages: RwLock<HashMap<PageId, Arc<std::sync::Mutex<PageFrame>>>>,
     clock_hand: RwLock<Vec<PageId>>,
     capacity: usize,

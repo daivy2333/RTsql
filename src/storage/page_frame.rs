@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use crate::storage::Page;
@@ -26,6 +27,20 @@ pub struct PageGuard {
     frame: Arc<Mutex<PageFrame>>,
 }
 
+/// Zero-copy page data accessor. Holds the MutexGuard so the borrow
+/// stays valid while the caller reads the data.
+pub struct PageDataGuard<'a> {
+    _guard: std::sync::MutexGuard<'a, PageFrame>,
+}
+
+impl Deref for PageDataGuard<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self._guard.page.data[..]
+    }
+}
+
 impl PageGuard {
     pub fn new(frame: Arc<Mutex<PageFrame>>) -> Self {
         {
@@ -44,8 +59,23 @@ impl PageGuard {
         self.frame.lock().unwrap().ref_count
     }
 
+    /// Clone the entire page (4KB allocation). Prefer `page_data()` for reads.
     pub fn page(&self) -> Page {
         self.frame.lock().unwrap().page.clone()
+    }
+
+    /// Zero-copy access to page data bytes.
+    ///
+    /// Returns a guard that derefs to `&[u8]` (4096 bytes).
+    /// The MutexGuard is held for the lifetime of the returned guard,
+    /// so no other thread can modify the page while reading.
+    ///
+    /// SAFETY: This uses std::sync::Mutex which must NOT be held across .await.
+    /// The returned PageDataGuard is not Send and cannot be held across await points.
+    pub fn page_data(&self) -> PageDataGuard<'_> {
+        PageDataGuard {
+            _guard: self.frame.lock().unwrap(),
+        }
     }
 
     /// Get mutable access to page data and automatically mark dirty

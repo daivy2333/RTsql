@@ -67,6 +67,45 @@ pub struct SlottedPage<'a> {
     header: SlottedPageHeader,
 }
 
+/// Read-only slotted page accessor from raw bytes (zero-copy).
+/// Used with PageGuard::page_data() to avoid 4KB page clone.
+pub struct SlottedPageRef<'a> {
+    data: &'a [u8],
+    header: SlottedPageHeader,
+}
+
+impl<'a> SlottedPageRef<'a> {
+    /// Create a read-only SlottedPageRef from page data bytes.
+    pub fn new(data: &'a [u8]) -> Self {
+        let header = SlottedPageHeader::deserialize(&data[..SlottedPageHeader::SIZE]);
+        Self { data, header }
+    }
+
+    /// Get slot count
+    pub fn slot_count(&self) -> usize {
+        self.header.slot_count as usize
+    }
+
+    /// Get a specific slot (read-only)
+    pub fn get_slot(&self, index: usize) -> Option<Slot> {
+        if index >= self.slot_count() {
+            return None;
+        }
+        let slot_start = Page::PAGE_SIZE - (index + 1) * Slot::SIZE;
+        let slot_buf = &self.data[slot_start..slot_start + Slot::SIZE];
+        let offset = u16::from_le_bytes([slot_buf[0], slot_buf[1]]);
+        let length = u16::from_le_bytes([slot_buf[2], slot_buf[3]]);
+        Some(Slot { offset, length })
+    }
+
+    /// Get data for a specific slot (read-only, zero-copy)
+    pub fn get_slot_data(&self, slot: &Slot) -> &'a [u8] {
+        let start = slot.offset as usize;
+        let end = start + slot.length as usize;
+        &self.data[start..end]
+    }
+}
+
 impl<'a> SlottedPage<'a> {
     /// Create SlottedPage from existing Page (read/write mode)
     pub fn new(page: &'a mut Page) -> Self {
