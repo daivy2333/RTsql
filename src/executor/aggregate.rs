@@ -191,13 +191,19 @@ pub struct AggregateExecutor {
 }
 
 impl AggregateExecutor {
-    pub fn new(input: Box<dyn Executor + Send>, node: AggregateNode) -> Self {
+    pub fn new(
+        input: Box<dyn Executor + Send>,
+        group_by: Vec<String>,
+        aggregates: Vec<AggregateFunc>,
+        output_columns: Vec<String>,
+        column_indices: HashMap<String, usize>,
+    ) -> Self {
         Self {
             input,
-            group_by: node.group_by,
-            aggregates: node.aggregates,
-            output_columns: node.output_columns,
-            column_indices: node.column_indices,
+            group_by,
+            aggregates,
+            output_columns,
+            column_indices,
             groups: HashMap::new(),
             single_group: None,
             has_consumed_input: false,
