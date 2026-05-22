@@ -1,16 +1,172 @@
 # 项目快照
 
-> 最后更新：2026-05-22（M14 Phase 2 T1 profiling 验证完成）
+> 最后更新：2026-05-22（M14 Phase 2 T2 完成，性能优化验证）
 
 ## 当前状态
 
-- **阶段**: M14 Phase 2 T1 profiling 验证完成
+- **阶段**: M14 Phase 2 T2 完成
 - **状态**: 正常
-- **当前里程碑**: 准备进入 M14 Phase 2 T2（IndexManager 优化）
-- **测试**: 83 lib tests + 74 integration tests（全部通过）
-- **代码量**: src 9190 行 + tests 8463 行 + benches 750 行 + profiling 68 行
+- **当前里程碑**: 准备进入 M15（聚合函数与 GROUP BY）
+- **测试**: 88 lib tests + 74 integration tests（全部通过）
+- **代码量**: src 9200 行 + tests 8500 行 + benches 900 行 + profiling 68 行
 
 ## 项目结构
+
+```
+RTsql/
+├── Cargo.toml              # Rust 项目配置（6 benchmarks）
+├── CLAUDE.md               # 文档入口
+├── examples/
+│   └── bench_minimal.rs    # Profiling benchmark（50 iterations）
+├── src/
+│   ├── main.rs             # 数据库服务器入口
+│   ├── lib.rs              # 库入口
+│   ├── database.rs         # Database 协调器 + plan_cache_len()
+│   ├── pipeline.rs         # SQL 执行管道（含 profiling timing）
+│   ├── profiling.rs        # Task-local profiling（68 行）
+│   ├── plan_cache.rs       # LRU plan cache（68 行）
+│   ├── storage/
+│   │   ├── mod.rs          # 存储模块导出（含 PageDataGuard, SlottedPageRef）
+│   │   ├── error.rs        # StorageError
+│   │   ├── page.rs         # Page（4KB Box<[u8]>）
+│   │   ├── page_id.rs      # PageId(u64)
+│   │   ├── page_frame.rs   # PageFrame + PageGuard + PageDataGuard（零拷贝）
+│   │   ├── async_storage.rs # AsyncStorage trait
+│   │   ├── file_storage.rs  # FileStorage 实现
+│   │   ├── buffer_pool.rs   # BufferPool（Clock 淘汰 + 两阶段锁）
+│   │   ├── data_page.rs    # write/read/update/delete tuple（零拷贝读取）
+│   │   ├── data/           # TableManager + TableMeta + ColumnSchema
+│   │   ├── page_format/
+│   │   │   ├── key.rs       # Key（32 bytes）
+│   │   │   ├── row_id.rs    # RowId（page_id + slot_id）
+│   │   │   ├── slotted_page.rs # SlottedPage + SlottedPageRef（含 slot compacting）
+│   │   │   └── tuple.rs    # ColumnType + serialize/deserialize_tuple
+│   │   └── btree/
+│   │       ├── btree.rs     # BTree 核心（含 search_async + from_root）
+│   │       ├── node.rs      # LeafNode + InternalNode + LeafNodeRef
+│   │       ├── sync_loader.rs # SyncPageLoader
+│   │       ├── async_loader.rs # AsyncPageLoader（直接 async）
+│   │       └── index_manager.rs # IndexManager（AtomicPageId + async search）
+│   ├── executor/
+│   │   ├── mod.rs           # 模块导出
+│   │   ├── value.rs         # Value（Int/String/Float/Bool/Null + Eq+Hash）
+│   │   ├── plan.rs          # PhysicalPlan（13 种节点）
+│   │   ├── result.rs        # ExecResult
+│   │   ├── executor_trait.rs # Executor trait
+│   │   ├── scan.rs          # ScanExecutor
+│   │   ├── index_scan.rs    # IndexScanExecutor（含 profiling timing）
+│   │   ├── insert.rs        # InsertExecutor
+│   │   ├── update.rs        # UpdateExecutor
+│   │   ├── delete.rs        # DeleteExecutor
+│   │   ├── predicate.rs     # Predicate + Expression trait
+│   │   ├── filter.rs        # FilterExecutor（WHERE）
+│   │   ├── sort.rs          # SortExecutor（ORDER BY）
+│   │   ├── limit.rs         # LimitExecutor（LIMIT/OFFSET）
+│   │   ├── join.rs          # JoinExecutor（INNER JOIN 哈希连接）
+│   │   ├── create_table.rs  # CreateTableExecutor
+│   │   └── drop_table.rs    # DropTableExecutor
+│   ├── transaction/
+│   │   ├── tx_id.rs         # AtomicU64 事务 ID
+│   │   ├── error.rs         # TransactionError
+│   │   ├── snapshot.rs      # Snapshot（Repeatable Read 可见性）
+│   │   ├── version_chain.rs # VersionHeader（22B）
+│   │   ├── row_lock.rs      # RowLockTable（异步行锁）
+│   │   └── manager.rs       # TransactionManager
+│   ├── parser/
+│   │   ├── error.rs         # PlanError（含 JOIN 错误类型）
+│   │   ├── value.rs         # Value 转换
+│   │   ├── ast.rs           # AST 辅助（含 extract_join_table_name）
+│   │   └── planner.rs       # PlanBuilder（含 build_from_clause/resolve_column_ref）
+│   ├── network/
+│   │   ├── protocol.rs      # Protocol trait + JsonProtocol
+│   │   ├── pg_messages.rs   # PostgreSQL 消息序列化
+│   │   ├── pg_protocol.rs   # PgProtocol 状态机
+│   │   ├── connection.rs    # ConnectionHandler
+│   │   ├── handler.rs       # SqlHandler（真实 pipeline）
+│   │   └── server.rs        # Server + Graceful shutdown
+│   └── wal/
+│       ├── record.rs        # WalRecord enum + serialize/deserialize
+│       ├── writer.rs        # WalWriter（async write + fsync + truncate）
+│       ├── reader.rs        # WalReader（read_next + seek_to）
+│       ├── checkpoint.rs    # CheckpointManager（checkpoint flow + 位点）
+│       └── recovery.rs      # RecoveryManager（recover + needs_recovery）
+├── benches/
+│   ├── common/mod.rs        # 共享 helper（setup_db, insert_rows）
+│   ├── micro_bench.rs       # 9 种 SQL 操作（50 iterations）
+│   ├── concurrent_bench.rs  # 并发压力测试（5 concurrency levels）
+│   ├── scale_bench.rs       # 规模扩展测试（1K/10K/100K）
+│   ├── sqlite_compare.rs    # SQLite 对比测试
+│   ├── rtsql_vs_sqlite_single.rs # 精确单次查询对比
+│   └── cache_bench.rs       # Cache 效果测试
+├── tests/                   # 集成测试（74 tests）
+└── .claude/docs/            # 项目文档
+```
+
+## Git 状态
+
+- **当前分支**: master
+- **最近提交**（M14 Phase 2 T2）:
+  - 10b0bce docs(M14-T2): verify and document 8x speedup credibility
+  - aa791db docs(M14-T2): record comprehensive benchmark data
+  - ca76e16 perf(M14-T2): adjust benchmark iterations to 50
+  - b0d1685 refactor(M14-T2): remove separate comparison benchmark
+  - 4aca9eb perf(M14-T2): add RTsql vs SQLite comparison
+  - 71689ce fix(M14-T2): implement slot compacting
+  - 1959b15 refactor(M14-T2): keep write operations sync
+  - 2597835 feat(M14-T2): add BTree::from_root helper
+  - 5c3fed9 feat(M14-T2): implement async scan_all
+  - 3639e9d feat(M14-T2): implement async search
+  - 637ff9e refactor(M14-T2): replace RwLock<BTree> with AtomicPageId
+
+## 关键文件
+
+| 文件 | 作用 | M14 T2 改动 |
+|------|------|------------|
+| src/storage/btree/index_manager.rs | IndexManager（AtomicPageId + async） | ✅ 重构架构 |
+| src/storage/btree/btree.rs | BTree（search_async + from_root） | ✅ 新增方法 |
+| src/storage/btree/async_loader.rs | AsyncPageLoader | ✅ 新增文件 |
+| src/storage/page_format/slotted_page.rs | SlottedPage（slot compacting） | ✅ 修复 bug |
+| benches/rtsql_vs_sqlite_single.rs | 精确对比测试 | ✅ 新增文件 |
+| examples/bench_minimal.rs | Profiling benchmark | ✅ 调整 iterations |
+
+## 下一步行动
+
+**优先级**: M15 聚合函数与 GROUP BY
+
+**里程碑路线图**:
+1. **M15**: 聚合函数与 GROUP BY（功能完善）
+2. **M16**: 子查询支持
+3. **M17**: 索引优化（B-Tree split/merge + 非唯一索引）
+4. **M18**: WAL 集成 + 写入优化（INSERT 5-10x 提速）
+
+**当前阻塞**: 无
+
+---
+
+## M14 Phase 2 T2 验证结果
+
+**性能优化成功**（17x internal speedup）：
+- index_manager_search: 51µs → 2-4µs
+- spawn_blocking + SyncPageLoader: 消除
+- RwLock<BTree> 锁争用: 消除
+
+**SQLite 对比验证**：
+- RTsql PK lookup: ~0.66µs
+- SQLite PK lookup: ~5.25µs
+- **提速**: 8x faster
+
+**Benchmark 参数**：
+- iterations: 50（所有测试）
+- concurrency: [1, 4, 8, 16, 32]
+- scale: [1K, 10K, 100K]
+
+运行命令：
+```bash
+cargo bench --bench rtsql_vs_sqlite_single  # 精确对比
+cargo bench --bench sqlite_compare           # SQLite 测试
+cargo bench --bench micro_bench              # RTsql 微基准
+RTSQL_PROFILING=1 cargo run --example bench_minimal  # Profiling
+```
 
 ```
 RTsql/
