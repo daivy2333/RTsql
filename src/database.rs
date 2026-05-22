@@ -71,4 +71,9 @@ impl Database {
     pub async fn execute_sql(&self, sql: &str) -> Response {
         crate::pipeline::execute(self, sql).await
     }
+
+    /// Get plan cache size (for testing)
+    pub fn plan_cache_len(&self) -> usize {
+        self.plan_cache.lock().unwrap().len()
+    }
 }
