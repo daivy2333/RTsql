@@ -4,11 +4,12 @@
 //! M11: WAL integration for crash recovery.
 
 use crate::network::protocol::Response;
+use crate::plan_cache::PlanCache;
 use crate::storage::{BufferPool, ColumnType, FileStorage, Result, TableManager, TableMeta};
 use crate::transaction::TransactionManager;
 use crate::wal::{RecoveryManager, WalWriter};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Database is the central coordinator that owns all major RTsql subsystems.
 #[derive(Clone)]
@@ -17,6 +18,7 @@ pub struct Database {
     pub table_manager: Arc<TableManager>,
     pub transaction_manager: Arc<TransactionManager>,
     pub wal_writer: Arc<WalWriter>,
+    pub plan_cache: Arc<Mutex<PlanCache>>,
 }
 
 impl Database {
@@ -41,11 +43,15 @@ impl Database {
                 .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?,
         );
 
+        // 4. Initialize plan cache
+        let plan_cache = Arc::new(Mutex::new(PlanCache::new()));
+
         Ok(Self {
             buffer_pool,
             table_manager,
             transaction_manager,
             wal_writer,
+            plan_cache,
         })
     }
 
