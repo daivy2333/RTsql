@@ -1,4 +1,4 @@
-use rtsql::Database;
+use rtsql::database::Database;
 use std::path::{Path, PathBuf};
 
 /// 创建临时目录并打开数据库
