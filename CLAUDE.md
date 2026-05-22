@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-> 项目文档入口 | 上次更新：2026-05-20 (M7 完成)
+> 项目文档入口 | 上次更新：2026-05-22 (M13 完成)
 
 ## 项目简介
 
@@ -12,7 +12,8 @@
 - **构建工具**: Cargo
 - **异步运行时**: Tokio (多线程 scheduler)
 - **SQL 解析**: sqlparser-rs
-- **测试框架**: sqllogictest + proptest
+- **测试框架**: criterion.rs + tempfile + rusqlite
+- **基准测试**: criterion.rs (4 套: micro/concurrent/scale/sqlite_compare)
 - **代码格式化**: rustfmt
 - **Lint**: clippy
 
@@ -44,4 +45,4 @@
 
 - **轻量**: 单库静态链接，无外部服务依赖，运行时仅需少量线程
 - **便捷**: API 简洁（`open`, `execute`, `query`），支持内存模式与持久化单文件
-- **高效**: 基于协程的异步 I/O、MVCC 无锁读、紧凑存储格式，实现高并发与低延迟
+- **高效**: 基于协程的异步 I/O、MVCC 无锁读、零拷贝页访问、两阶段锁缓冲池

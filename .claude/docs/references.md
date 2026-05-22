@@ -1,63 +1,68 @@
 # 外部参考资料
 
-> 收录依赖文档链接、重要概念、常见解决方案
+> 最后更新：2026-05-22
 
 ## 核心依赖
 
 | 依赖 | 文档链接 | 关键概念 |
 |------|----------|----------|
-| Tokio | https://tokio.rs/tokio/tutorial | 异步运行时，多线程调度器，spawn_blocking，io_uring |
+| Tokio | https://tokio.rs/tokio/tutorial | 异步运行时，多线程调度器，spawn_blocking |
 | sqlparser-rs | https://github.com/ballista-compute/sqlparser-rs | SQL 解析器，支持 PostgreSQL 语法 |
-| zerocopy | https://docs.rs/zerocopy/latest/zerocopy/ | 零拷贝数据结构，Slotted Page 访问 |
-| jemalloc | https://github.com/jemalloc/jemalloc | 内存分配器，减少碎片 |
-| mimalloc | https://github.com/microsoft/mimalloc | 内存分配器，高性能 |
-| sqllogictest | https://github.com/ballista-compute/sqllogictest | SQL 逻辑测试框架 |
-| proptest | https://docs.rs/proptest/latest/proptest/ | 属性测试框架，覆盖边界场景 |
-| tempfile | https://docs.rs/tempfile/latest/tempfile/ | 临时文件/目录测试 | 2026-05-21 |
+| criterion.rs | https://bheisler.github.io/criterion.rs/book/ | Rust 基准测试框架，html_reports，async_tokio |
+| rusqlite | https://docs.rs/rusqlite/latest/rusqlite/ | SQLite 绑定，用于对比测试 |
+| tempfile | https://docs.rs/tempfile/latest/tempfile/ | 临时文件/目录，测试与 benchmark |
+| serde_json | https://docs.rs/serde_json/latest/serde_json/ | JSON 序列化，协议层 |
+| tokio-util | https://docs.rs/tokio-util/latest/tokio_util/ | CancellationToken，graceful shutdown |
 
-## WAL（Write-Ahead Logging）
+## WAL 参考
 
 | 主题 | 链接 | 说明 |
 |------|------|------|
-| WAL 基础概念 | https://www.sqlite.org/wal.html | SQLite WAL 文档（简单追加 WAL 设计参考） | 2026-05-21 |
-| ARIES 恢复算法 | https://cs.stanford.edu/people/csilv-22/aries.pdf | 学术经典：WAL + Redo/Undo 恢复（复杂方案参考） | 2026-05-21 |
-| PostgreSQL WAL | https://www.postgresql.org/docs/current/wal-internals.html | PG WAL 内部实现（位点截断参考） | 2026-05-21 |
-| Checkpoint 机制 | https://www.sqlite.org/fileformat2.html#walformat | SQLite checkpoint 格式（位点文件设计参考） | 2026-05-21 |
+| WAL 基础 | https://www.sqlite.org/wal.html | SQLite WAL 文档 |
+| ARIES 恢复 | https://cs.stanford.edu/people/csilv-22/aries.pdf | 学术经典 WAL 恢复算法 |
+| PostgreSQL WAL | https://www.postgresql.org/docs/current/wal-internals.html | PG WAL 内部实现 |
+| Checkpoint | https://www.sqlite.org/fileformat2.html#walformat | SQLite checkpoint 格式 |
 
-## 领域知识笔记
+## 领域知识
 
 ### 异步协程与数据库
 
-- **协程调度优势**: 用户态无栈协程消除线程上下文切换，I/O 吞吐最大化
-- **海量连接**: 数千连接复用少量工作线程，每个连接仅占用极少量内存（无独立栈）
-- **锁等待**: 通过 `tokio::sync` 实现，不阻塞物理线程
-- **CPU隔离**: 重操作通过 `spawn_blocking` 移至阻塞线程池
+- **协程调度**: 用户态无栈协程消除线程上下文切换，I/O 吞吐最大化
+- **海量连接**: 数千连接复用少量工作线程
+- **锁等待**: tokio::sync 实现，不阻塞物理线程
+- **CPU 隔离**: spawn_blocking 移至阻塞线程池
 
-### MVCC（多版本并发控制）
+### MVCC
 
-- **读无锁**: 读取历史版本，不阻塞写操作
-- **写冲突**: 通过异步锁挂起协程等待
-- **快照读**: 基于 `AtomicU64` 分配事务ID
+- **读无锁**: 读取历史版本，不阻塞写
+- **写冲突**: 异步锁挂起协程等待
+- **快照读**: AtomicU64 分配事务 ID
 
 ### 存储引擎
 
 - **Slotted Page**: 4KB 页，紧凑行存储
-- **Buffer Pool**: 异步页加载/淘汰，`get_page() -> Future`
-- **WAL**: Write-Ahead Logging，保证持久性
+- **Buffer Pool**: 异步页加载/淘汰，两阶段锁
+- **零拷贝**: PageDataGuard + SlottedPageRef
 
 ### 索引
 
-- **B-Tree**: 同步内核，外部 async 包装
-- **LSM-Tree**: 可选方案，适合写入密集场景
+- **B-Tree**: 同步内核，spawn_blocking 包装
+- **哈希连接**: BuildRight → ScanLeft → Output
 
 ## 性能优化方向
 
-- **io_uring**: 零拷贝真异步磁盘读写（M7 阶段）
-- **页缓存策略**: 调优缓存大小、淘汰算法
-- **协程调度**: 调优工作线程数、任务优先级
+| 方向 | 优先级 | 说明 |
+|------|--------|------|
+| io_uring | 低 | 零拷贝真异步磁盘读写 |
+| jemalloc/mimalloc | 低 | 内存分配器优化 |
+| 大查询并行化 | 低 | 全表扫描按页切分 |
+| B-Tree split/merge | 高 | 索引完整性 |
 
 ## 测试策略
 
-- **sqllogictest**: 验证 SQL 兼容性
-- **proptest**: 覆盖边界场景（空输入、超大输入、边界值）
-- **并发测试**: 验证 MVCC 正确性，多事务并发场景
+| 策略 | 工具 | 说明 |
+|------|------|------|
+| 单元测试 | cargo test | 83 lib tests |
+| 集成测试 | tests/*.rs | 74 tests |
+| 基准测试 | criterion.rs | 4 套 benchmark |
+| SQLite 对比 | rusqlite | 性能对比参考 |
