@@ -214,6 +214,41 @@ impl Value {
             _ => Err(ValueError::TypeMismatch),
         }
     }
+
+    /// Addition (for SUM/AVG aggregation)
+    pub fn add(&self, other: &Value) -> Value {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(a + b),
+            (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
+            (Value::Int(a), Value::Float(b)) => Value::Float(*a as f64 + b),
+            (Value::Float(a), Value::Int(b)) => Value::Float(a + *b as f64),
+            _ => Value::Null,
+        }
+    }
+
+    /// Simple less-than comparison returning bool (for MIN/MAX aggregation)
+    /// NOTE: This is different from the existing `lt()` which returns Result<bool, ValueError>
+    pub fn lt_agg(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a < b,
+            (Value::Float(a), Value::Float(b)) => a < b,
+            (Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
+            (Value::Float(a), Value::Int(b)) => *a < (*b as f64),
+            (Value::String(a), Value::String(b)) => a < b,
+            _ => false,
+        }
+    }
+
+    /// Division (for AVG aggregation)
+    pub fn div(&self, other: &Value) -> Value {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) if *b != 0 => Value::Int(a / b),
+            (Value::Float(a), Value::Float(b)) if *b != 0.0 => Value::Float(a / b),
+            (Value::Int(a), Value::Float(b)) if *b != 0.0 => Value::Float(*a as f64 / b),
+            (Value::Float(a), Value::Int(b)) if *b != 0 => Value::Float(a / *b as f64),
+            _ => Value::Null,
+        }
+    }
 }
 
 impl fmt::Display for Value {
