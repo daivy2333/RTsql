@@ -21,7 +21,7 @@ mod sort;
 mod update;
 mod value;
 
-pub use aggregate::{AggregateFunc, AggregateState};
+pub use aggregate::{AggregateExecutor, AggregateFunc, AggregateState};
 pub use create_table::CreateTableExecutor;
 pub use delete::DeleteExecutor;
 pub use drop_table::DropTableExecutor;

@@ -1,7 +1,7 @@
 use crate::database::Database;
 use crate::executor::{
-    CreateTableExecutor, DeleteExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
-    IndexScanExecutor, InsertExecutor, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor, SortExecutor,
+    AggregateExecutor, AggregateNode, CreateTableExecutor, DeleteExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
+    HavingExecutor, IndexScanExecutor, InsertExecutor, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor, SortExecutor,
     UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
@@ -305,8 +305,17 @@ fn create_executor_from_plan(
                 panic!("DDL should be handled separately in execute()")
             }
 
-            PhysicalPlan::Aggregate(_) | PhysicalPlan::Having(_) => {
-                todo!("Aggregate/Having not yet implemented")
+            PhysicalPlan::Aggregate(node) => {
+                let AggregateNode { input, group_by, aggregates, output_columns, table_name: _, column_indices } = node;
+                let input_executor = create_executor_from_plan(*input, database).await?;
+                Ok(Box::new(AggregateExecutor::new(input_executor, group_by, aggregates, output_columns, column_indices))
+                    as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Having(node) => {
+                let input = create_executor_from_plan(*node.input, database).await?;
+                Ok(Box::new(HavingExecutor::new(input, node.predicate))
+                    as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Sort(node) => {
