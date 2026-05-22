@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-22（M14 Phase 2 T2 性能优化 + slot compacting）
+> 最后更新：2026-05-22（M15 聚合函数与 GROUP BY 完成）
 
 ## API 路径速查
 
@@ -52,7 +52,8 @@
 | src/storage/btree/async_loader.rs | AsyncPageLoader（直接 async） |
 | src/storage/btree/index_manager.rs | IndexManager（AtomicPageId + async） |
 | src/executor/join.rs | JoinExecutor（哈希连接） |
-| src/executor/filter.rs | FilterExecutor（WHERE） |
+| src/executor/aggregate.rs | AggregateFunc + AggregateState + AggregateExecutor |
+| src/executor/having.rs | HavingExecutor（HAVING 过滤） |
 | src/executor/sort.rs | SortExecutor（ORDER BY） |
 | src/executor/limit.rs | LimitExecutor（LIMIT/OFFSET） |
 | src/parser/planner.rs | PlanBuilder（含 JOIN 解析） |
