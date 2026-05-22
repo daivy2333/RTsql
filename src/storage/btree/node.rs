@@ -1,5 +1,5 @@
 use crate::storage::{
-    page_format::{Key, RowId, Slot, SlottedPage, SlottedPageHeader, MAX_KEY_LEN},
+    page_format::{Key, RowId, Slot, SlottedPage, SlottedPageHeader, SlottedPageRef, MAX_KEY_LEN},
     Page, StorageError,
 };
 
@@ -271,6 +271,70 @@ impl<'a> LeafNode<'a> {
     }
 }
 
+/// LeafNodeRef：零拷贝只读版本的 LeafNode，基于 &[u8]
+pub struct LeafNodeRef<'a> {
+    slotted: SlottedPageRef<'a>,
+}
+
+impl<'a> LeafNodeRef<'a> {
+    /// 从页数据字节切片创建 LeafNodeRef
+    pub fn new(data: &'a [u8]) -> Self {
+        Self {
+            slotted: SlottedPageRef::new(data),
+        }
+    }
+
+    /// 获取 slot 数量（即 key 数量）
+    pub fn key_count(&self) -> usize {
+        self.slotted.slot_count()
+    }
+
+    /// 获取某个 key
+    pub fn get_key(&self, index: usize) -> Option<Key> {
+        let slot = self.slotted.get_slot(index)?;
+        let data = self.slotted.get_slot_data(&slot);
+        if data.len() < MAX_KEY_LEN + RowId::SIZE {
+            return None;
+        }
+        Some(Key::deserialize(&data[..MAX_KEY_LEN]))
+    }
+
+    /// 获取某个 RowId
+    pub fn get_row_id(&self, index: usize) -> Option<RowId> {
+        let slot = self.slotted.get_slot(index)?;
+        let data = self.slotted.get_slot_data(&slot);
+        if data.len() < MAX_KEY_LEN + RowId::SIZE {
+            return None;
+        }
+        Some(RowId::deserialize(&data[MAX_KEY_LEN..]))
+    }
+
+    /// 查找 key 的位置（返回 (found, position)）
+    /// found=true 表示 key 已存在，position 为其索引
+    /// found=false 表示 key 不存在，position 为应插入的位置
+    pub fn find_key_position(&self, key: &Key) -> (bool, usize) {
+        let count = self.key_count();
+
+        for i in 0..count {
+            if let Some(current_key) = self.get_key(i) {
+                if current_key == *key {
+                    return (true, i);
+                }
+                if current_key > *key {
+                    return (false, i);
+                }
+            }
+        }
+
+        (false, count)
+    }
+
+    /// 获取下一叶子节点页ID
+    pub fn next_leaf_page_id(&self) -> u32 {
+        self.slotted.header().next_page_id
+    }
+}
+
 /// InternalNode：存储 Key + ChildPageId
 pub struct InternalNode<'a> {
     slotted: SlottedPage<'a>,
@@ -350,6 +414,71 @@ impl<'a> InternalNode<'a> {
     }
 }
 
+/// InternalNodeRef：零拷贝只读版本的 InternalNode，基于 &[u8]
+pub struct InternalNodeRef<'a> {
+    slotted: SlottedPageRef<'a>,
+}
+
+impl<'a> InternalNodeRef<'a> {
+    /// 从页数据字节切片创建 InternalNodeRef
+    pub fn new(data: &'a [u8]) -> Self {
+        Self {
+            slotted: SlottedPageRef::new(data),
+        }
+    }
+
+    /// 获取 key 数量
+    pub fn key_count(&self) -> usize {
+        self.slotted.slot_count()
+    }
+
+    /// 获取 leftmost child page id（存储在 header.next_page_id 中）
+    pub fn leftmost_child(&self) -> u32 {
+        self.slotted.header().next_page_id
+    }
+
+    /// 获取某个 key
+    pub fn get_key(&self, index: usize) -> Option<Key> {
+        let slot = self.slotted.get_slot(index)?;
+        let data = self.slotted.get_slot_data(&slot);
+        if data.len() < MAX_KEY_LEN + 4 {
+            return None;
+        }
+        Some(Key::deserialize(&data[..MAX_KEY_LEN]))
+    }
+
+    /// 获取某个 child_page_id
+    pub fn get_child_page_id(&self, index: usize) -> Option<u32> {
+        let slot = self.slotted.get_slot(index)?;
+        let data = self.slotted.get_slot_data(&slot);
+        if data.len() < MAX_KEY_LEN + 4 {
+            return None;
+        }
+        Some(u32::from_le_bytes([
+            data[MAX_KEY_LEN],
+            data[MAX_KEY_LEN + 1],
+            data[MAX_KEY_LEN + 2],
+            data[MAX_KEY_LEN + 3],
+        ]))
+    }
+
+    /// 查找 child_page_id（根据 key）
+    pub fn find_child_page_id(&self, key: &Key) -> Option<u32> {
+        let count = self.key_count();
+
+        for i in 0..count {
+            if let Some(current_key) = self.get_key(i) {
+                if *key < current_key {
+                    return self.get_child_page_id(if i == 0 { 0 } else { i });
+                }
+            }
+        }
+
+        // 返回最后一个 child
+        self.get_child_page_id(count)
+    }
+}
+
 /// Node 类型枚举（用于统一接口）
 pub enum Node<'a> {
     Leaf(LeafNode<'a>),
@@ -411,5 +540,95 @@ mod tests {
         // 查找 "b" 应返回位置 1（在 "a" 和 "c" 之间）
         let pos = leaf.find_key_position(&Key::new(b"b"));
         assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn test_leaf_node_ref_from_page_data() {
+        // 用真实 Page + LeafNode 构造数据
+        let mut page = Page::new(PageId(0));
+        let mut leaf = LeafNode::init(&mut page);
+
+        let key1 = Key::new(b"hello");
+        let row_id1 = RowId::new(10, 5);
+        let key2 = Key::new(b"world");
+        let row_id2 = RowId::new(20, 10);
+
+        leaf.insert(&key1, &row_id1).unwrap();
+        leaf.insert(&key2, &row_id2).unwrap();
+
+        // 通过 LeafNodeRef 读取验证
+        let data: &[u8] = page.data.as_ref();
+        let leaf_ref = LeafNodeRef::new(data);
+
+        assert_eq!(leaf_ref.key_count(), 2);
+        assert_eq!(leaf_ref.get_key(0).unwrap().as_bytes(), b"hello");
+        assert_eq!(leaf_ref.get_row_id(0).unwrap(), row_id1);
+        assert_eq!(leaf_ref.get_key(1).unwrap().as_bytes(), b"world");
+        assert_eq!(leaf_ref.get_row_id(1).unwrap(), row_id2);
+        assert_eq!(leaf_ref.next_leaf_page_id(), 0);
+    }
+
+    #[test]
+    fn test_leaf_node_ref_find_key_position() {
+        let mut page = Page::new(PageId(0));
+        let mut leaf = LeafNode::init(&mut page);
+
+        leaf.insert(&Key::new(b"a"), &RowId::new(1, 0)).unwrap();
+        leaf.insert(&Key::new(b"c"), &RowId::new(2, 1)).unwrap();
+        leaf.insert(&Key::new(b"e"), &RowId::new(3, 2)).unwrap();
+
+        let data: &[u8] = page.data.as_ref();
+        let leaf_ref = LeafNodeRef::new(data);
+
+        // key 已存在
+        let (found, pos) = leaf_ref.find_key_position(&Key::new(b"c"));
+        assert!(found);
+        assert_eq!(pos, 1);
+
+        // key 不存在，在中间
+        let (found, pos) = leaf_ref.find_key_position(&Key::new(b"b"));
+        assert!(!found);
+        assert_eq!(pos, 1);
+
+        // key 不存在，在末尾
+        let (found, pos) = leaf_ref.find_key_position(&Key::new(b"z"));
+        assert!(!found);
+        assert_eq!(pos, 3);
+
+        // key 不存在，在开头
+        let (found, pos) = leaf_ref.find_key_position(&Key::new(b"0"));
+        assert!(!found);
+        assert_eq!(pos, 0);
+    }
+
+    #[test]
+    fn test_internal_node_ref_from_page_data() {
+        // 用真实 Page + InternalNode 构造数据
+        // InternalNode 没有 insert 方法，使用 SlottedPage 直接写入 slot
+        let mut page = Page::new(PageId(0));
+        let mut slotted = SlottedPage::init(&mut page, INTERNAL_NODE);
+
+        // 写入 slot 0: Key("b") + child_page_id(100)
+        let mut entry0 = vec![0u8; MAX_KEY_LEN + 4];
+        Key::new(b"b").serialize(&mut entry0[..MAX_KEY_LEN]);
+        entry0[MAX_KEY_LEN..MAX_KEY_LEN + 4].copy_from_slice(&100u32.to_le_bytes());
+        slotted.add_slot(&entry0).unwrap();
+
+        // 写入 slot 1: Key("d") + child_page_id(200)
+        let mut entry1 = vec![0u8; MAX_KEY_LEN + 4];
+        Key::new(b"d").serialize(&mut entry1[..MAX_KEY_LEN]);
+        entry1[MAX_KEY_LEN..MAX_KEY_LEN + 4].copy_from_slice(&200u32.to_le_bytes());
+        slotted.add_slot(&entry1).unwrap();
+
+        // 通过 InternalNodeRef 读取验证
+        let data: &[u8] = page.data.as_ref();
+        let internal_ref = InternalNodeRef::new(data);
+
+        assert_eq!(internal_ref.key_count(), 2);
+        assert_eq!(internal_ref.get_key(0).unwrap().as_bytes(), b"b");
+        assert_eq!(internal_ref.get_child_page_id(0).unwrap(), 100);
+        assert_eq!(internal_ref.get_key(1).unwrap().as_bytes(), b"d");
+        assert_eq!(internal_ref.get_child_page_id(1).unwrap(), 200);
+        assert_eq!(internal_ref.leftmost_child(), 0);
     }
 }
