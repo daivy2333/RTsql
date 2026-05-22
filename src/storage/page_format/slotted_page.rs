@@ -200,15 +200,29 @@ impl<'a> SlottedPage<'a> {
         Ok(slot_index)
     }
 
-    /// Delete a slot (mark as deleted, don't reclaim space immediately)
+    /// Delete a slot (compact slots by moving them backward)
     pub fn delete_slot(&mut self, index: usize) -> Result<(), String> {
         if index >= self.slot_count() {
             return Err("Slot index out of range".to_string());
         }
 
-        // Mark as 0 (indicating deleted)
-        let slot_start = Page::PAGE_SIZE - (index + 1) * Slot::SIZE;
-        self.page.data[slot_start..slot_start + Slot::SIZE].copy_from_slice(&[0, 0, 0, 0]);
+        // Compact slots: move slots after index backward
+        let count = self.slot_count();
+        for i in index..(count - 1) {
+            // Copy slot from i+1 to i using a temporary buffer
+            let src_start = Page::PAGE_SIZE - (i + 2) * Slot::SIZE;
+            let dst_start = Page::PAGE_SIZE - (i + 1) * Slot::SIZE;
+
+            let slot_bytes = self.page.data[src_start..src_start + Slot::SIZE].to_vec();
+            self.page.data[dst_start..dst_start + Slot::SIZE].copy_from_slice(&slot_bytes);
+        }
+
+        // Clear the last slot (now moved to position count-1)
+        let last_slot_start = Page::PAGE_SIZE - count * Slot::SIZE;
+        self.page.data[last_slot_start..last_slot_start + Slot::SIZE].copy_from_slice(&[0, 0, 0, 0]);
+
+        // Decrease slot_count
+        self.header.slot_count -= 1;
 
         Ok(())
     }
