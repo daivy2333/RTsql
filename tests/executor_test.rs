@@ -9,7 +9,9 @@ use rtsql::storage::{
     FileStorage, Result, StorageError,
 };
 use rtsql::transaction::TransactionManager;
-use std::sync::Arc;
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -662,6 +664,7 @@ async fn test_create_table_executor_success() -> Result<()> {
         wal_writer: Arc::new(
             rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
         ),
+        plan_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
     });
 
     let plan = PhysicalPlan::CreateTable(rtsql::executor::CreateTableNode {
@@ -700,6 +703,7 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
         wal_writer: Arc::new(
             rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
         ),
+        plan_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
     });
 
     // Create table first time (using storage::ColumnType)
@@ -749,6 +753,7 @@ async fn test_drop_table_executor_success() -> Result<()> {
         wal_writer: Arc::new(
             rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
         ),
+        plan_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
     });
 
     // Create table first
@@ -793,6 +798,7 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
         wal_writer: Arc::new(
             rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
         ),
+        plan_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
     });
 
     // Try to drop a non-existent table without IF EXISTS
@@ -828,6 +834,7 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
         wal_writer: Arc::new(
             rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
         ),
+        plan_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
     });
 
     // Drop a non-existent table with IF EXISTS - should succeed without error

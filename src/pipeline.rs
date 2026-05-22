@@ -11,7 +11,30 @@ use sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Returns true if the statement is cacheable (SELECT queries only).
+fn is_cacheable(stmt: &Statement) -> bool {
+    matches!(stmt, Statement::Query(_))
+}
+
 pub async fn execute(database: &Database, sql: &str) -> Response {
+    // Check plan cache first
+    let cached_plan = {
+        let mut cache = database.plan_cache.lock().unwrap();
+        cache.get(sql).cloned()
+    };
+    if let Some(plan) = cached_plan {
+        // Cache hit — skip parse + plan, go straight to execution
+        let executor = match create_executor_from_plan(plan, database).await {
+            Ok(e) => e,
+            Err(e) => {
+                return Response::Error {
+                    message: e.to_string(),
+                }
+            }
+        };
+        return execute_executor(executor).await;
+    }
+
     let statements = match parse_sql(sql) {
         Ok(s) => s,
         Err(e) => {
@@ -43,7 +66,12 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
 
                 let executor: Box<dyn Executor + Send> =
                     Box::new(CreateTableExecutor::new(plan, Arc::new(database.clone())));
-                return execute_executor(executor).await;
+                let response = execute_executor(executor).await;
+
+                // DDL invalidates all cached plans
+                database.plan_cache.lock().unwrap().clear();
+
+                return response;
             }
 
             // DDL: DROP TABLE - no need to register table first
@@ -59,7 +87,12 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
 
                 let executor: Box<dyn Executor + Send> =
                     Box::new(DropTableExecutor::new(plan, Arc::new(database.clone())));
-                return execute_executor(executor).await;
+                let response = execute_executor(executor).await;
+
+                // DDL invalidates all cached plans
+                database.plan_cache.lock().unwrap().clear();
+
+                return response;
             }
 
             // Query, Insert, Update, Delete - need table metadata
@@ -77,6 +110,12 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
                         }
                     }
                 };
+
+                // Store in cache if this is a cacheable statement (SELECT only)
+                if is_cacheable(stmt) {
+                    let mut cache = database.plan_cache.lock().unwrap();
+                    cache.put(sql.to_string(), plan.clone());
+                }
 
                 let executor = match create_executor_from_plan(plan, database).await {
                     Ok(e) => e,
