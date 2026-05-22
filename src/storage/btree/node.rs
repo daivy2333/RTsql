@@ -531,6 +531,9 @@ impl<'a> InternalNodeRef<'a> {
         // lo is the insertion position; child at lo is the subtree for keys < key_lo
         if lo == 0 {
             self.leftmost_child()
+        } else if lo >= count {
+            // key >= all separators: go to last child
+            self.get_child_page_id(count - 1).unwrap_or(self.leftmost_child())
         } else {
             self.get_child_page_id(lo).unwrap_or(self.leftmost_child())
         }
