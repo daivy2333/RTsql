@@ -102,18 +102,38 @@ impl IndexManager {
         .await?
     }
 
-    /// Scan all entries — spawn_blocking with read lock
+    /// Async scan all entries — direct async path
     pub async fn scan_all(&self) -> Result<Vec<(Vec<u8>, RowId)>> {
-        let btree = self.btree.clone();
-        let results = tokio::task::spawn_blocking(move || {
-            let btree_guard = btree.read().unwrap();
-            btree_guard.scan_all()
-        })
-        .await??;
-        Ok(results
-            .into_iter()
-            .map(|(k, r)| (k.as_bytes().to_vec(), r))
-            .collect())
+        let root_page_id = PageId(self.root_page_id.load(Ordering::Acquire));
+        self.scan_all_async_from_root(root_page_id).await
+    }
+
+    async fn scan_all_async_from_root(&self, root_page_id: PageId) -> Result<Vec<(Vec<u8>, RowId)>> {
+        let mut results = Vec::new();
+        let mut page_id = root_page_id;
+
+        while page_id.0 != 0 {
+            let guard = self.async_loader.load_page(page_id).await?;
+            let data_guard = guard.page_data();
+            let leaf = LeafNodeRef::new(&data_guard);
+
+            let count = leaf.key_count();
+            let mut entries = Vec::with_capacity(count);
+            for i in 0..count {
+                if let (Some(key), Some(row_id)) = (leaf.get_key(i), leaf.get_row_id(i)) {
+                    entries.push((key.as_bytes().to_vec(), row_id));
+                }
+            }
+
+            let next_page_u32 = leaf.next_leaf_page_id();
+            drop(data_guard);
+            drop(guard);
+
+            results.extend(entries);
+            page_id = PageId(next_page_u32 as u64);
+        }
+
+        Ok(results)
     }
 
     /// Update the RowId for an existing key — spawn_blocking with write lock
