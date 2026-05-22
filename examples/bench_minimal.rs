@@ -11,12 +11,12 @@ async fn main() {
     std::mem::forget(dir);
 
     db.execute_sql("CREATE TABLE bench (id INTEGER PRIMARY KEY, val TEXT)").await;
-    for i in 0..100i64 {
+    for i in 0..30i64 {
         db.execute_sql(&format!("INSERT INTO bench VALUES ({}, 'hello')", i)).await;
     }
 
     // Warm up (trigger plan cache)
-    for _ in 0..100 {
+    for _ in 0..30 {
         db.execute_sql("SELECT * FROM bench WHERE id = 42").await;
     }
 
