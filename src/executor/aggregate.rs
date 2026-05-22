@@ -2,7 +2,13 @@
 //!
 //! Supports SQL standard aggregate functions: COUNT(*), COUNT(col), SUM, AVG, MIN, MAX.
 
+use crate::executor::executor_trait::Executor;
+use crate::executor::plan::AggregateNode;
+use crate::executor::result::ExecResult;
 use crate::executor::Value;
+use crate::storage;
+use async_trait::async_trait;
+use std::collections::HashMap;
 
 /// Aggregate function descriptor (from SQL parse)
 #[derive(Debug, Clone, PartialEq)]
@@ -161,6 +167,175 @@ impl AggregateState {
                 Some(v) => v.clone(),
                 None => Value::Null,
             },
+        }
+    }
+}
+
+/// Hash-based aggregate executor for GROUP BY + aggregate functions
+pub struct AggregateExecutor {
+    input: Box<dyn Executor + Send>,
+    group_by: Vec<String>,
+    aggregates: Vec<AggregateFunc>,
+    output_columns: Vec<String>,
+    column_indices: HashMap<String, usize>,
+    /// Grouped results: group key → aggregate states
+    groups: HashMap<Vec<Value>, Vec<AggregateState>>,
+    /// Single group state (when no GROUP BY)
+    single_group: Option<Vec<AggregateState>>,
+    /// Whether all input has been consumed
+    has_consumed_input: bool,
+    /// Output rows (materialized after consuming input)
+    output_rows: Option<Vec<Vec<Value>>>,
+    /// Current position in output rows
+    output_index: usize,
+}
+
+impl AggregateExecutor {
+    pub fn new(input: Box<dyn Executor + Send>, node: AggregateNode) -> Self {
+        Self {
+            input,
+            group_by: node.group_by,
+            aggregates: node.aggregates,
+            output_columns: node.output_columns,
+            column_indices: node.column_indices,
+            groups: HashMap::new(),
+            single_group: None,
+            has_consumed_input: false,
+            output_rows: None,
+            output_index: 0,
+        }
+    }
+
+    /// Consume all input rows and accumulate aggregate states
+    async fn consume_input(&mut self) -> storage::Result<()> {
+        let is_no_group_by = self.group_by.is_empty();
+
+        if is_no_group_by {
+            let states: Vec<AggregateState> = self
+                .aggregates
+                .iter()
+                .map(|f| AggregateState::new(f))
+                .collect();
+            self.single_group = Some(states);
+        }
+
+        loop {
+            match self.input.next().await? {
+                Some(ExecResult::Row(row)) => {
+                    if is_no_group_by {
+                        let states = self.single_group.as_mut().unwrap();
+                        for (i, func) in self.aggregates.iter().enumerate() {
+                            let value = Self::extract_value(&row, func, &self.column_indices);
+                            states[i].update(&value);
+                        }
+                    } else {
+                        let group_key = self.extract_group_key(&row);
+                        let states = self.groups.entry(group_key).or_insert_with(|| {
+                            self.aggregates.iter().map(|f| AggregateState::new(f)).collect()
+                        });
+                        for (i, func) in self.aggregates.iter().enumerate() {
+                            let value = Self::extract_value(&row, func, &self.column_indices);
+                            states[i].update(&value);
+                        }
+                    }
+                }
+                Some(_) => {} // Skip non-row results
+                None => break,
+            }
+        }
+
+        self.has_consumed_input = true;
+        Ok(())
+    }
+
+    /// Extract value from row for aggregate function
+    fn extract_value(row: &[Value], func: &AggregateFunc, column_indices: &HashMap<String, usize>) -> Value {
+        match func {
+            AggregateFunc::CountStar => Value::Int(1),
+            AggregateFunc::Count(col)
+            | AggregateFunc::Sum(col)
+            | AggregateFunc::Avg(col)
+            | AggregateFunc::Min(col)
+            | AggregateFunc::Max(col) => {
+                match column_indices.get(&col.to_lowercase()) {
+                    Some(&idx) => row.get(idx).cloned().unwrap_or(Value::Null),
+                    None => Value::Null,
+                }
+            }
+        }
+    }
+
+    /// Extract group key from row
+    fn extract_group_key(&self, row: &[Value]) -> Vec<Value> {
+        self.group_by
+            .iter()
+            .map(|col| {
+                match self.column_indices.get(&col.to_lowercase()) {
+                    Some(&idx) => row.get(idx).cloned().unwrap_or(Value::Null),
+                    None => Value::Null,
+                }
+            })
+            .collect()
+    }
+
+    /// Build output rows from accumulated aggregate states
+    fn build_output_rows(&mut self) {
+        let mut rows = Vec::new();
+
+        if self.group_by.is_empty() {
+            // No GROUP BY: return single row
+            if let Some(states) = &self.single_group {
+                let mut row = Vec::new();
+                for state in states {
+                    row.push(state.finalize());
+                }
+                rows.push(row);
+            } else {
+                // Empty input: return single row (COUNT→0, others→NULL)
+                let row: Vec<Value> = self
+                    .aggregates
+                    .iter()
+                    .map(|f| {
+                        let state = AggregateState::new(f);
+                        state.finalize()
+                    })
+                    .collect();
+                rows.push(row);
+            }
+        } else {
+            // With GROUP BY: one row per group
+            for (group_key, states) in &self.groups {
+                let mut row = group_key.clone();
+                for state in states {
+                    row.push(state.finalize());
+                }
+                rows.push(row);
+            }
+        }
+
+        self.output_rows = Some(rows);
+    }
+}
+
+#[async_trait]
+impl Executor for AggregateExecutor {
+    async fn next(&mut self) -> storage::Result<Option<ExecResult>> {
+        if !self.has_consumed_input {
+            self.consume_input().await?;
+            self.build_output_rows();
+        }
+
+        match &self.output_rows {
+            Some(rows) => {
+                if self.output_index < rows.len() {
+                    let row = rows[self.output_index].clone();
+                    self.output_index += 1;
+                    Ok(Some(ExecResult::Row(row)))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
         }
     }
 }
