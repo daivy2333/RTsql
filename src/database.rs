@@ -3,12 +3,15 @@
 //! M7: Single entry point for opening databases, creating tables, and executing SQL.
 //! M11: WAL integration for crash recovery.
 
+use crate::executor::PhysicalPlan;
 use crate::network::protocol::Response;
 use crate::storage::{BufferPool, ColumnType, FileStorage, Result, TableManager, TableMeta};
 use crate::transaction::TransactionManager;
 use crate::wal::{RecoveryManager, WalWriter};
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Database is the central coordinator that owns all major RTsql subsystems.
 #[derive(Clone)]
@@ -17,6 +20,7 @@ pub struct Database {
     pub table_manager: Arc<TableManager>,
     pub transaction_manager: Arc<TransactionManager>,
     pub wal_writer: Arc<WalWriter>,
+    pub plan_cache: Arc<Mutex<LruCache<String, PhysicalPlan>>>,
 }
 
 impl Database {
@@ -41,11 +45,15 @@ impl Database {
                 .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?,
         );
 
+        // 4. Initialize plan cache
+        let plan_cache = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())));
+
         Ok(Self {
             buffer_pool,
             table_manager,
             transaction_manager,
             wal_writer,
+            plan_cache,
         })
     }
 
@@ -64,5 +72,10 @@ impl Database {
 
     pub async fn execute_sql(&self, sql: &str) -> Response {
         crate::pipeline::execute(self, sql).await
+    }
+
+    /// Returns the number of entries currently in the plan cache.
+    pub fn plan_cache_len(&self) -> usize {
+        self.plan_cache.lock().unwrap().len()
     }
 }
