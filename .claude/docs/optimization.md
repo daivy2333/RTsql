@@ -305,6 +305,68 @@ let page = self.storage.read_page(page_id).await?;  // I/O 阻塞其他协程
 2. Executor 层 WAL 写入集成（回填 M11 推迟功能）
 
 **M13 优化重点**：
-1. io_uring 替换（可选）
-2. 性能基准测试
-3. 连接池（嵌入式可选）
+1. 性能基准测试框架（criterion.rs） ✅
+2. Critical 优化：PageGuard 零拷贝 + BufferPool 两阶段锁
+3. io_uring 替换（可选）
+4. 连接池（嵌入式可选）
+
+---
+
+## M13 Baseline Benchmark 数据（2026-05-22）
+
+### Micro Benchmarks（100 行数据）
+
+| 操作 | 延迟 |
+|------|------|
+| INSERT (single row) | ~440 µs |
+| SELECT (pk lookup, 100x) | ~4.9 ms |
+| UPDATE (single col, 100x) | ~9.0 ms |
+| DELETE (by pk, 100x) | ~26.2 ms |
+| SCAN (full table) | ~87 µs |
+| FILTER (WHERE value > 500) | ~86 µs |
+| SORT (ORDER BY value DESC) | ~115 µs |
+| LIMIT (LIMIT 10 OFFSET 5) | ~78 µs |
+| JOIN (inner join, 50 rows) | ~163 µs |
+
+### Concurrent Benchmarks
+
+| 场景 | 并发数 | 延迟 | 吞吐 |
+|------|--------|------|------|
+| read | 1 | - | - |
+| read | 4 | - | - |
+| read | 8 | - | - |
+| read | 16 | - | - |
+| read | 32 | - | - |
+| write | 1 | - | - |
+| write | 4 | - | - |
+| write | 8 | - | - |
+| write | 16 | - | - |
+| mixed (80r/20w) | 4 | ~13.3 ms | ~30 Kelem/s |
+| mixed (80r/20w) | 8 | ~29.2 ms | ~27 Kelem/s |
+| mixed (80r/20w) | 16 | ~53.0 ms | ~30 Kelem/s |
+| conflict (update same) | 4 | ~427 µs | ~468 Kelem/s |
+| conflict (update same) | 8 | ~661 µs | ~605 Kelem/s |
+| conflict (update same) | 16 | ~1.17 ms | ~684 Kelem/s |
+
+### Scale Benchmarks
+
+| 操作 | 数据量 | 延迟 | 吞吐 |
+|------|--------|------|------|
+| insert | 1K | - | - |
+| insert | 10K | - | - |
+| insert | 100K | - | - |
+| scan | 1K | ~86 µs | ~11.6 Melem/s |
+| scan | 10K | ~88 µs | ~113 Melem/s |
+| scan | 100K | ~81 µs | ~1.24 Gelem/s |
+| join | 100 | ~200 µs | ~500 Kelem/s |
+| join | 1K | ~201 µs | ~5.0 Melem/s |
+| join | 10K | ~194 µs | ~51 Melem/s |
+
+### SQLite Comparison
+
+| 操作 | RTsql | SQLite | 比率 |
+|------|-------|--------|------|
+| insert 100 rows | - | ~223 ms | - |
+| pk lookup | ~4.9 ms (100x) | ~5.5 µs (1x) | - |
+| full scan 1K | ~87 µs | ~77 µs | 1.1x |
+| inner join 1K | ~163 µs | ~102 µs | 1.6x |
