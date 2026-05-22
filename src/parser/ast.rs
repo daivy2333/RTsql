@@ -32,6 +32,7 @@ pub fn extract_table_name(from: &[TableWithJoins]) -> Result<String, PlanError> 
 /// 从 projection 提取列名列表（支持 table.column 格式）
 /// 对于 CompoundIdentifier，返回 "column" 格式（仅列名）
 /// 对于简单 Identifier，返回 "column" 格式
+/// 对于聚合函数，返回其结果列名（如 count_star, sum_score 等）
 pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanError> {
     projection
         .iter()
@@ -43,8 +44,49 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                 Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                     Ok(parts[1].value.to_string().to_lowercase())
                 }
+                // Aggregate function: return result column name
+                Expr::Function(f) => {
+                    let name = f.name.to_string().to_uppercase();
+                    match name.as_str() {
+                        "COUNT" => {
+                            if f.args.is_empty() {
+                                return Ok("count_star".to_string());
+                            }
+                            match &f.args[0] {
+                                sqlparser::ast::FunctionArg::Unnamed(
+                                    sqlparser::ast::FunctionArgExpr::Wildcard,
+                                ) => Ok("count_star".to_string()),
+                                sqlparser::ast::FunctionArg::Unnamed(
+                                    sqlparser::ast::FunctionArgExpr::Expr(inner),
+                                ) => {
+                                    let col = expr_to_column_name_static(inner)?;
+                                    Ok(format!("count_{}", col.to_lowercase()))
+                                }
+                                _ => Ok("count_star".to_string()),
+                            }
+                        }
+                        "SUM" => {
+                            let col = extract_single_col_static(&f.args, "SUM")?;
+                            Ok(format!("sum_{}", col.to_lowercase()))
+                        }
+                        "AVG" => {
+                            let col = extract_single_col_static(&f.args, "AVG")?;
+                            Ok(format!("avg_{}", col.to_lowercase()))
+                        }
+                        "MIN" => {
+                            let col = extract_single_col_static(&f.args, "MIN")?;
+                            Ok(format!("min_{}", col.to_lowercase()))
+                        }
+                        "MAX" => {
+                            let col = extract_single_col_static(&f.args, "MAX")?;
+                            Ok(format!("max_{}", col.to_lowercase()))
+                        }
+                        _ => Err(PlanError::UnsupportedStatement),
+                    }
+                }
                 _ => Err(PlanError::UnsupportedStatement),
             },
+            SelectItem::ExprWithAlias { alias, .. } => Ok(alias.value.to_string().to_lowercase()),
             SelectItem::Wildcard(_) => Ok("*".into()),
             _ => Err(PlanError::UnsupportedStatement),
         })
@@ -53,6 +95,7 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
 
 /// 从 projection 提取完整的列信息（table.column 格式）
 /// 返回 Vec<(Option<String>, String)> - (table_name, column_name)
+/// 对于聚合函数，返回 (None, result_column_name)
 pub fn extract_qualified_columns(
     projection: &[SelectItem],
 ) -> Result<Vec<(Option<String>, String)>, PlanError> {
@@ -69,8 +112,51 @@ pub fn extract_qualified_columns(
                         parts[1].value.to_string().to_lowercase(),
                     ))
                 }
+                // Aggregate function: return result column name
+                Expr::Function(f) => {
+                    let name = f.name.to_string().to_uppercase();
+                    match name.as_str() {
+                        "COUNT" => {
+                            if f.args.is_empty() {
+                                return Ok((None, "count_star".to_string()));
+                            }
+                            match &f.args[0] {
+                                sqlparser::ast::FunctionArg::Unnamed(
+                                    sqlparser::ast::FunctionArgExpr::Wildcard,
+                                ) => Ok((None, "count_star".to_string())),
+                                sqlparser::ast::FunctionArg::Unnamed(
+                                    sqlparser::ast::FunctionArgExpr::Expr(inner),
+                                ) => {
+                                    let col = expr_to_column_name_static(inner)?;
+                                    Ok((None, format!("count_{}", col.to_lowercase())))
+                                }
+                                _ => Ok((None, "count_star".to_string())),
+                            }
+                        }
+                        "SUM" => {
+                            let col = extract_single_col_static(&f.args, "SUM")?;
+                            Ok((None, format!("sum_{}", col.to_lowercase())))
+                        }
+                        "AVG" => {
+                            let col = extract_single_col_static(&f.args, "AVG")?;
+                            Ok((None, format!("avg_{}", col.to_lowercase())))
+                        }
+                        "MIN" => {
+                            let col = extract_single_col_static(&f.args, "MIN")?;
+                            Ok((None, format!("min_{}", col.to_lowercase())))
+                        }
+                        "MAX" => {
+                            let col = extract_single_col_static(&f.args, "MAX")?;
+                            Ok((None, format!("max_{}", col.to_lowercase())))
+                        }
+                        _ => Err(PlanError::UnsupportedStatement),
+                    }
+                }
                 _ => Err(PlanError::UnsupportedStatement),
             },
+            SelectItem::ExprWithAlias { alias, .. } => {
+                Ok((None, alias.value.to_string().to_lowercase()))
+            }
             SelectItem::Wildcard(_) => Ok((None, "*".into())),
             _ => Err(PlanError::UnsupportedStatement),
         })
@@ -87,5 +173,41 @@ pub fn extract_join_table_name(relation: &TableFactor) -> Result<String, PlanErr
     match relation {
         TableFactor::Table { name, .. } => Ok(name.to_string().to_lowercase()),
         _ => Err(PlanError::UnsupportedStatement),
+    }
+}
+
+/// Extract column name from Expr (Identifier or CompoundIdentifier)
+/// Used by extract_columns / extract_qualified_columns for aggregate function argument parsing.
+fn expr_to_column_name_static(expr: &Expr) -> Result<String, PlanError> {
+    match expr {
+        Expr::Identifier(ident) => Ok(ident.value.clone()),
+        Expr::CompoundIdentifier(parts) if !parts.is_empty() => {
+            Ok(parts.last().unwrap().value.clone())
+        }
+        _ => Err(PlanError::InvalidAggregateArgument(
+            "Expected column name".to_string(),
+        )),
+    }
+}
+
+/// Extract a single column argument from function args
+fn extract_single_col_static(
+    args: &[sqlparser::ast::FunctionArg],
+    func_name: &str,
+) -> Result<String, PlanError> {
+    if args.len() != 1 {
+        return Err(PlanError::InvalidAggregateArgument(format!(
+            "{} requires exactly one argument",
+            func_name
+        )));
+    }
+    match &args[0] {
+        sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
+            expr_to_column_name_static(expr)
+        }
+        _ => Err(PlanError::InvalidAggregateArgument(format!(
+            "{} argument must be a column",
+            func_name
+        ))),
     }
 }

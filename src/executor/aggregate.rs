@@ -156,7 +156,11 @@ impl AggregateState {
                 None => Value::Null,
             },
             AggregateState::Avg { sum, count } => match sum {
-                Some(v) if *count > 0 => v.div(&Value::Int(*count)),
+                Some(v) if *count > 0 => {
+                    // AVG should always produce a float result
+                    let sum_float = v.as_float().unwrap_or(0.0);
+                    Value::Float(sum_float / *count as f64)
+                }
                 _ => Value::Null,
             },
             AggregateState::Min(opt) => match opt {
