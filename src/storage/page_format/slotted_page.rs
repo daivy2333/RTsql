@@ -104,6 +104,11 @@ impl<'a> SlottedPageRef<'a> {
         let end = start + slot.length as usize;
         &self.data[start..end]
     }
+
+    /// Get header (read-only)
+    pub fn header(&self) -> &SlottedPageHeader {
+        &self.header
+    }
 }
 
 impl<'a> SlottedPage<'a> {
