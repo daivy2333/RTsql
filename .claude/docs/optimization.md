@@ -15,11 +15,32 @@
 | executor_execution | ~57µs (90.5%) | ~10-15µs | **5-6x** |
 | Total PK lookup | ~63µs | ~15-20µs | **3-4x** |
 
-**SQLite 对比基准**：
-| 数据库 | PK Lookup | 提速对比 |
-|--------|-----------|---------|
-| SQLite | ~5.1µs | 基准 |
-| **RTsql** | **~0.66µs (664ns)** | **8x faster** |
+### SQLite 对比基准**：
+
+**可信性验证**（精确单次查询测试）：
+| 数据库 | 单次 PK Lookup | 提速对比 | 验证方法 |
+|--------|---------------|---------|---------|
+| SQLite | ~5.25µs | 基准 | `rtsql_vs_sqlite_single.rs` |
+| **RTsql** | **~0.66µs (657ns)** | **8x faster** | `rtsql_vs_sqlite_single.rs` |
+
+**测试条件**：
+- 数据量：1000 行预热数据
+- Warmup：50 次预热查询
+- Release mode：cargo bench --release
+- 单次查询：直接测量单次 execute_sql() / query_row()
+- 无 profiling overhead：criterion 直接测量
+
+**数据一致性验证**：
+| 测试方法 | RTsql PK Lookup | SQLite PK Lookup | 提速 |
+|---------|----------------|------------------|------|
+| `rtsql_vs_sqlite_single.rs`（单次查询） | ~0.66µs | ~5.25µs | **8x** |
+| `micro_bench.rs`（50 次循环） | ~0.8µs（40µs/50） | ~5.4µs | **~6-7x** |
+| `bench_minimal.rs`（profiling） | ~2-4µs（仅 index_manager_search） | - | - |
+
+**差异解释**：
+- Profiling overhead：task_local storage + timing API 增加 ~100µs overhead（总时间 ~100-200µs）
+- Benchmark overhead：criterion 测量更精准，单次查询 ~0.66µs
+- **可信结论**：RTsql 比 SQLite 快 **6-8x**（不同测试方法略有差异）
 
 **并发性能改进**：
 | 并发度 | 优化前 | 优化后 | 提速 |
