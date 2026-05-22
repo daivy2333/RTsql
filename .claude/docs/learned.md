@@ -47,6 +47,20 @@
 | src/wal/recovery.rs | RecoveryManager |
 | benches/common/mod.rs | 基准测试共享 helper |
 
+### M14 踩坑：criterion benchmark 100 个 case 导致超时
+
+**症状**：`cargo bench --bench micro_bench` 运行超过 10 分钟
+**根因**：`bench_insert` 用 `for i in 0..100` 生成 100 个独立 criterion case，每个多次采样
+**解决**：用 `-- "pattern"` 过滤只跑需要的 benchmark，或用 `--sample-size 10` 减少采样
+**预防**：benchmark 中避免循环生成大量 case
+
+### M14 踩坑：缓存 benchmark 中不同 SQL 导致缓存无效
+
+**症状**：缓存命中和未命中性能几乎一样
+**根因**：`format!("... WHERE id = {}", i)` 产生 100 条不同 SQL，缓存命中率极低
+**解决**：写专门的缓存 benchmark，用相同 SQL 重复执行
+**预防**：验证缓存效果时必须用相同 SQL
+
 ## 踩坑记录
 
 | 问题 | 原因 | 解决 | 预防 |
@@ -64,6 +78,8 @@
 | 模式 | 描述 | 适用场景 |
 |------|------|----------|
 | 零拷贝页读取 | page_data() + SlottedPageRef 代替 page() + SlottedPage | 只读场景，避免 4KB clone |
+| 零拷贝 BTree 读取 | page_data() + LeafNodeRef/InternalNodeRef 代替 page() + LeafNode | BTree 读路径，避免 4KB clone + modify_page 开销 |
+| SQL Plan 缓存 | LruCache<String, PhysicalPlan>，命中跳过 parse+plan | 相同 SQL 重复执行 |
 | 两阶段锁 | 读锁检查→释放→I/O→写锁插入（double-check） | 缓存加载，避免 I/O 期间持锁 |
 | PageGuard::modify_page | 闭包修改页数据，自动标记 dirty | 修改页数据 |
 | spawn_blocking + sync BTree | B-Tree 操作在 spawn_blocking 中执行 | 避免阻塞 Tokio 运行时 |
@@ -76,8 +92,8 @@
 
 | 主题 | 优先级 | 备注 |
 |------|--------|------|
-| Prepared Statement 缓存 | 高 | M14，PK 查询 3-5x 提速 |
-| BTree 零拷贝迁移 | 高 | M14，page_data() 替代 page() |
+| Prepared Statement 缓存 | 高 | M14 已实现，PK 查询 1.1x 提速（parse+plan 开销小） |
+| BTree 零拷贝迁移 | 高 | M14 已实现，PK 查询 1.2x 提速 |
 | WAL Group Commit | 中 | M18，INSERT 5-10x 提速 |
 | io_uring 替换 | 低 | Linux 5.1+，需 tokio-uring |
 | jemalloc/mimalloc | 低 | 内存分配器优化 |

@@ -32,6 +32,10 @@ name = "concurrent_bench"
 harness = false
 
 [[bench]]
+name = "cache_bench"
+harness = false
+
+[[bench]]
 name = "scale_bench"
 harness = false
 
