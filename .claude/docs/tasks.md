@@ -1,11 +1,37 @@
 # 任务清单
 
-> 最后更新：2026-05-22（M14 Phase 2 T2 完成，所有文档更新）
+> 最后更新：2026-05-22（M15 聚合函数与 GROUP BY 完成）
 
-## 当前任务：M15 聚合函数与 GROUP BY
+## 当前任务：M16 子查询支持
 
 **状态**: 待开始
-**优先级**: 高（下一里程碑）
+**优先级**: 中
+
+### M15 聚合函数与 GROUP BY 已完成 ✅
+
+**功能实现成功**：
+- ✅ COUNT(*) / COUNT(col) / SUM / AVG / MIN / MAX 聚合函数
+- ✅ GROUP BY 单列分组（HashMap hash aggregation）
+- ✅ HAVING 聚合结果过滤
+- ✅ SQL 标准 NULL 处理语义（COUNT(*) 计所有行，其他跳过 NULL）
+- ✅ 严格模式（非聚合列必须出现在 GROUP BY 中）
+- ✅ 空表聚合返回单行（COUNT→0，其他→NULL）
+- ✅ 聚合 + WHERE + ORDER BY 组合查询
+
+**新增文件**：
+- `src/executor/aggregate.rs` — AggregateFunc, AggregateState, AggregateExecutor
+- `src/executor/having.rs` — HavingExecutor
+- `tests/aggregate_test.rs` — 19 个端到端测试
+
+**修改文件**：
+- `src/executor/plan.rs` — AggregateNode, HavingNode
+- `src/executor/value.rs` — add(), lt_agg(), div() 算术方法
+- `src/parser/planner.rs` — 聚合检测、GROUP BY/HAVING 解析
+- `src/parser/error.rs` — 4 个新错误变体
+- `src/parser/ast.rs` — extract_columns 支持 Expr::Function
+- `src/pipeline.rs` — Aggregate/Having executor 整合
+
+**测试**：19 aggregate tests + 88 lib tests + 其他集成测试 = 149 tests passing
 
 ### M14 Phase 2 T2 已完成 ✅✅
 
