@@ -1,14 +1,14 @@
 # 项目快照
 
-> 最后更新：2026-05-22（性能分析后路线更新）
+> 最后更新：2026-05-22（M14 Phase 2 T1 profiling 验证完成）
 
 ## 当前状态
 
-- **阶段**: M13 完成，性能瓶颈已定位
+- **阶段**: M14 Phase 2 T1 profiling 验证完成
 - **状态**: 正常
-- **当前里程碑**: M14 准备开始（查询路径优化 — BTree 零拷贝 + Prepared Statement 缓存）
+- **当前里程碑**: 准备进入 M14 Phase 2 T2（IndexManager 优化）
 - **测试**: 83 lib tests + 74 integration tests（全部通过）
-- **代码量**: src 9190 行 + tests 8463 行 + benches 750 行
+- **代码量**: src 9190 行 + tests 8463 行 + benches 750 行 + profiling 68 行
 
 ## 项目结构
 
@@ -133,13 +133,74 @@ RTsql/
 
 ## 下一步行动
 
-**优先级**: M14（查询路径优化 — BTree 零拷贝 + Prepared Statement 缓存）
+**优先级**: M14 Phase 2 T2（IndexManager.search 优化）
 
 **里程碑路线图**:
-1. **M14**: 查询路径优化（PK 查询 3-5x 提速）
+1. **M14 Phase 2 T2**: IndexManager.search 优化（目标：PK 查询 3-5x 提速）
+   - 瓶颈已定位：index_manager_search 占 79-81% 总时间
+   - 优化方向：BTree 零拷贝 + async search 优化
 2. **M15**: 聚合函数与 GROUP BY
 3. **M16**: 子查询支持
 4. **M17**: 索引优化（B-Tree split/merge + 非唯一索引）
 5. **M18**: WAL 集成 + 写入优化（INSERT 5-10x 提速）
 
 **当前阻塞**: 无
+
+---
+
+## M14 Phase 2 T1 验证结果
+
+运行 `cargo run --example bench_minimal`（RTSQL_PROFILING=1）：
+
+### 缓存命中场景（warm up 后）
+
+典型输出：
+```
+Stage                    | Time (µs) | % Total
+-------------------------|-----------|--------
+executor_execution      |      57.0 |   90.5%
+index_manager_search    |      51.0 |   81.0%
+executor_creation       |       2.0 |    3.2%
+cache_hit_check         |       0.0 |    0.0%
+parse_and_plan          |       0.0 |    0.0%
+-------------------------|-----------|--------
+Total                   |      63.0 |  100.0%
+```
+
+### 性能瓶颈定位
+
+- **IndexManager.search**: ~51µs (81% of total) — **主要瓶颈**
+- **Executor execution**: ~57µs (90.5% of total) — 包含 IndexManager.search
+- **Executor creation**: ~2-3µs (3.2-4.7%)
+- **Cache hit check**: ~0µs (0%)
+- **Parse and plan**: ~0µs (0%) — 缓存命中时跳过
+
+**PK lookup 平均耗时**: ~129-138µs（包含缓存检查）
+
+### 关键发现
+
+1. **IndexManager.search 是主要瓶颈**，占总执行时间的 79-81%
+2. **Plan cache 有效性已验证**，缓存命中时 parse_and_plan 时间为 0µs
+3. **Executor creation overhead 很小**（~2-3µs），不是优化重点
+4. **Profiling 框架运行正常**，task-local storage + scope 方案可行
+
+### 下一步优化方向
+
+根据 profiling 结果，M14 Phase 2 T2 应重点优化 **IndexManager.search**：
+- BTree 零拷贝（使用 `page_data()` + `SlottedPageRef`）
+- Async search 优化（减少 await overhead）
+- LeafNode/InternalNode 直接访问优化
+
+### 文件变更
+
+**新增文件**:
+- `src/profiling.rs` (68 行) — task-local storage + timing API
+- `src/plan_cache.rs` (68 行) — simple plan cache implementation
+- `examples/bench_minimal.rs` (34 行) — profiling-enabled benchmark
+
+**修改文件**:
+- `src/pipeline.rs` — 添加 profiling timing points + plan cache integration
+- `src/executor/index_scan.rs` — 添加 `index_manager_search` timing
+- `src/database.rs` — 添加 `plan_cache` field
+- `src/lib.rs` — 导出 profiling + plan_cache modules
+- `tests/executor_test.rs` — 添加 plan_cache field 到测试 Database 构造

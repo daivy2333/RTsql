@@ -1,33 +1,33 @@
 //! Profiling module for measuring SQL execution pipeline performance
 //!
-//! M14 Phase 2 T1: Provides task-local storage for timing measurements
+//! M14 Phase 2 T1: Provides simple timing measurements for performance analysis
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task_local;
 
 task_local! {
-    pub static PROFILING_DATA: std::cell::RefCell<HashMap<&'static str, Duration>>;
+    pub static PROFILING_DATA: Arc<Mutex<HashMap<&'static str, Duration>>>;
 }
 
 /// Initialize profiling data for current task
 pub fn init_profiling() {
-    PROFILING_DATA.with(|data| {
-        *data.borrow_mut() = HashMap::new();
-    });
+    // Task-local storage is set via scope() in the pipeline
+    // This function is a no-op placeholder
 }
 
 /// Record timing for a specific stage
 pub fn record_time(stage: &'static str, duration: Duration) {
     PROFILING_DATA.with(|data| {
-        data.borrow_mut().insert(stage, duration);
+        data.lock().unwrap().insert(stage, duration);
     });
 }
 
 /// Get all recorded timings
 pub fn get_timings() -> HashMap<&'static str, Duration> {
     PROFILING_DATA.with(|data| {
-        data.borrow_mut().clone()
+        data.lock().unwrap().clone()
     })
 }
 
@@ -56,4 +56,12 @@ pub fn print_timings(total: Duration) {
 /// Check if profiling is enabled via environment variable
 pub fn is_profiling_enabled() -> bool {
     std::env::var("RTSQL_PROFILING").is_ok()
+}
+
+/// Create profiling scope for async execution
+pub fn with_profiling_scope<F, T>(f: F) -> impl std::future::Future<Output = T>
+where
+    F: std::future::Future<Output = T>,
+{
+    PROFILING_DATA.scope(Arc::new(Mutex::new(HashMap::new())), f)
 }
