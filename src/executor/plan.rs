@@ -4,6 +4,7 @@ use crate::executor::aggregate::AggregateFunc;
 use crate::executor::predicate::PredicateRef;
 use crate::executor::{ColumnType, Value};
 use crate::storage::page_format::Key;
+use std::collections::HashMap;
 
 /// 排序列定义
 #[derive(Debug, Clone)]
@@ -269,6 +270,7 @@ pub struct AggregateNode {
     pub aggregates: Vec<AggregateFunc>,
     pub output_columns: Vec<String>,
     pub table_name: String,
+    pub column_indices: HashMap<String, usize>,
 }
 
 /// HAVING 过滤节点
