@@ -6,7 +6,7 @@ use crate::executor::{
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
-use crate::profiling::{init_profiling, is_profiling_enabled, print_timings, record_time};
+use crate::profiling::{init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope};
 use crate::storage::Result;
 use sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
@@ -14,6 +14,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub async fn execute(database: &Database, sql: &str) -> Response {
+    let profiling = is_profiling_enabled();
+
+    if profiling {
+        // Wrap entire execution in profiling scope for task-local storage
+        return with_profiling_scope(execute_inner(database, sql)).await;
+    }
+
+    execute_inner(database, sql).await
+}
+
+async fn execute_inner(database: &Database, sql: &str) -> Response {
     let profiling = is_profiling_enabled();
 
     if profiling {
