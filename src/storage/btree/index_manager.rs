@@ -77,30 +77,35 @@ impl IndexManager {
         })
     }
 
-    /// Insert a key-value pair — spawn_blocking with write lock
+    /// Insert a key-value pair — spawn_blocking with temporary BTree instance
     pub async fn insert(&self, key: &[u8], row_id: RowId) -> Result<()> {
-        let btree = self.btree.clone();
+        let root_page_id = self.root_page_id.load(Ordering::Acquire);
+        let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
+
         tokio::task::spawn_blocking(move || {
-            btree.write().unwrap().insert(&key_vec, row_id)
+            let btree = BTree::from_root(PageId(root_page_id), sync_loader);
+            btree.insert(&key_vec, row_id)
         }).await??;
 
         self.row_to_key.write().await.insert(row_id, key.to_vec());
         Ok(())
     }
 
-    /// Delete a key — spawn_blocking with write lock
+    /// Delete a key — spawn_blocking with temporary BTree instance
     pub async fn delete(&self, key: &[u8]) -> Result<()> {
         if let Some(row_id) = self.search(key).await? {
             self.row_to_key.write().await.remove(&row_id);
         }
 
-        let btree = self.btree.clone();
+        let root_page_id = self.root_page_id.load(Ordering::Acquire);
+        let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
+
         tokio::task::spawn_blocking(move || {
-            btree.write().unwrap().delete(&key_vec)
-        })
-        .await?
+            let btree = BTree::from_root(PageId(root_page_id), sync_loader);
+            btree.delete(&key_vec)
+        }).await?
     }
 
     /// Async scan all entries — direct async path
@@ -137,12 +142,15 @@ impl IndexManager {
         Ok(results)
     }
 
-    /// Update the RowId for an existing key — spawn_blocking with write lock
+    /// Update the RowId for an existing key — spawn_blocking with temporary BTree instance
     pub async fn update(&self, key: &[u8], new_row_id: RowId) -> Result<()> {
-        let btree = self.btree.clone();
+        let root_page_id = self.root_page_id.load(Ordering::Acquire);
+        let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
+
         tokio::task::spawn_blocking(move || {
-            btree.write().unwrap().update(&key_vec, new_row_id)
+            let btree = BTree::from_root(PageId(root_page_id), sync_loader);
+            btree.update(&key_vec, new_row_id)
         }).await??;
 
         self.row_to_key.write().await.insert(new_row_id, key.to_vec());
