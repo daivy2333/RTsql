@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use crate::storage::{
-    btree::node::{LeafNode, LEAF_NODE},
+    btree::node::{InternalNodeRef, LeafNode, LeafNodeRef, LEAF_NODE},
     page_format::{Key, RowId},
     PageId, Result, StorageError,
 };
@@ -49,37 +49,34 @@ impl BTree {
     /// Recursive search from a page
     fn search_from_page(&self, page_id: PageId, key: &Key) -> Result<Option<RowId>> {
         let guard = self.loader.load_page(page_id)?;
-        let page = guard.page();
+        let data_guard = guard.page_data();
 
         // Check page type from first byte
-        if page.data[0] == LEAF_NODE {
-            // Leaf node: search for key in this leaf
-            // We need mutable access for LeafNode operations, so we re-load with mutable guard
-            let guard2 = self.loader.load_page(page_id)?;
-            let result = guard2.modify_page(|page_mut| {
-                let leaf = LeafNode::from_page(page_mut)?;
-                let pos = leaf.find_key_position(key);
+        if data_guard[0] == LEAF_NODE {
+            // Leaf node: search for key using zero-copy LeafNodeRef
+            let leaf = LeafNodeRef::new(&*data_guard);
+            let (found, pos) = leaf.find_key_position(key);
 
-                if pos < leaf.key_count() {
-                    if let Some(existing_key) = leaf.get_key(pos) {
-                        if existing_key == *key {
-                            return Ok(leaf.get_row_id(pos));
-                        }
-                    }
-                }
-
+            if found {
+                Ok(leaf.get_row_id(pos))
+            } else {
                 Ok(None)
-            });
-
-            result
+            }
         } else {
             // Internal node: find the child page and recurse
-            // Simplified: assume only leaf nodes for now (no internal nodes yet)
-            // When we implement splits, we'll handle internal nodes here
-            Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Internal node traversal not implemented yet",
-            )))
+            let internal = InternalNodeRef::new(&*data_guard);
+            let child_page_id = internal
+                .find_child_page_id(key)
+                .ok_or_else(|| StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Internal node has no child page id",
+                )))?;
+
+            // Drop the data_guard before recursive call (avoids holding mutex across recursion)
+            drop(data_guard);
+            drop(guard);
+
+            self.search_from_page(PageId(child_page_id as u64), key)
         }
     }
 
@@ -153,23 +150,22 @@ impl BTree {
 
         while page_id.0 != 0 {
             let guard = self.loader.load_page(page_id)?;
-            let entries = guard.modify_page(|page| {
-                let leaf = LeafNode::from_page(page)?;
-                let count = leaf.key_count();
-                let mut entries = Vec::with_capacity(count);
-                for i in 0..count {
-                    if let (Some(key), Some(row_id)) = (leaf.get_key(i), leaf.get_row_id(i)) {
-                        entries.push((key, row_id));
-                    }
-                }
-                Ok::<_, StorageError>(entries)
-            })?;
-            results.extend(entries);
+            let data_guard = guard.page_data();
+            let leaf = LeafNodeRef::new(&*data_guard);
 
-            let next_page_u32 = guard.modify_page(|page| {
-                let leaf = LeafNode::from_page(page)?;
-                Ok::<_, StorageError>(leaf.next_leaf_page_id())
-            })?;
+            let count = leaf.key_count();
+            let mut entries = Vec::with_capacity(count);
+            for i in 0..count {
+                if let (Some(key), Some(row_id)) = (leaf.get_key(i), leaf.get_row_id(i)) {
+                    entries.push((key, row_id));
+                }
+            }
+
+            let next_page_u32 = leaf.next_leaf_page_id();
+            drop(data_guard);
+            drop(guard);
+
+            results.extend(entries);
             page_id = PageId(next_page_u32 as u64);
         }
         Ok(results)
