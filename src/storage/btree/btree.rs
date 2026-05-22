@@ -39,6 +39,14 @@ impl BTree {
         self.root_page_id
     }
 
+    /// Create BTree from existing root page (for write operations)
+    pub fn from_root(root_page_id: PageId, loader: Arc<SyncPageLoader>) -> Self {
+        Self {
+            loader,
+            root_page_id,
+        }
+    }
+
     /// Search for a key in the BTree
     /// Returns the RowId if found, None if not found
     pub fn search(&self, key: &[u8]) -> Result<Option<RowId>> {

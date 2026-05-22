@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::future::Future;
+use std::pin::Pin;
 
 use crate::storage::{
     btree::node::{InternalNodeRef, LeafNodeRef, LEAF_NODE},
@@ -48,12 +49,12 @@ impl IndexManager {
     }
 
     /// Recursive async search from a page
-    fn search_from_page_async(
-        &self,
+    fn search_from_page_async<'a>(
+        &'a self,
         page_id: PageId,
-        key: &Key,
-    ) -> impl Future<Output = Result<Option<RowId>>> + Send {
-        async move {
+        key: &'a Key,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Option<RowId>>> + Send + 'a>> {
+        Box::pin(async move {
             let child_page_id = {
                 let guard = self.async_loader.load_page(page_id).await?;
                 let data_guard = guard.page_data();
@@ -73,7 +74,7 @@ impl IndexManager {
             }; // guard and data_guard dropped here
 
             self.search_from_page_async(PageId(child_page_id as u64), key).await
-        }
+        })
     }
 
     /// Insert a key-value pair — spawn_blocking with write lock
