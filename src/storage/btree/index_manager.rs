@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use crate::storage::{page_format::RowId, BufferPool, Result};
 use tokio::sync::RwLock;
@@ -7,11 +8,12 @@ use tokio::sync::RwLock;
 use super::{AsyncPageLoader, BTree, SyncPageLoader};
 
 /// IndexManager: Async API wrapper for BTree
-/// Uses std::sync::RwLock<BTree> for concurrent reads with spawn_blocking
-/// Read ops use read lock (concurrent), write ops use write lock (exclusive)
+/// Uses AtomicPageId for lock-free root page access (read operations)
+/// Write operations use spawn_blocking + temporary BTree instance
 pub struct IndexManager {
-    btree: Arc<std::sync::RwLock<BTree>>,
-    async_loader: AsyncPageLoader,
+    root_page_id: AtomicU64,              // 无锁访问根页
+    sync_loader: Arc<SyncPageLoader>,     // 写操作仍用 sync
+    async_loader: AsyncPageLoader,        // 读操作用 async
     row_to_key: RwLock<HashMap<RowId, Vec<u8>>>,
 }
 
@@ -19,9 +21,14 @@ impl IndexManager {
     pub fn new(buffer_pool: Arc<BufferPool>) -> Result<Self> {
         let sync_loader = Arc::new(SyncPageLoader::new(buffer_pool.clone()));
         let async_loader = AsyncPageLoader::new(buffer_pool.clone());
-        let btree = BTree::new(sync_loader)?;
+
+        // 创建 BTree 并获取 root_page_id
+        let btree = BTree::new(sync_loader.clone())?;
+        let root_page_id = btree.root_page_id().0;
+
         Ok(Self {
-            btree: Arc::new(std::sync::RwLock::new(btree)),
+            root_page_id: AtomicU64::new(root_page_id),
+            sync_loader,
             async_loader,
             row_to_key: RwLock::new(HashMap::new()),
         })
