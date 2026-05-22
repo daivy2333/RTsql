@@ -2,11 +2,13 @@
 //!
 //! M5: Implement async fn next() -> Result<Option<ExecResult>>
 
+mod aggregate;
 mod create_table;
 mod delete;
 mod drop_table;
 mod executor_trait;
 mod filter;
+mod having;
 mod index_scan;
 mod insert;
 mod join;
@@ -19,6 +21,7 @@ mod sort;
 mod update;
 mod value;
 
+pub use aggregate::{AggregateFunc, AggregateState};
 pub use create_table::CreateTableExecutor;
 pub use delete::DeleteExecutor;
 pub use drop_table::DropTableExecutor;
