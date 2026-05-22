@@ -43,10 +43,6 @@ harness = false
 name = "sqlite_compare"
 harness = false
 
-[[bench]]
-name = "rtsql_vs_sqlite"
-harness = false
-
 [profile.release]
 opt-level = 3
 lto = true

@@ -18,7 +18,7 @@ fn bench_concurrent_read(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("concurrent_read");
     for concurrency in [1usize, 4, 8, 16, 32] {
-        group.throughput(Throughput::Elements(concurrency as u64 * 30));
+        group.throughput(Throughput::Elements(concurrency as u64 * 50));
         group.bench_function(BenchmarkId::new("select", concurrency), |b| {
             b.to_async(&rt).iter(|| {
                 let db = db.clone();
@@ -27,7 +27,7 @@ fn bench_concurrent_read(c: &mut Criterion) {
                     for _ in 0..concurrency {
                         let db = db.clone();
                         handles.push(tokio::spawn(async move {
-                            for i in 0..30i64 {
+                            for i in 0..50i64 {
                                 db.execute_sql(&format!(
                                     "SELECT * FROM bench WHERE id = {}",
                                     i % 1000
