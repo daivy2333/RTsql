@@ -1,10 +1,12 @@
 //! Index scan executor - primary key lookup
 
 use crate::executor::{ExecResult, Executor};
+use crate::profiling::{is_profiling_enabled, record_time};
 use crate::storage::page_format::{deserialize_tuple, ColumnType};
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
 use crate::transaction::Snapshot;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct IndexScanExecutor {
     table_meta: Arc<TableMeta>,
@@ -47,7 +49,17 @@ impl Executor for IndexScanExecutor {
 
         self.executed = true;
 
-        let row_id = self.table_meta.index_manager.search(&self.key).await?;
+        let profiling = is_profiling_enabled();
+        let row_id = {
+            if profiling {
+                let t0 = Instant::now();
+                let result = self.table_meta.index_manager.search(&self.key).await?;
+                record_time("index_manager_search", t0.elapsed());
+                result
+            } else {
+                self.table_meta.index_manager.search(&self.key).await?
+            }
+        };
 
         match row_id {
             Some(id) => {

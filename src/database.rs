@@ -3,13 +3,11 @@
 //! M7: Single entry point for opening databases, creating tables, and executing SQL.
 //! M11: WAL integration for crash recovery.
 
-use crate::executor::PhysicalPlan;
 use crate::network::protocol::Response;
+use crate::plan_cache::PlanCache;
 use crate::storage::{BufferPool, ColumnType, FileStorage, Result, TableManager, TableMeta};
 use crate::transaction::TransactionManager;
 use crate::wal::{RecoveryManager, WalWriter};
-use lru::LruCache;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +18,7 @@ pub struct Database {
     pub table_manager: Arc<TableManager>,
     pub transaction_manager: Arc<TransactionManager>,
     pub wal_writer: Arc<WalWriter>,
-    pub plan_cache: Arc<Mutex<LruCache<String, PhysicalPlan>>>,
+    pub plan_cache: Arc<Mutex<PlanCache>>,
 }
 
 impl Database {
@@ -35,7 +33,7 @@ impl Database {
 
         // 2. Initialize storage
         let storage: Arc<dyn crate::storage::AsyncStorage> = Arc::new(FileStorage::open(path)?);
-        let buffer_pool = Arc::new(BufferPool::new(1024, storage)?);
+        let buffer_pool = Arc::new(BufferPool::new(100, storage)?);
         let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
         let transaction_manager = Arc::new(TransactionManager::new());
 
@@ -46,7 +44,7 @@ impl Database {
         );
 
         // 4. Initialize plan cache
-        let plan_cache = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())));
+        let plan_cache = Arc::new(Mutex::new(PlanCache::new()));
 
         Ok(Self {
             buffer_pool,
@@ -72,10 +70,5 @@ impl Database {
 
     pub async fn execute_sql(&self, sql: &str) -> Response {
         crate::pipeline::execute(self, sql).await
-    }
-
-    /// Returns the number of entries currently in the plan cache.
-    pub fn plan_cache_len(&self) -> usize {
-        self.plan_cache.lock().unwrap().len()
     }
 }
