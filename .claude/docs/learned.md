@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-22（性能分析后路线更新）
+> 最后更新：2026-05-22（M14 Phase 2 T1 profiling 实现完成）
 
 ## API 路径速查
 
@@ -24,6 +24,10 @@
 | TransactionManager::begin/commit/rollback | 事务操作 | transaction/manager.rs |
 | PlanBuilder::build(sql) | SQL → PhysicalPlan | parser/planner.rs |
 | Pipeline::execute(plan) | 执行物理计划 | pipeline.rs |
+| Profiling::init_profiling() | 初始化 task-local profiling 数据 | profiling.rs |
+| Profiling::record_time(stage, duration) | 记录计时数据 | profiling.rs |
+| Profiling::print_timings(total) | 输出计时表格到 stderr | profiling.rs |
+| Profiling::is_profiling_enabled() | 检查 RTSQL_PROFILING 环境变量 | profiling.rs |
 
 ## 文件速查
 
@@ -100,3 +104,23 @@
 | B-Tree split/merge | 中 | M17 索引优化 |
 | 聚合函数 | 中 | M15 |
 | 子查询 | 中 | M16 |
+### M14 Phase 2 T1 踩坑：Binary search 对 key > all separators 的错误处理
+
+**症状**：测试失败，key 'g'（大于所有 separator）期望返回 300，实际返回 50
+**根因**：binary search 在 lo == count 时（key > all separators）错误返回 leftmost_child，而非 last child
+**解决**：添加 `lo >= count` 分支，返回 `get_child_page_id(count - 1)`
+**预防**：二分搜索边界情况必须单独测试（key < all, key > all, key == separator）
+
+### M14 Phase 2 T1 踩坑：Subagent worktree merge 冲突处理
+
+**症状**：Merge feature 分支时发现主分支原有测试失败，无法完成合并
+**根因**：主分支在 1bc8a43 引入 binary search 实现但未验证测试，feature 分支在此不稳定状态创建
+**解决**：先修复主分支测试失败，再 merge feature 分支，采用 --theirs 策略解决冲突
+**预防**：主分支任何改动必须验证测试通过，feature 分支基于稳定状态创建
+
+### M14 Phase 2 T1 踩坑：Task-local storage 在 async 上下文的使用
+
+**症状**：直接使用 task_local! 变量会 panic（未初始化）
+**根因**：task_local! 需要在 Tokio async 上下文初始化，且必须在 task 内部调用 with()
+**解决**：使用 with_profiling_scope() 包装 async 执行块，确保初始化后再使用
+**预防**：task_local! 变量必须通过 with() 方法访问，且必须在初始化后的作用域内

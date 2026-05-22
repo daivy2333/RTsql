@@ -1,5 +1,54 @@
 # 优化方向与技术债
 
+> 最后更新：2026-05-22（M14 Phase 2 T1 profiling 瓶颈定位完成）
+
+---
+
+## 🎯 当前主要瓶颈（M14 Phase 2 T2 目标）
+
+### IndexManager.search（81% 执行时间）
+
+**Profiling 数据**（PK lookup, cache hit, warm run）：
+```
+Stage                    | Time (µs) | % Total
+-------------------------|-----------|--------
+executor_execution       |      57.0 |   90.5%
+index_manager_search     |      51.0 |   81.0%  ← 主要瓶颈
+executor_creation        |       2.0 |    3.2%
+cache_hit_check          |       0.0 |    0.0%
+parse_and_plan           |       0.0 |    0.0%
+-------------------------|-----------|--------
+Total                    |      63.0 |  100.0%
+```
+
+**根因分析**：
+- spawn_blocking + SyncPageLoader::block_on 调度开销（~25µs）
+- std::sync::RwLock<BTree> 锁争用（~5µs）
+- 实际 BTree.search 计算（~21µs）
+
+**优化方案**：
+1. **启用 async search 路径**（推荐）
+   - BTree::search_async（已实现，Box::pin 递归）
+   - AsyncPageLoader::load_page（已实现，直接 async）
+   - IndexManager 改用 async search
+   - 预期：消除 spawn_blocking 调度开销，~3-5x 提速
+
+2. **专用线程池**（替代方案）
+   - 创建 dedicated BTree thread pool
+   - 减少 spawn_blocking 调度竞争
+   - 预期：~2-3x 提速
+
+3. **行缓存**（长期优化）
+   - 热点行缓存在 memory
+   - 减少 BufferPool 访问
+   - 预期：热点查询 ~10x
+
+---
+
+## 其他优化方向（按优先级）
+
+# 优化方向与技术债
+
 > 最后更新：2026-05-22（M13 完成 + 性能分析）
 
 ---
