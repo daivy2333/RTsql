@@ -4,6 +4,74 @@ use rtsql::database::Database;
 use tempfile::tempdir;
 
 #[tokio::test]
+async fn test_plan_cache_hit() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db"))
+        .await
+        .expect("Failed to open database");
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+        .await;
+    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+        .await;
+
+    let sql = "SELECT * FROM t WHERE id = 1";
+
+    // First execution - cache miss
+    let r1 = db.execute_sql(sql).await;
+    match &r1 {
+        rtsql::network::protocol::Response::QueryResult { rows } => {
+            assert_eq!(rows.len(), 1);
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    let cache_size = db.plan_cache_len();
+    assert!(cache_size > 0, "Cache should have at least one entry after SELECT");
+
+    // Second execution - cache hit
+    let r2 = db.execute_sql(sql).await;
+    match &r2 {
+        rtsql::network::protocol::Response::QueryResult { rows } => {
+            assert_eq!(rows.len(), 1);
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    assert_eq!(db.plan_cache_len(), cache_size, "Cache size should not grow on hit");
+}
+
+#[tokio::test]
+async fn test_ddl_clears_cache() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db"))
+        .await
+        .expect("Failed to open database");
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+
+    let sql = "SELECT * FROM t";
+    db.execute_sql(sql).await;
+    assert!(db.plan_cache_len() > 0, "Cache should have an entry after SELECT");
+
+    // DDL (CREATE TABLE) should clear cache
+    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await;
+    assert_eq!(db.plan_cache_len(), 0, "Cache should be empty after DDL");
+}
+
+#[tokio::test]
+async fn test_dml_not_cached() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db"))
+        .await
+        .expect("Failed to open database");
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
+
+    // INSERT is DML and should NOT be cached
+    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')").await;
+    assert_eq!(db.plan_cache_len(), 0, "DML should not be cached");
+}
+
+#[tokio::test]
 async fn test_pipeline_create_table() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db"))
