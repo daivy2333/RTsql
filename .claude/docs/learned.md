@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-21 (M11 完成：WAL 持久化)
+> 最后更新：2026-05-22 (M12 完成：INNER JOIN 哈希连接)
 > 记录探索发现、API路径、技巧、踩坑经验
 
 ---
@@ -116,6 +116,19 @@
 | RecoveryManager::recover | `RecoveryManager::recover(db_path)` → `Result<(HashSet<u64>, HashSet<u64>), WalError>` | 恢复 commit/abort 标记 | 2026-05-21 |
 | RecoveryManager::needs_recovery | `RecoveryManager::needs_recovery(db_path)` → `Result<bool, WalError>` | 检查是否需要恢复 | 2026-05-21 |
 | RecoveryManager::read_wal | `RecoveryManager::read_wal(db_path)` → `Result<Vec<WalRecord>, WalError>` | 读取所有 WAL 记录 | 2026-05-21 |
+| JoinExecutor::new | `JoinExecutor::new(left, right, conditions, output_columns, left_idx, right_idx, left_name, right_name)` | 创建哈希连接执行器 | 2026-05-22 |
+| JoinExecutor::build_hash_key | `executor.build_hash_key_left/right(row)` → `Option<Vec<Value>>` | 计算哈希键（NULL 返回 None） | 2026-05-22 |
+| JoinExecutor::build_output_row | `executor.build_output_row(left_row, right_row)` → `Vec<Value>` | 构建输出行（按 output_columns） | 2026-05-22 |
+| JoinExecutor::next | `executor.next().await` → `Result<Option<ExecResult>>` | 哈希连接迭代（BuildRight→ScanLeft→Output） | 2026-05-22 |
+| PlanBuilder::build_from_clause | `builder.build_from_clause(from)` → `PhysicalPlan` | 解析 FROM + JOIN 链 | 2026-05-22 |
+| PlanBuilder::resolve_column_ref | `builder.resolve_column_ref(expr, tables)` → `ColumnRef` | 列引用解析（t.col 或纯列名） | 2026-05-22 |
+| PlanBuilder::extract_join_conditions | `builder.extract_join_conditions(left_tables, right_table, on_expr)` → `Vec<JoinCondition>` | ON 条件解析（AND 组合） | 2026-05-22 |
+| ColumnRef | `ColumnRef { table: Option<String>, column: String }` | 列引用（支持 t.col） | 2026-05-22 |
+| JoinCondition | `JoinCondition { left_column: ColumnRef, right_column: ColumnRef }` | JOIN 等值条件 | 2026-05-22 |
+| OutputColumn | `OutputColumn { table, column, table_alias, column_index }` | 输出列映射 | 2026-05-22 |
+| JoinNode | `JoinNode { left, right, conditions, output_columns }` | JOIN 物理计划节点 | 2026-05-22 |
+| PhysicalPlan::Join | `PhysicalPlan::Join(JoinNode)` | JOIN plan 变体 | 2026-05-22 |
+| extract_join_table_name | `extract_join_table_name(relation)` → `String` | JOIN 表名提取 | 2026-05-22 |
 
 ---
 
@@ -148,6 +161,9 @@
 | WAL 读取器 | src/wal/reader.rs | M11: read_next + seek_to + read_all |
 | Checkpoint | src/wal/checkpoint.rs | M11: checkpoint flow + 位点读写 |
 | Recovery | src/wal/recovery.rs | M11: recover + needs_recovery + read_wal |
+| JOIN 模块 | src/executor/join.rs | M12: JoinExecutor 哈希连接 |
+| JOIN 解析 | src/parser/planner.rs | M12: build_from_clause + resolve_column_ref + extract_join_conditions |
+| JOIN 错误 | src/parser/error.rs | M12: AmbiguousColumn/TableNotFound/MissingOnClause/UnsupportedJoinType |
 
 ---
 
@@ -193,6 +209,8 @@
 | WalRecord field mismatch | spec 要求 tx_id + table_name，实现用 table_id | 按 spec 修正字段名，添加 Commit timestamp | 2026-05-21 |
 | Worktree isolation | subagent 在 worktree 工作，变更不自动合并到 main | 手动读取 worktree 文件 + Write 到 main 目录 | 2026-05-21 |
 | Database missing wal_writer | executor_test 直接构造 Database 缺少 wal_writer 字段 | 添加 wal_writer: Arc::new(WalWriter::open(...)) | 2026-05-21 |
+| NULL 键 JOIN 匹配错误 | SQL NULL != NULL，但 Value Eq 使 NULL == NULL | build_hash_key 返回 Option，NULL 键返回 None 被跳过 | 2026-05-22 |
+| pipeline extract_column_indices | nested join 的 table name 提取脆弱 | 使用 conditions.first() 或改进为更好的 fallback | 2026-05-22 |
 
 **详细踩坑档案**（复杂问题）：
 
@@ -319,6 +337,12 @@
 | Checkpoint flow | checkpoint 执行顺序 | 获取 LSN → flush_all → 写位点 → 写 WAL Checkpoint 记录 → 重置计数 | 2026-05-21 |
 | RecoveryManager commit/abort | 崩溃恢复标记 | 遍历 WAL → 收集 Commit/Abort tx_id → 返回 HashSet | 2026-05-21 |
 | Database WAL 集成 | 启动恢复 | RecoveryManager::recover → WalWriter::open → 添加到 Database 结构 | 2026-05-21 |
+| 哈希连接算法 | INNER JOIN 执行 | BuildRight（建哈希表）→ ScanLeft（缓存）→ Output（逐行匹配） | 2026-05-22 |
+| NULL 键跳过 | SQL NULL != NULL | build_hash_key 返回 Option<Vec<Value>>，NULL 返回 None → 跳过不匹配 | 2026-05-22 |
+| Value Hash trait | HashMap 键支持 | Float 使用 to_bits() 哈希，支持 Vec<Value> 作为哈希键 | 2026-05-22 |
+| ON 条件解析 | AND 组合递归 | extract_join_conditions 递归处理 AND → 返回 Vec<JoinCondition> | 2026-05-22 |
+| 列名歧义检测 | 多表同名列 | resolve_column_ref 检查 sources.len()，>1 返回 AmbiguousColumn 错误 | 2026-05-22 |
+| 链式 JOIN | 多表连接 | Join(Join(A, B), C) 递归结构，每个 Join 节点独立哈希连接 | 2026-05-22 |
 
 ---
 
@@ -364,6 +388,7 @@
 - [x] WAL（Write-Ahead Logging）基础实现（M11 阶段）→ WalRecord/WalWriter/WalReader/CheckpointManager/RecoveryManager 已实现
 - [ ] Executor 层 WAL 写入集成（M11 推迟）
 - [ ] WAL 完整数据重放（M11 推迟）
+- [x] JOIN 多表计划与执行（M12 阶段）→ JoinExecutor + ON 子句解析 + NULL 处理已实现
 
 ---
 

@@ -1,6 +1,6 @@
 # 任务清单
 
-> 最后更新：2026-05-21
+> 最后更新：2026-05-22
 
 ## 进行中
 
@@ -199,22 +199,33 @@
 **新增测试**: 22 个（wal_record:8 + wal_writer:5 + checkpoint:3 + recovery:3 + integration:3）
 **推迟功能**: Executor 层 WAL 写入集成、完整数据重放（仅返回 commit/abort 标记）
 
+### M12: INNER JOIN 多表查询 ✅
+
+**目标**: 多表查询能力（INNER JOIN）
+
+- [x] JoinNode 物理计划节点（JoinCondition + ColumnRef + OutputColumn）
+- [x] JoinExecutor 哈希连接实现（build right → scan left → output）
+- [x] NULL 键处理（SQL 语义：NULL != NULL）
+- [x] ON 子句解析（AND 组合等值条件）
+- [x] 多表链式 JOIN（Join(Join(A,B),C)）
+- [x] 列名歧义检测（AmbiguousColumn 错误）
+- [x] Value Eq + Hash trait（HashMap 键支持）
+
+**实现内容**:
+- Phase 1: 基础结构（JoinNode, JoinCondition, ColumnRef, OutputColumn）
+- Phase 2: 解析层（resolve_column_ref, extract_join_conditions, build_from_clause）
+- Phase 3: 执行层（JoinExecutor 哈希连接 + NULL 处理）
+- Phase 4: 集成（pipeline.rs JoinExecutor 创建）
+
+**完成日期**: 2026-05-22
+**验证结果**: cargo test (319 passed) ✅
+**新增文件**: join.rs, join_test.rs
+**新增测试**: 9 个（join:7 + pipeline:+2）
+**推迟功能**: LEFT/RIGHT/FULL OUTER JOIN, WHERE 隐式连接
+
 ---
 
-## 待办 - 开发路线图（M12 - M13）
-
-### M12: JOIN 多表 🟢 低优先级
-
-**目标**: 多表查询能力
-
-- [ ] INNER JOIN 实现（两表连接）
-- [ ] LEFT/RIGHT JOIN（可选）
-- [ ] 多表 WHERE 条件
-- [ ] JoinExecutor 实现
-
-**理由**: 嵌入式场景可能单表为主，但 JOIN 是 SQL 标准功能
-
----
+## 待办 - 开发路线图（M13）
 
 ### M13: 性能优化与完善
 
@@ -236,7 +247,9 @@
 | SSL/TLS | 推迟 | 嵌入式场景通常本地访问 |
 | 二进制格式（format_code=1） | 推迟 | 文本格式足够 |
 | psql 真实连接测试 | 可选 | PostgreSQL 协议层可能分离/删除 |
-| 聚合函数（COUNT/SUM/AVG） | 推迟 | M9 Phase 2 或后续里程碑 |
+| 聚合函数（COUNT/SUM/AVG） | 推迟 | 后续里程碑 |
+| LEFT/RIGHT/FULL OUTER JOIN | 推迟 | M12 仅实现 INNER JOIN |
+| WHERE 隐式连接 | 推迟 | 仅支持 ON 子句显式连接 |
 
 ---
 
@@ -248,9 +261,9 @@
 
 ## 下一步行动
 
-**立即开始**: M12（JOIN 多表支持）
-- 实现 INNER JOIN（两表连接）
-- 实现 JoinExecutor
-- 多表 WHERE 条件解析
+**立即开始**: M13（性能优化与完善）
+- io_uring 替换（可选）
+- 性能基准测试
+- 内存分配器优化
 
-**里程碑顺序**: M12 → M13
+**里程碑顺序**: M13 → 完成

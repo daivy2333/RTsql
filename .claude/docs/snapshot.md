@@ -1,37 +1,32 @@
 # 项目快照
 
-> 最后更新：2026-05-21
+> 最后更新：2026-05-22
 
 ## 当前状态
 
-- **阶段**: M11 完成（WAL 持久化）
+- **阶段**: M12 完成（INNER JOIN 多表查询）
 - **状态**: 正常
-- **当前里程碑**: M12 准备开始（JOIN 多表支持）
-- **测试**: 83 passed（lib）+ 74 passed（tests）
+- **当前里程碑**: M13 准备开始（性能优化与完善）
+- **测试**: 319 passed（全部测试）
 
 ## 项目结构
 
-新增 WAL 模块（M11）：
+新增 JOIN 模块（M12）：
 
 ```
-src/wal/
-├── mod.rs           # 模块导出
-├── record.rs        # WalRecord enum + serialize/deserialize
-├── writer.rs        # WalWriter（追加写入 + fsync + truncate）
-├── reader.rs        # WalReader（读取 + 定位）
-├── checkpoint.rs    # CheckpointManager（位点读写 + 刷脏页）
-└── recovery.rs      # RecoveryManager（启动重放）
-```
+src/executor/
+├── join.rs            # JoinExecutor（哈希连接实现）
+└── value.rs           # Value Eq + Hash trait（HashMap 键）
 
-新增 WAL 测试（M11）：
+新增 JOIN 解析（M12）：
+src/parser/
+├── planner.rs         # build_from_clause + resolve_column_ref + extract_join_conditions
+└── ast.rs             # extract_join_table_name 辅助函数
 
-```
+新增 JOIN 测试（M12）：
 tests/
-├── wal_record_test.rs       (8 tests)
-├── wal_writer_test.rs       (5 tests)
-├── checkpoint_test.rs       (3 tests)
-├── recovery_test.rs         (3 tests)
-└── wal_integration_test.rs  (3 tests)
+├── join_test.rs       # JoinExecutor 单元测试（7 tests）
+└── pipeline_test.rs   # JOIN 集成测试（+2 tests）
 ```
 
 ## 项目结构
@@ -73,9 +68,9 @@ RTsql/
 │           ├── sync_loader.rs
 │           └── index_manager.rs # IndexManager（含 scan_all）
 │   ├── executor/
-│   │   ├── mod.rs          # 模块导出 [M9 扩展：predicate/filter/create_table/drop_table/sort/limit]
-│   │   ├── value.rs        # Value [M9 扩展：Float/Bool + 比较方法]
-│   │   ├── plan.rs         # PhysicalPlan [M9 扩展：CreateTable/DropTable/Filter/Sort/Limit + ColumnDef/OrderByColumn]
+│   │   ├── mod.rs          # 模块导出 [M9 扩展：predicate/filter/create_table/drop_table/sort/limit + M12: join]
+│   │   ├── value.rs        # Value [M9 扩展：Float/Bool + 比较方法 + M12: Eq+Hash]
+│   │   ├── plan.rs         # PhysicalPlan [M9 扩展：CreateTable/DropTable/Filter/Sort/Limit + M12: Join/JoinCondition/ColumnRef/OutputColumn]
 │   │   ├── result.rs       # ExecResult（Row/AffectedRows）
 │   │   ├── executor_trait.rs
 │   │   ├── scan.rs         # ScanExecutor（全表扫描）[M7 重写]
@@ -87,6 +82,7 @@ RTsql/
 │   │   ├── filter.rs       # M9 Phase 1 新增：FilterExecutor（WHERE 过滤）
 │   │   ├── sort.rs         # M9 Phase 2 新增：SortExecutor（ORDER BY 排序）
 │   │   ├── limit.rs        # M9 Phase 2 新增：LimitExecutor（LIMIT/OFFSET 分页）
+│   │   ├── join.rs         # M12 新增：JoinExecutor（INNER JOIN 哈希连接）
 │   │   ├── create_table.rs # M9 Phase 1 新增：CreateTableExecutor
 │   │   └── drop_table.rs   # M9 Phase 1 新增：DropTableExecutor
 │   ├── transaction/
@@ -99,10 +95,10 @@ RTsql/
 │   │   └── manager.rs      # TransactionManager
 │   ├── parser/
 │   │   ├── mod.rs
-│   │   ├── error.rs        # PlanError [M9 扩展]
+│   │   ├── error.rs        # PlanError [M9 扩展 + M12: AmbiguousColumn/TableNotFound/MissingOnClause/UnsupportedJoinType]
 │   │   ├── value.rs        # Value 转换函数 [M9 扩展：Float 解析]
-│   │   ├── ast.rs          # AST 辅助函数
-│   │   └── planner.rs      # PlanBuilder [M9 扩展：DDL/WHERE/ORDER BY/LIMIT 解析]
+│   │   ├── ast.rs          # AST 辅助函数 [M12 扩展：extract_join_table_name]
+│   │   └── planner.rs      # PlanBuilder [M9 扩展：DDL/WHERE/ORDER BY/LIMIT 解析 + M12: build_from_clause/resolve_column_ref]
 │   └── network/
 │       ├── mod.rs
 │       ├── error.rs
@@ -119,7 +115,7 @@ RTsql/
 │   ├── sync_loader_test.rs   (2)
 │   ├── concurrent_test.rs    (4)
 │   ├── parser_test.rs        (6)
-│   ├── planner_test.rs       (25) [M9 扩展：DDL + WHERE + ORDER BY + LIMIT 解析]
+│   ├── planner_test.rs       (29) [M9 扩展：DDL + WHERE + ORDER BY + LIMIT + M12: JOIN 解析]
 │   ├── executor_test.rs      (24) [M7 更新 + M9 扩展：FilterExecutor]
 │   ├── plan_exec_test.rs     (4)  [M7 更新]
 │   ├── table_manager_test.rs (6)  [M7 新增]
@@ -131,8 +127,9 @@ RTsql/
 │   ├── predicate_test.rs     (12) [M9 Phase 1 新增]
 │   ├── sort_test.rs          (6)  [M9 Phase 2 新增]
 │   ├── limit_test.rs         (5)  [M9 Phase 2 新增]
-│   ├── pipeline_test.rs      (12) [M9 新增]
+│   ├── pipeline_test.rs      (14) [M9 新增 + M12: JOIN 集成测试]
 │   ├── value_test.rs         (19) [M9 Phase 1 新增]
+│   ├── join_test.rs          (7)  [M12 新增：JoinExecutor 单元测试]
 │   └── e2e_test.rs          (7)  [M7 新增]
 └── .claude/
     └── docs/
@@ -145,7 +142,7 @@ RTsql/
         └── tasks.md
 ```
 
-**注**: M9 Phase 2 完成（ORDER BY + LIMIT/OFFSET），256 个测试全部通过。新增 24 个测试（sort:6 + limit:5 + planner:+5 + pipeline:+3 + sort_unit:5）。
+**注**: M12 完成（INNER JOIN 哈希连接），319 个测试全部通过。新增 9 个测试（join:7 + pipeline:+2）。
 
 ## 技术栈
 
@@ -164,50 +161,52 @@ RTsql/
 ## Git 状态
 
 - **当前分支**: master
-- **最近提交**（M11 WAL 持久化）:
-  - 388173b test(M11): add WAL E2E integration tests
-  - 23a0d7c feat(M11): add CheckpointManager with site read/write
-  - 0b826d2 feat(M11): add WalWriter with async write/fsync/truncate
-  - 527d915 feat(M11): add WalRecord enum + serialize/deserialize
+- **最近提交**（M12 INNER JOIN）:
+  - 2242955 style: apply rustfmt to various files
+  - 1a5fa20 test(M12): add JOIN pipeline integration tests
+  - 7a8786a feat(M12): integrate JoinExecutor into pipeline
+  - 097d0e8 test(M12): add JoinExecutor unit tests
+  - d89c3dc fix(M12): handle NULL in join keys per SQL semantics
 - **未提交更改**: 无
 
-**M11 总结**: WAL 持久化基础实现完成（WalRecord + WalWriter + WalReader + CheckpointManager + RecoveryManager + Database 集成），22 WAL 相关测试通过。
+**M12 总结**: INNER JOIN 哈希连接实现完成（JoinNode + JoinExecutor + ON 子句解析 + NULL 处理 + 多表链式 JOIN），9 相关测试通过。
 
 ## 关键文件
 
 | 文件 | 作用 | 状态 |
 |------|------|------|
-| src/wal/record.rs | WalRecord enum + serialize/deserialize | ✅ M11 新增 |
-| src/wal/writer.rs | WalWriter（追加写入 + fsync + truncate） | ✅ M11 新增 |
-| src/wal/reader.rs | WalReader（读取 + 定位） | ✅ M11 新增 |
-| src/wal/checkpoint.rs | CheckpointManager（位点读写 + 刷脏页） | ✅ M11 新增 |
-| src/wal/recovery.rs | RecoveryManager（启动重放 commit/abort 标记） | ✅ M11 新增 |
-| src/database.rs | Database 集成 wal_writer + RecoveryManager | ✅ M11 修改 |
-| src/storage/error.rs | StorageError 添加 WalError 变体 | ✅ M11 修改 |
+| src/executor/join.rs | JoinExecutor 哈希连接实现（NULL 处理） | ✅ M12 新增 |
+| src/executor/plan.rs | JoinNode + JoinCondition + ColumnRef + OutputColumn | ✅ M12 扩展 |
+| src/executor/value.rs | Value Eq + Hash trait（HashMap 键支持） | ✅ M12 扩展 |
+| src/parser/planner.rs | build_from_clause + resolve_column_ref + extract_join_conditions | ✅ M12 扩展 |
+| src/parser/error.rs | AmbiguousColumn/TableNotFound/MissingOnClause/UnsupportedJoinType | ✅ M12 扩展 |
+| src/parser/ast.rs | extract_join_table_name 辅助函数 | ✅ M12 扩展 |
+| src/pipeline.rs | JoinExecutor 创建 + extract_column_indices | ✅ M12 扩展 |
+| tests/join_test.rs | JoinExecutor 单元测试（7 tests） | ✅ M12 新增 |
 
 ## 最近修改
 
 | 时间 | 文件 | 改动类型 |
 |------|------|----------|
-| 2026-05-21 | src/wal/record.rs | M11 新增 WalRecord enum + serialize/deserialize |
-| 2026-05-21 | src/wal/writer.rs | M11 新增 WalWriter（async write + fsync + truncate） |
-| 2026-05-21 | src/wal/reader.rs | M11 新增 WalReader（read_next + seek_to） |
-| 2026-05-21 | src/wal/checkpoint.rs | M11 新增 CheckpointManager（checkpoint flow） |
-| 2026-05-21 | src/wal/recovery.rs | M11 新增 RecoveryManager（recover + needs_recovery） |
-| 2026-05-21 | src/database.rs | M11 集成 wal_writer + RecoveryManager::recover |
-| 2026-05-21 | tests/wal_*.rs | M11 新增 22 WAL 测试 |
+| 2026-05-22 | src/executor/join.rs | M12 新增 JoinExecutor（哈希连接 + NULL 处理） |
+| 2026-05-22 | src/executor/plan.rs | M12 新增 JoinNode/JoinCondition/ColumnRef/OutputColumn |
+| 2026-05-22 | src/executor/value.rs | M12 添加 Value Eq + Hash trait |
+| 2026-05-22 | src/parser/planner.rs | M12 新增 build_from_clause + ON 条件解析 |
+| 2026-05-22 | src/parser/error.rs | M12 新增 4 个 JOIN 相关错误类型 |
+| 2026-05-22 | src/pipeline.rs | M12 JoinExecutor 创建逻辑 |
+| 2026-05-22 | tests/join_test.rs | M12 新增 7 个 JoinExecutor 测试 |
 
 ## 下一步行动
 
-**优先级**: M12（JOIN 多表支持）
+**优先级**: M13（性能优化与完善）
 
 **里程碑路线图**:
-1. **M12** (🟢 中优先级): JOIN 多表支持
-2. **M13**: 性能优化与完善
+1. **M13**: 性能优化与完善
 
 **当前阻塞**: 无
 
 **注意事项**:
-- M11 WAL 基础实现完成（WalRecord + WalWriter + WalReader + CheckpointManager + RecoveryManager）
-- Executor 层 WAL 写入集成推迟到后续（当前仅在 Database 层初始化 WAL）
-- RecoveryManager 仅返回 commit/abort 标记，实际数据重放推迟
+- M12 INNER JOIN 基础实现完成（仅 INNER JOIN，ON 子句 + AND 组合，哈希连接）
+- LEFT/RIGHT/FULL OUTER JOIN 推迟
+- NULL 处理符合 SQL 语义（NULL != NULL）
+- 多表链式 JOIN 支持（Join(Join(A,B),C)）
