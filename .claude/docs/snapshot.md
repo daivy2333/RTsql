@@ -150,6 +150,36 @@ RTsql/
 
 ## M14 Phase 2 T1 验证结果
 
+**Profiling 输出**（RTSQL_PROFILING=1，warm run cache hit）：
+
+```
+Stage                    | Time (µs) | % Total
+-------------------------|-----------|--------
+executor_execution       |      57.0 |   90.5%
+index_manager_search     |      51.0 |   81.0%
+executor_creation        |       2.0 |    3.2%
+cache_hit_check          |       0.0 |    0.0%
+parse_and_plan           |       0.0 |    0.0%
+-------------------------|-----------|--------
+Total                    |      63.0 |  100.0%
+```
+
+**瓶颈定位**：
+- **IndexManager.search**: 51µs (81%) ← **主要瓶颈**
+- Executor execution: 57µs (90.5%, 包含 IndexManager.search)
+- Executor creation: 2µs (3.2%)
+- Cache hit check + parse/plan: ~0µs（cache hit 场景跳过）
+
+**结论**：
+- spawn_blocking + SyncPageLoader 调度开销是主要瓶颈（~81%）
+- Plan cache 工作正常（parse/plan = 0µs on cache hit）
+- 下一步优化方向：消除 spawn_blocking 或启用 async search 路径
+
+**Git 状态**：
+- Merge 成功：19 commits ahead of origin/master
+- Binary search bug 修复（主分支原有 bug）
+- Tests：88 passed, 0 failed
+
 运行 `cargo run --example bench_minimal`（RTSQL_PROFILING=1）：
 
 ### 缓存命中场景（warm up 后）

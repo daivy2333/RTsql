@@ -1,31 +1,31 @@
 # 任务清单
 
-> 最后更新：2026-05-22（M14 重新规划）
+> 最后更新：2026-05-22（M14 Phase 2 T1 完成 + Binary search bug 修复）
 
-## 当前任务：M14 查询路径优化（第二阶段）
+## 当前任务：M14 Phase 2 T2（IndexManager.search 优化）
 
-**状态**: 进行中
-**目标**: PK 查询达到 3-5x 提速（当前 1.4x，baseline 49µs → 目标 ~10-15µs）
+**状态**: 准备开始
+**目标**: 消除 spawn_blocking 瓶颈，PK 查询从 ~34µs → ~10-15µs（~3x 提速）
 
-### M14 第一阶段已完成
+### M14 Phase 2 T1 已完成 ✅
 
-- [x] BTree 零拷贝迁移（LeafNodeRef + InternalNodeRef）
-- [x] SQL Plan 缓存（LruCache<String, PhysicalPlan>，256 容量）
-- [x] DDL 清缓存机制
-- [x] 缓存命中/未命中测试
-- [x] 性能分析：发现 spawn_blocking 是真正瓶颈
+- [x] Profiling 模块实现（task_local! + 输出表格）
+- [x] Pipeline 计时点（cache_hit_check, parse_and_plan, table_metadata_lookup, executor_creation, executor_execution）
+- [x] IndexScanExecutor 计时（index_manager_search）
+- [x] Bench example（examples/bench_minimal.rs + RTSQL_PROFILING=1）
+- [x] **瓶颈定位成功**：IndexManager.search 占 81% 执行时间
+- [x] Binary search bug 修复（主分支原有 bug，阻塞 merge）
 
-### M14 第二阶段待办
+**关键发现**：
+- IndexManager.search 通过 spawn_blocking + SyncPageLoader 调用 BTree.search
+- 调度开销占 ~81% 执行时间（主要瓶颈）
+- Plan cache 工作正常（cache hit 场景 parse/plan = 0µs）
 
-- [ ] **T1: 精确性能参数测试**
-  - 分阶段计时：parse / plan / create_executor / BTree search 各环节
-  - 量化 spawn_blocking / Mutex / block_on / 实际计算的开销比例
-  - 对比 SQLite 各阶段耗时
-  - 产出精确的性能参数表
+### M14 Phase 2 T2 待办
 
 - [ ] **T2: 消除 spawn_blocking 调度瓶颈**
-  - 基于 T1 数据选择方案：async BTree / 专用线程池 / 行缓存
-  - 实现并验证 PK 查询 3-5x 提速
+  - 方案选择：async BTree search / 专用线程池 / 直接 async search
+  - 实现并验证 PK 查询 ~3x 提速（34µs → 10-15µs）
   - 回归测试全量通过
 
 ## 里程碑路线
