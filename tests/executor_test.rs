@@ -2,7 +2,7 @@
 
 use rtsql::executor::{
     ColumnDef, CreateTableExecutor, DeleteExecutor, ExecResult, Executor, IndexScanExecutor,
-    InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value,
+    IndexScanAllExecutor, InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value,
 };
 use rtsql::storage::{
     data::TableManager, page_format::ColumnType, read_tuple_from_data_page, BufferPool,
@@ -1068,6 +1068,129 @@ async fn test_filter_executor_empty_result() -> Result<()> {
     }
 
     assert_eq!(count, 0);
+
+    Ok(())
+}
+
+// =============================================================================
+// IndexScanAllExecutor Tests (M18 Phase2)
+// =============================================================================
+
+#[tokio::test]
+async fn test_index_scan_all_executor_basic() -> Result<()> {
+    use rtsql::storage::page_format::RowId;
+    use rtsql::storage::write_tuple_to_data_page;
+    use rtsql::transaction::VersionHeader;
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+
+    let table_meta = table_mgr.get_table("test").await?;
+
+    // Write data pages and insert duplicate keys directly
+    let key = 1i64.to_be_bytes();
+    let version_header = VersionHeader::new(0, None);
+    let tuple_bytes = vec![0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]; // Int(1) serialized
+
+    let row_id1 = write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
+    let row_id2 = write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
+    let row_id3 = write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
+
+    table_meta.index_manager.insert(&key, row_id1).await?;
+    table_meta.index_manager.insert(&key, row_id2).await?;
+    table_meta.index_manager.insert(&key, row_id3).await?;
+
+    // Search for all rows with key = 1
+    let mut executor = IndexScanAllExecutor::new(table_meta, buffer_pool, key.to_vec(), None);
+
+    let mut row_count = 0;
+    while let Some(result) = executor.next().await? {
+        match result {
+            ExecResult::Row(_) => {
+                row_count += 1;
+            }
+            _ => panic!("Expected ExecResult::Row"),
+        }
+    }
+    assert_eq!(row_count, 3);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_index_scan_all_executor_empty() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+
+    let table_meta = table_mgr.get_table("test").await?;
+
+    // Search for non-existent key
+    let key = 999i64.to_be_bytes().to_vec();
+    let mut executor = IndexScanAllExecutor::new(table_meta, buffer_pool, key, None);
+
+    let result = executor.next().await?;
+    assert_eq!(result, None);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_index_scan_all_executor_single() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+
+    let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
+
+    // Insert 1 row (unique key scenario, but search_all still works)
+    let key = 42i64.to_be_bytes().to_vec();
+    let values = vec![vec![Value::Int(42)]];
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager,
+        values,
+        0,
+    );
+    insert_executor.next().await?;
+
+    // Search for all rows with key = 42
+    let mut executor = IndexScanAllExecutor::new(table_meta, buffer_pool, key.clone(), None);
+
+    let mut row_count = 0;
+    while let Some(result) = executor.next().await? {
+        match result {
+            ExecResult::Row(values) => {
+                assert_eq!(values.len(), 1);
+                assert_eq!(values[0], Value::Int(42));
+                row_count += 1;
+            }
+            _ => panic!("Expected ExecResult::Row"),
+        }
+    }
+    assert_eq!(row_count, 1);
+
+    // Verify no more results
+    let result = executor.next().await?;
+    assert_eq!(result, None);
 
     Ok(())
 }
