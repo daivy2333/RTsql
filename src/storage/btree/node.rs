@@ -767,15 +767,21 @@ impl<'a> InternalNodeRef<'a> {
         for i in 0..count {
             if let Some(current_key) = self.get_key(i) {
                 if *key < current_key {
+                    // key < key_i: go to left subtree of separator i
                     if i == 0 {
                         return Some(self.leftmost_child());
                     }
+                    // key_{i-1} <= key < key_i: go to child_{i-1}
+                    return self.get_child_page_id(i - 1);
+                }
+                // key == key_i: go to right subtree = child_i
+                if *key == current_key {
                     return self.get_child_page_id(i);
                 }
             }
         }
 
-        // key >= all separators: go to last child (child at last slot)
+        // key >= all separators: go to last child
         if count > 0 {
             self.get_child_page_id(count - 1)
         } else {
