@@ -1,5 +1,5 @@
 use crate::database::Database;
-use crate::executor::{CorrelatedParam, Executor, JoinCondition, OutputColumn, PhysicalPlan, Value};
+use crate::executor::{CorrelatedParam, Executor, JoinCondition, OutputColumn, PhysicalPlan};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,19 +16,4 @@ pub struct JoinRelatedConfig {
     pub right_column_indices: HashMap<String, usize>,
     pub right_plan: Option<PhysicalPlan>,
     pub database: Option<Arc<Database>>,
-}
-
-impl JoinRelatedConfig {
-    /// Build hash key from right-table row using join conditions
-    pub fn build_right_key(&self, right_row: &[Value]) -> Option<Vec<Value>> {
-        let key: Vec<Value> = self
-            .conditions
-            .iter()
-            .map(|cond| {
-                let right_idx = self.right_column_indices.get(&cond.right_column)?;
-                Some(right_row[*right_idx].clone())
-            })
-            .collect::<Option<Vec<Value>>>()?;
-        Some(key)
-    }
 }
