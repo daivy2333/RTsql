@@ -6,7 +6,7 @@
 //! - 反序列化边界检查
 //! - 错误处理
 
-use rtsql::wal::WalRecord;
+use rtsql::wal::{WalError, WalRecord};
 
 #[test]
 fn test_insert_record_serialize_deserialize() {
@@ -124,4 +124,101 @@ fn test_invalid_record_type_error() {
     let result = WalRecord::deserialize(&buf);
 
     assert!(result.is_err());
+}
+
+#[test]
+fn test_begin_txn_roundtrip() {
+    let record = WalRecord::BeginTxn { tx_id: 42 };
+    let serialized = record.serialize();
+    let (deserialized, consumed) = WalRecord::deserialize(&serialized).unwrap();
+    assert_eq!(consumed, serialized.len());
+    assert_eq!(record, deserialized);
+}
+
+#[test]
+fn test_commit_txn_roundtrip() {
+    let record = WalRecord::CommitTxn {
+        tx_id: 100,
+        timestamp: 99999,
+    };
+    let serialized = record.serialize();
+    let (deserialized, consumed) = WalRecord::deserialize(&serialized).unwrap();
+    assert_eq!(consumed, serialized.len());
+    assert_eq!(record, deserialized);
+}
+
+#[test]
+fn test_abort_txn_roundtrip() {
+    let record = WalRecord::AbortTxn { tx_id: 77 };
+    let serialized = record.serialize();
+    let (deserialized, consumed) = WalRecord::deserialize(&serialized).unwrap();
+    assert_eq!(consumed, serialized.len());
+    assert_eq!(record, deserialized);
+}
+
+#[test]
+fn test_lsn_crc_roundtrip() {
+    let record = WalRecord::Insert {
+        tx_id: 55,
+        table_name: "test_table".to_string(),
+        row_id: rtsql::storage::RowId::new(3, 7),
+        tuple_data: vec![10, 20, 30],
+    };
+    let lsn: u64 = 12345;
+    let serialized = record.serialize_with_lsn(lsn);
+    let (deserialized_lsn, deserialized_record, consumed) =
+        WalRecord::deserialize_with_lsn(&serialized).unwrap();
+    assert_eq!(lsn, deserialized_lsn);
+    assert_eq!(record, deserialized_record);
+    assert_eq!(consumed, serialized.len());
+}
+
+#[test]
+fn test_crc_mismatch_detected() {
+    let record = WalRecord::CommitTxn {
+        tx_id: 1,
+        timestamp: 2,
+    };
+    let lsn: u64 = 100;
+    let mut serialized = record.serialize_with_lsn(lsn);
+
+    // Tamper with a byte in the body area (after header, before CRC)
+    // Format: [lsn:8B][type:1B][len:4B][body:variable][crc:4B]
+    // Tamper the first body byte
+    let body_start = 8 + 1 + 4; // lsn + type + len
+    if serialized.len() > body_start + 4 {
+        serialized[body_start] ^= 0xFF;
+    }
+
+    let result = WalRecord::deserialize_with_lsn(&serialized);
+    assert!(matches!(result, Err(WalError::ChecksumMismatch)));
+}
+
+#[test]
+fn test_tx_id_method() {
+    let insert = WalRecord::Insert {
+        tx_id: 10,
+        table_name: "t".to_string(),
+        row_id: rtsql::storage::RowId::new(1, 1),
+        tuple_data: vec![],
+    };
+    assert_eq!(insert.tx_id(), 10);
+
+    let begin = WalRecord::BeginTxn { tx_id: 20 };
+    assert_eq!(begin.tx_id(), 20);
+
+    let commit_txn = WalRecord::CommitTxn {
+        tx_id: 30,
+        timestamp: 0,
+    };
+    assert_eq!(commit_txn.tx_id(), 30);
+
+    let abort_txn = WalRecord::AbortTxn { tx_id: 40 };
+    assert_eq!(abort_txn.tx_id(), 40);
+
+    let checkpoint = WalRecord::Checkpoint {
+        lsn: 0,
+        timestamp: 0,
+    };
+    assert_eq!(checkpoint.tx_id(), 0);
 }

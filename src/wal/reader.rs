@@ -1,8 +1,9 @@
 //! WAL 读取器
 //!
 //! 负责从磁盘读取 WAL 记录
+//! 支持旧格式 (type+len+data) 和新格式 (lsn+type+len+body+crc32)
 
-use super::record::{WalError, WalRecord};
+use super::record::{WalError, WalRecord, WalRecordType};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -25,37 +26,76 @@ impl WalReader {
 
     /// 读取下一条 WAL 记录
     ///
+    /// 自动检测旧格式和新格式（带 LSN + CRC32）
     /// 返回 Ok(None) 表示已到达文件末尾
     pub fn read_next(&mut self) -> Result<Option<WalRecord>, WalError> {
-        let mut header_buf = [0u8; 5];
+        // 先尝试读取足够多的字节来判断格式
+        let mut peek_buf = [0u8; 13]; // 至少 13 字节: lsn(8) + type(1) + len(4)
         let bytes_read = self
             .file
-            .read(&mut header_buf)
+            .read(&mut peek_buf)
             .map_err(|e| WalError::IoError(e.to_string()))?;
 
-        if bytes_read < 5 {
-            // 不足 5 字节，说明到达文件末尾或文件损坏
-            if bytes_read == 0 {
-                return Ok(None); // 正常结束
-            } else {
-                return Err(WalError::IncompleteRecord);
-            }
+        if bytes_read == 0 {
+            return Ok(None); // 正常结束
         }
 
-        // 解析长度
-        let len = u32::from_le_bytes([header_buf[1], header_buf[2], header_buf[3], header_buf[4]])
-            as usize;
+        if bytes_read < 5 {
+            return Err(WalError::IncompleteRecord);
+        }
 
-        // 读取完整记录
-        let mut record_buf = vec![0u8; 5 + len];
-        record_buf[..5].copy_from_slice(&header_buf);
+        // 判断格式：检查是否为新格式
+        // 新格式: byte[8] 是有效的 WalRecordType
+        // 旧格式: byte[0] 是有效的 WalRecordType
+        let is_new_format = bytes_read >= 9
+            && WalRecordType::try_from(peek_buf[8]).is_ok()
+            && WalRecordType::try_from(peek_buf[0]).is_err();
 
-        self.file
-            .read_exact(&mut record_buf[5..])
-            .map_err(|e| WalError::IoError(e.to_string()))?;
+        if is_new_format {
+            // 新格式: [lsn:8B][type:1B][len:4B][body:variable][crc:4B]
+            if bytes_read < 13 {
+                return Err(WalError::IncompleteRecord);
+            }
 
-        let (record, _) = WalRecord::deserialize(&record_buf)?;
-        Ok(Some(record))
+            let len = u32::from_le_bytes([
+                peek_buf[9],
+                peek_buf[10],
+                peek_buf[11],
+                peek_buf[12],
+            ]) as usize;
+
+            let total_len = 8 + 1 + 4 + len + 4;
+            let mut record_buf = vec![0u8; total_len];
+            record_buf[..bytes_read].copy_from_slice(&peek_buf[..bytes_read]);
+
+            self.file
+                .read_exact(&mut record_buf[bytes_read..])
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+
+            let (_lsn, record, _consumed) = WalRecord::deserialize_with_lsn(&record_buf)?;
+            Ok(Some(record))
+        } else {
+            // 旧格式: [type:1B][len:4B][data:variable]
+            let len = u32::from_le_bytes([
+                peek_buf[1],
+                peek_buf[2],
+                peek_buf[3],
+                peek_buf[4],
+            ]) as usize;
+
+            let total_len = 5 + len;
+            let mut record_buf = vec![0u8; total_len];
+            record_buf[..bytes_read.min(total_len)].copy_from_slice(&peek_buf[..bytes_read.min(total_len)]);
+
+            if total_len > bytes_read {
+                self.file
+                    .read_exact(&mut record_buf[bytes_read..])
+                    .map_err(|e| WalError::IoError(e.to_string()))?;
+            }
+
+            let (record, _) = WalRecord::deserialize(&record_buf)?;
+            Ok(Some(record))
+        }
     }
 
     /// 读取所有 WAL 记录
