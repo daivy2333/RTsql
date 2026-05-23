@@ -6,7 +6,9 @@
 //! - Correlated subquery: correlated_params non-empty, re-materializes right per left row (placeholder)
 
 use crate::database::Database;
-use crate::executor::{CorrelatedParam, ExecResult, Executor, JoinCondition, OutputColumn, PhysicalPlan, Value};
+use crate::executor::{
+    CorrelatedParam, ExecResult, Executor, JoinCondition, OutputColumn, PhysicalPlan, Value,
+};
 use crate::storage::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -197,35 +199,25 @@ impl Executor for AntiJoinExecutor {
                                     if let (Some(ref right_plan), Some(ref database)) =
                                         (&self.right_plan, &self.database)
                                     {
-                                        let param_values =
-                                            self.extract_param_values(&left_row);
+                                        let param_values = self.extract_param_values(&left_row);
                                         let plan = right_plan.clone();
                                         crate::executor::inject_correlated_values(
-                                            &plan, &param_values,
+                                            &plan,
+                                            &param_values,
                                         );
                                         let mut right_exec =
                                             crate::pipeline::create_executor_from_plan(
                                                 plan, database,
                                             )
                                             .await?;
-                                        let mut hashmap: HashMap<
-                                            Vec<Value>,
-                                            Vec<Vec<Value>>,
-                                        > = HashMap::new();
+                                        let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
+                                            HashMap::new();
                                         let mut has_rows = false;
-                                        while let Some(result) =
-                                            right_exec.next().await?
-                                        {
-                                            if let ExecResult::Row(row) = result
-                                            {
+                                        while let Some(result) = right_exec.next().await? {
+                                            if let ExecResult::Row(row) = result {
                                                 has_rows = true;
-                                                if let Some(hash_key) =
-                                                    self.build_right_key(&row)
-                                                {
-                                                    hashmap
-                                                        .entry(hash_key)
-                                                        .or_default()
-                                                        .push(row);
+                                                if let Some(hash_key) = self.build_right_key(&row) {
+                                                    hashmap.entry(hash_key).or_default().push(row);
                                                 }
                                             }
                                         }

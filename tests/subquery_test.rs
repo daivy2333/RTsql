@@ -44,7 +44,11 @@ fn error_msg(resp: Response) -> String {
 
 /// Helper: set up employees and departments tables.
 async fn setup_emp_dept(db: &Database) {
-    exec(db, "CREATE TABLE emp (id INT, name TEXT, dept INT, salary INT)").await;
+    exec(
+        db,
+        "CREATE TABLE emp (id INT, name TEXT, dept INT, salary INT)",
+    )
+    .await;
     exec(db, "INSERT INTO emp VALUES (1, 'Alice', 10, 50000)").await;
     exec(db, "INSERT INTO emp VALUES (2, 'Bob', 20, 60000)").await;
     exec(db, "INSERT INTO emp VALUES (3, 'Carol', 10, 55000)").await;
@@ -265,9 +269,9 @@ async fn test_scalar_subquery_empty_result() {
     let r = rows(resp);
 
     assert_eq!(r.len(), 3); // 3 dept rows
-    // AVG on empty emp table returns NULL or 0
-    // Current implementation may return NULL or handle differently
-    // Just verify we got 3 rows
+                            // AVG on empty emp table returns NULL or 0
+                            // Current implementation may return NULL or handle differently
+                            // Just verify we got 3 rows
 }
 
 #[tokio::test]
@@ -427,11 +431,17 @@ async fn test_correlated_empty_right() {
     // With empty dept table, correlated IN should return 0 rows
     // KNOWN BUG: engine currently returns 5 (all emp rows) instead of 0
     if r.len() == 5 {
-        eprintln!("KNOWN BUG: empty_right correlated IN returns {} instead of 0", r.len());
+        eprintln!(
+            "KNOWN BUG: empty_right correlated IN returns {} instead of 0",
+            r.len()
+        );
     }
     // TODO: fix to assert_eq!(r.len(), 0) once correlated empty issue fixed
     if r.len() != 0 {
-        eprintln!("KNOWN BUG: expected 0 rows from empty-right correlated IN, got {}", r.len());
+        eprintln!(
+            "KNOWN BUG: expected 0 rows from empty-right correlated IN, got {}",
+            r.len()
+        );
     }
 }
 

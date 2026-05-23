@@ -21,7 +21,9 @@ fn bench_insert(c: &mut Criterion) {
                     let id = i * 1000 + j;
                     db.execute_sql(&format!(
                         "INSERT INTO bench VALUES ({}, 'user_{}', {})",
-                        id, id, id * 10
+                        id,
+                        id,
+                        id * 10
                     ))
                     .await;
                 }
@@ -76,7 +78,8 @@ fn bench_update(c: &mut Criterion) {
                 for i in 0..50 {
                     db.execute_sql(&format!(
                         "UPDATE bench SET value = {} WHERE id = {}",
-                        i * 20, i
+                        i * 20,
+                        i
                     ))
                     .await;
                 }

@@ -7,8 +7,8 @@
 //! For correlated subqueries, the plan is cloned, injected with outer values, and
 //! re-executed per outer row (no caching).
 
-use crate::executor::{CorrelatedParam, ExecResult, Executor, PhysicalPlan, Value};
 use crate::database::Database;
+use crate::executor::{CorrelatedParam, ExecResult, Executor, PhysicalPlan, Value};
 use crate::storage::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,11 +56,9 @@ impl SubqueryEvalExecutor {
     /// Returns Null if the subquery produces no rows.
     /// Returns an error if the subquery returns more than one row.
     async fn eval_subquery(&mut self) -> Result<Value> {
-        let mut executor = crate::pipeline::create_executor_from_plan(
-            self.subquery_plan.clone(),
-            &self.database,
-        )
-        .await?;
+        let mut executor =
+            crate::pipeline::create_executor_from_plan(self.subquery_plan.clone(), &self.database)
+                .await?;
 
         let mut result_value: Option<Value> = None;
         let mut row_count = 0;
@@ -96,7 +94,10 @@ impl SubqueryEvalExecutor {
                     .get(&cp.outer_column.to_lowercase())
                     .copied()
                     .unwrap_or(0);
-                (cp.param_name.clone(), row.get(idx).cloned().unwrap_or(Value::Null))
+                (
+                    cp.param_name.clone(),
+                    row.get(idx).cloned().unwrap_or(Value::Null),
+                )
             })
             .collect()
     }
@@ -114,11 +115,9 @@ impl Executor for SubqueryEvalExecutor {
                         let cloned_plan = self.subquery_plan.clone();
                         let param_values = self.extract_param_values(&row);
                         crate::executor::inject_correlated_values(&cloned_plan, &param_values);
-                        let mut executor = crate::pipeline::create_executor_from_plan(
-                            cloned_plan,
-                            &self.database,
-                        )
-                        .await?;
+                        let mut executor =
+                            crate::pipeline::create_executor_from_plan(cloned_plan, &self.database)
+                                .await?;
                         let mut result_value: Option<Value> = None;
                         let mut row_count = 0;
                         while let Some(result) = executor.next().await? {

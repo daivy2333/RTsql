@@ -70,7 +70,7 @@ pub async fn read_tuple_from_data_page(
     let guard = buffer_pool.get_page(page_id).await?;
 
     let data_guard = guard.page_data();
-    let slotted = SlottedPageRef::new(&*data_guard);
+    let slotted = SlottedPageRef::new(&data_guard);
 
     let slot = slotted
         .get_slot(row_id.slot_id as usize)

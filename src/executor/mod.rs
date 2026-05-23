@@ -28,6 +28,7 @@ mod value;
 
 pub use aggregate::{AggregateExecutor, AggregateFunc, AggregateState};
 pub use anti_join::AntiJoinExecutor;
+pub use correlated::inject_correlated_values;
 pub use create_table::CreateTableExecutor;
 pub use delete::DeleteExecutor;
 pub use derived_scan::DerivedScanExecutor;
@@ -39,7 +40,6 @@ pub use index_scan::IndexScanExecutor;
 pub use insert::InsertExecutor;
 pub use join::JoinExecutor;
 pub use limit::LimitExecutor;
-pub use correlated::inject_correlated_values;
 pub use plan::{
     AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, CorrelatedParam,
     CreateTableNode, DeleteNode, DerivedScanNode, DropTableNode, FilterNode, HavingNode,

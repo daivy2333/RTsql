@@ -14,7 +14,7 @@ fn setup_builder() -> PlanBuilder {
 fn test_select_by_pk() {
     let sql = "SELECT id, name FROM users WHERE id = 1";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -30,7 +30,7 @@ fn test_select_by_pk() {
 fn test_select_scan() {
     let sql = "SELECT id, name FROM users";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -46,7 +46,7 @@ fn test_select_scan() {
 fn test_insert() {
     let sql = "INSERT INTO users (id, name) VALUES (1, 'Alice')";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -64,7 +64,7 @@ fn test_insert() {
 fn test_update() {
     let sql = "UPDATE users SET name = 'Bob' WHERE id = 1";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -80,7 +80,7 @@ fn test_update() {
 fn test_delete() {
     let sql = "DELETE FROM users WHERE id = 1";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -95,7 +95,7 @@ fn test_delete() {
 fn test_table_not_found() {
     let sql = "SELECT id FROM nonexistent";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let result = builder.build_plan(&stmts[0]);
 
     assert!(result.is_err());
@@ -106,7 +106,7 @@ fn test_invalid_where_not_pk() {
     // Non-PK WHERE clause should generate Filter plan
     let sql = "SELECT id, name FROM users WHERE name = 'Alice'";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -122,7 +122,7 @@ fn test_unsupported_statement() {
     // ALTER TABLE is not supported
     let sql = "ALTER TABLE test ADD COLUMN name VARCHAR(100)";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let result = builder.build_plan(&stmts[0]);
 
     assert!(result.is_err());
@@ -136,7 +136,7 @@ fn test_unsupported_statement() {
 fn test_build_create_table() {
     let sql = "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)";
     let stmts = parse_sql(sql).unwrap();
-    let builder = PlanBuilder::new();
+    let mut builder = PlanBuilder::new();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -167,7 +167,7 @@ fn test_build_create_table() {
 fn test_build_create_table_with_defaults() {
     let sql = "CREATE TABLE items (id INT, name TEXT DEFAULT 'unnamed', active BOOL)";
     let stmts = parse_sql(sql).unwrap();
-    let builder = PlanBuilder::new();
+    let mut builder = PlanBuilder::new();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -195,7 +195,7 @@ fn test_build_create_table_with_defaults() {
 fn test_build_create_table_various_types() {
     let sql = "CREATE TABLE test (a INT, b BIGINT, c FLOAT, d DOUBLE, e REAL, f TEXT, g VARCHAR(50), h BOOLEAN, i BOOL)";
     let stmts = parse_sql(sql).unwrap();
-    let builder = PlanBuilder::new();
+    let mut builder = PlanBuilder::new();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -222,7 +222,7 @@ fn test_build_create_table_various_types() {
 fn test_build_drop_table() {
     let sql = "DROP TABLE users";
     let stmts = parse_sql(sql).unwrap();
-    let builder = PlanBuilder::new();
+    let mut builder = PlanBuilder::new();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -238,7 +238,7 @@ fn test_build_drop_table() {
 fn test_build_drop_table_if_exists() {
     let sql = "DROP TABLE IF EXISTS users";
     let stmts = parse_sql(sql).unwrap();
-    let builder = PlanBuilder::new();
+    let mut builder = PlanBuilder::new();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -257,7 +257,7 @@ fn test_create_table_empty_columns_error() {
     // For now, we test that a table with columns works
     let sql = "CREATE TABLE test (id INT)";
     let stmts = parse_sql(sql).unwrap();
-    let builder = PlanBuilder::new();
+    let mut builder = PlanBuilder::new();
     let plan = builder.build_plan(&stmts[0]);
 
     // Should succeed with one column
@@ -282,7 +282,7 @@ fn test_build_where_comparison() {
     // WHERE id > 10 (comparison predicate)
     let sql = "SELECT id, name FROM users WHERE id > 10";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -300,7 +300,7 @@ fn test_build_where_logical_and() {
     // WHERE id > 10 AND id < 100 (logical AND predicate)
     let sql = "SELECT id, name FROM users WHERE id > 10 AND id < 100";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -326,7 +326,7 @@ fn test_build_where_comparison_operators() {
 
     for (sql, _op_name) in test_cases {
         let stmts = parse_sql(sql).unwrap();
-        let builder = setup_builder();
+        let mut builder = setup_builder();
         let plan = builder.build_plan(&stmts[0]).unwrap();
 
         match plan {
@@ -342,7 +342,7 @@ fn test_build_where_column_comparison() {
     // WHERE name = 'Alice' (non-PK column)
     let sql = "SELECT id, name FROM users WHERE name = 'Alice'";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
@@ -358,7 +358,7 @@ fn test_build_where_logical_or() {
     // WHERE id < 10 OR id > 100 (logical OR predicate)
     let sql = "SELECT id, name FROM users WHERE id < 10 OR id > 100";
     let stmts = parse_sql(sql).unwrap();
-    let builder = setup_builder();
+    let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {

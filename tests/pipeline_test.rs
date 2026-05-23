@@ -26,7 +26,10 @@ async fn test_plan_cache_hit() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
     let cache_size = db.plan_cache_len();
-    assert!(cache_size > 0, "Cache should have at least one entry after SELECT");
+    assert!(
+        cache_size > 0,
+        "Cache should have at least one entry after SELECT"
+    );
 
     // Second execution - cache hit
     let r2 = db.execute_sql(sql).await;
@@ -36,7 +39,11 @@ async fn test_plan_cache_hit() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    assert_eq!(db.plan_cache_len(), cache_size, "Cache size should not grow on hit");
+    assert_eq!(
+        db.plan_cache_len(),
+        cache_size,
+        "Cache size should not grow on hit"
+    );
 }
 
 #[tokio::test]
@@ -50,7 +57,10 @@ async fn test_ddl_clears_cache() {
 
     let sql = "SELECT * FROM t";
     db.execute_sql(sql).await;
-    assert!(db.plan_cache_len() > 0, "Cache should have an entry after SELECT");
+    assert!(
+        db.plan_cache_len() > 0,
+        "Cache should have an entry after SELECT"
+    );
 
     // DDL (CREATE TABLE) should clear cache
     db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await;
@@ -64,10 +74,12 @@ async fn test_dml_not_cached() {
         .await
         .expect("Failed to open database");
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+        .await;
 
     // INSERT is DML and should NOT be cached
-    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')").await;
+    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+        .await;
     assert_eq!(db.plan_cache_len(), 0, "DML should not be cached");
 }
 
@@ -573,7 +585,9 @@ async fn test_pipeline_join_execution_basic() {
 
     // Execute JOIN
     let response = db
-        .execute_sql("SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id")
+        .execute_sql(
+            "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id",
+        )
         .await;
 
     match response {
@@ -618,7 +632,11 @@ async fn test_pipeline_join_with_null_keys() {
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
             // Should return 1 row: (1, 1) - NULL rows should not match
-            assert_eq!(rows.len(), 1, "Expected 1 row from JOIN (NULLs should not match)");
+            assert_eq!(
+                rows.len(),
+                1,
+                "Expected 1 row from JOIN (NULLs should not match)"
+            );
 
             // Row should have 2 columns: a.id, b.id
             assert_eq!(rows[0].len(), 2);

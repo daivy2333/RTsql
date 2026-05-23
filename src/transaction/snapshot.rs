@@ -27,7 +27,7 @@ impl Snapshot {
     /// 3. The creating transaction is NOT in the active list (not active when snapshot was taken)
     pub fn is_visible(&self, create_tx_id: u64, commit_tx_id: Option<u64>) -> bool {
         // Rule 1: must be committed
-        let commit_tx_id = match commit_tx_id {
+        let _commit_tx_id = match commit_tx_id {
             Some(id) => id,
             None => return false,
         };

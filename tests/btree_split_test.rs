@@ -4,7 +4,7 @@ use tempfile::tempdir;
 
 use rtsql::storage::page_format::{Key, RowId};
 use rtsql::storage::{
-    btree::{BTree, SyncPageLoader, LeafNodeRef},
+    btree::{BTree, LeafNodeRef, SyncPageLoader},
     BufferPool, FileStorage,
 };
 
@@ -31,8 +31,8 @@ async fn test_non_unique_insert() {
         let row_id3 = RowId::new(3, 0);
 
         btree.insert(key, row_id1).unwrap();
-        btree.insert(key, row_id2).unwrap();  // Would fail before, should succeed now
-        btree.insert(key, row_id3).unwrap();  // Would fail before, should succeed now
+        btree.insert(key, row_id2).unwrap(); // Would fail before, should succeed now
+        btree.insert(key, row_id3).unwrap(); // Would fail before, should succeed now
 
         // Verify all insertions succeeded
         let all = btree.scan_all().unwrap();
@@ -208,11 +208,7 @@ async fn test_leaf_split_first_time() {
         for i in 0..total {
             let key = make_key(i);
             let result = btree.search(&key).unwrap();
-            assert!(
-                result.is_some(),
-                "Key {} should be found after split",
-                i
-            );
+            assert!(result.is_some(), "Key {} should be found after split", i);
             assert_eq!(
                 result.unwrap(),
                 RowId::new(i, 0),
@@ -223,7 +219,12 @@ async fn test_leaf_split_first_time() {
 
         // Verify scan_all returns the correct count
         let all = btree.scan_all().unwrap();
-        assert_eq!(all.len(), total as usize, "scan_all should return {} entries", total);
+        assert_eq!(
+            all.len(),
+            total as usize,
+            "scan_all should return {} entries",
+            total
+        );
 
         // Root page_id should have changed if root split occurred
         // (With 120 entries, root definitely split)
@@ -259,7 +260,12 @@ async fn test_non_unique_key_split() {
 
         // Verify search_all returns all matching RowIds
         let results = btree.search_all(key).unwrap();
-        assert_eq!(results.len(), total as usize, "search_all should return all {} entries", total);
+        assert_eq!(
+            results.len(),
+            total as usize,
+            "search_all should return all {} entries",
+            total
+        );
 
         // Verify each RowId is present
         for i in 0..total {
@@ -273,11 +279,19 @@ async fn test_non_unique_key_split() {
 
         // Delete all entries with this key
         let deleted = btree.delete_by_key(key).unwrap();
-        assert_eq!(deleted, total as usize, "delete_by_key should delete all {} entries", total);
+        assert_eq!(
+            deleted, total as usize,
+            "delete_by_key should delete all {} entries",
+            total
+        );
 
         // Verify all are gone
         let after_delete = btree.search_all(key).unwrap();
-        assert_eq!(after_delete.len(), 0, "No entries should remain after delete_by_key");
+        assert_eq!(
+            after_delete.len(),
+            0,
+            "No entries should remain after delete_by_key"
+        );
     })
     .await
     .unwrap();
@@ -406,7 +420,12 @@ async fn test_delete_after_split() {
 
         // Verify scan_all has the correct count
         let all = btree.scan_all().unwrap();
-        assert_eq!(all.len(), (total - 30) as usize, "scan_all should return {} entries", total - 30);
+        assert_eq!(
+            all.len(),
+            (total - 30) as usize,
+            "scan_all should return {} entries",
+            total - 30
+        );
 
         // Test delete_exact after split
         // Insert duplicate keys, then use delete_exact to remove one
@@ -420,7 +439,11 @@ async fn test_delete_after_split() {
 
         // Verify only the right ones remain
         let remaining = btree.search_all(&dup_key).unwrap();
-        assert_eq!(remaining.len(), 2, "Should have 2 remaining entries after delete_exact");
+        assert_eq!(
+            remaining.len(),
+            2,
+            "Should have 2 remaining entries after delete_exact"
+        );
         assert!(remaining.contains(&RowId::new(200, 0)));
         assert!(remaining.contains(&RowId::new(202, 2)));
         assert!(!remaining.contains(&RowId::new(201, 1)));
@@ -449,7 +472,12 @@ async fn test_leaf_chain_after_split() {
 
         // Verify scan_all returns all entries
         let all = btree.scan_all().unwrap();
-        assert_eq!(all.len(), total as usize, "scan_all should return all {} entries", total);
+        assert_eq!(
+            all.len(),
+            total as usize,
+            "scan_all should return all {} entries",
+            total
+        );
 
         // Verify entries are in sorted key order
         for i in 1..all.len() {
@@ -466,8 +494,14 @@ async fn test_leaf_chain_after_split() {
         for i in 0..total {
             let expected_key = Key::new(&make_key(i));
             let expected_rid = RowId::new(i, 0);
-            let found = all.iter().any(|(k, r)| *k == expected_key && *r == expected_rid);
-            assert!(found, "Entry (key={}, RowId={}) should be in scan_all results", i, expected_rid);
+            let found = all
+                .iter()
+                .any(|(k, r)| *k == expected_key && *r == expected_rid);
+            assert!(
+                found,
+                "Entry (key={}, RowId={}) should be in scan_all results",
+                i, expected_rid
+            );
         }
     })
     .await
@@ -494,17 +528,18 @@ async fn test_massive_insert_multiple_splits() {
 
         // Verify scan_all returns the correct count
         let all = btree.scan_all().unwrap();
-        assert_eq!(all.len(), total as usize, "scan_all should return {} entries", total);
+        assert_eq!(
+            all.len(),
+            total as usize,
+            "scan_all should return {} entries",
+            total
+        );
 
         // Spot-check search for various keys across the range
         for i in [0u32, 1, 50, 100, 500, 999, 1000, 1500, 1999] {
             let key = make_key(i);
             let result = btree.search(&key).unwrap();
-            assert!(
-                result.is_some(),
-                "Key {} should be found",
-                i
-            );
+            assert!(result.is_some(), "Key {} should be found", i);
             assert_eq!(
                 result.unwrap(),
                 RowId::new(i, (i % 1000) as u16),
@@ -564,8 +599,7 @@ async fn test_root_split() {
                 );
                 // Verify root_page_id has changed from the initial
                 assert_ne!(
-                    new_root_page_id,
-                    initial_root,
+                    new_root_page_id, initial_root,
                     "New root should be a different page from the initial root"
                 );
             }

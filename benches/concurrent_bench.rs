@@ -61,8 +61,7 @@ fn bench_concurrent_write(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("insert", concurrency), |b| {
             b.to_async(&rt).iter(|| {
                 let db = db.clone();
-                let base =
-                    CONCURRENT_COUNTER.fetch_add(concurrency as i64 * 50, Ordering::SeqCst);
+                let base = CONCURRENT_COUNTER.fetch_add(concurrency as i64 * 50, Ordering::SeqCst);
                 async move {
                     let mut handles = vec![];
                     for t in 0..concurrency {
@@ -106,8 +105,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("80r_20w", concurrency), |b| {
             b.to_async(&rt).iter(|| {
                 let db = db.clone();
-                let base =
-                    CONCURRENT_COUNTER.fetch_add(concurrency as i64 * 20, Ordering::SeqCst);
+                let base = CONCURRENT_COUNTER.fetch_add(concurrency as i64 * 20, Ordering::SeqCst);
                 async move {
                     let mut handles = vec![];
                     for t in 0..concurrency {

@@ -29,7 +29,9 @@ pub async fn insert_rows(db: &Database, start: i64, n: i64) {
     for i in start..start + n {
         db.execute_sql(&format!(
             "INSERT INTO bench VALUES ({}, 'user_{}', {})",
-            i, i, i * 10
+            i,
+            i,
+            i * 10
         ))
         .await;
     }
@@ -53,7 +55,9 @@ pub async fn insert_join_data(db: &Database, n: i64) {
         .await;
         db.execute_sql(&format!(
             "INSERT INTO orders VALUES ({}, {}, {})",
-            i, i, i * 100
+            i,
+            i,
+            i * 100
         ))
         .await;
     }

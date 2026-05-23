@@ -24,18 +24,16 @@ impl Executor for HavingExecutor {
     async fn next(&mut self) -> storage::Result<Option<ExecResult>> {
         loop {
             match self.input.next().await? {
-                Some(ExecResult::Row(row)) => {
-                    match self.predicate.evaluate(&row) {
-                        Ok(true) => return Ok(Some(ExecResult::Row(row))),
-                        Ok(false) => continue,
-                        Err(e) => {
-                            return Err(crate::storage::StorageError::ExecutionError(format!(
-                                "HAVING predicate evaluation error: {}",
-                                e
-                            )));
-                        }
+                Some(ExecResult::Row(row)) => match self.predicate.evaluate(&row) {
+                    Ok(true) => return Ok(Some(ExecResult::Row(row))),
+                    Ok(false) => continue,
+                    Err(e) => {
+                        return Err(crate::storage::StorageError::ExecutionError(format!(
+                            "HAVING predicate evaluation error: {}",
+                            e
+                        )));
                     }
-                }
+                },
                 Some(other) => return Ok(Some(other)),
                 None => return Ok(None),
             }

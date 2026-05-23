@@ -76,15 +76,33 @@ impl fmt::Display for PlanError {
             PlanError::TableNotFound(table) => write!(f, "Table not found: {}", table),
             PlanError::MissingOnClause => write!(f, "INNER JOIN requires ON clause"),
             PlanError::UnsupportedJoinType => write!(f, "Only INNER JOIN is supported"),
-            PlanError::NonAggregatedColumn(col) => write!(f, "Non-aggregated column '{}' must appear in GROUP BY clause", col),
-            PlanError::InvalidAggregateArgument(msg) => write!(f, "Invalid aggregate argument: {}", msg),
-            PlanError::GroupByColumnNotFound(col) => write!(f, "GROUP BY column not found: {}", col),
-            PlanError::HavingNonAggregatedReference(col) => write!(f, "HAVING references non-aggregated column: {}", col),
-            PlanError::SubqueryReturnsMultipleRow => write!(f, "Subquery returns multiple rows (scalar subquery requires single row)"),
-            PlanError::SubqueryReturnsMultipleColumns => write!(f, "Subquery returns multiple columns (IN subquery requires single column)"),
+            PlanError::NonAggregatedColumn(col) => write!(
+                f,
+                "Non-aggregated column '{}' must appear in GROUP BY clause",
+                col
+            ),
+            PlanError::InvalidAggregateArgument(msg) => {
+                write!(f, "Invalid aggregate argument: {}", msg)
+            }
+            PlanError::GroupByColumnNotFound(col) => {
+                write!(f, "GROUP BY column not found: {}", col)
+            }
+            PlanError::HavingNonAggregatedReference(col) => {
+                write!(f, "HAVING references non-aggregated column: {}", col)
+            }
+            PlanError::SubqueryReturnsMultipleRow => write!(
+                f,
+                "Subquery returns multiple rows (scalar subquery requires single row)"
+            ),
+            PlanError::SubqueryReturnsMultipleColumns => write!(
+                f,
+                "Subquery returns multiple columns (IN subquery requires single column)"
+            ),
             PlanError::SubqueryReturnsEmpty => write!(f, "Scalar subquery returns empty result"),
             PlanError::UnsupportedSubqueryPosition => write!(f, "Unsupported subquery position"),
-            PlanError::CorrelatedParamError(msg) => write!(f, "Correlated subquery parameter error: {}", msg),
+            PlanError::CorrelatedParamError(msg) => {
+                write!(f, "Correlated subquery parameter error: {}", msg)
+            }
             PlanError::NotInWithNull => write!(f, "NOT IN subquery contains NULL values"),
         }
     }

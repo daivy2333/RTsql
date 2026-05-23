@@ -26,9 +26,7 @@ pub fn record_time(stage: &'static str, duration: Duration) {
 
 /// Get all recorded timings
 pub fn get_timings() -> HashMap<&'static str, Duration> {
-    PROFILING_DATA.with(|data| {
-        data.lock().unwrap().clone()
-    })
+    PROFILING_DATA.with(|data| data.lock().unwrap().clone())
 }
 
 /// Print timings table to stderr

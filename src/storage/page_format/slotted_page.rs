@@ -219,7 +219,8 @@ impl<'a> SlottedPage<'a> {
 
         // Clear the last slot (now moved to position count-1)
         let last_slot_start = Page::PAGE_SIZE - count * Slot::SIZE;
-        self.page.data[last_slot_start..last_slot_start + Slot::SIZE].copy_from_slice(&[0, 0, 0, 0]);
+        self.page.data[last_slot_start..last_slot_start + Slot::SIZE]
+            .copy_from_slice(&[0, 0, 0, 0]);
 
         // Decrease slot_count
         self.header.slot_count -= 1;

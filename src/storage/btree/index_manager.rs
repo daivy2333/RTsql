@@ -1,13 +1,12 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::future::Future;
-use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::storage::{
     btree::node::{InternalNodeRef, LeafNodeRef, LEAF_NODE},
     page_format::{Key, RowId},
-    PageId, BufferPool, Result,
+    BufferPool, PageId, Result,
 };
 use tokio::sync::RwLock;
 
@@ -17,9 +16,9 @@ use super::{AsyncPageLoader, BTree, SyncPageLoader};
 /// Uses AtomicPageId for lock-free root page access (read operations)
 /// Write operations use spawn_blocking + temporary BTree instance
 pub struct IndexManager {
-    root_page_id: AtomicU64,              // 无锁访问根页
-    sync_loader: Arc<SyncPageLoader>,     // 写操作仍用 sync
-    async_loader: AsyncPageLoader,        // 读操作用 async
+    root_page_id: AtomicU64,          // 无锁访问根页
+    sync_loader: Arc<SyncPageLoader>, // 写操作仍用 sync
+    async_loader: AsyncPageLoader,    // 读操作用 async
     row_to_key: RwLock<HashMap<RowId, Vec<u8>>>,
 }
 
@@ -73,7 +72,8 @@ impl IndexManager {
                 }
             }; // guard and data_guard dropped here
 
-            self.search_from_page_async(PageId(child_page_id as u64), key).await
+            self.search_from_page_async(PageId(child_page_id as u64), key)
+                .await
         })
     }
 
@@ -87,7 +87,8 @@ impl IndexManager {
         let new_root = tokio::task::spawn_blocking(move || {
             let mut btree = BTree::from_root(PageId(root_page_id), sync_loader);
             btree.insert(&key_vec, row_id)
-        }).await??;
+        })
+        .await??;
 
         // If root split occurred, update the atomic root page id
         if let Some(new_root_id) = new_root {
@@ -111,7 +112,8 @@ impl IndexManager {
         tokio::task::spawn_blocking(move || {
             let btree = BTree::from_root(PageId(root_page_id), sync_loader);
             btree.delete(&key_vec)
-        }).await?
+        })
+        .await?
     }
 
     /// Async scan all entries — direct async path
@@ -120,7 +122,10 @@ impl IndexManager {
         self.scan_all_async_from_root(root_page_id).await
     }
 
-    async fn scan_all_async_from_root(&self, root_page_id: PageId) -> Result<Vec<(Vec<u8>, RowId)>> {
+    async fn scan_all_async_from_root(
+        &self,
+        root_page_id: PageId,
+    ) -> Result<Vec<(Vec<u8>, RowId)>> {
         let mut results = Vec::new();
         let mut page_id = root_page_id;
 
@@ -157,9 +162,13 @@ impl IndexManager {
         tokio::task::spawn_blocking(move || {
             let btree = BTree::from_root(PageId(root_page_id), sync_loader);
             btree.update(&key_vec, new_row_id)
-        }).await??;
+        })
+        .await??;
 
-        self.row_to_key.write().await.insert(new_row_id, key.to_vec());
+        self.row_to_key
+            .write()
+            .await
+            .insert(new_row_id, key.to_vec());
         Ok(())
     }
 
