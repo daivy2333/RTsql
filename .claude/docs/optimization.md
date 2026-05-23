@@ -1,6 +1,6 @@
 # 优化方向与技术债
 
-> 最后更新：2026-05-23（M18 Phase1 架构Warnings清理完成）
+> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
 
 ## 已完成的优化
 
@@ -16,6 +16,7 @@
 | 8 | 非唯一索引（同页多条目） | M17-Phase1 | 5 tests |
 | 9 | B-Tree Split 机制 | M17-Phase2 | 7 tests，支持多层级索引 |
 | 10 | **架构Warnings清理** | **M18-Phase1** | **0 warnings（代码层面）** ⚡ |
+| 11 | **Executor层非唯一索引** | **M18-Phase2** | **IndexScanAllExecutor + 3 tests** ⚡ |
 
 ## M14 性能验证（已完成）
 
@@ -151,6 +152,25 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 
 ---
 
+## M18 Phase2 Executor层非唯一索引测试覆盖（已完成）⚡
+
+> 2026-05-23: Phase2 完成 Executor 层非唯一索引支持
+
+**成果**：
+- ✅ IndexManager::search_all 方法：async，支持非唯一索引查询
+- ✅ IndexScanAllExecutor：惰性初始化 + MVCC可见性迭代 + 逐行返回
+- ✅ executor_test.rs 新增 3 个测试：基础功能/空结果/单结果
+- ✅ PhysicalPlan::IndexScanAll 节点：完整集成链路（Planner + Pipeline + correlated.rs）
+- ✅ 101 tests pass, 0 failures
+- ✅ Clippy 0 warnings（代码层面）
+
+**关键实现技巧**：
+- ✅ 惰性初始化：search_all 在首次 next() 调用时执行，避免不必要开销
+- ✅ MVCC 可见性迭代：while 循环跳过不可见版本，继续下一个 row_id
+- ✅ 测试方法创新：直接使用 write_tuple_to_data_page + IndexManager.insert 创建重复键数据
+
+---
+
 ## 技术债清单（M18 Phase1 已清理）
 
 ### Clippy 债务 ✅ 已解决
@@ -166,7 +186,7 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 
 | 问题 | 状态 | 修复方式 |
 |------|------|----------|
-| Executor层非唯一索引测试覆盖缺失 | ⏳ 待 M18-Phase2 | 新增 IndexScanAllExecutor |
+| Executor层非唯一索引测试覆盖缺失 | ✅ 已解决（M18-Phase2） | 新增 IndexScanAllExecutor + 3 tests |
 
 ---
 
@@ -195,7 +215,7 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 |--------|------|----------|------|
 | P0 | test_btree_insert_duplicate_key_returns_error 失败 | 更新为非唯一索引行为测试 | ✅ 已修复 |
 | P0 | planner_test.rs 19 个编译错误 | 修复 builder mutability | ✅ 已修复 |
-| P1 | Executor 层非唯一索引测试覆盖缺失 | 添加 IndexScanAllExecutor 或修改 IndexScanExecutor | ⏳ 待 M18+ |
+| P1 | Executor 层非唯一索引测试覆盖缺失 | IndexScanAllExecutor + 3 tests | ✅ 已修复（M18-Phase2） |
 
 **Executor 层测试覆盖说明**：M17 的非唯一索引功能（NonUniqueIndex + search_all）已在 BTree 层通过 btree_test 和 btree_split_test 验证，但 Executor 层（IndexScanExecutor）暂不支持 search_all。需要后续添加 IndexScanAllExecutor 或修改 IndexScanExecutor 以支持非唯一索引扫描。
 
