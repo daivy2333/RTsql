@@ -19,6 +19,18 @@ pub struct LeafSplitData {
     pub new_page_id: PageId,
 }
 
+/// Internal split 操作的中间数据（由 BTree 层消费）
+pub struct InternalSplitData {
+    /// 上推到父节点的中间 key（不保留在任一子节点）
+    pub middle_key: Key,
+    /// separators[mid] 的 right_child → 新页的 leftmost_child
+    pub new_leftmost_child: u32,
+    /// 右半部分 separators（mid+1..end）
+    pub right_separators: Vec<(Key, u32)>,
+    /// 新页的 PageId
+    pub new_page_id: PageId,
+}
+
 /// LeafNode：存储 Key + RowId
 pub struct LeafNode<'a> {
     slotted: SlottedPage<'a>,
@@ -539,7 +551,7 @@ impl<'a> InternalNode<'a> {
         // 3. 构造数据
         let mut data = vec![0u8; entry_size];
         key.serialize(&mut data[..MAX_KEY_LEN]);
-        data[MAX_KEY_LEN..].copy_from_slice(&right_child.0.to_le_bytes());
+        data[MAX_KEY_LEN..].copy_from_slice(&(right_child.0 as u32).to_le_bytes());
 
         // 4. 添加 slot
         let slot_index = self
@@ -584,9 +596,10 @@ impl<'a> InternalNode<'a> {
         let page_id = self.slotted.page_id();
         let leftmost = self.slotted.header().next_page_id;
         let mut new_page = Page::new(page_id);
-        // Set leftmost_child: directly modify header.next_page_id (bytes [5..9]) BEFORE init
-        new_page.data[5..9].copy_from_slice(&leftmost.to_le_bytes());
         let mut new_internal = InternalNode::init(&mut new_page);
+        // Set leftmost_child: init resets header, so set after init
+        new_internal.slotted.page.data[5..9].copy_from_slice(&leftmost.to_le_bytes());
+        new_internal.slotted.reload_header();
 
         for (key, child) in sorted {
             new_internal.insert_separator_simple(&key, PageId(child as u64))?;
@@ -605,13 +618,74 @@ impl<'a> InternalNode<'a> {
 
         let mut data = vec![0u8; entry_size];
         key.serialize(&mut data[..MAX_KEY_LEN]);
-        data[MAX_KEY_LEN..].copy_from_slice(&right_child.0.to_le_bytes());
+        data[MAX_KEY_LEN..].copy_from_slice(&(right_child.0 as u32).to_le_bytes());
 
         self.slotted
             .add_slot(&data)
             .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
         Ok(())
+    }
+
+    /// 分裂内节点：将后半部分 separators 移出，重建原页只保留前半部分。
+    /// middle_key 上推到父节点（不保留在任一子节点）。
+    /// 返回 InternalSplitData，由调用方（BTree）负责分配新页、写入 right_separators。
+    pub fn split(&mut self, new_page_id: PageId) -> Result<InternalSplitData, StorageError> {
+        // 1. 读取所有 separators（key + right_child 对）
+        let separators: Vec<(Key, u32)> = (0..self.key_count())
+            .filter_map(|i| {
+                let key = self.get_key(i)?;
+                let child = self.get_child_page_id(i)?;
+                Some((key, child))
+            })
+            .collect();
+
+        if separators.is_empty() {
+            return Err(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "cannot split empty internal node",
+            )));
+        }
+
+        // 2. 计算中间分裂点
+        let mid = separators.len() / 2;
+
+        // 3. middle_key 上推（不保留在任一子节点）
+        let middle_key = separators[mid].0.clone();
+        let new_leftmost_child = separators[mid].1; // separators[mid] 的 right_child → 新页的 leftmost_child
+
+        // 4. 收集右半部分 separators（mid+1..end）
+        let right_separators = if mid + 1 < separators.len() {
+            separators[mid + 1..].to_vec()
+        } else {
+            vec![]
+        };
+
+        // 5. 重建原页：只保留 leftmost_child + separators[0..mid]
+        let page_id = self.slotted.page_id();
+        let old_leftmost = self.slotted.header().next_page_id; // leftmost_child 存储在 header.next_page_id
+        let mut new_page = Page::new(page_id);
+        let mut new_internal = InternalNode::init(&mut new_page);
+        // 保留原 leftmost_child：init 会重置 header，所以需要在 init 之后设置
+        new_internal.slotted.page.data[5..9].copy_from_slice(&old_leftmost.to_le_bytes());
+        new_internal.slotted.reload_header();
+        for (key, child_id) in &separators[..mid] {
+            new_internal.insert_separator_simple(key, PageId(*child_id as u64))?;
+        }
+        // 复制回原页
+        self.slotted
+            .page
+            .data
+            .copy_from_slice(new_page.data.as_ref());
+        // 刷新缓存 header（copy_from_slice 修改了原始字节，但 slotted 的 header 字段是缓存的）
+        self.slotted.reload_header();
+
+        Ok(InternalSplitData {
+            middle_key,
+            new_leftmost_child,
+            right_separators,
+            new_page_id,
+        })
     }
 }
 
@@ -1060,6 +1134,138 @@ mod tests {
         assert_eq!(leaf.key_count(), 2);
         assert_eq!(split_data.right_entries.len(), 3);
         assert_eq!(split_data.middle_key.as_bytes(), b"c");
+        assert_eq!(split_data.new_page_id, PageId(10));
+    }
+
+    #[test]
+    fn test_internal_node_split() {
+        let mut page = Page::new(PageId(0));
+        let mut internal = InternalNode::init(&mut page);
+        // Set leftmost_child after init (init resets header, so set after)
+        internal.slotted.page.data[5..9].copy_from_slice(&100u32.to_le_bytes());
+        internal.slotted.reload_header();
+
+        // Insert enough separators for a meaningful split
+        let total = 50;
+        for i in 0..total {
+            let key = Key::new(format!("key_{:03}", i).as_bytes());
+            internal.insert_separator(&key, PageId(101 + i as u64)).unwrap();
+        }
+
+        assert_eq!(internal.key_count(), total);
+
+        // Execute split
+        let new_page_id = PageId(1);
+        let split_data = internal.split(new_page_id).unwrap();
+
+        let mid = total / 2; // 25
+
+        // Verify: original page now has only the first half (25 separators)
+        assert_eq!(internal.key_count(), mid);
+
+        // Verify: leftmost_child is preserved
+        assert_eq!(internal.slotted.header().next_page_id, 100);
+
+        // Verify: first half separators are correct
+        for i in 0..mid {
+            let key = internal.get_key(i).unwrap();
+            assert_eq!(
+                key.as_bytes(),
+                format!("key_{:03}", i).as_bytes(),
+                "Left separator {} mismatch",
+                i
+            );
+        }
+
+        // Verify: middle_key is separators[25].key (pushed up, not in either child)
+        assert_eq!(
+            split_data.middle_key.as_bytes(),
+            format!("key_{:03}", mid).as_bytes()
+        );
+
+        // Verify: new_leftmost_child is separators[25].right_child
+        assert_eq!(split_data.new_leftmost_child, 101 + mid as u32);
+
+        // Verify: right_separators has 24 entries (mid+1..50 = 26..50)
+        assert_eq!(split_data.right_separators.len(), total - mid - 1);
+        for (i, (key, child_id)) in split_data.right_separators.iter().enumerate() {
+            let expected_idx = mid + 1 + i;
+            assert_eq!(
+                key.as_bytes(),
+                format!("key_{:03}", expected_idx).as_bytes(),
+                "Right separator {} mismatch",
+                i
+            );
+            assert_eq!(*child_id, 101 + expected_idx as u32);
+        }
+
+        // Verify: new_page_id is passed through correctly
+        assert_eq!(split_data.new_page_id, PageId(1));
+    }
+
+    #[test]
+    fn test_internal_node_split_empty_fails() {
+        let mut page = Page::new(PageId(0));
+        let _ = InternalNode::init(&mut page);
+        // Re-init to get a mutable reference we can call split on
+        let mut page2 = Page::new(PageId(0));
+        let mut internal = InternalNode::init(&mut page2);
+
+        let result = internal.split(PageId(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_internal_node_split_single_separator() {
+        // Edge case: split with just 1 separator (mid = 0)
+        let mut page = Page::new(PageId(0));
+        let mut internal = InternalNode::init(&mut page);
+        // Set leftmost_child after init
+        internal.slotted.page.data[5..9].copy_from_slice(&50u32.to_le_bytes());
+        internal.slotted.reload_header();
+
+        internal
+            .insert_separator(&Key::new(b"only"), PageId(99))
+            .unwrap();
+        assert_eq!(internal.key_count(), 1);
+
+        let split_data = internal.split(PageId(2)).unwrap();
+
+        // mid = 1 / 2 = 0, so left half has 0 separators, right half has 0 separators
+        // middle_key = "only", new_leftmost_child = 99
+        assert_eq!(internal.key_count(), 0);
+        assert_eq!(split_data.middle_key.as_bytes(), b"only");
+        assert_eq!(split_data.new_leftmost_child, 99);
+        assert_eq!(split_data.right_separators.len(), 0);
+        assert_eq!(split_data.new_page_id, PageId(2));
+    }
+
+    #[test]
+    fn test_internal_node_split_odd_count() {
+        // Odd number of separators: mid = 5 / 2 = 2
+        let mut page = Page::new(PageId(0));
+        let mut internal = InternalNode::init(&mut page);
+        // Set leftmost_child after init
+        internal.slotted.page.data[5..9].copy_from_slice(&10u32.to_le_bytes());
+        internal.slotted.reload_header();
+
+        for (ch, child) in [(b'a', 100u64), (b'b', 200u64), (b'c', 300u64), (b'd', 400u64), (b'e', 500u64)] {
+            internal
+                .insert_separator(&Key::new(&[ch]), PageId(child))
+                .unwrap();
+        }
+
+        let split_data = internal.split(PageId(10)).unwrap();
+
+        // mid = 2, so left: 2 separators (a, b), middle_key = "c", right: 2 separators (d, e)
+        assert_eq!(internal.key_count(), 2);
+        assert_eq!(split_data.middle_key.as_bytes(), b"c");
+        assert_eq!(split_data.new_leftmost_child, 300); // separators[2].right_child
+        assert_eq!(split_data.right_separators.len(), 2);
+        assert_eq!(split_data.right_separators[0].0.as_bytes(), b"d");
+        assert_eq!(split_data.right_separators[0].1, 400);
+        assert_eq!(split_data.right_separators[1].0.as_bytes(), b"e");
+        assert_eq!(split_data.right_separators[1].1, 500);
         assert_eq!(split_data.new_page_id, PageId(10));
     }
 }
