@@ -9,6 +9,14 @@ use crate::storage::{
 
 use super::{AsyncPageLoader, SyncPageLoader};
 
+/// Split 操作的结果（用于 split 传播）
+pub struct SplitResult {
+    /// 上推到父节点的分割 key
+    pub middle_key: Key,
+    /// 新分裂出的右页 PageId
+    pub new_page_id: PageId,
+}
+
 pub struct BTree {
     loader: Arc<SyncPageLoader>,
     root_page_id: PageId,
