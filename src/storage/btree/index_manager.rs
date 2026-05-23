@@ -121,9 +121,9 @@ impl IndexManager {
                                 let left_child = if i == 0 {
                                     internal.leftmost_child()
                                 } else {
-                                    internal.get_child_page_id(i - 1).unwrap_or(0)
+                                    internal.get_child_page_id(i - 1).unwrap_or(internal.leftmost_child())
                                 };
-                                let right_child = internal.get_child_page_id(i).unwrap_or(0);
+                                let right_child = internal.get_child_page_id(i).unwrap_or(internal.leftmost_child());
                                 child_page_ids.push(PageId(left_child as u64));
                                 child_page_ids.push(PageId(right_child as u64));
                             }
