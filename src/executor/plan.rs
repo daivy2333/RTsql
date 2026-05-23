@@ -20,6 +20,8 @@ pub enum PhysicalPlan {
     Scan(ScanNode),
     /// 主键索引扫描
     IndexScan(IndexScanNode),
+    /// 非唯一索引扫描（返回所有匹配行）
+    IndexScanAll(IndexScanAllNode),
     /// 过滤节点（WHERE 子句）
     Filter(FilterNode),
     /// 插入
@@ -67,6 +69,17 @@ pub struct IndexScanNode {
     /// 表名
     pub table_name: String,
     /// 主键值（用于 IndexManager.get()）
+    pub key: Key,
+    /// 输出列名列表
+    pub columns: Vec<String>,
+}
+
+/// 非唯一索引扫描节点（返回所有匹配行）
+#[derive(Debug, Clone)]
+pub struct IndexScanAllNode {
+    /// 表名
+    pub table_name: String,
+    /// 索引键值（用于 IndexManager.search_all()）
     pub key: Key,
     /// 输出列名列表
     pub columns: Vec<String>,

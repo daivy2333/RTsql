@@ -51,7 +51,7 @@ pub use limit::LimitExecutor;
 pub use plan::{
     AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, CorrelatedParam,
     CreateTableNode, DeleteNode, DerivedScanNode, DropTableNode, FilterNode, HavingNode,
-    IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode, OrderByColumn, OutputColumn,
+    IndexScanNode, IndexScanAllNode, InsertNode, JoinCondition, JoinNode, LimitNode, OrderByColumn, OutputColumn,
     PhysicalPlan, ScanNode, SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode,
 };
 pub use predicate::{

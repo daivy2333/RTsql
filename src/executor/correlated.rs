@@ -51,6 +51,7 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
         // Leaf or DML nodes: no sub-plans, no predicates
         PhysicalPlan::Scan(_)
         | PhysicalPlan::IndexScan(_)
+        | PhysicalPlan::IndexScanAll(_)
         | PhysicalPlan::Insert(_)
         | PhysicalPlan::Update(_)
         | PhysicalPlan::Delete(_)

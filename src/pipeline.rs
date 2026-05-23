@@ -2,7 +2,7 @@ use crate::database::Database;
 use crate::executor::{
     AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DeleteExecutor,
     DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor, HavingExecutor,
-    IndexScanExecutor, InsertExecutor, JoinConfig, JoinExecutor, JoinRelatedConfig, LimitExecutor, PhysicalPlan, ScanExecutor,
+    IndexScanExecutor, IndexScanAllExecutor, InsertExecutor, JoinConfig, JoinExecutor, JoinRelatedConfig, LimitExecutor, PhysicalPlan, ScanExecutor,
     SemiJoinExecutorV2, SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
@@ -299,6 +299,16 @@ pub(crate) fn create_executor_from_plan(
             PhysicalPlan::IndexScan(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
                 Ok(Box::new(IndexScanExecutor::new(
+                    table_meta,
+                    database.buffer_pool.clone(),
+                    node.key.as_bytes().to_vec(),
+                    None,
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::IndexScanAll(node) => {
+                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                Ok(Box::new(IndexScanAllExecutor::new(
                     table_meta,
                     database.buffer_pool.clone(),
                     node.key.as_bytes().to_vec(),
@@ -622,8 +632,17 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
                 .collect();
             Ok((indices, node.table_name.clone()))
         }
+        PhysicalPlan::IndexScanAll(node) => {
+            let indices: HashMap<String, usize> = node
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, node.table_name.clone()))
+        }
         _ => Err(crate::storage::StorageError::ExecutionError(
-            "Expected Scan, Join, SemiJoin, AntiJoin, Filter, Aggregate, SubqueryEval, DerivedScan, or IndexScan".into(),
+            "Expected Scan, Join, SemiJoin, AntiJoin, Filter, Aggregate, SubqueryEval, DerivedScan, IndexScan, or IndexScanAll".into(),
         )),
     }
 }
