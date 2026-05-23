@@ -2,7 +2,7 @@ use crate::database::Database;
 use crate::executor::{
     AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DeleteExecutor,
     DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor, HavingExecutor,
-    IndexScanExecutor, InsertExecutor, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor,
+    IndexScanExecutor, InsertExecutor, JoinConfig, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor,
     SemiJoinExecutorV2, SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
@@ -393,16 +393,16 @@ pub(crate) fn create_executor_from_plan(
                 // Build right executor recursively
                 let right_executor = create_executor_from_plan(*join_node.right, database).await?;
 
-                Ok(Box::new(JoinExecutor::new(
+                Ok(Box::new(JoinExecutor::new(JoinConfig {
                     left_executor,
                     right_executor,
-                    join_node.conditions.clone(),
-                    join_node.output_columns.clone(),
+                    conditions: join_node.conditions.clone(),
+                    output_columns: join_node.output_columns.clone(),
                     left_column_indices,
                     right_column_indices,
                     left_table_name,
                     right_table_name,
-                )) as Box<dyn Executor + Send>)
+                })) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::SemiJoin(node) => {

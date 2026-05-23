@@ -1,6 +1,6 @@
 //! Join executor - INNER JOIN using hash join algorithm
 
-use crate::executor::{ExecResult, Executor, JoinCondition, OutputColumn, Value};
+use crate::executor::{ExecResult, Executor, JoinConfig, JoinCondition, OutputColumn, Value};
 use crate::storage::Result;
 use std::collections::HashMap;
 
@@ -45,25 +45,16 @@ pub struct JoinExecutor {
 
 impl JoinExecutor {
     /// 创建新的 JoinExecutor
-    pub fn new(
-        left_executor: Box<dyn Executor + Send>,
-        right_executor: Box<dyn Executor + Send>,
-        conditions: Vec<JoinCondition>,
-        output_columns: Vec<OutputColumn>,
-        left_column_indices: HashMap<String, usize>,
-        right_column_indices: HashMap<String, usize>,
-        left_table_name: String,
-        right_table_name: String,
-    ) -> Self {
+    pub fn new(config: JoinConfig) -> Self {
         Self {
-            left_executor,
-            right_executor,
-            conditions,
-            output_columns,
-            left_column_indices,
-            right_column_indices,
-            left_table_name,
-            _right_table_name: right_table_name,
+            left_executor: config.left_executor,
+            right_executor: config.right_executor,
+            conditions: config.conditions,
+            output_columns: config.output_columns,
+            left_column_indices: config.left_column_indices,
+            right_column_indices: config.right_column_indices,
+            left_table_name: config.left_table_name,
+            _right_table_name: config.right_table_name,
             right_hashmap: HashMap::new(),
             left_rows: Vec::new(),
             current_left_index: 0,
