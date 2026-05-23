@@ -7,6 +7,18 @@ use crate::storage::{
 pub const LEAF_NODE: u8 = 0x01;
 pub const INTERNAL_NODE: u8 = 0x02;
 
+/// Leaf split 操作的中间数据（由 BTree 层消费）
+pub struct LeafSplitData {
+    /// 上推到父节点的分割 key（右半部分第一个 entry 的 key）
+    pub middle_key: Key,
+    /// 右半部分 entries（需写入新页）
+    pub right_entries: Vec<(Key, RowId)>,
+    /// 原页的旧 next_leaf_page_id（用于维护链表）
+    pub old_next_page_id: u32,
+    /// 新页的 PageId
+    pub new_page_id: PageId,
+}
+
 /// LeafNode：存储 Key + RowId
 pub struct LeafNode<'a> {
     slotted: SlottedPage<'a>,
@@ -265,10 +277,10 @@ impl<'a> LeafNode<'a> {
 
     /// 设置下一叶子节点页ID
     pub fn set_next_leaf_page_id(&mut self, page_id: u32) {
-        // 需要修改 header
         let mut header = *self.slotted.header();
         header.next_page_id = page_id;
         header.serialize(&mut self.slotted.page.data[..SlottedPageHeader::SIZE]);
+        self.slotted.reload_header();
     }
 
     /// 计算可用空间
@@ -279,6 +291,62 @@ impl<'a> LeafNode<'a> {
     /// 最小 key 数量（用于 merge 判断）
     pub fn min_keys(&self) -> usize {
         48 // 见 spec 中的计算
+    }
+
+    /// 分裂叶节点：将后半部分 entries 移出，重建原页只保留前半部分。
+    /// 返回 LeafSplitData，由调用方（BTree）负责分配新页、写入 right_entries、维护链表指针。
+    pub fn split(&mut self, new_page_id: PageId) -> Result<LeafSplitData, StorageError> {
+        // 1. 读取所有 entries
+        let entries: Vec<(Key, RowId)> = (0..self.key_count())
+            .filter_map(|i| {
+                let key = self.get_key(i)?;
+                let row_id = self.get_row_id(i)?;
+                Some((key, row_id))
+            })
+            .collect();
+
+        if entries.is_empty() {
+            return Err(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "cannot split empty leaf node",
+            )));
+        }
+
+        // 2. 按 key 排序
+        let mut sorted_entries = entries;
+        sorted_entries.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+
+        // 3. 计算中间分裂点
+        let mid = sorted_entries.len() / 2;
+
+        // 4. 记录 middle_key 和右半部分 entries
+        let middle_key = sorted_entries[mid].0.clone();
+        let right_entries = sorted_entries[mid..].to_vec();
+
+        // 5. 记录原页的旧 next_leaf_page_id
+        let old_next_page_id = self.next_leaf_page_id();
+
+        // 6. 重建原页：只保留前半部分 entries
+        let page_id = self.slotted.page_id();
+        let mut new_page = Page::new(page_id);
+        let mut new_leaf = LeafNode::init(&mut new_page);
+        for (key, row_id) in &sorted_entries[..mid] {
+            new_leaf.insert_simple(key, row_id)?;
+        }
+        // 复制回原页
+        self.slotted
+            .page
+            .data
+            .copy_from_slice(new_page.data.as_ref());
+        // 刷新缓存 header（copy_from_slice 修改了原始字节，但 slotted 的 header 字段是缓存的）
+        self.slotted.reload_header();
+
+        Ok(LeafSplitData {
+            middle_key,
+            right_entries,
+            old_next_page_id,
+            new_page_id,
+        })
     }
 }
 
@@ -878,5 +946,120 @@ mod tests {
         let linear = internal_ref.find_child_page_id(&Key::new(b"b"));
         let binary = internal_ref.find_child_page_id_binary(&Key::new(b"b"));
         assert_eq!(linear.unwrap(), binary, "Mismatch for key 'b'");
+    }
+
+    #[test]
+    fn test_leaf_node_split() {
+        // Fill a LeafNode with entries
+        let mut page = Page::new(PageId(0));
+        let mut leaf = LeafNode::init(&mut page);
+
+        // Insert entries until we have enough for a meaningful split
+        let total = 90;
+        for i in 0..total {
+            let key = Key::new(format!("key_{:03}", i).as_bytes());
+            let row_id = RowId::new(i as u32, 0);
+            leaf.insert(&key, &row_id).unwrap();
+        }
+
+        assert_eq!(leaf.key_count(), total);
+
+        // Set a non-zero next_leaf_page_id to verify it's preserved
+        leaf.set_next_leaf_page_id(42);
+
+        // Execute split
+        let new_page_id = PageId(1);
+        let split_data = leaf.split(new_page_id).unwrap();
+
+        let mid = total / 2; // 45
+
+        // Verify: original page now has only the first half
+        assert_eq!(leaf.key_count(), mid);
+
+        // Verify: first half entries are correct
+        for i in 0..mid {
+            let key = leaf.get_key(i).unwrap();
+            assert_eq!(
+                key.as_bytes(),
+                format!("key_{:03}", i).as_bytes(),
+                "Left entry {} mismatch",
+                i
+            );
+        }
+
+        // Verify: middle_key is the first key of the right half
+        assert_eq!(
+            split_data.middle_key.as_bytes(),
+            format!("key_{:03}", mid).as_bytes()
+        );
+
+        // Verify: right_entries has the second half
+        assert_eq!(split_data.right_entries.len(), mid);
+        for (i, (key, row_id)) in split_data.right_entries.iter().enumerate() {
+            assert_eq!(
+                key.as_bytes(),
+                format!("key_{:03}", mid + i).as_bytes(),
+                "Right entry {} mismatch",
+                i
+            );
+            assert_eq!(*row_id, RowId::new((mid + i) as u32, 0));
+        }
+
+        // Verify: old_next_page_id preserved the original next pointer
+        assert_eq!(split_data.old_next_page_id, 42);
+
+        // Verify: new_page_id is passed through correctly
+        assert_eq!(split_data.new_page_id, PageId(1));
+
+        // Verify: after split, the leaf's next_leaf_page_id was reset by page rebuild
+        // (init resets header, so next_page_id goes back to 0; BTree layer sets it)
+        assert_eq!(leaf.next_leaf_page_id(), 0);
+    }
+
+    #[test]
+    fn test_leaf_node_split_empty_fails() {
+        let mut page = Page::new(PageId(0));
+        let mut leaf = LeafNode::init(&mut page);
+
+        let result = leaf.split(PageId(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_leaf_node_split_single_entry() {
+        // Edge case: split with just 1 entry (mid = 0)
+        let mut page = Page::new(PageId(0));
+        let mut leaf = LeafNode::init(&mut page);
+
+        leaf.insert(&Key::new(b"only"), &RowId::new(1, 0)).unwrap();
+        assert_eq!(leaf.key_count(), 1);
+
+        let split_data = leaf.split(PageId(2)).unwrap();
+
+        // mid = 1 / 2 = 0, so left half has 0 entries, right half has 1 entry
+        assert_eq!(leaf.key_count(), 0);
+        assert_eq!(split_data.middle_key.as_bytes(), b"only");
+        assert_eq!(split_data.right_entries.len(), 1);
+        assert_eq!(split_data.new_page_id, PageId(2));
+    }
+
+    #[test]
+    fn test_leaf_node_split_odd_count() {
+        // Odd number of entries: mid = 5 / 2 = 2
+        let mut page = Page::new(PageId(0));
+        let mut leaf = LeafNode::init(&mut page);
+
+        for ch in b"abcde" {
+            leaf.insert(&Key::new(&[*ch]), &RowId::new(*ch as u32, 0))
+                .unwrap();
+        }
+
+        let split_data = leaf.split(PageId(10)).unwrap();
+
+        // Left: 2 entries (a, b), Right: 3 entries (c, d, e)
+        assert_eq!(leaf.key_count(), 2);
+        assert_eq!(split_data.right_entries.len(), 3);
+        assert_eq!(split_data.middle_key.as_bytes(), b"c");
+        assert_eq!(split_data.new_page_id, PageId(10));
     }
 }
