@@ -1,6 +1,37 @@
 # 学习记忆
 
-> 最后更新：2026-05-23（M17-Phase1 非唯一索引 完成）
+> 最后更新：2026-05-23（M17.5 存储架构分析 + 基准测试扩展）
+
+## 2026-05-23 新增（M17.5）
+
+### 存储架构发现
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **固定 Key 空间开销** | Key 固定 32 bytes，短 Key 浪费 ~28B，长 Key 限制 32B | storage/page_format/key.rs |
+| **两层分离索引** | 索引页 + 数据页（vs SQLite 聚簇索引），灵活性高但空间开销大 | storage/btree/ + storage/data_page.rs |
+| **SlottedPage overhead** | 每个 entry 多 4B Slot（offset + length），页填充率 50-70% | storage/page_format/slotted_page.rs |
+| **二进制序列化格式** | Tag byte + 固定长度（Int=9B, Float=9B），比 varint 多 ~6-7B | storage/page_format/tuple.rs |
+
+### 基准测试发现
+
+| 发现 | 数据 | 结论 |
+|------|------|------|
+| **INSERT 性能惊人** | RTsql 693µs vs SQLite 232ms (332x faster) ⚡ | 异步 I/O + MVCC 无锁写优势巨大 |
+| **PK lookup 性能** | RTsql 1.05µs vs SQLite 5.88µs (5.6x faster) ⚡ | 零拷贝 + AtomicPageId 有效 |
+| **Full Scan 较慢** | RTsql 327µs vs SQLite 80µs (4x slower) | SQLite 扫描优化成熟，后续可并行化 |
+| **文件大小差异** | RTsql 1.4MB vs SQLite 217KB (6.5x larger) | 合理权衡：空间换灵活性 |
+
+### Rust 基准测试技巧
+
+| 技巧 | 用途 | 代码位置 |
+|------|------|----------|
+| **共享 tokio::runtime** | 避免 per-iteration 创建 runtime（开销大） | benches/sqlite_compare.rs |
+| **RTsqlDirect in-process** | 直接调用 API，避免 network overhead | benches/sqlite_compare.rs |
+| **criterion Throughput** | 设置 throughput 更准确的测量 | benches/sqlite_compare.rs |
+| **减少 sample_size** | 慢操作用小 sample_size 加速完成 | benches/sqlite_compare.rs |
+
+---
 
 ## API 路径速查
 

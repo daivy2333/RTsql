@@ -107,7 +107,7 @@ async fn test_btree_insert_multiple_keys_ordered_search() {
 }
 
 #[tokio::test]
-async fn test_btree_insert_duplicate_key_returns_error() {
+async fn test_btree_insert_duplicate_key_allows_nonunique() {
     let buffer_pool = create_test_btree();
     let buffer_pool_clone = buffer_pool.clone();
 
@@ -118,14 +118,24 @@ async fn test_btree_insert_duplicate_key_returns_error() {
         // Insert key
         btree.insert(b"key1", RowId::new(1, 0)).unwrap();
 
-        // Insert duplicate
-        btree.insert(b"key1", RowId::new(2, 0))
+        // Insert duplicate key with different RowId (NonUniqueIndex allows this)
+        btree.insert(b"key1", RowId::new(2, 0)).unwrap();
+
+        // Insert another duplicate
+        btree.insert(b"key1", RowId::new(3, 0)).unwrap();
+
+        // Search all should find all 3 RowIds
+        let results = btree.search_all(b"key1").unwrap();
+        results
     })
     .await
     .unwrap();
 
-    assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), StorageError::DuplicateKey));
+    // Verify all 3 RowIds are found
+    assert_eq!(result.len(), 3);
+    assert!(result.contains(&RowId::new(1, 0)));
+    assert!(result.contains(&RowId::new(2, 0)));
+    assert!(result.contains(&RowId::new(3, 0)));
 }
 
 #[tokio::test]

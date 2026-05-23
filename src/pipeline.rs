@@ -1,12 +1,15 @@
 use crate::database::Database;
 use crate::executor::{
-    AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DeleteExecutor, DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
-    HavingExecutor, IndexScanExecutor, InsertExecutor, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor, SemiJoinExecutorV2,
-    SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
+    AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DeleteExecutor,
+    DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor, HavingExecutor,
+    IndexScanExecutor, InsertExecutor, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor,
+    SemiJoinExecutorV2, SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
-use crate::profiling::{init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope};
+use crate::profiling::{
+    init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope,
+};
 use crate::storage::Result;
 use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
@@ -31,7 +34,11 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
         init_profiling();
     }
 
-    let total_start = if profiling { Some(Instant::now()) } else { None };
+    let total_start = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
 
     // Check plan cache first
     let cached_plan = {
@@ -55,7 +62,11 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
             record_time("parse_and_plan", Duration::ZERO);
         }
 
-        let executor_start = if profiling { Some(Instant::now()) } else { None };
+        let executor_start = if profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let executor = match create_executor_from_plan(plan, database).await {
             Ok(e) => e,
             Err(e) => {
@@ -68,7 +79,11 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
             record_time("executor_creation", executor_start.unwrap().elapsed());
         }
 
-        let exec_start = if profiling { Some(Instant::now()) } else { None };
+        let exec_start = if profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let response = execute_executor(executor).await;
         if profiling {
             record_time("executor_execution", exec_start.unwrap().elapsed());
@@ -78,7 +93,11 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
     }
 
     // Cache miss — parse and plan
-    let parse_start = if profiling { Some(Instant::now()) } else { None };
+    let parse_start = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let statements = match parse_sql(sql) {
         Ok(s) => s,
         Err(e) => {
@@ -150,13 +169,20 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
 
             // Query, Insert, Update, Delete
             _ => {
-                let table_lookup_start = if profiling { Some(Instant::now()) } else { None };
+                let table_lookup_start = if profiling {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 let mut plan_builder = PlanBuilder::new();
                 if let Err(e) = register_table(database, &mut plan_builder, stmt).await {
                     return Response::Error { message: e };
                 }
                 if profiling {
-                    record_time("table_metadata_lookup", table_lookup_start.unwrap().elapsed());
+                    record_time(
+                        "table_metadata_lookup",
+                        table_lookup_start.unwrap().elapsed(),
+                    );
                 }
 
                 let plan = match plan_builder.build_plan(stmt) {
@@ -173,7 +199,11 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
                     cache.put(sql.to_string(), plan.clone());
                 }
 
-                let executor_start = if profiling { Some(Instant::now()) } else { None };
+                let executor_start = if profiling {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 let executor = match create_executor_from_plan(plan, database).await {
                     Ok(e) => e,
                     Err(e) => {
@@ -186,7 +216,11 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
                     record_time("executor_creation", executor_start.unwrap().elapsed());
                 }
 
-                let exec_start = if profiling { Some(Instant::now()) } else { None };
+                let exec_start = if profiling {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 let response = execute_executor(executor).await;
                 if profiling {
                     record_time("executor_execution", exec_start.unwrap().elapsed());
@@ -306,10 +340,22 @@ pub(crate) fn create_executor_from_plan(
             }
 
             PhysicalPlan::Aggregate(node) => {
-                let AggregateNode { input, group_by, aggregates, output_columns, table_name: _, column_indices } = node;
+                let AggregateNode {
+                    input,
+                    group_by,
+                    aggregates,
+                    output_columns,
+                    table_name: _,
+                    column_indices,
+                } = node;
                 let input_executor = create_executor_from_plan(*input, database).await?;
-                Ok(Box::new(AggregateExecutor::new(input_executor, group_by, aggregates, output_columns, column_indices))
-                    as Box<dyn Executor + Send>)
+                Ok(Box::new(AggregateExecutor::new(
+                    input_executor,
+                    group_by,
+                    aggregates,
+                    output_columns,
+                    column_indices,
+                )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Having(node) => {
@@ -336,8 +382,10 @@ pub(crate) fn create_executor_from_plan(
 
             PhysicalPlan::Join(join_node) => {
                 // Build column index mappings from ScanNodes (must do before moving)
-                let (left_column_indices, left_table_name) = extract_column_indices(&join_node.left)?;
-                let (right_column_indices, right_table_name) = extract_column_indices(&join_node.right)?;
+                let (left_column_indices, left_table_name) =
+                    extract_column_indices(&join_node.left)?;
+                let (right_column_indices, right_table_name) =
+                    extract_column_indices(&join_node.right)?;
 
                 // Build left executor recursively
                 let left_executor = create_executor_from_plan(*join_node.left, database).await?;
@@ -434,7 +482,8 @@ pub(crate) fn create_executor_from_plan(
 
             PhysicalPlan::DerivedScan(node) => {
                 // Materialize subquery results into memory
-                let mut subquery_executor = create_executor_from_plan(*node.subquery, database).await?;
+                let mut subquery_executor =
+                    create_executor_from_plan(*node.subquery, database).await?;
                 let mut rows = Vec::new();
                 loop {
                     match subquery_executor.next().await? {
@@ -470,9 +519,7 @@ fn value_to_json(value: Value) -> serde_json::Value {
     }
 }
 
-fn extract_column_indices(
-    plan: &PhysicalPlan,
-) -> Result<(HashMap<String, usize>, String)> {
+fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>, String)> {
     match plan {
         PhysicalPlan::Scan(scan_node) => {
             let indices: HashMap<String, usize> = scan_node
@@ -610,7 +657,7 @@ fn extract_all_query_table_names(query: &Query) -> Vec<String> {
             let where_tables = select
                 .selection
                 .as_ref()
-                .map(|expr| extract_subquery_tables_from_expr(expr))
+                .map(extract_subquery_tables_from_expr)
                 .unwrap_or_default();
 
             // Extract tables from SELECT projection subqueries
@@ -629,8 +676,8 @@ fn extract_all_query_table_names(query: &Query) -> Vec<String> {
             // Combine FROM, WHERE, and projection tables
             from_tables
                 .into_iter()
-                .chain(where_tables.into_iter())
-                .chain(projection_tables.into_iter())
+                .chain(where_tables)
+                .chain(projection_tables)
                 .collect()
         }
         _ => Vec::new(),
@@ -645,21 +692,19 @@ fn extract_subquery_tables_from_expr(expr: &Expr) -> Vec<String> {
         }
         Expr::Subquery(subquery) => extract_all_query_table_names(subquery),
         // Recurse into nested expressions
-        Expr::BinaryOp { left, right, .. } => {
-            extract_subquery_tables_from_expr(left)
-                .into_iter()
-                .chain(extract_subquery_tables_from_expr(right).into_iter())
-                .collect()
-        }
+        Expr::BinaryOp { left, right, .. } => extract_subquery_tables_from_expr(left)
+            .into_iter()
+            .chain(extract_subquery_tables_from_expr(right))
+            .collect(),
         Expr::UnaryOp { expr, .. } => extract_subquery_tables_from_expr(expr),
         Expr::Nested(expr) => extract_subquery_tables_from_expr(expr),
-        Expr::Between { expr, low, high, .. } => {
-            extract_subquery_tables_from_expr(expr)
-                .into_iter()
-                .chain(extract_subquery_tables_from_expr(low).into_iter())
-                .chain(extract_subquery_tables_from_expr(high).into_iter())
-                .collect()
-        }
+        Expr::Between {
+            expr, low, high, ..
+        } => extract_subquery_tables_from_expr(expr)
+            .into_iter()
+            .chain(extract_subquery_tables_from_expr(low))
+            .chain(extract_subquery_tables_from_expr(high))
+            .collect(),
         Expr::InList { expr, .. } => extract_subquery_tables_from_expr(expr),
         Expr::Case { .. } => Vec::new(), // Case expressions don't typically contain subqueries
         _ => Vec::new(),

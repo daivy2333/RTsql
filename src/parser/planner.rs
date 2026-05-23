@@ -3,9 +3,9 @@
 //! M4: SQL Parser and Physical Plan
 
 use crate::executor::{
-    AggregateFunc, AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef,
-    ColumnType, ComparisonOp, ComparisonPredicate, ConstantExpression, CorrelatedParam,
-    CreateTableNode, DeleteNode, DerivedScanNode, DropTableNode, ExpressionRef, FilterNode, HavingNode,
+    AggregateFunc, AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, ColumnType,
+    ComparisonOp, ComparisonPredicate, ConstantExpression, CorrelatedParam, CreateTableNode,
+    DeleteNode, DerivedScanNode, DropTableNode, ExpressionRef, FilterNode, HavingNode,
     IndexScanNode, InsertNode, JoinCondition, LimitNode, LogicalOp, LogicalPredicate,
     OrderByColumn, OutputColumn, ParameterExpression, PhysicalPlan, PredicateRef, ScanNode,
     SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode, Value,
@@ -216,6 +216,7 @@ impl PlanBuilder {
 
     /// 构建 FROM + JOIN 链计划（支持列投影）
     /// 从 PhysicalPlan 中提取输出列名（用于派生表的列注册）
+    #[allow(clippy::only_used_in_recursion)]
     fn get_plan_output_columns(&self, plan: &PhysicalPlan) -> Vec<String> {
         match plan {
             PhysicalPlan::Scan(node) => node.columns.clone(),
@@ -231,7 +232,9 @@ impl PlanBuilder {
                 Vec::new()
             }
             PhysicalPlan::SubqueryEval(node) => self.get_plan_output_columns(&node.input),
-            PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => Vec::new(),
+            PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => {
+                Vec::new()
+            }
             PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => Vec::new(),
         }
     }
@@ -260,7 +263,9 @@ impl PlanBuilder {
                 });
                 (plan, table_name)
             }
-            TableFactor::Derived { subquery, alias, .. } => {
+            TableFactor::Derived {
+                subquery, alias, ..
+            } => {
                 let subquery_plan = self.build_query(subquery)?;
                 let alias_name = alias
                     .as_ref()
@@ -277,7 +282,11 @@ impl PlanBuilder {
                 });
                 (plan, alias_name)
             }
-            _ => return Err(PlanError::InvalidQuery("unsupported table factor in FROM clause".into())),
+            _ => {
+                return Err(PlanError::InvalidQuery(
+                    "unsupported table factor in FROM clause".into(),
+                ))
+            }
         };
 
         // 递归处理 JOIN 链
@@ -387,7 +396,8 @@ impl PlanBuilder {
         // === Scalar subquery detection in SELECT projection ===
         // Scan projection for Expr::Subquery items and build subquery plans
         // Also detect correlated parameters (outer table column references)
-        let mut subquery_evals: Vec<(usize, PhysicalPlan, String, Vec<CorrelatedParam>)> = Vec::new();
+        let mut subquery_evals: Vec<(usize, PhysicalPlan, String, Vec<CorrelatedParam>)> =
+            Vec::new();
         for (idx, item) in select.projection.iter().enumerate() {
             let (expr, col_name) = match item {
                 sqlparser::ast::SelectItem::UnnamedExpr(Expr::Subquery(subquery)) => {
@@ -420,7 +430,11 @@ impl PlanBuilder {
             .projection
             .iter()
             .enumerate()
-            .filter(|(idx, _)| !subquery_evals.iter().any(|(sq_idx, _, _, _)| *sq_idx == *idx))
+            .filter(|(idx, _)| {
+                !subquery_evals
+                    .iter()
+                    .any(|(sq_idx, _, _, _)| *sq_idx == *idx)
+            })
             .map(|(_, item)| item.clone())
             .collect();
 
@@ -512,10 +526,11 @@ impl PlanBuilder {
             match item {
                 sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
                     if is_aggregate_expr(expr) {
-                        let func = extract_aggregate_func(expr)?
-                            .ok_or_else(|| PlanError::InvalidAggregateArgument(
+                        let func = extract_aggregate_func(expr)?.ok_or_else(|| {
+                            PlanError::InvalidAggregateArgument(
                                 "Unknown aggregate function".to_string(),
-                            ))?;
+                            )
+                        })?;
                         agg_output_columns.push(func.result_column_name());
                         aggregates.push(func);
                     } else {
@@ -526,10 +541,11 @@ impl PlanBuilder {
                 }
                 sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
                     if is_aggregate_expr(expr) {
-                        let func = extract_aggregate_func(expr)?
-                            .ok_or_else(|| PlanError::InvalidAggregateArgument(
+                        let func = extract_aggregate_func(expr)?.ok_or_else(|| {
+                            PlanError::InvalidAggregateArgument(
                                 "Unknown aggregate function".to_string(),
-                            ))?;
+                            )
+                        })?;
                         agg_output_columns.push(alias.value.clone());
                         aggregates.push(func);
                     } else {
@@ -548,11 +564,10 @@ impl PlanBuilder {
         let plan_with_aggregate = if has_aggregates {
             // Extract GROUP BY columns
             let group_by: Vec<String> = match &select.group_by {
-                sqlparser::ast::GroupByExpr::Expressions(exprs) => {
-                    exprs.iter()
-                        .map(|expr| expr_to_column_name(expr))
-                        .collect::<Result<Vec<_>, _>>()?
-                }
+                sqlparser::ast::GroupByExpr::Expressions(exprs) => exprs
+                    .iter()
+                    .map(expr_to_column_name)
+                    .collect::<Result<Vec<_>, _>>()?,
                 sqlparser::ast::GroupByExpr::All => {
                     // GROUP BY ALL: all non-aggregate columns
                     non_agg_columns.clone()
@@ -842,7 +857,9 @@ impl PlanBuilder {
                 let column_index = output_columns
                     .iter()
                     .position(|c| c.to_lowercase() == result_col_name.to_lowercase())
-                    .ok_or_else(|| PlanError::HavingNonAggregatedReference(result_col_name.clone()))?;
+                    .ok_or_else(|| {
+                        PlanError::HavingNonAggregatedReference(result_col_name.clone())
+                    })?;
                 Ok(Arc::new(crate::executor::ColumnExpression {
                     column_name: result_col_name,
                     column_index,
@@ -958,7 +975,10 @@ impl PlanBuilder {
 
                 // Check if this is an outer (correlated) reference
                 if let Some(ref inner_tables) = self.inner_table_names {
-                    if !inner_tables.iter().any(|t| t.eq_ignore_ascii_case(&table_ref)) {
+                    if !inner_tables
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(&table_ref))
+                    {
                         let param_name = format!("{}.{}", table_ref, column_name);
                         return Ok(Arc::new(ParameterExpression::new(param_name)));
                     }
@@ -1168,18 +1188,12 @@ impl PlanBuilder {
                 .iter()
                 .flat_map(|twj| {
                     let mut names = Vec::new();
-                    match &twj.relation {
-                        TableFactor::Table { name, .. } => {
-                            names.push(name.to_string().to_lowercase());
-                        }
-                        _ => {}
+                    if let TableFactor::Table { name, .. } = &twj.relation {
+                        names.push(name.to_string().to_lowercase());
                     }
                     for join in &twj.joins {
-                        match &join.relation {
-                            TableFactor::Table { name, .. } => {
-                                names.push(name.to_string().to_lowercase());
-                            }
-                            _ => {}
+                        if let TableFactor::Table { name, .. } = &join.relation {
+                            names.push(name.to_string().to_lowercase());
                         }
                     }
                     names
@@ -1216,6 +1230,7 @@ impl PlanBuilder {
     /// Recursively walk an expression tree to find outer column references.
     /// An outer column reference is a CompoundIdentifier (table.column) where
     /// the table is NOT in the inner_tables list.
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_outer_column_refs(
         &self,
         expr: &Expr,
@@ -1253,7 +1268,9 @@ impl PlanBuilder {
                 Ok(())
             }
             // Recurse into BETWEEN
-            Expr::Between { expr, low, high, .. } => {
+            Expr::Between {
+                expr, low, high, ..
+            } => {
                 self.collect_outer_column_refs(expr, inner_tables, params)?;
                 self.collect_outer_column_refs(low, inner_tables, params)?;
                 self.collect_outer_column_refs(high, inner_tables, params)?;
@@ -1270,13 +1287,14 @@ impl PlanBuilder {
                 let nested_inner_tables = Self::extract_subquery_table_names(subquery);
                 if let SetExpr::Select(select) = subquery.body.as_ref() {
                     if let Some(ref where_expr) = select.selection {
-                        let all_allowed: Vec<String> = inner_tables.iter()
+                        let all_allowed: Vec<String> = inner_tables
+                            .iter()
                             .chain(nested_inner_tables.iter())
                             .cloned()
                             .collect();
                         if Self::has_outer_refs_outside(where_expr, &all_allowed) {
                             return Err(PlanError::CorrelatedParamError(
-                                "Multi-level correlated subqueries are not supported".to_string()
+                                "Multi-level correlated subqueries are not supported".to_string(),
                             ));
                         }
                     }
@@ -1290,21 +1308,28 @@ impl PlanBuilder {
                 let nested_inner_tables = Self::extract_subquery_table_names(subquery);
                 if let SetExpr::Select(select) = subquery.body.as_ref() {
                     if let Some(ref where_expr) = select.selection {
-                        let all_allowed: Vec<String> = inner_tables.iter()
+                        let all_allowed: Vec<String> = inner_tables
+                            .iter()
                             .chain(nested_inner_tables.iter())
                             .cloned()
                             .collect();
                         if Self::has_outer_refs_outside(where_expr, &all_allowed) {
                             return Err(PlanError::CorrelatedParamError(
-                                "Multi-level correlated subqueries are not supported".to_string()
+                                "Multi-level correlated subqueries are not supported".to_string(),
                             ));
                         }
                     }
                 }
                 Ok(())
-            },
+            }
             // Recurse into CASE
-            Expr::Case { operand, conditions, results, else_result, .. } => {
+            Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+                ..
+            } => {
                 if let Some(op) = operand {
                     self.collect_outer_column_refs(op, inner_tables, params)?;
                 }
@@ -1329,7 +1354,9 @@ impl PlanBuilder {
         match expr {
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                 let table = parts[0].value.to_lowercase();
-                !allowed_tables.iter().any(|t| t.eq_ignore_ascii_case(&table))
+                !allowed_tables
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&table))
             }
             Expr::BinaryOp { left, right, .. } => {
                 Self::has_outer_refs_outside(left, allowed_tables)
@@ -1337,7 +1364,9 @@ impl PlanBuilder {
             }
             Expr::Nested(inner) => Self::has_outer_refs_outside(inner, allowed_tables),
             Expr::UnaryOp { expr, .. } => Self::has_outer_refs_outside(expr, allowed_tables),
-            Expr::Between { expr, low, high, .. } => {
+            Expr::Between {
+                expr, low, high, ..
+            } => {
                 Self::has_outer_refs_outside(expr, allowed_tables)
                     || Self::has_outer_refs_outside(low, allowed_tables)
                     || Self::has_outer_refs_outside(high, allowed_tables)
@@ -1357,7 +1386,7 @@ impl PlanBuilder {
                     select
                         .selection
                         .as_ref()
-                        .map_or(false, |w| Self::has_outer_refs_outside(w, &all_allowed))
+                        .is_some_and(|w| Self::has_outer_refs_outside(w, &all_allowed))
                 } else {
                     false
                 }
@@ -1373,7 +1402,7 @@ impl PlanBuilder {
                     select
                         .selection
                         .as_ref()
-                        .map_or(false, |w| Self::has_outer_refs_outside(w, &all_allowed))
+                        .is_some_and(|w| Self::has_outer_refs_outside(w, &all_allowed))
                 } else {
                     false
                 }
@@ -1409,6 +1438,7 @@ impl PlanBuilder {
     }
 
     /// Get the first output column name from a subquery plan (IN subquery requires single column)
+    #[allow(clippy::only_used_in_recursion)]
     fn get_subquery_first_column(&self, plan: &PhysicalPlan) -> Result<ColumnRef, PlanError> {
         match plan {
             PhysicalPlan::Scan(node) => {
@@ -1931,9 +1961,9 @@ fn extract_single_column_arg(
         )));
     }
     match &args[0] {
-        sqlparser::ast::FunctionArg::Unnamed(
-            sqlparser::ast::FunctionArgExpr::Expr(expr),
-        ) => expr_to_column_name(expr),
+        sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
+            expr_to_column_name(expr)
+        }
         _ => Err(PlanError::InvalidAggregateArgument(format!(
             "{} argument must be a column",
             func_name
@@ -1948,7 +1978,7 @@ fn expr_to_column_name(expr: &Expr) -> Result<String, PlanError> {
         Expr::CompoundIdentifier(parts) if !parts.is_empty() => {
             Ok(parts.last().unwrap().value.clone())
         }
-        Expr::Value(v) => Ok(format!("_{}", v.to_string())),
+        Expr::Value(v) => Ok(format!("_{}", v)),
         _ => Err(PlanError::InvalidAggregateArgument(
             "Expected column name".to_string(),
         )),

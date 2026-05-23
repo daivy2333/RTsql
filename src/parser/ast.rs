@@ -84,7 +84,7 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                         _ => Err(PlanError::UnsupportedStatement),
                     }
                 }
-                Expr::Value(v) => Ok(format!("_{}", v.to_string())),
+                Expr::Value(v) => Ok(format!("_{}", v)),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => Ok(alias.value.to_string().to_lowercase()),
@@ -107,12 +107,10 @@ pub fn extract_qualified_columns(
                 // Simple column: name
                 Expr::Identifier(ident) => Ok((None, ident.value.to_string().to_lowercase())),
                 // Qualified column: table.name
-                Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-                    Ok((
-                        Some(parts[0].value.to_string().to_lowercase()),
-                        parts[1].value.to_string().to_lowercase(),
-                    ))
-                }
+                Expr::CompoundIdentifier(parts) if parts.len() == 2 => Ok((
+                    Some(parts[0].value.to_string().to_lowercase()),
+                    parts[1].value.to_string().to_lowercase(),
+                )),
                 // Aggregate function: return result column name
                 Expr::Function(f) => {
                     let name = f.name.to_string().to_uppercase();
@@ -153,7 +151,7 @@ pub fn extract_qualified_columns(
                         _ => Err(PlanError::UnsupportedStatement),
                     }
                 }
-                Expr::Value(v) => Ok((None, format!("_{}", v.to_string()))),
+                Expr::Value(v) => Ok((None, format!("_{}", v))),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => {

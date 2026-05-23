@@ -3,7 +3,6 @@
 //! Supports SQL standard aggregate functions: COUNT(*), COUNT(col), SUM, AVG, MIN, MAX.
 
 use crate::executor::executor_trait::Executor;
-use crate::executor::plan::AggregateNode;
 use crate::executor::result::ExecResult;
 use crate::executor::Value;
 use crate::storage;
@@ -180,6 +179,8 @@ pub struct AggregateExecutor {
     input: Box<dyn Executor + Send>,
     group_by: Vec<String>,
     aggregates: Vec<AggregateFunc>,
+    /// Output column names for projection optimization (future use)
+    #[allow(dead_code)]
     output_columns: Vec<String>,
     column_indices: HashMap<String, usize>,
     /// Grouped results: group key → aggregate states
@@ -221,11 +222,8 @@ impl AggregateExecutor {
         let is_no_group_by = self.group_by.is_empty();
 
         if is_no_group_by {
-            let states: Vec<AggregateState> = self
-                .aggregates
-                .iter()
-                .map(|f| AggregateState::new(f))
-                .collect();
+            let states: Vec<AggregateState> =
+                self.aggregates.iter().map(AggregateState::new).collect();
             self.single_group = Some(states);
         }
 
@@ -241,7 +239,7 @@ impl AggregateExecutor {
                     } else {
                         let group_key = self.extract_group_key(&row);
                         let states = self.groups.entry(group_key).or_insert_with(|| {
-                            self.aggregates.iter().map(|f| AggregateState::new(f)).collect()
+                            self.aggregates.iter().map(AggregateState::new).collect()
                         });
                         for (i, func) in self.aggregates.iter().enumerate() {
                             let value = Self::extract_value(&row, func, &self.column_indices);
@@ -259,19 +257,21 @@ impl AggregateExecutor {
     }
 
     /// Extract value from row for aggregate function
-    fn extract_value(row: &[Value], func: &AggregateFunc, column_indices: &HashMap<String, usize>) -> Value {
+    fn extract_value(
+        row: &[Value],
+        func: &AggregateFunc,
+        column_indices: &HashMap<String, usize>,
+    ) -> Value {
         match func {
             AggregateFunc::CountStar => Value::Int(1),
             AggregateFunc::Count(col)
             | AggregateFunc::Sum(col)
             | AggregateFunc::Avg(col)
             | AggregateFunc::Min(col)
-            | AggregateFunc::Max(col) => {
-                match column_indices.get(&col.to_lowercase()) {
-                    Some(&idx) => row.get(idx).cloned().unwrap_or(Value::Null),
-                    None => Value::Null,
-                }
-            }
+            | AggregateFunc::Max(col) => match column_indices.get(&col.to_lowercase()) {
+                Some(&idx) => row.get(idx).cloned().unwrap_or(Value::Null),
+                None => Value::Null,
+            },
         }
     }
 
@@ -279,11 +279,9 @@ impl AggregateExecutor {
     fn extract_group_key(&self, row: &[Value]) -> Vec<Value> {
         self.group_by
             .iter()
-            .map(|col| {
-                match self.column_indices.get(&col.to_lowercase()) {
-                    Some(&idx) => row.get(idx).cloned().unwrap_or(Value::Null),
-                    None => Value::Null,
-                }
+            .map(|col| match self.column_indices.get(&col.to_lowercase()) {
+                Some(&idx) => row.get(idx).cloned().unwrap_or(Value::Null),
+                None => Value::Null,
             })
             .collect()
     }

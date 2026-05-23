@@ -22,6 +22,7 @@ lru = "0.12"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 rusqlite = "0.31"
 tempfile = "3.0"
+which = "6.0"
 
 [[bench]]
 name = "micro_bench"

@@ -10,9 +10,11 @@ async fn main() {
     let db = Database::open(&db_path).await.unwrap();
     std::mem::forget(dir);
 
-    db.execute_sql("CREATE TABLE bench (id INTEGER PRIMARY KEY, val TEXT)").await;
+    db.execute_sql("CREATE TABLE bench (id INTEGER PRIMARY KEY, val TEXT)")
+        .await;
     for i in 0..50i64 {
-        db.execute_sql(&format!("INSERT INTO bench VALUES ({}, 'hello')", i)).await;
+        db.execute_sql(&format!("INSERT INTO bench VALUES ({}, 'hello')", i))
+            .await;
     }
 
     // Warm up (trigger plan cache)

@@ -108,7 +108,7 @@ impl Protocol for JsonProtocol {
             serde_json::to_vec(response).map_err(|e| NetworkError::ProtocolWrite(e.to_string()))?;
 
         stream.write_all(&json).await?;
-        stream.write_all(&[b'\n']).await?;
+        stream.write_all(b"\n").await?;
         stream.flush().await?;
 
         Ok(())

@@ -1,10 +1,12 @@
 //! Join executor unit tests (M12)
 
 use rtsql::executor::{
-    ColumnRef, ExecResult, Executor, InsertExecutor, JoinCondition, JoinExecutor,
-    OutputColumn, ScanExecutor, Value,
+    ColumnRef, ExecResult, Executor, InsertExecutor, JoinCondition, JoinExecutor, OutputColumn,
+    ScanExecutor, Value,
 };
-use rtsql::storage::{data::TableManager, page_format::ColumnType, BufferPool, FileStorage, Result};
+use rtsql::storage::{
+    data::TableManager, page_format::ColumnType, BufferPool, FileStorage, Result,
+};
 use rtsql::transaction::TransactionManager;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -487,9 +489,24 @@ async fn test_join_multiple_conditions_and() -> Result<()> {
         ],
         "id",
         vec![
-            vec![Value::Int(101), Value::Int(1), Value::Int(2024), Value::Int(100000)],
-            vec![Value::Int(102), Value::Int(1), Value::Int(2023), Value::Int(90000)],
-            vec![Value::Int(103), Value::Int(2), Value::Int(2024), Value::Int(120000)],
+            vec![
+                Value::Int(101),
+                Value::Int(1),
+                Value::Int(2024),
+                Value::Int(100000),
+            ],
+            vec![
+                Value::Int(102),
+                Value::Int(1),
+                Value::Int(2023),
+                Value::Int(90000),
+            ],
+            vec![
+                Value::Int(103),
+                Value::Int(2),
+                Value::Int(2024),
+                Value::Int(120000),
+            ],
             // Note: no budget for dept_id=2, year=2023
         ],
         buffer_pool.clone(),

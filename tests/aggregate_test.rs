@@ -43,7 +43,11 @@ fn error_msg(resp: Response) -> String {
 
 /// Helper: set up a students table with sample data.
 async fn setup_students(db: &Database) {
-    exec(db, "CREATE TABLE students (id INT, name TEXT, class TEXT, score INT)").await;
+    exec(
+        db,
+        "CREATE TABLE students (id INT, name TEXT, class TEXT, score INT)",
+    )
+    .await;
     exec(db, "INSERT INTO students VALUES (1, 'Alice', 'A', 90)").await;
     exec(db, "INSERT INTO students VALUES (2, 'Bob', 'B', 85)").await;
     exec(db, "INSERT INTO students VALUES (3, 'Carol', 'A', 95)").await;
@@ -186,16 +190,20 @@ async fn test_group_by_count() {
     let db = open_db().await;
     setup_students(&db).await;
 
-    let r = rows(
-        exec(&db, "SELECT class, COUNT(*) FROM students GROUP BY class").await,
-    );
+    let r = rows(exec(&db, "SELECT class, COUNT(*) FROM students GROUP BY class").await);
     assert_eq!(r.len(), 2, "should have 2 groups (A, B)");
 
     // Find the group for class A
-    let group_a = r.iter().find(|row| row[0] == serde_json::json!("A")).expect("should have class A");
+    let group_a = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("A"))
+        .expect("should have class A");
     assert_eq!(group_a[1], serde_json::json!(3)); // Alice, Carol, Eve
 
-    let group_b = r.iter().find(|row| row[0] == serde_json::json!("B")).expect("should have class B");
+    let group_b = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("B"))
+        .expect("should have class B");
     assert_eq!(group_b[1], serde_json::json!(2)); // Bob, Dave
 }
 
@@ -204,19 +212,19 @@ async fn test_group_by_sum() {
     let db = open_db().await;
     setup_students(&db).await;
 
-    let r = rows(
-        exec(
-            &db,
-            "SELECT class, SUM(score) FROM students GROUP BY class",
-        )
-        .await,
-    );
+    let r = rows(exec(&db, "SELECT class, SUM(score) FROM students GROUP BY class").await);
 
-    let group_a = r.iter().find(|row| row[0] == serde_json::json!("A")).expect("should have class A");
+    let group_a = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("A"))
+        .expect("should have class A");
     // Alice(90) + Carol(95) + Eve(80) = 265
     assert_eq!(group_a[1], serde_json::json!(265));
 
-    let group_b = r.iter().find(|row| row[0] == serde_json::json!("B")).expect("should have class B");
+    let group_b = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("B"))
+        .expect("should have class B");
     // Bob(85) + Dave(70) = 155
     assert_eq!(group_b[1], serde_json::json!(155));
 }
@@ -226,23 +234,29 @@ async fn test_group_by_avg() {
     let db = open_db().await;
     setup_students(&db).await;
 
-    let r = rows(
-        exec(
-            &db,
-            "SELECT class, AVG(score) FROM students GROUP BY class",
-        )
-        .await,
-    );
+    let r = rows(exec(&db, "SELECT class, AVG(score) FROM students GROUP BY class").await);
 
-    let group_a = r.iter().find(|row| row[0] == serde_json::json!("A")).expect("should have class A");
+    let group_a = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("A"))
+        .expect("should have class A");
     let avg_a = group_a[1].as_f64().expect("AVG should be a number");
     // 265 / 3 = 88.333...
-    assert!((avg_a - 88.333).abs() < 0.1, "AVG for A should be ~88.33, got {avg_a}");
+    assert!(
+        (avg_a - 88.333).abs() < 0.1,
+        "AVG for A should be ~88.33, got {avg_a}"
+    );
 
-    let group_b = r.iter().find(|row| row[0] == serde_json::json!("B")).expect("should have class B");
+    let group_b = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("B"))
+        .expect("should have class B");
     let avg_b = group_b[1].as_f64().expect("AVG should be a number");
     // 155 / 2 = 77.5
-    assert!((avg_b - 77.5).abs() < 0.01, "AVG for B should be 77.5, got {avg_b}");
+    assert!(
+        (avg_b - 77.5).abs() < 0.01,
+        "AVG for B should be 77.5, got {avg_b}"
+    );
 }
 
 #[tokio::test]
@@ -264,7 +278,11 @@ async fn test_group_by_strict_non_aggregated_column() {
 #[tokio::test]
 async fn test_group_by_null_handling() {
     let db = open_db().await;
-    exec(&db, "CREATE TABLE gn (id INT PRIMARY KEY, cat TEXT, val INT)").await;
+    exec(
+        &db,
+        "CREATE TABLE gn (id INT PRIMARY KEY, cat TEXT, val INT)",
+    )
+    .await;
     exec(&db, "INSERT INTO gn VALUES (1, 'x', 1)").await;
     exec(&db, "INSERT INTO gn VALUES (2, NULL, 2)").await;
     exec(&db, "INSERT INTO gn VALUES (3, 'x', 3)").await;
@@ -274,7 +292,10 @@ async fn test_group_by_null_handling() {
     // Two groups: 'x' and NULL
     assert_eq!(r.len(), 2, "should have 2 groups (x and NULL)");
 
-    let group_x = r.iter().find(|row| row[0] == serde_json::json!("x")).expect("should have group x");
+    let group_x = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("x"))
+        .expect("should have group x");
     assert_eq!(group_x[1], serde_json::json!(2));
 }
 
@@ -369,11 +390,17 @@ async fn test_group_by_with_where() {
         .await,
     );
 
-    let group_a = r.iter().find(|row| row[0] == serde_json::json!("A")).expect("should have class A");
+    let group_a = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("A"))
+        .expect("should have class A");
     assert_eq!(group_a[1], serde_json::json!(2)); // Alice, Carol
     assert_eq!(group_a[2], serde_json::json!(185)); // 90 + 95
 
-    let group_b = r.iter().find(|row| row[0] == serde_json::json!("B")).expect("should have class B");
+    let group_b = r
+        .iter()
+        .find(|row| row[0] == serde_json::json!("B"))
+        .expect("should have class B");
     assert_eq!(group_b[1], serde_json::json!(1)); // Bob
     assert_eq!(group_b[2], serde_json::json!(85));
 }

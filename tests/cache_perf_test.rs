@@ -10,8 +10,13 @@ async fn cache_perf_measurement() {
     db.execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, name STRING, value INT)")
         .await;
     for i in 0..100 {
-        db.execute_sql(&format!("INSERT INTO bench VALUES ({}, 'user_{}', {})", i, i, i * 10))
-            .await;
+        db.execute_sql(&format!(
+            "INSERT INTO bench VALUES ({}, 'user_{}', {})",
+            i,
+            i,
+            i * 10
+        ))
+        .await;
     }
 
     let sql = "SELECT * FROM bench WHERE id = 42";
@@ -41,14 +46,18 @@ async fn cache_perf_measurement() {
     println!("  Cached:   {} µs/call", cached_us);
     println!("  Uncached: {} µs/call", uncached_us);
     if uncached_us > 0 && cached_us > 0 {
-        println!("  Cache speedup: {:.1}x", uncached_us as f64 / cached_us as f64);
+        println!(
+            "  Cache speedup: {:.1}x",
+            uncached_us as f64 / cached_us as f64
+        );
     }
 
     // Measure with different SQLs (low cache hit)
     let start = Instant::now();
     for i in 0..n {
         let id = (i % 100) as i64;
-        db.execute_sql(&format!("SELECT * FROM bench WHERE id = {}", id)).await;
+        db.execute_sql(&format!("SELECT * FROM bench WHERE id = {}", id))
+            .await;
     }
     let diff_sql_us = start.elapsed().as_micros() / n as u128;
     println!("  Diff SQL: {} µs/call (100 unique SQLs)", diff_sql_us);

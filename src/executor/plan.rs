@@ -302,7 +302,11 @@ pub struct CorrelatedParam {
 
 impl CorrelatedParam {
     pub fn new(outer_table: String, outer_column: String, param_name: String) -> Self {
-        Self { outer_table, outer_column, param_name }
+        Self {
+            outer_table,
+            outer_column,
+            param_name,
+        }
     }
 }
 

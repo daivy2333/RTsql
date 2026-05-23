@@ -149,7 +149,10 @@ impl SemiJoinExecutorV2 {
                     .get(&cp.outer_column.to_lowercase())
                     .copied()
                     .unwrap_or(0);
-                (cp.param_name.clone(), left_row.get(idx).cloned().unwrap_or(Value::Null))
+                (
+                    cp.param_name.clone(),
+                    left_row.get(idx).cloned().unwrap_or(Value::Null),
+                )
             })
             .collect()
     }
@@ -202,11 +205,15 @@ impl Executor for SemiJoinExecutorV2 {
                                     let db = self.database.as_ref().unwrap();
                                     let cloned_plan = plan.clone();
                                     let param_values = self.extract_param_values(&left_row);
-                                    crate::executor::inject_correlated_values(&cloned_plan, &param_values);
-                                    let mut right_exec = crate::pipeline::create_executor_from_plan(
-                                        cloned_plan, db,
-                                    ).await?;
-                                    let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> = HashMap::new();
+                                    crate::executor::inject_correlated_values(
+                                        &cloned_plan,
+                                        &param_values,
+                                    );
+                                    let mut right_exec =
+                                        crate::pipeline::create_executor_from_plan(cloned_plan, db)
+                                            .await?;
+                                    let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
+                                        HashMap::new();
                                     let mut has_rows = false;
                                     while let Some(result) = right_exec.next().await? {
                                         if let ExecResult::Row(row) = result {

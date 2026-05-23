@@ -7,6 +7,8 @@ use std::sync::Arc;
 pub struct DeleteExecutor {
     index_manager: Arc<IndexManager>,
     key: Vec<u8>,
+    /// Transaction ID for MVCC visibility checks (future use)
+    #[allow(dead_code)]
     tx_id: u64,
     executed: bool,
 }

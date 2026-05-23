@@ -86,15 +86,18 @@ impl BTree {
 
     /// Async search — direct async path without spawn_blocking/block_on
     pub async fn search_async(&self, key: &Key, loader: &AsyncPageLoader) -> Result<Option<RowId>> {
-        self.search_from_page_async(self.root_page_id, key, loader).await
+        self.search_from_page_async(self.root_page_id, key, loader)
+            .await
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn search_from_page_async<'a>(
         &'a self,
         page_id: PageId,
         key: &'a Key,
         loader: &'a AsyncPageLoader,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<RowId>>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<RowId>>> + Send + 'a>>
+    {
         Box::pin(async move {
             let child_page_id = {
                 let guard = loader.load_page(page_id).await?;
@@ -114,7 +117,8 @@ impl BTree {
                 }
             }; // guard and data_guard dropped here, before recursive await
 
-            self.search_from_page_async(PageId(child_page_id as u64), key, loader).await
+            self.search_from_page_async(PageId(child_page_id as u64), key, loader)
+                .await
         })
     }
 
@@ -164,10 +168,11 @@ impl BTree {
 
         if is_leaf {
             // Try direct insert first
-            let insert_result: std::result::Result<usize, StorageError> = guard.modify_page(|page| {
-                let mut leaf = LeafNode::from_page(page)?;
-                leaf.insert(key, row_id)
-            });
+            let insert_result: std::result::Result<usize, StorageError> =
+                guard.modify_page(|page| {
+                    let mut leaf = LeafNode::from_page(page)?;
+                    leaf.insert(key, row_id)
+                });
 
             match insert_result {
                 Ok(_) => Ok(None), // Insert succeeded, no split needed
@@ -203,7 +208,7 @@ impl BTree {
                         // Collect all entries for the right page (sorted + new entry if applicable)
                         let mut right_with_new = leaf_split.right_entries.clone();
                         if key_in_right {
-                            right_with_new.push((key.clone(), row_id.clone()));
+                            right_with_new.push((key.clone(), *row_id));
                             right_with_new.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
                         }
 
@@ -243,10 +248,14 @@ impl BTree {
 
             if let Some(child_split_result) = child_split {
                 // Child split: need to insert a separator into this internal node
-                let separator_insert_result: std::result::Result<usize, StorageError> = guard.modify_page(|page| {
-                    let mut internal = InternalNode::from_page(page)?;
-                    internal.insert_separator(&child_split_result.middle_key, child_split_result.new_page_id)
-                });
+                let separator_insert_result: std::result::Result<usize, StorageError> = guard
+                    .modify_page(|page| {
+                        let mut internal = InternalNode::from_page(page)?;
+                        internal.insert_separator(
+                            &child_split_result.middle_key,
+                            child_split_result.new_page_id,
+                        )
+                    });
 
                 match separator_insert_result {
                     Ok(_) => Ok(None), // Separator inserted successfully
@@ -286,7 +295,8 @@ impl BTree {
                             new_internal.set_leftmost_child(internal_split.new_leftmost_child);
                             // Insert right separators
                             for (k, child_id) in &internal_split.right_separators {
-                                new_internal.insert_separator_simple(k, PageId(*child_id as u64))?;
+                                new_internal
+                                    .insert_separator_simple(k, PageId(*child_id as u64))?;
                             }
                             if sep_in_right {
                                 new_internal.insert_separator(
@@ -335,8 +345,7 @@ impl BTree {
         } else {
             // Internal node: find child and recurse
             // Simplified: not implemented yet
-            Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(StorageError::Io(std::io::Error::other(
                 "Internal node deletion not implemented yet",
             )))
         }
@@ -418,8 +427,7 @@ impl BTree {
         } else {
             // Internal node: find child and recurse
             // Simplified: not implemented yet
-            Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(StorageError::Io(std::io::Error::other(
                 "Internal node update not implemented yet",
             )))
         }
@@ -469,9 +477,13 @@ impl BTree {
                 let left_child = if idx == 0 {
                     internal.leftmost_child()
                 } else {
-                    internal.get_child_page_id(idx - 1).unwrap_or(internal.leftmost_child())
+                    internal
+                        .get_child_page_id(idx - 1)
+                        .unwrap_or(internal.leftmost_child())
                 };
-                let right_child = internal.get_child_page_id(idx).unwrap_or(internal.leftmost_child());
+                let right_child = internal
+                    .get_child_page_id(idx)
+                    .unwrap_or(internal.leftmost_child());
 
                 drop(data_guard);
                 drop(guard);
@@ -542,9 +554,13 @@ impl BTree {
                 let left_child = if idx == 0 {
                     internal.leftmost_child()
                 } else {
-                    internal.get_child_page_id(idx - 1).unwrap_or(internal.leftmost_child())
+                    internal
+                        .get_child_page_id(idx - 1)
+                        .unwrap_or(internal.leftmost_child())
                 };
-                let right_child = internal.get_child_page_id(idx).unwrap_or(internal.leftmost_child());
+                let right_child = internal
+                    .get_child_page_id(idx)
+                    .unwrap_or(internal.leftmost_child());
 
                 drop(data_guard);
                 drop(guard);
@@ -577,9 +593,10 @@ impl BTree {
             let matches = leaf_ref.find_all_matches(key);
 
             // Find slot with matching RowId
-            let target_idx = matches.iter().find(|idx| {
-                leaf_ref.get_row_id(**idx) == Some(row_id.clone())
-            }).copied();
+            let target_idx = matches
+                .iter()
+                .find(|idx| leaf_ref.get_row_id(**idx) == Some(*row_id))
+                .copied();
 
             let key_has_matches_in_leaf = !matches.is_empty();
             let next_page_u32 = if key_has_matches_in_leaf {
@@ -626,9 +643,13 @@ impl BTree {
                 let left_child = if idx == 0 {
                     internal.leftmost_child()
                 } else {
-                    internal.get_child_page_id(idx - 1).unwrap_or(internal.leftmost_child())
+                    internal
+                        .get_child_page_id(idx - 1)
+                        .unwrap_or(internal.leftmost_child())
                 };
-                let right_child = internal.get_child_page_id(idx).unwrap_or(internal.leftmost_child());
+                let right_child = internal
+                    .get_child_page_id(idx)
+                    .unwrap_or(internal.leftmost_child());
 
                 drop(data_guard);
                 drop(guard);

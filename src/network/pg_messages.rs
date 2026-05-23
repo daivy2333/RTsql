@@ -6,7 +6,6 @@ use crate::executor::Value;
 use crate::network::NetworkError;
 
 /// PostgreSQL message serialization functions
-
 /// AuthenticationOk message: 'R' + length(8) + code(0)
 pub fn authentication_ok() -> Vec<u8> {
     let mut bytes = Vec::with_capacity(9);

@@ -134,7 +134,7 @@ impl<'a> LeafNode<'a> {
         let slot_index = self
             .slotted
             .add_slot(&data)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
 
         // 6. 如果不是插入到末尾，需要移动 slots
         if slot_index != position {
@@ -196,7 +196,7 @@ impl<'a> LeafNode<'a> {
         // 添加 slot（直接添加到末尾）
         self.slotted
             .add_slot(&data)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
 
         Ok(())
     }
@@ -211,7 +211,7 @@ impl<'a> LeafNode<'a> {
 
         self.slotted
             .delete_slot(position)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
         self.slotted.sync_header();
 
         Ok(())
@@ -221,7 +221,7 @@ impl<'a> LeafNode<'a> {
     pub fn delete_slot(&mut self, index: usize) -> Result<(), StorageError> {
         self.slotted
             .delete_slot(index)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
         self.slotted.sync_header();
         Ok(())
     }
@@ -255,13 +255,7 @@ impl<'a> LeafNode<'a> {
         // Update the matching entry
         let updated_entries: Vec<(Key, RowId)> = entries
             .into_iter()
-            .map(|(k, r)| {
-                if k == *key {
-                    (k, new_row_id.clone())
-                } else {
-                    (k, r)
-                }
-            })
+            .map(|(k, r)| if k == *key { (k, *new_row_id) } else { (k, r) })
             .collect();
 
         // Rebuild the page
@@ -318,8 +312,7 @@ impl<'a> LeafNode<'a> {
             .collect();
 
         if entries.is_empty() {
-            return Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(StorageError::Io(std::io::Error::other(
                 "cannot split empty leaf node",
             )));
         }
@@ -561,7 +554,11 @@ impl<'a> InternalNode<'a> {
     }
 
     /// 插入分隔符（key + right_child_page_id）
-    pub fn insert_separator(&mut self, key: &Key, right_child: PageId) -> Result<usize, StorageError> {
+    pub fn insert_separator(
+        &mut self,
+        key: &Key,
+        right_child: PageId,
+    ) -> Result<usize, StorageError> {
         // 1. 查找插入位置
         let position = self.find_insert_position(key);
 
@@ -580,7 +577,7 @@ impl<'a> InternalNode<'a> {
         let slot_index = self
             .slotted
             .add_slot(&data)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
 
         // 5. 调整顺序（如果不是插入到末尾）
         if slot_index != position {
@@ -628,12 +625,19 @@ impl<'a> InternalNode<'a> {
             new_internal.insert_separator_simple(&key, PageId(child as u64))?;
         }
 
-        self.slotted.page.data.copy_from_slice(new_page.data.as_ref());
+        self.slotted
+            .page
+            .data
+            .copy_from_slice(new_page.data.as_ref());
         Ok(())
     }
 
     /// 简单插入（不检查顺序，用于重建）
-    pub fn insert_separator_simple(&mut self, key: &Key, right_child: PageId) -> Result<(), StorageError> {
+    pub fn insert_separator_simple(
+        &mut self,
+        key: &Key,
+        right_child: PageId,
+    ) -> Result<(), StorageError> {
         let entry_size = MAX_KEY_LEN + 4;
         if self.slotted.free_space() < Slot::SIZE + entry_size {
             return Err(StorageError::PageFull);
@@ -645,7 +649,7 @@ impl<'a> InternalNode<'a> {
 
         self.slotted
             .add_slot(&data)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
 
         Ok(())
     }
@@ -664,8 +668,7 @@ impl<'a> InternalNode<'a> {
             .collect();
 
         if separators.is_empty() {
-            return Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(StorageError::Io(std::io::Error::other(
                 "cannot split empty internal node",
             )));
         }
@@ -819,7 +822,8 @@ impl<'a> InternalNodeRef<'a> {
             self.leftmost_child()
         } else {
             // key belongs to the subtree rooted at child_{lo-1}
-            self.get_child_page_id(lo - 1).unwrap_or(self.leftmost_child())
+            self.get_child_page_id(lo - 1)
+                .unwrap_or(self.leftmost_child())
         }
     }
 }
@@ -983,7 +987,8 @@ mod tests {
         let mut leaf = LeafNode::init(&mut page);
 
         for ch in b"acegikm" {
-            leaf.insert(&Key::new(&[*ch]), &RowId::new(*ch as u32, 0)).unwrap();
+            leaf.insert(&Key::new(&[*ch]), &RowId::new(*ch as u32, 0))
+                .unwrap();
         }
 
         let data: &[u8] = page.data.as_ref();
@@ -1178,7 +1183,9 @@ mod tests {
         let total = 50;
         for i in 0..total {
             let key = Key::new(format!("key_{:03}", i).as_bytes());
-            internal.insert_separator(&key, PageId(101 + i as u64)).unwrap();
+            internal
+                .insert_separator(&key, PageId(101 + i as u64))
+                .unwrap();
         }
 
         assert_eq!(internal.key_count(), total);
@@ -1278,7 +1285,13 @@ mod tests {
         internal.slotted.page.data[5..9].copy_from_slice(&10u32.to_le_bytes());
         internal.slotted.reload_header();
 
-        for (ch, child) in [(b'a', 100u64), (b'b', 200u64), (b'c', 300u64), (b'd', 400u64), (b'e', 500u64)] {
+        for (ch, child) in [
+            (b'a', 100u64),
+            (b'b', 200u64),
+            (b'c', 300u64),
+            (b'd', 400u64),
+            (b'e', 500u64),
+        ] {
             internal
                 .insert_separator(&Key::new(&[ch]), PageId(child))
                 .unwrap();
