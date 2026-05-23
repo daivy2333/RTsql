@@ -68,6 +68,8 @@
 
 ---
 
+---
+
 ### ADR-004: 自定义二进制序列化（2026-05-23）
 
 **决策**：使用自定义二进制格式（Tag + Value），而非 JSON 或 Protobuf。
@@ -93,6 +95,149 @@ Bool   = [Tag 0x05][1 byte]
 **对比**：
 - RTsql: Int = 9 bytes (Tag + 8B)
 - SQLite varint: Int = 1-9 bytes（平均 ~2-3 bytes）
+
+---
+
+### ADR-005: 务实 Clippy warnings 清理策略（2026-05-23）
+
+**决策**：采用务实策略清理架构 warnings，平衡性能、安全、重构成本。
+
+**清理原则**：
+- ✅ **简单 warnings 直接修复**：too_many_arguments、type_complexity
+- ✅ **合理设计保留 #[allow]**：await_holding_lock、dead_code 字段
+- ✅ **避免过度重构**：不追求零 warnings 的极端目标
+
+**修复方案**：
+
+| Warning | 修复方案 | 收益评估 |
+|---------|----------|----------|
+| too_many_arguments | 引入 JoinConfig struct | 参数组织清晰，易扩展 |
+| type_complexity | 定义 ExecutorFuture type alias | 类型签名简洁，易维护 |
+| await_holding_lock | #[allow] + 安全评估 | 避免异步重构成本 |
+| dead_code 字段 | #[allow] + 明确用途注释 | 保留未来功能支持 |
+
+**原因**：
+- ✅ **成本控制**：避免 await_holding_lock 大规模异步重构
+- ✅ **实用性**：dead_code 字段有明确的未来用途（MVCC、投影优化）
+- ✅ **渐进式**：先清理简单问题，复杂架构问题后续评估
+
+**替代方案**：
+- 完全修复（激进）：零 warnings，但重构成本高
+- 保守修复：仅处理最简单 warnings，遗留复杂问题
+
+---
+
+### ADR-006: IndexScanAllExecutor（Executor层非唯一索引）（2026-05-23）
+
+**决策**：新增 IndexScanAllExecutor 处理非唯一索引扫描，而非扩展 IndexScanExecutor。
+
+**原因**：
+- ✅ **职责清晰**：IndexScanExecutor 保持唯一索引职责，IndexScanAllExecutor 专注非唯一索引
+- ✅ **易扩展**：新增 executor 不影响现有唯一索引逻辑
+- ✅ **测试友好**：独立 executor 易于单独测试
+
+**设计**：
+```rust
+pub struct IndexScanAllExecutor {
+    index_name: String,
+    key: Key,
+    index_manager: Arc<IndexManager>,
+    buffer_pool: Arc<BufferPool>,
+    tx_id: u64,
+}
+```
+
+**数据流**：
+```
+SQL层 → IndexScanAllExecutor → IndexManager.search_all(key)
+                                    ↓
+                                BTree.search_all → 返回所有 row_ids
+                                    ↓
+                                BufferPool.fetch_page → 返回所有 tuples
+```
+
+**替代方案**：
+- 扩展 IndexScanExecutor：添加 search_mode 参数，但职责混淆
+- Executor层不支持：仅在 BTree 层使用 search_all（功能不完整）
+
+---
+
+### ADR-007: WAL + Group Commit架构（2026-05-23）
+
+**决策**：实现 WAL（Write-Ahead Logging）机制，结合 Group Commit 优化 INSERT 性能（5-10x）。
+
+**架构设计**：
+```
+Executor（INSERT/UPDATE/DELETE）
+    ↓ 写操作
+WALWriter
+    ↓ 记录 WAL log
+WALBuffer（内存缓冲）
+    ↓ Group Commit触发
+WALFile（持久化）
+```
+
+**核心组件**：
+
+1. **WALRecord**：记录写操作类型（Insert/Update/Delete/Commit）
+2. **WALWriter**：缓冲管理 + 批量刷盘
+3. **Group Commit策略**：
+   - 缓冲区满（100条）→ 立即刷盘
+   - 事务提交 → 刷盘当前事务的所有记录
+   - 定时刷盘（例如每 100ms）
+
+**性能优化原理**：
+- ✅ 减少 fsync 次数（从 N次降至 N/100次）
+- ✅ 批量写入提高磁盘 I/O效率
+- ✅ 目标：INSERT 5-10x faster
+
+**原因**：
+- ✅ **崩溃恢复**：WAL 保证数据持久性
+- ✅ **性能提升**：Group Commit 减少 fsync开销
+- ✅ **主流方案**：PostgreSQL、MySQL 都采用类似机制
+
+**替代方案**：
+- 直接刷盘（无 Group Commit）：性能提升有限
+- 异步刷盘（无 fsync）：崩溃恢复风险
+
+---
+
+### ADR-008: B-Tree Merge机制（2026-05-23）
+
+**决策**：实现 B-Tree页合并机制，避免删除后的 underflow，支持页释放。
+
+**Merge触发条件**：
+- 页利用率 < 50%（underflow）
+- 页删除后条目数 < 最小阈值
+
+**Merge策略**：
+
+1. **Leaf Merge**：
+   - 左兄弟页 + 当前页 → 合并为一个页
+   - 更新父节点 separator
+   - 释放空页
+
+2. **Internal Merge**：
+   - 合并子节点后，父节点 separator减少
+   - 父节点可能也需要 merge（递归）
+
+**设计**：
+```rust
+pub fn merge(&mut self, sibling: &mut LeafNode) -> MergeResult {
+    // 将 sibling 的条目合并到 self
+    // 更新 next_leaf_page_id
+    // 返回 MergeResult { freed_page_id, separator_key }
+}
+```
+
+**原因**：
+- ✅ **空间效率**：避免删除后页利用率低
+- ✅ **页释放**：空页可回收，减少文件大小
+- ✅ **性能稳定**：保持 B-Tree查询性能
+
+**替代方案**：
+- 不实现 Merge：页利用率低，文件大小增长
+- 简化 Merge：仅处理 Leaf Merge，不处理 Internal（可能导致父节点 underflow）
 
 ---
 

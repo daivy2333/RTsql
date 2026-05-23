@@ -1,6 +1,6 @@
 # 任务追踪
 
-> 最后更新：2026-05-23（M17.5 清理阶段 已完成）
+> 最后更新：2026-05-23（M18 优化项目与技术债清理 规划完成）
 
 ## 当前阶段：M17.5 代码清理 + 全面对比 ✅
 
@@ -21,7 +21,62 @@
 
 ---
 
-## 下一步：M18 WAL 集成 + 写入优化
+---
+
+## 当前阶段：M18 优化项目与技术债清理 ⏳
+
+**设计文档**：`.claude/docs/superpowers/specs/2026-05-23-optimization-tech-debts-design.md`
+
+### Phase1: 架构Warnings清理（待开始）
+
+- [ ] T1: 引入 JoinConfig struct（解决 too_many_arguments）
+- [ ] T2: 定义 ExecutorFuture type alias（解决 type_complexity）
+- [ ] T3: 评估 await_holding_lock 是否需要重构
+- [ ] T4: #[allow] dead_code 字段 + 明确用途注释
+- [ ] T5: 评估 module_inception 是否重命名
+- [ ] T6: Clippy 验证（warnings 降至 2-3个）
+
+**预估工期**：1-2天
+
+---
+
+### Phase2: Executor层非唯一索引测试覆盖（待开始）
+
+- [ ] T1: 新增 IndexScanAllExecutor 结构体
+- [ ] T2: 实现 IndexScanAllExecutor::execute
+- [ ] T3: executor_test.rs 新增非唯一索引测试
+- [ ] T4: SQL层集成验证
+
+**预估工期**：1天
+
+---
+
+### Phase3: WAL集成 + Group Commit（待开始）
+
+- [ ] T1: 设计 WALRecord 结构
+- [ ] T2: 实现 WALWriter + buffer管理
+- [ ] T3: Group Commit策略实现
+- [ ] T4: INSERT Executor 集成 WAL
+- [ ] T5: 性能基准测试（验证 5-10x faster）
+- [ ] T6: 崩溃恢复测试
+
+**预估工期**：3-5天
+
+---
+
+### Phase4: B-Tree Merge（待开始）
+
+- [ ] T1: LeafNode::merge 实现
+- [ ] T2: BTree::delete 递归 merge回传
+- [ ] T3: InternalNode merge处理
+- [ ] T4: BufferPool.free_page 集成
+- [ ] T5: btree_merge_test.rs 新增测试
+
+**预估工期**：2-3天
+
+---
+
+## 下一步：Phase1 架构Warnings清理
 
 ---
 

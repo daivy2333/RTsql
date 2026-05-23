@@ -1,16 +1,13 @@
 # 项目快照
 
-> 最后更新：2026-05-23（M17.5 代码清理 + 全面对比 已完成）
+> 最后更新：2026-05-23（M18 优化项目与技术债清理 规划完成）
 
 ## 当前状态
 
-- **阶段**: M17.5 已完成，代码清理 + 全面对比完成
-- **状态**: 编译通过，所有测试通过，Clippy 清理完成
-- **测试**: 174+ tests pass, 0 failures
-- **Clippy**: 6 个架构 warnings（已留档，待 M18+ 重构）
-- **性能对比**: INSERT 332x faster, PK lookup 5.6x faster than SQLite ⚡
-- **遗留**: Executor 层非唯一索引测试覆盖（待 M18+）、await_holding_lock 重构（待 M18+）
-- **下一步**: M18 WAL 集成 + Group Commit（写入优化）
+- **阶段**: M18 优化项目与技术债清理 规划完成
+- **状态**: 设计文档已写入，待 Phase1 开始
+- **设计文档**: `.claude/docs/superpowers/specs/2026-05-23-optimization-tech-debts-design.md`
+- **下一步**: Phase1 架构Warnings清理（8个 Clippy warnings 修复）
 
 ## 最近提交（M17.5）
 
@@ -83,12 +80,14 @@
 
 ## 下一步行动
 
-1. M17.5: 代码清理 + 全面对比（新阶段）
-2. M18: WAL 集成 + 写入优化
+1. **Phase1: 架构Warnings清理**（8个 Clippy warnings 修复）
+2. **Phase2: Executor层非唯一索引测试覆盖**（新增 IndexScanAllExecutor）
+3. **Phase3: WAL集成 + Group Commit**（INSERT 性能优化）
+4. **Phase4: B-Tree Merge**（删除后页合并）
 
 **里程碑路线图**:
 - M16: ✅ 子查询支持
 - M17-Phase1: ✅ 非唯一索引
 - M17-Phase2: ✅ B-Tree Split 机制
-- **M17.5**: ✅ **代码清理 + 全面对比**
-- M18: WAL 集成 + 写入优化
+- M17.5: ✅ **代码清理 + 全面对比**
+- **M18**: ⏳ **优化项目与技术债清理**（Phase1-4）
