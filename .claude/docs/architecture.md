@@ -1,6 +1,6 @@
 # 架构决策记录
 
-> 最后更新：2026-05-23（M17.5 存储架构分析完成）
+> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
 
 ## 存储层架构决策（M17.5 新增）
 
@@ -124,7 +124,7 @@ Bool   = [Tag 0x05][1 byte]
 
 ---
 
-### ADR-006: IndexScanAllExecutor（Executor层非唯一索引）（2026-05-23）
+### ADR-006: IndexScanAllExecutor（Executor层非唯一索引）（2026-05-23 Phase2完成）
 
 **决策**：新增 IndexScanAllExecutor 处理非唯一索引扫描，而非扩展 IndexScanExecutor。
 
@@ -133,29 +133,47 @@ Bool   = [Tag 0x05][1 byte]
 - ✅ **易扩展**：新增 executor 不影响现有唯一索引逻辑
 - ✅ **测试友好**：独立 executor 易于单独测试
 
-**设计**：
+**实现设计**（Phase2已完成）：
 ```rust
 pub struct IndexScanAllExecutor {
-    index_name: String,
-    key: Key,
-    index_manager: Arc<IndexManager>,
+    table_meta: Arc<TableMeta>,
     buffer_pool: Arc<BufferPool>,
-    tx_id: u64,
+    key: Vec<u8>,
+    schema: Vec<ColumnType>,
+    snapshot: Option<Snapshot>,
+    row_ids: Vec<RowId>,      // 查询结果缓存
+    current_idx: usize,        // 迭代索引
+    initialized: bool,         // 惰性初始化标志
 }
 ```
 
-**数据流**：
+**关键特性**（Phase2已验证）：
+- ✅ **惰性初始化**：search_all 在首次 next() 调用时执行，避免不必要开销
+- ✅ **MVCC 可见性迭代**：while 循环跳过不可见版本，继续下一个 row_id
+- ✅ **逐行返回**：符合 Executor 接口约定（每次返回一个 ExecResult::Row）
+
+**数据流**（Phase2已实现）：
 ```
-SQL层 → IndexScanAllExecutor → IndexManager.search_all(key)
-                                    ↓
-                                BTree.search_all → 返回所有 row_ids
-                                    ↓
-                                BufferPool.fetch_page → 返回所有 tuples
+SQL层 → Planner → PhysicalPlan::IndexScanAll
+          ↓
+      Pipeline → IndexScanAllExecutor::new
+          ↓
+      Executor::next() → search_all (首次)
+          ↓
+      BTree::search_all → Vec<RowId>
+          ↓
+      BufferPool::find_visible_version → MVCC可见性检查
+          ↓
+      逐行返回 ExecResult::Row
 ```
 
-**替代方案**：
-- 扩展 IndexScanExecutor：添加 search_mode 参数，但职责混淆
-- Executor层不支持：仅在 BTree 层使用 search_all（功能不完整）
+**验证结果（Phase2完成）**：
+- ✅ IndexManager::search_all 方法实现完成（async，支持非唯一索引）
+- ✅ IndexScanAllExecutor 实现（惰性初始化 + MVCC可见性 + 逐行返回）
+- ✅ executor_test.rs 新增 3 个测试（基础/空结果/单结果）
+- ✅ PhysicalPlan::IndexScanAll 节点集成
+- ✅ Pipeline 创建 IndexScanAllExecutor 逻辑
+- ✅ 101 tests pass, 0 failures
 
 ---
 
