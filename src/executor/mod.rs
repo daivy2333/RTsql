@@ -3,6 +3,7 @@
 //! M5: Implement async fn next() -> Result<Option<ExecResult>>
 
 mod join_config;
+mod join_related_config;
 
 mod aggregate;
 mod anti_join;
@@ -29,6 +30,7 @@ mod update;
 mod value;
 
 pub use join_config::JoinConfig;
+pub use join_related_config::JoinRelatedConfig;
 
 pub use aggregate::{AggregateExecutor, AggregateFunc, AggregateState};
 pub use anti_join::AntiJoinExecutor;
