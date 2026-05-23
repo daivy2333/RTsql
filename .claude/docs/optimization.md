@@ -1,6 +1,6 @@
 # 优化方向与技术债
 
-> 最后更新：2026-05-22（M15 完成）
+> 最后更新：2026-05-23（M16-Phase2 完成）
 
 ## 已完成的优化
 
@@ -12,6 +12,7 @@
 | 4 | BTree 零拷贝读 | M14 | PK 查询 1.2x |
 | 5 | Async search (AtomicPageId) | M14 | 17x internal + 8x vs SQLite |
 | 6 | 聚合函数 + GROUP BY | M15 | 19 tests，功能完善 |
+| 7 | 子查询支持（独立+关联） | M16 | 20 tests，SemiJoin/AntiJoin/SubqueryEval/DerivedScan |
 
 ## M14 性能验证（已完成）
 
@@ -35,12 +36,12 @@
 
 ## 优化路线图
 
-| 里程碑 | 优化项 | 目标 |
-|--------|--------|------|
-| M16 | 子查询支持 | 功能完善 |
-| M17 | B-Tree split/merge + 非唯一索引 | 索引完整性 |
-| M18 | WAL 集成 + Group Commit | INSERT 5-10x 提速 |
-| M19 | 行缓存 + 并发优化 | 热点行 2-3x |
+| 里程碑 | 优化项 | 目标 | 状态 |
+|--------|--------|------|------|
+| M16 | 子查询支持 | 功能完善 | ✅ 完成 |
+| M17 | B-Tree split/merge + 非唯一索引 | 索引完整性 | ⏳ 待开始 |
+| M18 | WAL 集成 + Group Commit | INSERT 5-10x 提速 | ⏳ 待开始 |
+| M19 | 行缓存 + 并发优化 | 热点行 2-3x | ⏳ 待开始 |
 
 ## 低优先级优化
 
@@ -67,4 +68,7 @@
 ✅ 读操作用 page_data()，写操作用 modify_page()
 ✅ HAVING 谓词解析用聚合输出列，不是原始表列
 ✅ AVG 结果必须是 Float 类型
+✅ 相关子查询注入: ParameterExpression + Mutex，clone→inject→rebuild per row
+✅ 多层 Plan 检测: 确保检测在提取首列之前触发
+⚠️ 关联 IN + 空右侧: 已知 bug，返回所有行而非 0 行（待修复）
 ```

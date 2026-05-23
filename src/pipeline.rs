@@ -1,14 +1,14 @@
 use crate::database::Database;
 use crate::executor::{
-    AggregateExecutor, AggregateNode, CreateTableExecutor, DeleteExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
-    HavingExecutor, IndexScanExecutor, InsertExecutor, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor, SortExecutor,
-    UpdateExecutor, Value,
+    AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DeleteExecutor, DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
+    HavingExecutor, IndexScanExecutor, InsertExecutor, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor, SemiJoinExecutorV2,
+    SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
 use crate::profiling::{init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope};
 use crate::storage::Result;
-use sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
+use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -233,7 +233,7 @@ async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
 }
 
 /// Create executor from physical plan (recursive for Filter)
-fn create_executor_from_plan(
+pub(crate) fn create_executor_from_plan(
     plan: PhysicalPlan,
     database: &Database,
 ) -> std::pin::Pin<
@@ -356,6 +356,95 @@ fn create_executor_from_plan(
                     right_table_name,
                 )) as Box<dyn Executor + Send>)
             }
+
+            PhysicalPlan::SemiJoin(node) => {
+                // Build column index mapping for right table (like JoinExecutor does)
+                let (right_column_indices, _) = extract_column_indices(&node.right)?;
+
+                // Build column index mapping for left table (need all columns for condition lookup)
+                let (left_column_indices, _) = extract_column_indices(&node.left)?;
+
+                // For correlated subqueries, clone the right plan before consuming
+                let right_plan = if !node.correlated_params.is_empty() {
+                    Some((*node.right).clone())
+                } else {
+                    None
+                };
+
+                // Build left and right executors recursively
+                let left_executor = create_executor_from_plan(*node.left, database).await?;
+                let right_executor = create_executor_from_plan(*node.right, database).await?;
+
+                Ok(Box::new(SemiJoinExecutorV2::new(
+                    left_executor,
+                    right_executor,
+                    node.conditions,
+                    node.output_columns,
+                    node.correlated_params,
+                    left_column_indices,
+                    right_column_indices,
+                    right_plan,
+                    Some(Arc::new(database.clone())),
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::AntiJoin(node) => {
+                // Build column index mapping for right table (like SemiJoin does)
+                let (right_column_indices, _) = extract_column_indices(&node.right)?;
+
+                // Build column index mapping for left table (need all columns for condition lookup)
+                let (left_column_indices, _) = extract_column_indices(&node.left)?;
+
+                // Save right plan clone for correlated per-row rebuild before consuming node.right
+                let right_plan = if !node.correlated_params.is_empty() {
+                    Some((*node.right).clone())
+                } else {
+                    None
+                };
+                // Build left and right executors recursively
+                let left_executor = create_executor_from_plan(*node.left, database).await?;
+                let right_executor = create_executor_from_plan(*node.right, database).await?;
+
+                Ok(Box::new(AntiJoinExecutor::new(
+                    left_executor,
+                    right_executor,
+                    node.conditions,
+                    node.output_columns,
+                    node.correlated_params,
+                    left_column_indices,
+                    right_column_indices,
+                    right_plan,
+                    Some(Arc::new(database.clone())),
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::SubqueryEval(node) => {
+                let (outer_column_indices, _) = extract_column_indices(&node.input)?;
+                let input_executor = create_executor_from_plan(*node.input, database).await?;
+                Ok(Box::new(SubqueryEvalExecutor::new(
+                    input_executor,
+                    *node.subquery,
+                    node.output_column.clone(),
+                    node.result_column_index,
+                    node.correlated_params.clone(),
+                    outer_column_indices,
+                    Arc::new(database.clone()),
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::DerivedScan(node) => {
+                // Materialize subquery results into memory
+                let mut subquery_executor = create_executor_from_plan(*node.subquery, database).await?;
+                let mut rows = Vec::new();
+                loop {
+                    match subquery_executor.next().await? {
+                        Some(ExecResult::Row(row)) => rows.push(row),
+                        Some(_) => {} // skip non-row results
+                        None => break,
+                    }
+                }
+                Ok(Box::new(DerivedScanExecutor::new(rows)) as Box<dyn Executor + Send>)
+            }
         }
     })
 }
@@ -410,8 +499,79 @@ fn extract_column_indices(
                 .unwrap_or_default();
             Ok((indices, table_name))
         }
+        PhysicalPlan::SemiJoin(semi_join_node) => {
+            // SemiJoin outputs only left table columns
+            let indices: HashMap<String, usize> = semi_join_node
+                .output_columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.column.to_lowercase(), idx))
+                .collect();
+            // Use first condition's left table as "table name"
+            let table_name = semi_join_node
+                .conditions
+                .first()
+                .map(|c| c.left_column.table.clone().unwrap_or_default())
+                .unwrap_or_default();
+            Ok((indices, table_name))
+        }
+        PhysicalPlan::AntiJoin(anti_join_node) => {
+            // AntiJoin outputs only left table columns
+            let indices: HashMap<String, usize> = anti_join_node
+                .output_columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.column.to_lowercase(), idx))
+                .collect();
+            // Use first condition's left table as "table name"
+            let table_name = anti_join_node
+                .conditions
+                .first()
+                .map(|c| c.left_column.table.clone().unwrap_or_default())
+                .unwrap_or_default();
+            Ok((indices, table_name))
+        }
+        PhysicalPlan::Filter(filter_node) => {
+            // For Filter, extract from input
+            extract_column_indices(&filter_node.input)
+        }
+        PhysicalPlan::Aggregate(agg_node) => {
+            // For Aggregate, use output_columns
+            let indices: HashMap<String, usize> = agg_node
+                .output_columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, agg_node.table_name.clone()))
+        }
+        PhysicalPlan::SubqueryEval(node) => {
+            // Recurse into input, then add the scalar result column
+            let (mut indices, table_name) = extract_column_indices(&node.input)?;
+            let next_idx = indices.len();
+            indices.insert(node.output_column.to_lowercase(), next_idx);
+            Ok((indices, table_name))
+        }
+        PhysicalPlan::DerivedScan(node) => {
+            let indices: HashMap<String, usize> = node
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, String::new()))
+        }
+        PhysicalPlan::IndexScan(node) => {
+            let indices: HashMap<String, usize> = node
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, node.table_name.clone()))
+        }
         _ => Err(crate::storage::StorageError::ExecutionError(
-            "Expected Scan or Join".into(),
+            "Expected Scan, Join, SemiJoin, AntiJoin, Filter, Aggregate, SubqueryEval, DerivedScan, or IndexScan".into(),
         )),
     }
 }
@@ -436,33 +596,102 @@ fn extract_all_table_names(stmt: &Statement) -> Vec<String> {
     }
 }
 
-/// Extract all table names from a query (including JOIN tables)
+/// Extract all table names from a query (including JOIN tables, derived subqueries, and WHERE/SELECT subqueries)
 fn extract_all_query_table_names(query: &Query) -> Vec<String> {
     match query.body.as_ref() {
         SetExpr::Select(select) => {
-            select
+            let from_tables: Vec<String> = select
                 .from
                 .iter()
                 .flat_map(extract_all_from_table_with_joins_item)
+                .collect();
+
+            // Extract tables from WHERE clause subqueries
+            let where_tables = select
+                .selection
+                .as_ref()
+                .map(|expr| extract_subquery_tables_from_expr(expr))
+                .unwrap_or_default();
+
+            // Extract tables from SELECT projection subqueries
+            let projection_tables: Vec<String> = select
+                .projection
+                .iter()
+                .flat_map(|item| match item {
+                    sqlparser::ast::SelectItem::UnnamedExpr(expr)
+                    | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
+                        extract_subquery_tables_from_expr(expr)
+                    }
+                    _ => Vec::new(),
+                })
+                .collect();
+
+            // Combine FROM, WHERE, and projection tables
+            from_tables
+                .into_iter()
+                .chain(where_tables.into_iter())
+                .chain(projection_tables.into_iter())
                 .collect()
         }
         _ => Vec::new(),
     }
 }
 
-/// Extract all table names from a TableWithJoins (including JOIN tables)
+/// Extract table names from subqueries inside an expression
+fn extract_subquery_tables_from_expr(expr: &Expr) -> Vec<String> {
+    match expr {
+        Expr::InSubquery { subquery, .. } | Expr::Exists { subquery, .. } => {
+            extract_all_query_table_names(subquery)
+        }
+        Expr::Subquery(subquery) => extract_all_query_table_names(subquery),
+        // Recurse into nested expressions
+        Expr::BinaryOp { left, right, .. } => {
+            extract_subquery_tables_from_expr(left)
+                .into_iter()
+                .chain(extract_subquery_tables_from_expr(right).into_iter())
+                .collect()
+        }
+        Expr::UnaryOp { expr, .. } => extract_subquery_tables_from_expr(expr),
+        Expr::Nested(expr) => extract_subquery_tables_from_expr(expr),
+        Expr::Between { expr, low, high, .. } => {
+            extract_subquery_tables_from_expr(expr)
+                .into_iter()
+                .chain(extract_subquery_tables_from_expr(low).into_iter())
+                .chain(extract_subquery_tables_from_expr(high).into_iter())
+                .collect()
+        }
+        Expr::InList { expr, .. } => extract_subquery_tables_from_expr(expr),
+        Expr::Case { .. } => Vec::new(), // Case expressions don't typically contain subqueries
+        _ => Vec::new(),
+    }
+}
+
+/// Extract all table names from a TableWithJoins (including JOIN tables and derived subqueries)
 fn extract_all_from_table_with_joins_item(twj: &TableWithJoins) -> Vec<String> {
     let mut tables = Vec::new();
 
     // Main table
-    if let TableFactor::Table { name, .. } = &twj.relation {
-        tables.push(name.to_string().to_lowercase());
+    match &twj.relation {
+        TableFactor::Table { name, .. } => {
+            tables.push(name.to_string().to_lowercase());
+        }
+        TableFactor::Derived { subquery, .. } => {
+            // Recursively extract table names from the derived subquery
+            tables.extend(extract_all_query_table_names(subquery));
+        }
+        _ => {}
     }
 
     // JOIN tables
     for join in &twj.joins {
-        if let TableFactor::Table { name, .. } = &join.relation {
-            tables.push(name.to_string().to_lowercase());
+        match &join.relation {
+            TableFactor::Table { name, .. } => {
+                tables.push(name.to_string().to_lowercase());
+            }
+            TableFactor::Derived { subquery, .. } => {
+                tables.extend(extract_all_query_table_names(subquery));
+            }
+            _ => {}
         }
     }
 

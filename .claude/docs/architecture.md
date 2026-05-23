@@ -1,6 +1,6 @@
 # 架构决策记录
 
-> 最后更新：2026-05-22（M15 聚合函数与 GROUP BY）
+> 最后更新：2026-05-23（M16-Phase2 相关子查询 完成）
 
 ## 系统架构
 
@@ -16,7 +16,7 @@
        ▼
 ┌──────────────┐
 │  PlanBuilder │───▶ PhysicalPlan
-│ (register +  │     (15 种节点)
+│ (register +  │     (19 种节点)
 │  build_plan) │
 └──────┬───────┘
        ▼
@@ -31,6 +31,8 @@
 │  Scan → Filter → Join → Aggregate   │
 │       → Having → Sort → Limit       │
 │  IndexScan → Insert/Update/Delete   │
+│  SemiJoin → AntiJoin                │
+│  SubqueryEval → DerivedScan         │
 └──────────────────────────────────────┘
        │
        ▼
@@ -54,8 +56,11 @@
 | 6 | 2026-05 | Volcano Hash Aggregation | 匹配现有架构，改动最小 | 排序聚合（需 SortExecutor 依赖） |
 | 7 | 2026-05 | 严格 GROUP BY 模式 | SQL 标准一致，防歧义 | 宽松模式（结果不确定） |
 | 8 | 2026-05 | HAVING 复用 Predicate 体系 | HavingExecutor 结构同 FilterExecutor | 独立谓词体系（重复代码） |
+| 9 | 2026-05 | 子查询混合策略 | WHERE→SemiJoin/AntiJoin O(N+M)，SELECT→SubqueryEval，FROM→DerivedScan | 全部嵌套循环或全部反嵌套 |
+| 10 | 2026-05 | CorrelatedParam 机制 | 相关子查询通过参数注入外层值，避免闭包捕获 | 参数化查询/延迟绑定 |
+| 11 | 2026-05 | ParameterExpression + Mutex 注入 | 外层列引用在谓词树中以 ParameterExpression 占位，按行 clone+inject+rebuild executor，无需修改 Expression trait 签名 | 深度克隆谓词树 + 类型匹配（复杂且需 as_any） |
 
-## PhysicalPlan 节点（15 种）
+## PhysicalPlan 节点（19 种）
 
 | 节点 | 输入 | 用途 |
 |------|------|------|
@@ -67,6 +72,10 @@
 | Having | 1 | HAVING 过滤（聚合后） |
 | Sort | 1 | ORDER BY |
 | Limit | 1 | LIMIT/OFFSET |
+| SemiJoin | 2 | IN/EXISTS 子查询（仅输出左表匹配行） |
+| AntiJoin | 2 | NOT IN/NOT EXISTS（仅输出左表不匹配行） |
+| SubqueryEval | 1 | SELECT 标量子查询 |
+| DerivedScan | 1 | FROM 子查询（派生表） |
 | Insert/Update/Delete | - | DML |
 | CreateTable/DropTable | - | DDL |
 
@@ -79,25 +88,48 @@ SQL → Parser → PlanBuilder(+PlanCache) → PhysicalPlan
   → Response::QueryResult { rows }
 ```
 
-### 聚合查询数据流
+### 子查询数据流
 
 ```
-SQL: SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) > 3
+WHERE IN 子查询:
+  SQL: SELECT * FROM emp WHERE dept IN (SELECT dept FROM dept_table WHERE region = 'east')
+  Plan: SemiJoin(Scan(emp), Filter(Scan(dept_table)), conditions=[emp.dept = dept_table.dept])
+  Exec: BuildRight(hash) → ScanLeft(probe) → Output matching left rows
 
-Parser → PlanBuilder:
-  1. 检测聚合函数 (COUNT/SUM/AVG/MIN/MAX)
-  2. 验证严格模式（非聚合列必须在 GROUP BY）
-  3. 构建: Scan → Aggregate → Having → Sort → Limit
+WHERE EXISTS 子查询:
+  Plan: SemiJoin(Scan(emp), Filter(Scan(dept_table)), conditions=[])
+  Exec: BuildRight(has_rows?) → ScanLeft → Output left rows if right non-empty
 
-Pipeline → Executor Tree:
-  ScanExecutor → AggregateExecutor → HavingExecutor
+SELECT 标量子查询:
+  SQL: SELECT name, (SELECT AVG(salary) FROM emp) AS avg_sal FROM dept
+  Plan: SubqueryEval(Scan(dept), Aggregate(Scan(emp)))
+  Exec: For each input row → eval subquery once (cached if independent) → insert result
 
-执行:
-  1. AggregateExecutor.consume_input() 消耗全部输入
-     - 提取分组键 → HashMap<Vec<Value>, Vec<AggregateState>>
-     - 逐行更新 AggregateState
-  2. build_output_rows() 物化结果
-  3. HavingExecutor 过滤聚合结果行
+FROM 派生表:
+  SQL: SELECT t.dept FROM (SELECT dept, AVG(salary) FROM emp GROUP BY dept) AS t
+  Plan: DerivedScan(Aggregate(Scan(emp)))
+  Exec: Materialize subquery → iterate as virtual Scan
+
+### 相关子查询数据流（M16-Phase2）
+
+```
+SQL: SELECT emp.name FROM emp WHERE emp.dept IN
+     (SELECT dept.id FROM dept WHERE dept.id = emp.dept)
+
+Plan 构建:
+  1. Planner 检测子查询 WHERE 中 emp.dept 为外层引用
+  2. 设置 inner_table_names = ["dept"]，调用 build_expression
+  3. build_expression 检查 table_ref "emp" 不在 inner_tables → 创建 ParameterExpression("emp.dept")
+  4. 生成 CorrelatedParam { outer_table: "emp", outer_column: "dept", param_name: "emp.dept" }
+  5. 创建 SemiJoinNode { correlated_params: [CorrelatedParam(...)] }
+
+Plan 执行（每外层行）:
+  1. ScanLeft 获取外层行 [Alice, 10, 50000]
+  2. 提取参数: param_values = [("emp.dept", Value::Int(10))]
+  3. clone right_plan → inject_correlated_values(clone, param_values)
+     → 遍历谓词树，找到 ParameterExpression("emp.dept")，Mutex::set(10)
+  4. create_executor_from_plan(clone, database) → 重建右表执行器
+  5. 物化右表到 hashmap → probe → 匹配则输出
 ```
 
 ## 存储层
