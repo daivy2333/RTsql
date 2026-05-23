@@ -1,122 +1,85 @@
 # 项目快照
 
-> 最后更新：2026-05-23（M17-Phase1 非唯一索引 完成）
+> 最后更新：2026-05-23（M17-Phase2 B-Tree Split 机制 完成）
 
 ## 当前状态
 
-- **阶段**: M17-Phase1 完成，非唯一索引功能到位
-- **状态**: 编译通过，所有测试通过
-- **测试**: 90 lib + 5 btree_split = 95 tests pass
-- **下一步**: M17-Phase2 B-Tree Split 机制
+- **阶段**: M17-Phase2 完成，B-Tree Split 机制实现到位
+- **状态**: 编译通过，核心测试通过
+- **测试**: 98 lib + 12 btree_split + 9 btree = 119 tests pass
+- **遗留**: 47 clippy warnings、1 过时测试、planner_test 编译失败、M15 对比测试未完成
+- **下一步**: M17.5 代码清理 + 全面对比 → M18 WAL
 
 ## 最近提交
 
-- c854ac8 docs(M17): update tasks with Phase1 completion
-- bf46c98 feat(M17-T5): add InternalNode::insert_separator
-- 0f723cf feat(M17-T4): add SplitResult struct
-- bc368f8 feat(M17-T3): add search_all/delete_by_key/delete_exact
-- 1ae1cbe feat(M17-T2): add LeafNodeRef::find_all_matches
-- e3cf46d feat(M17-T1): allow duplicate keys + fix scan_all bug
+- 72c69dc fix(M17): fix InternalNodeRef::find_child_page_id linear search routing
+- f54a6c7 feat(M17-T5/T8): add B-Tree split test suite and fix split/search/delete bugs
+- 95b60b2 feat(M17-T7/T8): rewrite BTree::insert with recursive split propagation and root split
+- d3a7c0c feat(M17-T6): add InternalNode::split for b-tree internal node splitting
+- 238d9a7 feat(M17-T6): add LeafNode::split for b-tree leaf node splitting
 
-## 项目结构
+## M17-Phase2 新增功能
 
-```
-RTsql/
-├── Cargo.toml              # Rust 项目配置（6 benchmarks）
-├── CLAUDE.md               # 文档入口
-├── examples/bench_minimal.rs
-├── src/
-│   ├── main.rs             # 数据库服务器入口
-│   ├── lib.rs              # 库入口
-│   ├── database.rs         # Database 协调器 + plan_cache
-│   ├── pipeline.rs         # SQL 执行管道（含 profiling）
-│   ├── profiling.rs        # Task-local profiling
-│   ├── plan_cache.rs       # LRU plan cache
-│   ├── storage/
-│   │   ├── buffer_pool.rs  # Clock 淘汰 + 两阶段锁
-│   │   ├── page_frame.rs   # PageGuard + PageDataGuard（零拷贝）
-│   │   ├── data_page.rs    # 零拷贝页读取
-│   │   ├── data/           # TableManager + TableMeta + ColumnSchema
-│   │   ├── page_format/    # SlottedPage + SlottedPageRef（含 compacting）
-│   │   └── btree/          # BTree + AsyncPageLoader + AtomicPageId
-│   ├── executor/
-│   │   ├── value.rs        # Value + arithmetic（add/lt_agg/div）
-│   │   ├── plan.rs         # PhysicalPlan（19 种节点）
-│   │   ├── executor_trait.rs
-│   │   ├── scan.rs / index_scan.rs / insert.rs / update.rs / delete.rs
-│   │   ├── predicate.rs    # Predicate/Expression trait + ParameterExpression
-│   │   ├── filter.rs / sort.rs / limit.rs
-│   │   ├── join.rs         # 哈希连接
-│   │   ├── aggregate.rs    # AggregateFunc + AggregateState + AggregateExecutor
-│   │   ├── having.rs       # HavingExecutor
-│   │   ├── semi_join.rs    # SemiJoinExecutorV2（独立+关联 双路径）
-│   │   ├── anti_join.rs    # AntiJoinExecutor（独立+关联 双路径）
-│   │   ├── subquery_eval.rs # SubqueryEvalExecutor（独立+关联 双路径）
-│   │   ├── derived_scan.rs # DerivedScanExecutor（FROM 派生表）
-│   │   ├── correlated.rs   # inject_correlated_values 函数
-│   │   └── create_table.rs / drop_table.rs
-│   ├── transaction/        # MVCC（VersionChain + RowLock + Snapshot）
-│   ├── parser/             # PlanBuilder + AST + 聚合/子查询解析
-│   ├── network/            # PgProtocol + ConnectionHandler + Server
-│   └── wal/                # WalWriter + Recovery + Checkpoint
-├── benches/                # 6 套基准测试
-├── tests/                  # 集成测试（含 subquery_test.rs 20 tests）
-└── .claude/docs/           # 项目文档
-```
+| 功能 | 实现方式 | 测试 |
+|------|----------|------|
+| LeafNode::split | 中间分裂 + LeafSplitData | ✅ |
+| InternalNode::split | 中间分裂 + middle_key 上推 + InternalSplitData | ✅ |
+| BTree::insert 递归 + split 回传 | Result<Option<SplitResult>> 递归 | ✅ |
+| 根分裂处理 | 新 InternalNode 根 + 返回新 root_page_id | ✅ |
+| IndexManager root_page_id 更新 | AtomicU64 store after split | ✅ |
+| Leaf 链表维护 | split 后 next_leaf_page_id 正确链接 | ✅ |
+| InternalNodeRef 路由修复 | find_child_page_id 线性/二分搜索一致 | ✅ |
+
+## 遗留问题清单
+
+### Clippy (47 warnings)
+
+| 类别 | 数量 | 修复难度 |
+|------|------|----------|
+| io::Error::other (io_other_error) | 10 | 简单 |
+| clone_on_copy (Copy类型 .clone()) | 3 | 简单 |
+| redundant_closure | 4 | 简单 |
+| into_iter on IntoIterator | 5 | 简单 |
+| to_string in format args | 3 | 简单 |
+| only_used_in_recursion | 4 | 中等 |
+| too_many_arguments | 2 | 中等(需重构参数) |
+| await_holding_lock | 1 | 中等(需重构buffer_pool) |
+| dead_code (unused fields) | 2 | 需评估是否删除 |
+| unused imports/variables | 2 | 简单 |
+| 其他 (single_match, byte_str, etc.) | 6 | 简单 |
+| module_inception | 1 | 需评估 |
+| explicit_auto_deref | 1 | 简单 |
+
+### 测试问题
+
+| 问题 | 状态 | 修复方式 |
+|------|------|----------|
+| test_btree_insert_duplicate_key_returns_error | ❌ 失败 | 更新为测试非唯一索引行为 |
+| planner_test.rs (19 编译错误) | ❌ 无法编译 | 修复 builder mutability |
+| M15 SQLite 全面对比 | ⏳ 未执行 | 编写基准测试脚本 |
+
+### M15 全面对比待完成项
+
+- [ ] 内存消耗对比（启动 + 工作峰值）
+- [ ] 启动时间对比
+- [ ] 数据文件大小对比
+- [ ] 编译产物大小对比
+- [ ] 大规模数据加载性能对比
+- [ ] 并发场景资源消耗对比
 
 ## Git 状态
 
 - **当前分支**: master
-- **未提交变更**: M16-Phase1 + Phase2 全部实现文件
-- **最近提交**:
-  - 2eee8af docs(M16): add subquery implementation plan
-  - 1a36bf6 docs(M16): add subquery design spec
-
-## M16 功能矩阵
-
-| 功能类型 | 独立子查询 | 相关子查询 |
-|----------|-----------|-----------|
-| WHERE IN | ✅ 完成 | ✅ 完成 |
-| WHERE NOT IN | ✅ 完成 | ✅ 完成 |
-| WHERE EXISTS | ✅ 完成 | ✅ 完成 |
-| WHERE NOT EXISTS | ✅ 完成 | ✅ 完成 |
-| SELECT 标量 | ✅ 完成 | ✅ 完成 |
-| FROM 派生表 | ✅ 完成 | N/A |
-
-## M16-Phase2 关键文件
-
-| 文件 | 作用 | 变更 |
-|------|------|------|
-| src/executor/plan.rs | CorrelatedParam 重构（param_name） | 修改 |
-| src/executor/predicate.rs | ParameterExpression + trait 方法 | 修改 |
-| src/executor/correlated.rs | inject_correlated_values 函数 | **新增** |
-| src/executor/mod.rs | 导出新类型 | 修改 |
-| src/parser/planner.rs | 外部引用检测 + 多层检测 + Expr::Value 处理 | 修改 |
-| src/parser/ast.rs | extract_columns 支持 Expr::Value | 修改 |
-| src/executor/semi_join.rs | 双路径执行（独立+关联） | 修改 |
-| src/executor/anti_join.rs | 双路径执行（独立+关联） | 修改 |
-| src/executor/subquery_eval.rs | 双路径执行（独立+关联） | 修改 |
-| src/pipeline.rs | 接线 + extract_column_indices 扩展 | 修改 |
-| tests/subquery_test.rs | 20 测试（14 独立 + 6 关联） | 修改 |
-
-## 架构：ParameterExpression + Mutex 注入
-
-- **ParameterExpression**: 携带 `Mutex<Value>`，作为谓词树中外部列引用的占位符
-- **注入时机**: 每次外层行处理时，clone PhysicalPlan → inject → rebuild executor
-- **安全性**: Volcano 顺序执行保证 Arc 共享的 ParameterExpression 无需并发保护
-
-## 已知问题
-
-1. **关联 IN + 空右侧**: 返回所有行而非 0 行（引擎 bug，测试已标记）
-2. **Projection 列过滤**: SubqueryEval 返回完整表列而非 projection 列
-3. **未提交**: 所有 M16 变更在工作区未提交
+- **ahead of origin**: 14 commits
 
 ## 下一步行动
 
-1. 提交 M16 全部变更
-2. 进入 M17 索引优化：B-Tree split/merge + 非唯一索引
+1. M17.5: 代码清理 + 全面对比（新阶段）
+2. M18: WAL 集成 + 写入优化
 
 **里程碑路线图**:
-- M16: ✅ 子查询支持（独立 + 关联 全部完成）
-- M17: 索引优化
+- M16: ✅ 子查询支持
+- M17-Phase1: ✅ 非唯一索引
+- M17-Phase2: ✅ B-Tree Split 机制
+- **M17.5**: **代码清理 + 全面对比**
 - M18: WAL 集成 + 写入优化
