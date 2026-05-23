@@ -1,5 +1,10 @@
-mod async_loader;
+// Module inception: `btree` module contains `BTree` type
+// This is a standard naming pattern (like std::collections::hash_map::HashMap)
+// Renaming would add complexity for minimal benefit
+#[allow(clippy::module_inception)]
 mod btree;
+
+mod async_loader;
 mod index_manager;
 mod node;
 mod sync_loader;
