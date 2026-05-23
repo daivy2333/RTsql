@@ -1,6 +1,19 @@
 # 学习记忆
 
-> 最后更新：2026-05-23（M18 Phase1 架构Warnings清理完成）
+> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
+
+## 2026-05-23 新增（M18 Phase2）
+
+### IndexScanAllExecutor 实现技巧
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **惰性初始化模式** | search_all 在首次 next() 调用时执行，避免不必要的查询开销 | executor/index_scan_all.rs:51-61 |
+| **MVCC 可见性迭代** | while 循环跳过不可见版本，继续下一个 row_id，符合 Executor 逐行返回约定 | executor/index_scan_all.rs:65-86 |
+| **非唯一索引测试方法** | 使用 write_tuple_to_data_page + IndexManager.insert 直接创建重复键数据，绕过 InsertExecutor 的 DuplicateKey 检查 | tests/executor_test.rs:1081-1103 |
+| **PhysicalPlan 扩展模式** | 新增 enum variant + Node struct + Pipeline match 分支 + correlated.rs/planner.rs match 分支，完整集成链路 | executor/plan.rs + pipeline.rs + correlated.rs + planner.rs |
+
+---
 
 ## 2026-05-23 新增（M18 Phase1）
 

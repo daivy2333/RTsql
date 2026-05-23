@@ -1,14 +1,14 @@
 # 项目快照
 
-> 最后更新：2026-05-23（M18 优化项目与技术债清理 规划完成）
+> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
 
 ## 当前状态
 
-- **阶段**: M18 Phase1 架构Warnings清理 ✅ 已完成
-- **状态**: 所有代码 warnings 已清理，测试通过
-- **测试**: 98 tests pass, 0 failures
-- **Clippy**: 0 warnings（代码层面）
-- **下一步**: Phase2 Executor层非唯一索引测试覆盖
+- **阶段**: M18 Phase2 Executor层非唯一索引测试覆盖 ✅ 已完成
+- **状态**: IndexScanAllExecutor 实现完成，SQL层集成验证通过
+- **测试**: 101 tests pass, 0 failures
+- **Clippy**: 0 warnings
+- **下一步**: Phase3 WAL集成 + Group Commit
 
 ## 最近提交（M17.5）
 
