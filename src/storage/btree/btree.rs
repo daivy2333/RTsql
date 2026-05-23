@@ -177,12 +177,24 @@ impl BTree {
     pub fn scan_all(&self) -> Result<Vec<(Key, RowId)>> {
         let mut results = Vec::new();
         let mut page_id = self.root_page_id;
+        let mut first_iteration = true;
 
-        while page_id.0 != 0 {
+        loop {
             let guard = self.loader.load_page(page_id)?;
             let data_guard = guard.page_data();
-            let leaf = LeafNodeRef::new(&data_guard);
 
+            // Check if it's a leaf node
+            if data_guard[0] != LEAF_NODE {
+                // Internal node: follow leftmost child
+                let internal = InternalNodeRef::new(&data_guard);
+                let child_id = internal.leftmost_child();
+                drop(data_guard);
+                drop(guard);
+                page_id = PageId(child_id as u64);
+                continue;
+            }
+
+            let leaf = LeafNodeRef::new(&data_guard);
             let count = leaf.key_count();
             let mut entries = Vec::with_capacity(count);
             for i in 0..count {
@@ -196,8 +208,20 @@ impl BTree {
             drop(guard);
 
             results.extend(entries);
+
+            // Stop after first leaf if no next_leaf_page_id (single leaf tree)
+            if next_page_u32 == 0 && !first_iteration {
+                break;
+            }
+            first_iteration = false;
+
+            // Move to next leaf, or stop if next_page_id is invalid (0 after first iteration)
+            if next_page_u32 == 0 {
+                break;
+            }
             page_id = PageId(next_page_u32 as u64);
         }
+
         Ok(results)
     }
 

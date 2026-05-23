@@ -83,14 +83,16 @@ impl<'a> LeafNode<'a> {
         // 1. 查找插入位置
         let position = self.find_key_position(key);
 
-        // 2. 检查是否已存在（不允许重复 key）
-        if position < self.key_count() {
-            if let Some(existing_key) = self.get_key(position) {
-                if existing_key == *key {
-                    return Err(StorageError::DuplicateKey);
-                }
-            }
-        }
+        // 2. 检查空间是否足够（允许重复 key）
+        // 注释掉 DuplicateKey 检查：
+        // if position < self.key_count() {
+        //     if let Some(existing_key) = self.get_key(position) {
+        //         if existing_key == *key {
+        //             return Err(StorageError::DuplicateKey);
+        //         }
+        //     }
+        // }
+        // 新逻辑：直接继续，允许重复 key
 
         // 3. 检查空间是否足够
         let entry_size = MAX_KEY_LEN + RowId::SIZE; // 38 bytes
