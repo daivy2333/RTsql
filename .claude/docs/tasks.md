@@ -1,11 +1,40 @@
 # 任务清单
 
-> 最后更新：2026-05-23（M16-Phase2 相关子查询 完成）
+> 最后更新：2026-05-23（M17-Phase1 非唯一索引 完成）
 
-## 当前任务：M17 索引优化
+## 当前任务：M17-Phase2 B-Tree Split 机制
 
-**状态**: 待开始
+**状态**: 待继续
 **优先级**: 高
+**范围**: Split 机制实现（非唯一索引已完成）
+
+### M17 任务分解
+
+| Task | 内容 | 依赖 | 状态 |
+|------|------|------|------|
+| T1 | LeafNode 去掉 DuplicateKey 检查 | - | ✅ 完成 |
+| T2 | LeafNodeRef::find_all_matches | T1 | ✅ 完成 |
+| T3 | BTree::search_all / delete_by_key / delete_exact | T2 | ✅ 完成 |
+| T4 | SplitResult 结构定义 | - | ✅ 完成 |
+| T5 | InternalNode::insert_separator | T4 | ✅ 完成 |
+| T6 | LeafNode split 逻辑（split_leaf） | T4 | ⏳ 待实现 |
+| T7 | 递归 insert + split 传播 | T5, T6 | ⏳ 待实现 |
+| T8 | 根分裂处理（create_new_root） | T7 | ⏳ 待实现 |
+| T9 | 测试：容量 + 非唯一 + split（完整测试套） | T1-T8 | ✅ 部分完成（5 tests pass） |
+
+## M17-Phase1 已完成（非唯一索引）
+
+**测试覆盖**: 5 tests（non_unique_insert + find_all_matches + search_all_matches + delete_by_key + delete_exact）
+
+| 功能 | 实现方式 | 测试 |
+|------|----------|------|
+| LeafNode 允许重复 key | 去掉 DuplicateKey 检查 | ✅ |
+| LeafNodeRef::find_all_matches | 遍历所有 slot 查找匹配 | ✅ |
+| BTree::search_all | 返回所有匹配 RowId | ✅ |
+| BTree::delete_by_key | 删除所有匹配 entries | ✅ |
+| BTree::delete_exact | 精确删除（key + RowId） | ✅ |
+| SplitResult 结构 | middle_key + new_page_id | ✅（待使用）|
+| InternalNode::insert_separator | separator 插入方法 | ✅（待使用）|
 
 ## 里程碑路线
 
@@ -17,7 +46,9 @@
 | M15 | 聚合/GROUP BY/HAVING | ✅ 完成 |
 | **M16-Phase1** | **子查询支持（独立子查询）** | ✅ 完成 |
 | **M16-Phase2** | **相关子查询注入逻辑** | ✅ 完成 |
-| M17 | 索引优化（B-Tree split/merge + 非唯一索引） | ⏳ 待开始 |
+| **M17-Phase1** | **非唯一索引** | ✅ 完成 |
+| M17-Phase2 | B-Tree Split 机制 | ⏳ 待实现 |
+| M17.5 | B-Tree Merge 机制（删除后 underflow） | ⏳ 待规划 |
 | M18 | WAL 集成 + 写入优化（INSERT 5-10x 提速） | ⏳ 待开始 |
 
 ## M16 全部完成
