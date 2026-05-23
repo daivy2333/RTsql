@@ -78,15 +78,21 @@ impl IndexManager {
     }
 
     /// Insert a key-value pair — spawn_blocking with temporary BTree instance
+    /// Updates root_page_id atomically if a root split occurred
     pub async fn insert(&self, key: &[u8], row_id: RowId) -> Result<()> {
         let root_page_id = self.root_page_id.load(Ordering::Acquire);
         let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
 
-        tokio::task::spawn_blocking(move || {
-            let btree = BTree::from_root(PageId(root_page_id), sync_loader);
+        let new_root = tokio::task::spawn_blocking(move || {
+            let mut btree = BTree::from_root(PageId(root_page_id), sync_loader);
             btree.insert(&key_vec, row_id)
         }).await??;
+
+        // If root split occurred, update the atomic root page id
+        if let Some(new_root_id) = new_root {
+            self.root_page_id.store(new_root_id.0, Ordering::Release);
+        }
 
         self.row_to_key.write().await.insert(row_id, key.to_vec());
         Ok(())

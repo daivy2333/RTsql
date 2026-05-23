@@ -181,7 +181,7 @@ impl<'a> LeafNode<'a> {
     }
 
     /// 简单插入（不检查顺序，用于重建时）
-    fn insert_simple(&mut self, key: &Key, row_id: &RowId) -> Result<(), StorageError> {
+    pub fn insert_simple(&mut self, key: &Key, row_id: &RowId) -> Result<(), StorageError> {
         // 检查空间是否足够
         let entry_size = MAX_KEY_LEN + RowId::SIZE; // 38 bytes
         if self.slotted.free_space() < Slot::SIZE + entry_size {
@@ -485,6 +485,12 @@ impl<'a> InternalNode<'a> {
         Self { slotted }
     }
 
+    /// 设置 leftmost_child（存储在 header.next_page_id 中）
+    pub fn set_leftmost_child(&mut self, child_page_id: u32) {
+        self.slotted.page.data[5..9].copy_from_slice(&child_page_id.to_le_bytes());
+        self.slotted.reload_header();
+    }
+
     /// 获取 key 数量
     pub fn key_count(&self) -> usize {
         self.slotted.slot_count()
@@ -610,7 +616,7 @@ impl<'a> InternalNode<'a> {
     }
 
     /// 简单插入（不检查顺序，用于重建）
-    fn insert_separator_simple(&mut self, key: &Key, right_child: PageId) -> Result<(), StorageError> {
+    pub fn insert_separator_simple(&mut self, key: &Key, right_child: PageId) -> Result<(), StorageError> {
         let entry_size = MAX_KEY_LEN + 4;
         if self.slotted.free_space() < Slot::SIZE + entry_size {
             return Err(StorageError::PageFull);

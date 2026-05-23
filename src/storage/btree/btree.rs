@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use crate::storage::{
-    btree::node::{InternalNodeRef, LeafNode, LeafNodeRef, LEAF_NODE},
+    btree::node::{InternalNode, InternalNodeRef, LeafNode, LeafNodeRef, LEAF_NODE},
     page_format::{Key, RowId},
     PageId, Result, StorageError,
 };
@@ -118,34 +118,150 @@ impl BTree {
         })
     }
 
-    /// Insert a key and RowId into the BTree
-    /// Returns error if key already exists (DuplicateKey)
-    /// Simplified version: does not handle splits
-    pub fn insert(&self, key: &[u8], row_id: RowId) -> Result<()> {
+    /// Insert a key and RowId into the BTree.
+    /// Returns Ok(Some(new_root_page_id)) if a root split occurred (caller should update root),
+    /// Returns Ok(None) if insertion succeeded without root split.
+    pub fn insert(&mut self, key: &[u8], row_id: RowId) -> Result<Option<PageId>> {
         let key_obj = Key::new(key);
-        self.insert_into_page(self.root_page_id, &key_obj, &row_id)
+
+        let split = self.insert_into_page(self.root_page_id, &key_obj, &row_id)?;
+
+        if let Some(split_result) = split {
+            // Root split: create a new root InternalNode
+            let new_root_page_id = self.loader.allocate_page()?;
+            let guard = self.loader.load_page(new_root_page_id)?;
+            guard.modify_page(|page| {
+                let mut new_root = InternalNode::init(page);
+                // Set leftmost_child to the old root page id
+                new_root.set_leftmost_child(self.root_page_id.0 as u32);
+                // Insert separator for the split
+                new_root.insert_separator(&split_result.middle_key, split_result.new_page_id)?;
+                Ok::<(), StorageError>(())
+            })?;
+
+            self.root_page_id = new_root_page_id;
+            Ok(Some(new_root_page_id))
+        } else {
+            Ok(None)
+        }
     }
 
-    /// Insert into a page (leaf or internal)
-    fn insert_into_page(&self, page_id: PageId, key: &Key, row_id: &RowId) -> Result<()> {
+    /// Recursive insert into a page. Returns Some(SplitResult) if the page split,
+    /// None if insertion completed without split.
+    fn insert_into_page(
+        &self,
+        page_id: PageId,
+        key: &Key,
+        row_id: &RowId,
+    ) -> Result<Option<SplitResult>> {
         let guard = self.loader.load_page(page_id)?;
-        let page = guard.page();
 
-        if page.data[0] == LEAF_NODE {
-            // Leaf node: insert directly
-            let guard2 = self.loader.load_page(page_id)?;
-            guard2.modify_page(|page_mut| {
-                let mut leaf = LeafNode::from_page(page_mut)?;
-                leaf.insert(key, row_id)?;
-                Ok(())
-            })
+        // Determine node type using zero-copy read
+        let is_leaf = {
+            let data_guard = guard.page_data();
+            data_guard[0] == LEAF_NODE
+        };
+
+        if is_leaf {
+            // Try direct insert first
+            let insert_result: std::result::Result<usize, StorageError> = guard.modify_page(|page| {
+                let mut leaf = LeafNode::from_page(page)?;
+                leaf.insert(key, row_id)
+            });
+
+            match insert_result {
+                Ok(_) => Ok(None), // Insert succeeded, no split needed
+                Err(StorageError::PageFull) => {
+                    // Need to split the leaf node
+                    let new_page_id = self.loader.allocate_page()?;
+
+                    // 1. Split the original leaf (rebuilds it with left half)
+                    let leaf_split = guard.modify_page(|page| {
+                        let mut leaf = LeafNode::from_page(page)?;
+                        leaf.split(new_page_id)
+                    })?;
+
+                    // 2. Initialize the new leaf page with right entries
+                    let new_guard = self.loader.load_page(new_page_id)?;
+                    new_guard.modify_page(|page| {
+                        let mut new_leaf = LeafNode::init(page);
+                        for (k, r) in &leaf_split.right_entries {
+                            new_leaf.insert_simple(k, r)?;
+                        }
+                        // Maintain linked list: new page's next = old page's old next
+                        new_leaf.set_next_leaf_page_id(leaf_split.old_next_page_id);
+                        Ok::<(), StorageError>(())
+                    })?;
+
+                    // 3. Update original page's next pointer to the new page
+                    guard.modify_page(|page| {
+                        let mut leaf = LeafNode::from_page(page)?;
+                        leaf.set_next_leaf_page_id(new_page_id.0 as u32);
+                        Ok::<(), StorageError>(())
+                    })?;
+
+                    Ok(Some(SplitResult {
+                        middle_key: leaf_split.middle_key,
+                        new_page_id,
+                    }))
+                }
+                Err(e) => Err(e), // Other error, propagate
+            }
         } else {
-            // Internal node: find child and recurse
-            // Simplified: not implemented yet
-            Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Internal node insertion not implemented yet",
-            )))
+            // Internal node: find the child to recurse into
+            let child_page_id_u32 = {
+                let data_guard = guard.page_data();
+                let internal_ref = InternalNodeRef::new(&data_guard);
+                internal_ref.find_child_page_id_binary(key)
+            };
+            let child_page_id = PageId(child_page_id_u32 as u64);
+
+            // Recursively insert into child
+            let child_split = self.insert_into_page(child_page_id, key, row_id)?;
+
+            if let Some(child_split_result) = child_split {
+                // Child split: need to insert a separator into this internal node
+                let separator_insert_result: std::result::Result<usize, StorageError> = guard.modify_page(|page| {
+                    let mut internal = InternalNode::from_page(page)?;
+                    internal.insert_separator(&child_split_result.middle_key, child_split_result.new_page_id)
+                });
+
+                match separator_insert_result {
+                    Ok(_) => Ok(None), // Separator inserted successfully
+                    Err(StorageError::PageFull) => {
+                        // Internal node is also full, need to split it
+                        let new_page_id = self.loader.allocate_page()?;
+
+                        // 1. Split the original internal node
+                        let internal_split = guard.modify_page(|page| {
+                            let mut internal = InternalNode::from_page(page)?;
+                            internal.split(new_page_id)
+                        })?;
+
+                        // 2. Initialize the new internal node page
+                        let new_guard = self.loader.load_page(new_page_id)?;
+                        new_guard.modify_page(|page| {
+                            let mut new_internal = InternalNode::init(page);
+                            // Set leftmost_child
+                            new_internal.set_leftmost_child(internal_split.new_leftmost_child);
+                            // Insert right separators
+                            for (k, child_id) in &internal_split.right_separators {
+                                new_internal.insert_separator_simple(k, PageId(*child_id as u64))?;
+                            }
+                            Ok::<(), StorageError>(())
+                        })?;
+
+                        Ok(Some(SplitResult {
+                            middle_key: internal_split.middle_key,
+                            new_page_id,
+                        }))
+                    }
+                    Err(e) => Err(e), // Other error, propagate
+                }
+            } else {
+                // Child did not split, insertion complete
+                Ok(None)
+            }
         }
     }
 
