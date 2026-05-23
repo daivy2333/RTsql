@@ -24,6 +24,9 @@ pub enum WalRecordType {
     Commit = 0x04,
     Abort = 0x05,
     Checkpoint = 0x06,
+    BeginTxn = 0x07,
+    CommitTxn = 0x08,
+    AbortTxn = 0x09,
 }
 
 impl TryFrom<u8> for WalRecordType {
@@ -37,6 +40,9 @@ impl TryFrom<u8> for WalRecordType {
             0x04 => Ok(WalRecordType::Commit),
             0x05 => Ok(WalRecordType::Abort),
             0x06 => Ok(WalRecordType::Checkpoint),
+            0x07 => Ok(WalRecordType::BeginTxn),
+            0x08 => Ok(WalRecordType::CommitTxn),
+            0x09 => Ok(WalRecordType::AbortTxn),
             _ => Err(WalError::InvalidRecordType(value)),
         }
     }
@@ -72,6 +78,12 @@ pub enum WalRecord {
     Abort { tx_id: u64 },
     /// 检查点
     Checkpoint { lsn: u64, timestamp: u64 },
+    /// 事务开始（新格式）
+    BeginTxn { tx_id: u64 },
+    /// 事务提交（新格式）
+    CommitTxn { tx_id: u64, timestamp: u64 },
+    /// 事务回滚（新格式）
+    AbortTxn { tx_id: u64 },
 }
 
 impl WalRecord {
@@ -84,6 +96,24 @@ impl WalRecord {
             WalRecord::Commit { .. } => WalRecordType::Commit,
             WalRecord::Abort { .. } => WalRecordType::Abort,
             WalRecord::Checkpoint { .. } => WalRecordType::Checkpoint,
+            WalRecord::BeginTxn { .. } => WalRecordType::BeginTxn,
+            WalRecord::CommitTxn { .. } => WalRecordType::CommitTxn,
+            WalRecord::AbortTxn { .. } => WalRecordType::AbortTxn,
+        }
+    }
+
+    /// 获取记录关联的事务 ID（Checkpoint 返回 0）
+    pub fn tx_id(&self) -> u64 {
+        match self {
+            WalRecord::Insert { tx_id, .. } => *tx_id,
+            WalRecord::Update { tx_id, .. } => *tx_id,
+            WalRecord::Delete { tx_id, .. } => *tx_id,
+            WalRecord::Commit { tx_id, .. } => *tx_id,
+            WalRecord::Abort { tx_id } => *tx_id,
+            WalRecord::Checkpoint { .. } => 0,
+            WalRecord::BeginTxn { tx_id } => *tx_id,
+            WalRecord::CommitTxn { tx_id, .. } => *tx_id,
+            WalRecord::AbortTxn { tx_id } => *tx_id,
         }
     }
 
@@ -135,6 +165,75 @@ impl WalRecord {
         Ok((record, 5 + len))
     }
 
+    /// 带 LSN + CRC32 的序列化
+    ///
+    /// 格式: [lsn: 8B LE][type: 1B][len: 4B LE][body: variable][crc32: 4B LE]
+    /// len = body 的长度
+    /// crc32 = 对 [lsn + type + len + body] 计算的 CRC32
+    pub fn serialize_with_lsn(&self, lsn: u64) -> Vec<u8> {
+        let record_data = self.serialize_data();
+
+        // Build the content: [lsn:8B][type:1B][len:4B][body:variable]
+        let mut buf = Vec::with_capacity(8 + 1 + 4 + record_data.len() + 4);
+        buf.extend_from_slice(&lsn.to_le_bytes());
+        buf.push(self.record_type() as u8);
+        buf.extend_from_slice(&(record_data.len() as u32).to_le_bytes());
+        buf.extend(&record_data);
+
+        // Compute CRC32 over [lsn + type + len + body]
+        let crc = crc32fast::hash(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+
+        buf
+    }
+
+    /// 带 LSN + CRC32 的反序列化
+    ///
+    /// 返回 (lsn, 记录, 消耗的字节数)
+    pub fn deserialize_with_lsn(buf: &[u8]) -> Result<(u64, Self, usize), WalError> {
+        // 最少需要 8 (lsn) + 1 (type) + 4 (len) + 4 (crc) = 17 字节
+        if buf.len() < 17 {
+            return Err(WalError::IncompleteRecord);
+        }
+
+        // 读取 LSN
+        let lsn = u64::from_le_bytes([
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+        ]);
+
+        // 读取类型
+        let record_type = WalRecordType::try_from(buf[8])?;
+
+        // 读取长度
+        let len = u32::from_le_bytes([buf[9], buf[10], buf[11], buf[12]]) as usize;
+
+        // 检查缓冲区是否足够（header 13B + body + crc 4B）
+        let total_len = 8 + 1 + 4 + len + 4;
+        if buf.len() < total_len {
+            return Err(WalError::IncompleteRecord);
+        }
+
+        // 验证 CRC32：对 [lsn + type + len + body] 计算
+        let content_end = 8 + 1 + 4 + len;
+        let expected_crc = crc32fast::hash(&buf[..content_end]);
+        let stored_crc = u32::from_le_bytes([
+            buf[content_end],
+            buf[content_end + 1],
+            buf[content_end + 2],
+            buf[content_end + 3],
+        ]);
+
+        if expected_crc != stored_crc {
+            return Err(WalError::ChecksumMismatch);
+        }
+
+        // 反序列化记录数据
+        let data_buf = &buf[13..13 + len];
+        let record = Self::deserialize_data(record_type, data_buf)?;
+
+        Ok((lsn, record, total_len))
+    }
+
     /// 序列化记录数据部分
     fn serialize_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
@@ -183,6 +282,16 @@ impl WalRecord {
             WalRecord::Checkpoint { lsn, timestamp } => {
                 data.extend_from_slice(&lsn.to_le_bytes());
                 data.extend_from_slice(&timestamp.to_le_bytes());
+            }
+            WalRecord::BeginTxn { tx_id } => {
+                data.extend_from_slice(&tx_id.to_le_bytes());
+            }
+            WalRecord::CommitTxn { tx_id, timestamp } => {
+                data.extend_from_slice(&tx_id.to_le_bytes());
+                data.extend_from_slice(&timestamp.to_le_bytes());
+            }
+            WalRecord::AbortTxn { tx_id } => {
+                data.extend_from_slice(&tx_id.to_le_bytes());
             }
         }
 
@@ -279,6 +388,36 @@ impl WalRecord {
                 ]);
                 Ok(WalRecord::Checkpoint { lsn, timestamp })
             }
+            WalRecordType::BeginTxn => {
+                if buf.len() < 8 {
+                    return Err(WalError::IncompleteRecord);
+                }
+                let tx_id = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                Ok(WalRecord::BeginTxn { tx_id })
+            }
+            WalRecordType::CommitTxn => {
+                if buf.len() < 16 {
+                    return Err(WalError::IncompleteRecord);
+                }
+                let tx_id = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                let timestamp = u64::from_le_bytes([
+                    buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+                ]);
+                Ok(WalRecord::CommitTxn { tx_id, timestamp })
+            }
+            WalRecordType::AbortTxn => {
+                if buf.len() < 8 {
+                    return Err(WalError::IncompleteRecord);
+                }
+                let tx_id = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                Ok(WalRecord::AbortTxn { tx_id })
+            }
         }
     }
 }
@@ -338,6 +477,15 @@ impl fmt::Display for WalRecord {
             WalRecord::Checkpoint { lsn, timestamp } => {
                 write!(f, "Checkpoint(lsn={}, ts={})", lsn, timestamp)
             }
+            WalRecord::BeginTxn { tx_id } => {
+                write!(f, "BeginTxn(tx={})", tx_id)
+            }
+            WalRecord::CommitTxn { tx_id, timestamp } => {
+                write!(f, "CommitTxn(tx={}, ts={})", tx_id, timestamp)
+            }
+            WalRecord::AbortTxn { tx_id } => {
+                write!(f, "AbortTxn(tx={})", tx_id)
+            }
         }
     }
 }
@@ -353,6 +501,8 @@ pub enum WalError {
     InvalidUtf8,
     /// IO 错误
     IoError(String),
+    /// CRC32 校验不匹配
+    ChecksumMismatch,
 }
 
 impl std::fmt::Display for WalError {
@@ -362,6 +512,7 @@ impl std::fmt::Display for WalError {
             WalError::InvalidRecordType(t) => write!(f, "Invalid WAL record type: 0x{:02X}", t),
             WalError::InvalidUtf8 => write!(f, "Invalid UTF-8 string in WAL record"),
             WalError::IoError(msg) => write!(f, "WAL IO error: {}", msg),
+            WalError::ChecksumMismatch => write!(f, "WAL record CRC32 checksum mismatch"),
         }
     }
 }

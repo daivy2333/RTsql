@@ -145,4 +145,36 @@ impl WalWriter {
         .await
         .map_err(|e| WalError::IoError(e.to_string()))?
     }
+
+    /// 批量写入 WAL 记录（带 LSN + CRC32）
+    ///
+    /// 遍历 records，对每条调用 serialize_with_lsn(lsn) → write_all
+    /// 最后一次性 fsync
+    pub async fn write_batch(&self, records: Vec<(u64, WalRecord)>) -> Result<(), WalError> {
+        let wal_path = self.wal_path.clone();
+        let count = records.len() as u64;
+
+        spawn_blocking(move || {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&wal_path)
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+
+            for (lsn, record) in &records {
+                let buf = record.serialize_with_lsn(*lsn);
+                file.write_all(&buf)
+                    .map_err(|e| WalError::IoError(e.to_string()))?;
+            }
+
+            file.sync_all()
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| WalError::IoError(e.to_string()))??;
+
+        self.write_count.fetch_add(count, Ordering::SeqCst);
+        Ok(())
+    }
 }
