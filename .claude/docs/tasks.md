@@ -1,6 +1,6 @@
 # 任务追踪
 
-> 最后更新：2026-05-23（M18 优化项目与技术债清理 规划完成）
+> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
 
 ## 当前阶段：M17.5 代码清理 + 全面对比 ✅
 
@@ -43,14 +43,23 @@
 
 ---
 
-### Phase2: Executor层非唯一索引测试覆盖（待开始）
+### Phase2: Executor层非唯一索引测试覆盖 ✅
 
-- [ ] T1: 新增 IndexScanAllExecutor 结构体
-- [ ] T2: 实现 IndexScanAllExecutor::execute
-- [ ] T3: executor_test.rs 新增非唯一索引测试
-- [ ] T4: SQL层集成验证
+- [x] T1: 新增 IndexManager::search_all 方法
+- [x] T2: 实现 IndexScanAllExecutor::execute
+- [x] T3: executor_test.rs 新增非唯一索引测试
+- [x] T4: SQL层集成验证
 
-**预估工期**：1天
+**Phase2成果**：
+- ✅ IndexManager 新增 search_all 方法（支持非唯一索引查询）
+- ✅ IndexScanAllExecutor 实现完成（逐行返回，MVCC 可见性）
+- ✅ executor_test.rs 新增 3 个测试（基础功能/空结果/单结果）
+- ✅ PhysicalPlan::IndexScanAll 节点集成
+- ✅ Pipeline 创建 IndexScanAllExecutor 逻辑
+- ✅ 101 tests pass, 0 failures
+- ✅ Clippy 0 warnings
+
+**预估工期**：1天（实际完成）
 
 ---
 
