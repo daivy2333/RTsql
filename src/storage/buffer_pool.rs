@@ -129,6 +129,12 @@ impl BufferPool {
     }
 
     /// Flush all dirty pages to storage
+    ///
+    /// Note: MutexGuard held during clone, then explicitly dropped before .await
+    /// - frame_guard is held only during synchronous clone + dirty flag reset
+    /// - Explicit drop(frame_guard) releases lock before async I/O
+    /// - No lock contention during storage.write_page().await
+    #[allow(clippy::await_holding_lock)]
     pub async fn flush_all(&self) -> Result<()> {
         let pages = self.pages.read().await;
 

@@ -16,6 +16,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// create_executor_from_plan 返回类型别名
+///
+/// 用于解决 type_complexity warning，简化 async 函数返回类型签名
+type CreateExecutorFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Box<dyn Executor + Send>>> + Send + 'a>,
+>;
+
 pub async fn execute(database: &Database, sql: &str) -> Response {
     let profiling = is_profiling_enabled();
 
@@ -270,9 +277,7 @@ async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
 pub(crate) fn create_executor_from_plan(
     plan: PhysicalPlan,
     database: &Database,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Box<dyn Executor + Send>>> + Send + '_>,
-> {
+) -> CreateExecutorFuture<'_> {
     Box::pin(async move {
         match plan {
             PhysicalPlan::Filter(node) => {
