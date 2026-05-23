@@ -311,6 +311,19 @@ impl<'a> LeafNodeRef<'a> {
         Some(RowId::deserialize(&data[MAX_KEY_LEN..]))
     }
 
+    /// 查找所有匹配 key 的 slot 索引（用于非唯一索引）
+    pub fn find_all_matches(&self, key: &Key) -> Vec<usize> {
+        let mut matches = Vec::new();
+        for i in 0..self.key_count() {
+            if let Some(k) = self.get_key(i) {
+                if k == *key {
+                    matches.push(i);
+                }
+            }
+        }
+        matches
+    }
+
     /// 查找 key 的位置（返回 (found, position)）
     /// found=true 表示 key 已存在，position 为其索引
     /// found=false 表示 key 不存在，position 为应插入的位置
