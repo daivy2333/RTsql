@@ -655,13 +655,15 @@ async fn test_create_table_executor_success() -> Result<()> {
 
     use rtsql::database::Database;
     use rtsql::executor::ColumnType;
+    let wal_writer = Arc::new(
+        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+    );
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(
-            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-        ),
+        wal_writer: wal_writer.clone(),
+        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
     });
 
@@ -694,13 +696,15 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
     use rtsql::database::Database;
     use rtsql::executor::ColumnType as ExecColumnType;
     use rtsql::storage::ColumnType as StorageColumnType;
+    let wal_writer = Arc::new(
+        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+    );
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(
-            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-        ),
+        wal_writer: wal_writer.clone(),
+        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
     });
 
@@ -744,13 +748,15 @@ async fn test_drop_table_executor_success() -> Result<()> {
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
+    let wal_writer = Arc::new(
+        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+    );
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(
-            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-        ),
+        wal_writer: wal_writer.clone(),
+        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
     });
 
@@ -789,13 +795,15 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
+    let wal_writer = Arc::new(
+        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+    );
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(
-            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-        ),
+        wal_writer: wal_writer.clone(),
+        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
     });
 
@@ -825,13 +833,15 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
+    let wal_writer = Arc::new(
+        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
+    );
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: Arc::new(
-            rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-        ),
+        wal_writer: wal_writer.clone(),
+        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
     });
 

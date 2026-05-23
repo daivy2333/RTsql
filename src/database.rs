@@ -7,7 +7,7 @@ use crate::network::protocol::Response;
 use crate::plan_cache::PlanCache;
 use crate::storage::{BufferPool, ColumnType, FileStorage, Result, TableManager, TableMeta};
 use crate::transaction::TransactionManager;
-use crate::wal::{RecoveryManager, WalWriter};
+use crate::wal::{RecoveryManager, WALBuffer, WalWriter};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +18,7 @@ pub struct Database {
     pub table_manager: Arc<TableManager>,
     pub transaction_manager: Arc<TransactionManager>,
     pub wal_writer: Arc<WalWriter>,
+    pub wal_buffer: Arc<WALBuffer>,
     pub plan_cache: Arc<Mutex<PlanCache>>,
 }
 
@@ -43,6 +44,10 @@ impl Database {
                 .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?,
         );
 
+        // 3b. Initialize WAL buffer with Group Commit
+        let wal_buffer = Arc::new(WALBuffer::new(wal_writer.clone(), 100, 100));
+        wal_buffer.start_flush_loop();
+
         // 4. Initialize plan cache
         let plan_cache = Arc::new(Mutex::new(PlanCache::new()));
 
@@ -51,6 +56,7 @@ impl Database {
             table_manager,
             transaction_manager,
             wal_writer,
+            wal_buffer,
             plan_cache,
         })
     }

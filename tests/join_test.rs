@@ -1,8 +1,8 @@
 //! Join executor unit tests (M12)
 
 use rtsql::executor::{
-    ColumnRef, ExecResult, Executor, InsertExecutor, JoinCondition, JoinExecutor, OutputColumn,
-    ScanExecutor, Value,
+    ColumnRef, ExecResult, Executor, InsertExecutor, JoinCondition, JoinConfig, JoinExecutor,
+    OutputColumn, ScanExecutor, Value,
 };
 use rtsql::storage::{
     data::TableManager, page_format::ColumnType, BufferPool, FileStorage, Result,
@@ -134,16 +134,16 @@ async fn test_join_basic_hash_join() -> Result<()> {
         },
     ];
 
-    let mut join_executor = JoinExecutor::new(
-        Box::new(left_scan),
-        Box::new(right_scan),
+    let mut join_executor = JoinExecutor::new(JoinConfig {
+        left_executor: Box::new(left_scan),
+        right_executor: Box::new(right_scan),
         conditions,
         output_columns,
-        left_indices,
-        right_indices,
-        "users".to_string(),
-        "orders".to_string(),
-    );
+        left_column_indices: left_indices,
+        right_column_indices: right_indices,
+        left_table_name: "users".to_string(),
+        right_table_name: "orders".to_string(),
+    });
 
     let results = collect_rows(&mut join_executor).await?;
 
@@ -246,16 +246,16 @@ async fn test_join_null_keys_no_match() -> Result<()> {
         },
     ];
 
-    let mut join_executor = JoinExecutor::new(
-        Box::new(left_scan),
-        Box::new(right_scan),
+    let mut join_executor = JoinExecutor::new(JoinConfig {
+        left_executor: Box::new(left_scan),
+        right_executor: Box::new(right_scan),
         conditions,
         output_columns,
-        left_indices,
-        right_indices,
-        "left_table".to_string(),
-        "right_table".to_string(),
-    );
+        left_column_indices: left_indices,
+        right_column_indices: right_indices,
+        left_table_name: "left_table".to_string(),
+        right_table_name: "right_table".to_string(),
+    });
 
     let results = collect_rows(&mut join_executor).await?;
 
@@ -332,16 +332,16 @@ async fn test_join_empty_right_table() -> Result<()> {
         column_index: 1,
     }];
 
-    let mut join_executor = JoinExecutor::new(
-        Box::new(left_scan),
-        Box::new(right_scan),
+    let mut join_executor = JoinExecutor::new(JoinConfig {
+        left_executor: Box::new(left_scan),
+        right_executor: Box::new(right_scan),
         conditions,
         output_columns,
-        left_indices,
-        right_indices,
-        "left_table".to_string(),
-        "right_table".to_string(),
-    );
+        left_column_indices: left_indices,
+        right_column_indices: right_indices,
+        left_table_name: "left_table".to_string(),
+        right_table_name: "right_table".to_string(),
+    });
 
     let results = collect_rows(&mut join_executor).await?;
 
@@ -407,16 +407,16 @@ async fn test_join_empty_left_table() -> Result<()> {
         column_index: 1,
     }];
 
-    let mut join_executor = JoinExecutor::new(
-        Box::new(left_scan),
-        Box::new(right_scan),
+    let mut join_executor = JoinExecutor::new(JoinConfig {
+        left_executor: Box::new(left_scan),
+        right_executor: Box::new(right_scan),
         conditions,
         output_columns,
-        left_indices,
-        right_indices,
-        "left_table".to_string(),
-        "right_table".to_string(),
-    );
+        left_column_indices: left_indices,
+        right_column_indices: right_indices,
+        left_table_name: "left_table".to_string(),
+        right_table_name: "right_table".to_string(),
+    });
 
     let results = collect_rows(&mut join_executor).await?;
 
@@ -567,16 +567,16 @@ async fn test_join_multiple_conditions_and() -> Result<()> {
         },
     ];
 
-    let mut join_executor = JoinExecutor::new(
-        Box::new(left_scan),
-        Box::new(right_scan),
+    let mut join_executor = JoinExecutor::new(JoinConfig {
+        left_executor: Box::new(left_scan),
+        right_executor: Box::new(right_scan),
         conditions,
         output_columns,
-        left_indices,
-        right_indices,
-        "projects".to_string(),
-        "budgets".to_string(),
-    );
+        left_column_indices: left_indices,
+        right_column_indices: right_indices,
+        left_table_name: "projects".to_string(),
+        right_table_name: "budgets".to_string(),
+    });
 
     let results = collect_rows(&mut join_executor).await?;
 
@@ -672,16 +672,16 @@ async fn test_join_no_matching_keys() -> Result<()> {
         column_index: 1,
     }];
 
-    let mut join_executor = JoinExecutor::new(
-        Box::new(left_scan),
-        Box::new(right_scan),
+    let mut join_executor = JoinExecutor::new(JoinConfig {
+        left_executor: Box::new(left_scan),
+        right_executor: Box::new(right_scan),
         conditions,
         output_columns,
-        left_indices,
-        right_indices,
-        "left_table".to_string(),
-        "right_table".to_string(),
-    );
+        left_column_indices: left_indices,
+        right_column_indices: right_indices,
+        left_table_name: "left_table".to_string(),
+        right_table_name: "right_table".to_string(),
+    });
 
     let results = collect_rows(&mut join_executor).await?;
 
@@ -764,16 +764,16 @@ async fn test_join_one_to_many() -> Result<()> {
         },
     ];
 
-    let mut join_executor = JoinExecutor::new(
-        Box::new(left_scan),
-        Box::new(right_scan),
+    let mut join_executor = JoinExecutor::new(JoinConfig {
+        left_executor: Box::new(left_scan),
+        right_executor: Box::new(right_scan),
         conditions,
         output_columns,
-        left_indices,
-        right_indices,
-        "users".to_string(),
-        "orders".to_string(),
-    );
+        left_column_indices: left_indices,
+        right_column_indices: right_indices,
+        left_table_name: "users".to_string(),
+        right_table_name: "orders".to_string(),
+    });
 
     let results = collect_rows(&mut join_executor).await?;
 
