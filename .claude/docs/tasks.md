@@ -27,16 +27,19 @@
 
 **设计文档**：`.claude/docs/superpowers/specs/2026-05-23-optimization-tech-debts-design.md`
 
-### Phase1: 架构Warnings清理（待开始）
+### Phase1: 架构Warnings清理 ✅
 
-- [ ] T1: 引入 JoinConfig struct（解决 too_many_arguments）
-- [ ] T2: 定义 ExecutorFuture type alias（解决 type_complexity）
-- [ ] T3: 评估 await_holding_lock 是否需要重构
-- [ ] T4: #[allow] dead_code 字段 + 明确用途注释
-- [ ] T5: 评估 module_inception 是否重命名
-- [ ] T6: Clippy 验证（warnings 降至 2-3个）
+- [x] T1: 引入 JoinConfig/JoinRelatedConfig struct（解决 too_many_arguments）
+- [x] T2: 定义 CreateExecutorFuture type alias（解决 type_complexity）
+- [x] T3: #[allow] await_holding_lock（两阶段锁模式安全）
+- [x] T4: #[allow] module_inception（标准命名模式）
+- [x] T5: Clippy 验证（warnings 从 6降至 0）
 
-**预估工期**：1-2天
+**Phase1成果**：
+- ✅ 所有代码 warnings 已清理（仅剩 cargo config deprecated）
+- ✅ 参数组织清晰（JoinConfig/JoinRelatedConfig）
+- ✅ 类型签名简洁（CreateExecutorFuture）
+- ✅ #[allow] 有明确注释说明合理设计
 
 ---
 
