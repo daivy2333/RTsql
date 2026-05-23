@@ -1,13 +1,22 @@
 # 项目快照
 
-> 最后更新：2026-05-23（M16-Phase2 相关子查询 完成）
+> 最后更新：2026-05-23（M17-Phase1 非唯一索引 完成）
 
 ## 当前状态
 
-- **阶段**: M16-Phase2 完成，M16 全部功能到位
+- **阶段**: M17-Phase1 完成，非唯一索引功能到位
 - **状态**: 编译通过，所有测试通过
-- **测试**: 90 lib + 20 subquery + 19 aggregate = 129 tests pass
-- **下一步**: M17 索引优化
+- **测试**: 90 lib + 5 btree_split = 95 tests pass
+- **下一步**: M17-Phase2 B-Tree Split 机制
+
+## 最近提交
+
+- c854ac8 docs(M17): update tasks with Phase1 completion
+- bf46c98 feat(M17-T5): add InternalNode::insert_separator
+- 0f723cf feat(M17-T4): add SplitResult struct
+- bc368f8 feat(M17-T3): add search_all/delete_by_key/delete_exact
+- 1ae1cbe feat(M17-T2): add LeafNodeRef::find_all_matches
+- e3cf46d feat(M17-T1): allow duplicate keys + fix scan_all bug
 
 ## 项目结构
 

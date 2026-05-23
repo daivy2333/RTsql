@@ -1,6 +1,6 @@
 # 架构决策记录
 
-> 最后更新：2026-05-23（M16-Phase2 相关子查询 完成）
+> 最后更新：2026-05-23（M17-Phase1 非唯一索引 完成）
 
 ## 系统架构
 
@@ -59,6 +59,10 @@
 | 9 | 2026-05 | 子查询混合策略 | WHERE→SemiJoin/AntiJoin O(N+M)，SELECT→SubqueryEval，FROM→DerivedScan | 全部嵌套循环或全部反嵌套 |
 | 10 | 2026-05 | CorrelatedParam 机制 | 相关子查询通过参数注入外层值，避免闭包捕获 | 参数化查询/延迟绑定 |
 | 11 | 2026-05 | ParameterExpression + Mutex 注入 | 外层列引用在谓词树中以 ParameterExpression 占位，按行 clone+inject+rebuild executor，无需修改 Expression trait 签名 | 深度克隆谓词树 + 类型匹配（复杂且需 as_any） |
+| 12 | 2026-05 | 非唯一索引同页多条目方案 | Key 允许重复，同一 key 多个 slot 在同页，利用现有 SlottedPage 结构，最小改动 | 溢出页链表（需新增页类型和管理器） |
+| 13 | 2026-05 | LeafNode 去掉 DuplicateKey 检查 | 允许重复 key 插入，非唯一索引基础 | 保持唯一索引限制（需索引类型区分） |
+| 14 | 2026-05 | LeafNodeRef::find_all_matches | 非唯一索引查询遍历所有匹配 slot | 二分查找首个匹配（需额外逻辑处理多匹配） |
+| 15 | 2026-05 | BTree 批量/精确删除方法 | delete_by_key（删除所有匹配） + delete_exact（key+RowId 精确删除） | 仅支持单 key 删除（非唯一场景受限） |
 
 ## PhysicalPlan 节点（19 种）
 
