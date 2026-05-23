@@ -47,6 +47,14 @@ impl IndexManager {
         self.search_from_page_async(root_page_id, &key_obj).await
     }
 
+    /// Async search_all — find all RowIds matching a key (for non-unique indexes)
+    pub async fn search_all(&self, key: &[u8]) -> Result<Vec<RowId>> {
+        let root_page_id = PageId(self.root_page_id.load(Ordering::Acquire));
+        let key_obj = Key::new(key);
+
+        self.search_all_from_page_async(root_page_id, &key_obj).await
+    }
+
     /// Recursive async search from a page
     fn search_from_page_async<'a>(
         &'a self,
@@ -74,6 +82,71 @@ impl IndexManager {
 
             self.search_from_page_async(PageId(child_page_id as u64), key)
                 .await
+        })
+    }
+
+    /// Recursive async search_all from a page
+    #[allow(clippy::only_used_in_recursion)]
+    fn search_all_from_page_async<'a>(
+        &'a self,
+        page_id: PageId,
+        key: &'a Key,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<RowId>>> + Send + 'a>> {
+        Box::pin(async move {
+            let child_page_ids = {
+                let guard = self.async_loader.load_page(page_id).await?;
+                let data_guard = guard.page_data();
+
+                if data_guard[0] == LEAF_NODE {
+                    // Leaf: collect all matching RowIds
+                    let leaf = LeafNodeRef::new(&data_guard);
+                    let matches = leaf.find_all_matches(key);
+                    let mut row_ids = Vec::new();
+                    for idx in matches {
+                        if let Some(rid) = leaf.get_row_id(idx) {
+                            row_ids.push(rid);
+                        }
+                    }
+                    return Ok(row_ids);
+                } else {
+                    // Internal: check if key matches any separator (need to search both subtrees)
+                    let internal = InternalNodeRef::new(&data_guard);
+                    let count = internal.key_count();
+
+                    let mut child_page_ids = Vec::new();
+                    for i in 0..count {
+                        if let Some(sep_key) = internal.get_key(i) {
+                            if sep_key == *key {
+                                // Key matches separator: search both left and right subtrees
+                                let left_child = if i == 0 {
+                                    internal.leftmost_child()
+                                } else {
+                                    internal.get_child_page_id(i - 1).unwrap_or(0)
+                                };
+                                let right_child = internal.get_child_page_id(i).unwrap_or(0);
+                                child_page_ids.push(PageId(left_child as u64));
+                                child_page_ids.push(PageId(right_child as u64));
+                            }
+                        }
+                    }
+
+                    // If no separator match, follow normal routing
+                    if child_page_ids.is_empty() {
+                        let child_page_id = internal.find_child_page_id_binary(key);
+                        child_page_ids.push(PageId(child_page_id as u64));
+                    }
+
+                    child_page_ids
+                }
+            }; // guard and data_guard dropped
+
+            // Recursively search all child subtrees
+            let mut results = Vec::new();
+            for child_page_id in child_page_ids {
+                let child_results = self.search_all_from_page_async(child_page_id, key).await?;
+                results.extend(child_results);
+            }
+            Ok(results)
         })
     }
 
