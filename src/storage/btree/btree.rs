@@ -254,4 +254,121 @@ impl BTree {
             )))
         }
     }
+
+    /// 返回所有匹配 key 的 RowId（用于非唯一索引）
+    pub fn search_all(&self, key: &[u8]) -> Result<Vec<RowId>> {
+        let key_obj = Key::new(key);
+        self.search_all_from_page(self.root_page_id, &key_obj)
+    }
+
+    fn search_all_from_page(&self, page_id: PageId, key: &Key) -> Result<Vec<RowId>> {
+        let guard = self.loader.load_page(page_id)?;
+        let data_guard = guard.page_data();
+
+        if data_guard[0] == LEAF_NODE {
+            let leaf = LeafNodeRef::new(&data_guard);
+            let matches = leaf.find_all_matches(key);
+            let mut row_ids = Vec::new();
+            for idx in matches {
+                if let Some(rid) = leaf.get_row_id(idx) {
+                    row_ids.push(rid);
+                }
+            }
+            Ok(row_ids)
+        } else {
+            // Internal node: find child, recurse
+            let internal = InternalNodeRef::new(&data_guard);
+            let child_page_id = internal.find_child_page_id_binary(key);
+            drop(data_guard);
+            drop(guard);
+            self.search_all_from_page(PageId(child_page_id as u64), key)
+        }
+    }
+
+    /// 删除所有匹配 key 的 entries，返回删除数量（用于非唯一索引）
+    pub fn delete_by_key(&self, key: &[u8]) -> Result<usize> {
+        let key_obj = Key::new(key);
+        self.delete_all_from_page(self.root_page_id, &key_obj)
+    }
+
+    fn delete_all_from_page(&self, page_id: PageId, key: &Key) -> Result<usize> {
+        // First, read the page to find matches
+        let guard = self.loader.load_page(page_id)?;
+        let data_guard = guard.page_data();
+
+        if data_guard[0] == LEAF_NODE {
+            let leaf_ref = LeafNodeRef::new(&data_guard);
+            let matches = leaf_ref.find_all_matches(key);
+            let count = matches.len();
+            drop(data_guard);
+            drop(guard);
+
+            // Then, modify the page to delete
+            if count > 0 {
+                let guard2 = self.loader.load_page(page_id)?;
+                guard2.modify_page(|page_mut| {
+                    let mut leaf = LeafNode::from_page(page_mut)?;
+                    // Delete from back to front (avoid index shifting)
+                    for idx in matches.into_iter().rev() {
+                        leaf.delete_slot(idx)?;
+                    }
+                    Ok::<(), StorageError>(())
+                })?;
+            }
+
+            Ok(count)
+        } else {
+            // Internal node: find child, recurse
+            let internal = InternalNodeRef::new(&data_guard);
+            let child_page_id = internal.find_child_page_id_binary(key);
+            drop(data_guard);
+            drop(guard);
+            self.delete_all_from_page(PageId(child_page_id as u64), key)
+        }
+    }
+
+    /// 精确删除（key + RowId 匹配）
+    pub fn delete_exact(&self, key: &[u8], row_id: RowId) -> Result<()> {
+        let key_obj = Key::new(key);
+        self.delete_exact_from_page(self.root_page_id, &key_obj, &row_id)
+    }
+
+    fn delete_exact_from_page(&self, page_id: PageId, key: &Key, row_id: &RowId) -> Result<()> {
+        // First, read the page to find exact match
+        let guard = self.loader.load_page(page_id)?;
+        let data_guard = guard.page_data();
+
+        if data_guard[0] == LEAF_NODE {
+            let leaf_ref = LeafNodeRef::new(&data_guard);
+            let matches = leaf_ref.find_all_matches(key);
+
+            // Find slot with matching RowId
+            let target_idx = matches.into_iter().find(|idx| {
+                leaf_ref.get_row_id(*idx) == Some(row_id.clone())
+            });
+
+            drop(data_guard);
+            drop(guard);
+
+            // Then, modify the page to delete
+            if let Some(idx) = target_idx {
+                let guard2 = self.loader.load_page(page_id)?;
+                guard2.modify_page(|page_mut| {
+                    let mut leaf = LeafNode::from_page(page_mut)?;
+                    leaf.delete_slot(idx)?;
+                    Ok::<(), StorageError>(())
+                })?;
+                Ok(())
+            } else {
+                Err(StorageError::KeyNotFound)
+            }
+        } else {
+            // Internal node: find child, recurse
+            let internal = InternalNodeRef::new(&data_guard);
+            let child_page_id = internal.find_child_page_id_binary(key);
+            drop(data_guard);
+            drop(guard);
+            self.delete_exact_from_page(PageId(child_page_id as u64), key, row_id)
+        }
+    }
 }
