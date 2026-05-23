@@ -2,6 +2,8 @@
 //!
 //! M5: Implement async fn next() -> Result<Option<ExecResult>>
 
+mod join_config;
+
 mod aggregate;
 mod anti_join;
 mod correlated;
@@ -25,6 +27,8 @@ mod sort;
 mod subquery_eval;
 mod update;
 mod value;
+
+pub use join_config::JoinConfig;
 
 pub use aggregate::{AggregateExecutor, AggregateFunc, AggregateState};
 pub use anti_join::AntiJoinExecutor;
