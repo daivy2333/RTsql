@@ -6,7 +6,7 @@
 //! - Correlated subquery: correlated_params non-empty, re-materializes right per left row (placeholder)
 
 use crate::database::Database;
-use crate::executor::{ExecResult, Executor, JoinCondition, OutputColumn, PhysicalPlan, Value};
+use crate::executor::{ExecResult, Executor, JoinCondition, JoinRelatedConfig, OutputColumn, PhysicalPlan, Value};
 use crate::storage::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,29 +56,19 @@ pub struct SemiJoinExecutorV2 {
 
 impl SemiJoinExecutorV2 {
     /// Create a new SemiJoinExecutorV2
-    pub fn new(
-        left: Box<dyn Executor + Send>,
-        right: Box<dyn Executor + Send>,
-        conditions: Vec<JoinCondition>,
-        output_columns: Vec<OutputColumn>,
-        correlated_params: Vec<crate::executor::CorrelatedParam>,
-        left_column_indices: HashMap<String, usize>,
-        right_column_indices: HashMap<String, usize>,
-        right_plan: Option<PhysicalPlan>,
-        database: Option<Arc<Database>>,
-    ) -> Self {
+    pub fn new(config: JoinRelatedConfig) -> Self {
         Self {
-            left,
-            right,
-            conditions,
-            output_columns,
-            correlated_params,
-            left_column_indices,
-            right_column_indices,
+            left: config.left,
+            right: config.right,
+            conditions: config.conditions,
+            output_columns: config.output_columns,
+            correlated_params: config.correlated_params,
+            left_column_indices: config.left_column_indices,
+            right_column_indices: config.right_column_indices,
             right_hashmap: None,
             right_has_rows: None,
-            right_plan,
-            database,
+            right_plan: config.right_plan,
+            database: config.database,
             phase: SemiJoinPhase::BuildRight,
             executed: false,
         }

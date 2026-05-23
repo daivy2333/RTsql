@@ -2,7 +2,7 @@ use crate::database::Database;
 use crate::executor::{
     AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DeleteExecutor,
     DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor, HavingExecutor,
-    IndexScanExecutor, InsertExecutor, JoinConfig, JoinExecutor, LimitExecutor, PhysicalPlan, ScanExecutor,
+    IndexScanExecutor, InsertExecutor, JoinConfig, JoinExecutor, JoinRelatedConfig, LimitExecutor, PhysicalPlan, ScanExecutor,
     SemiJoinExecutorV2, SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
@@ -423,17 +423,17 @@ pub(crate) fn create_executor_from_plan(
                 let left_executor = create_executor_from_plan(*node.left, database).await?;
                 let right_executor = create_executor_from_plan(*node.right, database).await?;
 
-                Ok(Box::new(SemiJoinExecutorV2::new(
-                    left_executor,
-                    right_executor,
-                    node.conditions,
-                    node.output_columns,
-                    node.correlated_params,
+                Ok(Box::new(SemiJoinExecutorV2::new(JoinRelatedConfig {
+                    left: left_executor,
+                    right: right_executor,
+                    conditions: node.conditions,
+                    output_columns: node.output_columns,
+                    correlated_params: node.correlated_params,
                     left_column_indices,
                     right_column_indices,
                     right_plan,
-                    Some(Arc::new(database.clone())),
-                )) as Box<dyn Executor + Send>)
+                    database: Some(Arc::new(database.clone())),
+                })) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::AntiJoin(node) => {
@@ -453,17 +453,17 @@ pub(crate) fn create_executor_from_plan(
                 let left_executor = create_executor_from_plan(*node.left, database).await?;
                 let right_executor = create_executor_from_plan(*node.right, database).await?;
 
-                Ok(Box::new(AntiJoinExecutor::new(
-                    left_executor,
-                    right_executor,
-                    node.conditions,
-                    node.output_columns,
-                    node.correlated_params,
+                Ok(Box::new(AntiJoinExecutor::new(JoinRelatedConfig {
+                    left: left_executor,
+                    right: right_executor,
+                    conditions: node.conditions,
+                    output_columns: node.output_columns,
+                    correlated_params: node.correlated_params,
                     left_column_indices,
                     right_column_indices,
                     right_plan,
-                    Some(Arc::new(database.clone())),
-                )) as Box<dyn Executor + Send>)
+                    database: Some(Arc::new(database.clone())),
+                })) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::SubqueryEval(node) => {

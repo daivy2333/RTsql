@@ -7,7 +7,7 @@
 
 use crate::database::Database;
 use crate::executor::{
-    CorrelatedParam, ExecResult, Executor, JoinCondition, OutputColumn, PhysicalPlan, Value,
+    CorrelatedParam, ExecResult, Executor, JoinCondition, JoinRelatedConfig, OutputColumn, PhysicalPlan, Value,
 };
 use crate::storage::Result;
 use std::collections::HashMap;
@@ -58,27 +58,17 @@ pub struct AntiJoinExecutor {
 
 impl AntiJoinExecutor {
     /// Create a new AntiJoinExecutor
-    pub fn new(
-        left: Box<dyn Executor + Send>,
-        right: Box<dyn Executor + Send>,
-        conditions: Vec<JoinCondition>,
-        output_columns: Vec<OutputColumn>,
-        correlated_params: Vec<crate::executor::CorrelatedParam>,
-        left_column_indices: HashMap<String, usize>,
-        right_column_indices: HashMap<String, usize>,
-        right_plan: Option<PhysicalPlan>,
-        database: Option<Arc<Database>>,
-    ) -> Self {
+    pub fn new(config: JoinRelatedConfig) -> Self {
         Self {
-            left,
-            right,
-            conditions,
-            output_columns,
-            correlated_params,
-            right_plan,
-            database,
-            left_column_indices,
-            right_column_indices,
+            left: config.left,
+            right: config.right,
+            conditions: config.conditions,
+            output_columns: config.output_columns,
+            correlated_params: config.correlated_params,
+            right_plan: config.right_plan,
+            database: config.database,
+            left_column_indices: config.left_column_indices,
+            right_column_indices: config.right_column_indices,
             right_hashmap: None,
             right_has_rows: None,
             phase: AntiJoinPhase::BuildRight,
