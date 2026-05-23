@@ -240,6 +240,11 @@ impl<'a> SlottedPage<'a> {
             .serialize(&mut self.page.data[..SlottedPageHeader::SIZE]);
     }
 
+    /// Reload header from page data (after raw page data was modified externally)
+    pub fn reload_header(&mut self) {
+        self.header = SlottedPageHeader::deserialize(&self.page.data[..SlottedPageHeader::SIZE]);
+    }
+
     /// Get page id
     pub fn page_id(&self) -> crate::storage::PageId {
         self.page.id
