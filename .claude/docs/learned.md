@@ -1,6 +1,19 @@
 # 学习记忆
 
-> 最后更新：2026-05-23（M17.5 存储架构分析 + 基准测试扩展）
+> 最后更新：2026-05-23（M18 Phase1 架构Warnings清理完成）
+
+## 2026-05-23 新增（M18 Phase1）
+
+### ClippyWarnings清理技巧
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **JoinConfig 模式** | 8-9个参数组织为单一 struct，解决 too_many_arguments | executor/join_config.rs |
+| **Type alias 简化** | CreateExecutorFuture<'a> 简化复杂 async 返回类型 | pipeline.rs |
+| **#[allow] 合理设计** | await_holding_lock（两阶段锁）+ module_inception（标准命名） | buffer_pool.rs, btree/mod.rs |
+| **务实策略** | 不追求零 warnings，保留合理设计 + 明确注释 | architecture.md ADR-005 |
+
+---
 
 ## 2026-05-23 新增（M17.5）
 
