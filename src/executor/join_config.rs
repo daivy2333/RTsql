@@ -1,4 +1,4 @@
-use crate::executor::{Executor, JoinCondition, OutputColumn, Value};
+use crate::executor::{Executor, JoinCondition, OutputColumn};
 use std::collections::HashMap;
 
 /// Join executor 配置参数集合
