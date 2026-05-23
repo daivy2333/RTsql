@@ -227,6 +227,7 @@ impl PlanBuilder {
             PhysicalPlan::Aggregate(node) => node.output_columns.clone(),
             PhysicalPlan::Having(node) => self.get_plan_output_columns(&node.input),
             PhysicalPlan::IndexScan(node) => node.columns.clone(),
+            PhysicalPlan::IndexScanAll(node) => node.columns.clone(),
             PhysicalPlan::Join(_) | PhysicalPlan::SemiJoin(_) | PhysicalPlan::AntiJoin(_) => {
                 // JOIN 的列来自左右子计划的合并
                 Vec::new()
