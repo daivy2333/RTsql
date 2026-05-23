@@ -24,7 +24,7 @@ async fn test_btree_new_creates_empty_leaf_root() {
     // Create BTree and verify root is empty LeafNode
     tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone1));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
         let root_id = btree.root_page_id();
 
         // Load root page and verify it's LEAF_NODE
@@ -46,7 +46,7 @@ async fn test_btree_search_empty_tree_returns_none() {
 
     let result = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
         btree.search(b"key1")
     })
     .await
@@ -63,7 +63,7 @@ async fn test_btree_insert_and_search_single_key() {
 
     let result = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert key
         btree.insert(b"key1", RowId::new(1, 0)).unwrap();
@@ -84,7 +84,7 @@ async fn test_btree_insert_multiple_keys_ordered_search() {
 
     let results = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert keys in different order
         btree.insert(b"key3", RowId::new(3, 0)).unwrap();
@@ -113,7 +113,7 @@ async fn test_btree_insert_duplicate_key_returns_error() {
 
     let result = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert key
         btree.insert(b"key1", RowId::new(1, 0)).unwrap();
@@ -135,7 +135,7 @@ async fn test_btree_delete_existing_key() {
 
     let result = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert key
         btree.insert(b"key1", RowId::new(1, 0)).unwrap();
@@ -159,7 +159,7 @@ async fn test_btree_delete_nonexistent_key_returns_error() {
 
     let result = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         btree.delete(b"key1")
     })
@@ -177,7 +177,7 @@ async fn test_btree_update_existing_key() {
 
     let result = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert key
         btree.insert(b"key1", RowId::new(1, 0)).unwrap();
@@ -201,7 +201,7 @@ async fn test_btree_update_nonexistent_key_returns_error() {
 
     let result = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         btree.update(b"key1", RowId::new(5, 10))
     })
@@ -224,7 +224,7 @@ async fn test_btree_persists_changes_to_disk() {
     // Insert key and get root_page_id
     let root_page_id = tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(buffer_pool_clone1));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
         let root_id = btree.root_page_id();
         btree.insert(b"key1", RowId::new(1, 0)).unwrap();
         root_id

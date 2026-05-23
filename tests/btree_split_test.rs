@@ -22,7 +22,7 @@ async fn test_non_unique_insert() {
 
     tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Same key inserted multiple times (should succeed)
         let key = b"same_key";
@@ -50,7 +50,7 @@ async fn test_find_all_matches() {
 
     tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(pool_clone1));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert duplicate keys
         let key = b"test_key";
@@ -88,7 +88,7 @@ async fn test_search_all_matches() {
 
     tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert duplicate keys
         let key = b"multi_key";
@@ -121,7 +121,7 @@ async fn test_delete_by_key() {
 
     tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert duplicate keys
         let key = b"del_key";
@@ -151,7 +151,7 @@ async fn test_delete_exact() {
 
     tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(pool_clone));
-        let btree = BTree::new(loader).unwrap();
+        let mut btree = BTree::new(loader).unwrap();
 
         // Insert duplicate keys
         let key = b"exact_key";
