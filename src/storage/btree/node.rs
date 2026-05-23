@@ -1,6 +1,6 @@
 use crate::storage::{
     page_format::{Key, RowId, Slot, SlottedPage, SlottedPageHeader, SlottedPageRef, MAX_KEY_LEN},
-    Page, StorageError,
+    Page, PageId, StorageError,
 };
 
 // B-Tree 常量
@@ -455,6 +455,95 @@ impl<'a> InternalNode<'a> {
 
         // 返回最后一个 child
         self.get_child_page_id(count)
+    }
+
+    /// 插入分隔符（key + right_child_page_id）
+    pub fn insert_separator(&mut self, key: &Key, right_child: PageId) -> Result<usize, StorageError> {
+        // 1. 查找插入位置
+        let position = self.find_insert_position(key);
+
+        // 2. 检查 PageFull
+        let entry_size = MAX_KEY_LEN + 4; // Key + PageId (u32)
+        if self.slotted.free_space() < Slot::SIZE + entry_size {
+            return Err(StorageError::PageFull);
+        }
+
+        // 3. 构造数据
+        let mut data = vec![0u8; entry_size];
+        key.serialize(&mut data[..MAX_KEY_LEN]);
+        data[MAX_KEY_LEN..].copy_from_slice(&right_child.0.to_le_bytes());
+
+        // 4. 添加 slot
+        let slot_index = self
+            .slotted
+            .add_slot(&data)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        // 5. 调整顺序（如果不是插入到末尾）
+        if slot_index != position {
+            self.shift_slots_right_internal(position, slot_index)?;
+        }
+
+        Ok(position)
+    }
+
+    /// 查找插入位置（用于有序插入）
+    fn find_insert_position(&self, key: &Key) -> usize {
+        for i in 0..self.key_count() {
+            if let Some(k) = self.get_key(i) {
+                if k >= *key {
+                    return i;
+                }
+            }
+        }
+        self.key_count()
+    }
+
+    /// 向右移动 slots（为插入腾出位置）- InternalNode 版本
+    fn shift_slots_right_internal(&mut self, _from: usize, _to: usize) -> Result<(), StorageError> {
+        // 简化实现：重建页
+        let entries: Vec<(Key, u32)> = (0..self.key_count())
+            .filter_map(|i| {
+                let key = self.get_key(i)?;
+                let child = self.get_child_page_id(i)?;
+                Some((key, child))
+            })
+            .collect();
+
+        let mut sorted = entries;
+        sorted.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+
+        let page_id = self.slotted.page_id();
+        let leftmost = self.slotted.header().next_page_id;
+        let mut new_page = Page::new(page_id);
+        // Set leftmost_child: directly modify header.next_page_id (bytes [5..9]) BEFORE init
+        new_page.data[5..9].copy_from_slice(&leftmost.to_le_bytes());
+        let mut new_internal = InternalNode::init(&mut new_page);
+
+        for (key, child) in sorted {
+            new_internal.insert_separator_simple(&key, PageId(child as u64))?;
+        }
+
+        self.slotted.page.data.copy_from_slice(new_page.data.as_ref());
+        Ok(())
+    }
+
+    /// 简单插入（不检查顺序，用于重建）
+    fn insert_separator_simple(&mut self, key: &Key, right_child: PageId) -> Result<(), StorageError> {
+        let entry_size = MAX_KEY_LEN + 4;
+        if self.slotted.free_space() < Slot::SIZE + entry_size {
+            return Err(StorageError::PageFull);
+        }
+
+        let mut data = vec![0u8; entry_size];
+        key.serialize(&mut data[..MAX_KEY_LEN]);
+        data[MAX_KEY_LEN..].copy_from_slice(&right_child.0.to_le_bytes());
+
+        self.slotted
+            .add_slot(&data)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        Ok(())
     }
 }
 
