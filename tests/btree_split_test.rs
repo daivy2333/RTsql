@@ -4,8 +4,8 @@ use tempfile::tempdir;
 
 use rtsql::storage::page_format::{Key, RowId};
 use rtsql::storage::{
-    btree::{BTree, SyncPageLoader, LEAF_NODE},
-    BufferPool, FileStorage, Page, PageId,
+    btree::{BTree, SyncPageLoader, LeafNodeRef, LEAF_NODE},
+    BufferPool, FileStorage,
 };
 
 /// Helper: create a test BufferPool
@@ -49,8 +49,6 @@ async fn test_find_all_matches() {
     let pool_clone2 = pool.clone();
 
     tokio::task::spawn_blocking(move || {
-        use rtsql::storage::btree::LeafNodeRef;
-
         let loader = Arc::new(SyncPageLoader::new(pool_clone1));
         let btree = BTree::new(loader).unwrap();
 
@@ -78,6 +76,98 @@ async fn test_find_all_matches() {
         // Verify no matches for non-existent key
         let no_match = leaf_ref.find_all_matches(&Key::new(b"no_key"));
         assert_eq!(no_match.len(), 0);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_search_all_matches() {
+    let pool = create_test_pool();
+    let pool_clone = pool.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let loader = Arc::new(SyncPageLoader::new(pool_clone));
+        let btree = BTree::new(loader).unwrap();
+
+        // Insert duplicate keys
+        let key = b"multi_key";
+        btree.insert(key, RowId::new(10, 0)).unwrap();
+        btree.insert(key, RowId::new(20, 1)).unwrap();
+        btree.insert(key, RowId::new(30, 2)).unwrap();
+
+        // Insert other key
+        btree.insert(b"single_key", RowId::new(40, 0)).unwrap();
+
+        // Verify search_all returns all matching RowIds
+        let results = btree.search_all(key).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.contains(&RowId::new(10, 0)));
+        assert!(results.contains(&RowId::new(20, 1)));
+        assert!(results.contains(&RowId::new(30, 2)));
+
+        // Verify single key query
+        let single = btree.search_all(b"single_key").unwrap();
+        assert_eq!(single.len(), 1);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_delete_by_key() {
+    let pool = create_test_pool();
+    let pool_clone = pool.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let loader = Arc::new(SyncPageLoader::new(pool_clone));
+        let btree = BTree::new(loader).unwrap();
+
+        // Insert duplicate keys
+        let key = b"del_key";
+        btree.insert(key, RowId::new(1, 0)).unwrap();
+        btree.insert(key, RowId::new(2, 1)).unwrap();
+        btree.insert(key, RowId::new(3, 2)).unwrap();
+
+        // Verify insertion succeeded
+        assert_eq!(btree.search_all(key).unwrap().len(), 3);
+
+        // Delete all matches
+        let deleted_count = btree.delete_by_key(key).unwrap();
+        assert_eq!(deleted_count, 3);
+
+        // Verify deleted
+        let remaining = btree.search_all(key).unwrap();
+        assert_eq!(remaining.len(), 0);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_delete_exact() {
+    let pool = create_test_pool();
+    let pool_clone = pool.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let loader = Arc::new(SyncPageLoader::new(pool_clone));
+        let btree = BTree::new(loader).unwrap();
+
+        // Insert duplicate keys
+        let key = b"exact_key";
+        btree.insert(key, RowId::new(1, 0)).unwrap();
+        btree.insert(key, RowId::new(2, 1)).unwrap();
+        btree.insert(key, RowId::new(3, 2)).unwrap();
+
+        // Exact delete middle one
+        btree.delete_exact(key, RowId::new(2, 1)).unwrap();
+
+        // Verify remaining two
+        let remaining = btree.search_all(key).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&RowId::new(1, 0)));
+        assert!(remaining.contains(&RowId::new(3, 2)));
+        assert!(!remaining.contains(&RowId::new(2, 1)));
     })
     .await
     .unwrap();

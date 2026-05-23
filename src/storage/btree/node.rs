@@ -193,6 +193,15 @@ impl<'a> LeafNode<'a> {
         Ok(())
     }
 
+    /// 删除指定索引的 slot（用于批量删除）
+    pub fn delete_slot(&mut self, index: usize) -> Result<(), StorageError> {
+        self.slotted
+            .delete_slot(index)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        self.slotted.sync_header();
+        Ok(())
+    }
+
     /// 更新某个 key 的 RowId
     pub fn update(&mut self, key: &Key, new_row_id: &RowId) -> Result<(), StorageError> {
         let position = self.find_key_position(key);
