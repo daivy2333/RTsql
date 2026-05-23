@@ -527,20 +527,37 @@ impl<'a> InternalNode<'a> {
     }
 
     /// 查找 child_page_id（根据 key）
-    pub fn find_child_page_id(&self, key: &Key) -> Option<u32> {
+    /// Layout: leftmost_child | key_0 → child_0 | key_1 → child_1 | ...
+    /// For key < key_0, go to leftmost_child
+    /// For key_i <= key < key_{i+1}, go to child_i = get_child_page_id(i)
+    /// For key >= key_{n-1}, go to child_{n-1} = get_child_page_id(n-1)
+    pub fn find_child_page_id(&self, key: &Key) -> u32 {
         let count = self.key_count();
+        let leftmost = self.slotted.header().next_page_id;
 
         for i in 0..count {
-            if let Some(current_key) = self.get_key(i) {
-                if *key < current_key {
-                    // 返回前一个 child（或第一个）
-                    return self.get_child_page_id(if i == 0 { 0 } else { i });
+            if let Some(sep_key) = self.get_key(i) {
+                if *key < sep_key {
+                    // key < separator[i]: go to left subtree of separator[i]
+                    if i == 0 {
+                        return leftmost;
+                    } else {
+                        return self.get_child_page_id(i - 1).unwrap_or(leftmost);
+                    }
+                }
+                if *key == sep_key {
+                    // key == separator[i]: go to right subtree = child_i
+                    return self.get_child_page_id(i).unwrap_or(leftmost);
                 }
             }
         }
 
-        // 返回最后一个 child
-        self.get_child_page_id(count)
+        // key >= all separators: go to last child
+        if count > 0 {
+            self.get_child_page_id(count - 1).unwrap_or(leftmost)
+        } else {
+            leftmost
+        }
     }
 
     /// 插入分隔符（key + right_child_page_id）
@@ -768,8 +785,9 @@ impl<'a> InternalNodeRef<'a> {
 
     /// Binary search for child page id — O(log n) instead of O(n)
     /// Returns the child page id for the subtree that should contain the given key.
-    /// In an internal node: leftmost_child | key_0 → child_1 | key_1 → child_2 | ...
-    /// If key < key_0, go to leftmost_child; if key < key_i, go to child_i; else go to last child.
+    /// In an internal node: leftmost_child | key_0 → child_0 | key_1 → child_1 | ...
+    /// where child_i = get_child_page_id(i) is the right child of separator i.
+    /// If key < key_0, go to leftmost_child; if key_i <= key < key_{i+1}, go to child_i; else go to last child.
     pub fn find_child_page_id_binary(&self, key: &Key) -> u32 {
         let count = self.key_count();
         let mut lo: usize = 0;
@@ -781,22 +799,21 @@ impl<'a> InternalNodeRef<'a> {
                     std::cmp::Ordering::Less => lo = mid + 1,
                     std::cmp::Ordering::Greater => hi = mid,
                     std::cmp::Ordering::Equal => {
-                        // key == separator: go to right subtree (child at mid+1)
-                        return self.get_child_page_id(mid + 1).unwrap_or(self.leftmost_child());
+                        // key == separator[mid]: go to right subtree (child at mid)
+                        return self.get_child_page_id(mid).unwrap_or(self.leftmost_child());
                     }
                 }
             } else {
                 hi = mid;
             }
         }
-        // lo is the insertion position; child at lo is the subtree for keys < key_lo
+        // lo is the insertion position. The subtree for keys in [key_{lo-1}, key_{lo})
+        // is child_{lo-1} = get_child_page_id(lo - 1).
         if lo == 0 {
             self.leftmost_child()
-        } else if lo >= count {
-            // key >= all separators: go to last child
-            self.get_child_page_id(count - 1).unwrap_or(self.leftmost_child())
         } else {
-            self.get_child_page_id(lo).unwrap_or(self.leftmost_child())
+            // key belongs to the subtree rooted at child_{lo-1}
+            self.get_child_page_id(lo - 1).unwrap_or(self.leftmost_child())
         }
     }
 }

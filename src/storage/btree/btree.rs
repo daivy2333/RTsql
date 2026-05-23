@@ -181,11 +181,33 @@ impl BTree {
                         leaf.split(new_page_id)
                     })?;
 
-                    // 2. Initialize the new leaf page with right entries
+                    // 2. Re-insert the new entry into the appropriate half after split
+                    let key_in_right = key >= &leaf_split.middle_key;
+
+                    if !key_in_right {
+                        // Key belongs to the left (original) half
+                        // Use insert (not insert_simple) to maintain sorted order
+                        guard.modify_page(|page| {
+                            let mut leaf = LeafNode::from_page(page)?;
+                            leaf.insert(key, row_id)?;
+                            Ok::<(), StorageError>(())
+                        })?;
+                    }
+
+                    // 3. Initialize the new leaf page with right entries
+                    //    (and include the new entry if it belongs to the right half)
                     let new_guard = self.loader.load_page(new_page_id)?;
                     new_guard.modify_page(|page| {
                         let mut new_leaf = LeafNode::init(page);
-                        for (k, r) in &leaf_split.right_entries {
+
+                        // Collect all entries for the right page (sorted + new entry if applicable)
+                        let mut right_with_new = leaf_split.right_entries.clone();
+                        if key_in_right {
+                            right_with_new.push((key.clone(), row_id.clone()));
+                            right_with_new.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+                        }
+
+                        for (k, r) in &right_with_new {
                             new_leaf.insert_simple(k, r)?;
                         }
                         // Maintain linked list: new page's next = old page's old next
@@ -193,7 +215,7 @@ impl BTree {
                         Ok::<(), StorageError>(())
                     })?;
 
-                    // 3. Update original page's next pointer to the new page
+                    // 4. Update original page's next pointer to the new page
                     guard.modify_page(|page| {
                         let mut leaf = LeafNode::from_page(page)?;
                         leaf.set_next_leaf_page_id(new_page_id.0 as u32);
@@ -238,7 +260,25 @@ impl BTree {
                             internal.split(new_page_id)
                         })?;
 
-                        // 2. Initialize the new internal node page
+                        // 2. Re-insert the pending separator into the appropriate half
+                        //    The separator that caused PageFull was child_split_result.middle_key.
+                        let sep_in_right =
+                            child_split_result.middle_key >= internal_split.middle_key;
+
+                        if !sep_in_right {
+                            // Separator belongs to the left (original) half
+                            guard.modify_page(|page| {
+                                let mut internal = InternalNode::from_page(page)?;
+                                internal.insert_separator(
+                                    &child_split_result.middle_key,
+                                    child_split_result.new_page_id,
+                                )?;
+                                Ok::<(), StorageError>(())
+                            })?;
+                        }
+
+                        // 3. Initialize the new internal node page
+                        //    (and include the pending separator if it belongs to the right half)
                         let new_guard = self.loader.load_page(new_page_id)?;
                         new_guard.modify_page(|page| {
                             let mut new_internal = InternalNode::init(page);
@@ -247,6 +287,12 @@ impl BTree {
                             // Insert right separators
                             for (k, child_id) in &internal_split.right_separators {
                                 new_internal.insert_separator_simple(k, PageId(*child_id as u64))?;
+                            }
+                            if sep_in_right {
+                                new_internal.insert_separator(
+                                    &child_split_result.middle_key,
+                                    child_split_result.new_page_id,
+                                )?;
                             }
                             Ok::<(), StorageError>(())
                         })?;
@@ -398,14 +444,49 @@ impl BTree {
                     row_ids.push(rid);
                 }
             }
+
             Ok(row_ids)
         } else {
-            // Internal node: find child, recurse
+            // Internal node: for non-unique keys that equal a separator, we need to
+            // search both the left and right subtrees.
             let internal = InternalNodeRef::new(&data_guard);
-            let child_page_id = internal.find_child_page_id_binary(key);
-            drop(data_guard);
-            drop(guard);
-            self.search_all_from_page(PageId(child_page_id as u64), key)
+            let count = internal.key_count();
+
+            // Find if the key matches any separator
+            let mut separator_match_idx: Option<usize> = None;
+            for i in 0..count {
+                if let Some(sep_key) = internal.get_key(i) {
+                    if sep_key == *key {
+                        separator_match_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(idx) = separator_match_idx {
+                // Key matches a separator — search both left subtree (get_child_page_id(idx-1) or leftmost)
+                // and right subtree (get_child_page_id(idx))
+                let left_child = if idx == 0 {
+                    internal.leftmost_child()
+                } else {
+                    internal.get_child_page_id(idx - 1).unwrap_or(internal.leftmost_child())
+                };
+                let right_child = internal.get_child_page_id(idx).unwrap_or(internal.leftmost_child());
+
+                drop(data_guard);
+                drop(guard);
+
+                let mut results = self.search_all_from_page(PageId(left_child as u64), key)?;
+                let right_results = self.search_all_from_page(PageId(right_child as u64), key)?;
+                results.extend(right_results);
+                Ok(results)
+            } else {
+                // Key doesn't match any separator — route normally
+                let child_page_id = internal.find_child_page_id_binary(key);
+                drop(data_guard);
+                drop(guard);
+                self.search_all_from_page(PageId(child_page_id as u64), key)
+            }
         }
     }
 
@@ -442,12 +523,41 @@ impl BTree {
 
             Ok(count)
         } else {
-            // Internal node: find child, recurse
+            // Internal node: for non-unique keys that equal a separator, search both subtrees
             let internal = InternalNodeRef::new(&data_guard);
-            let child_page_id = internal.find_child_page_id_binary(key);
-            drop(data_guard);
-            drop(guard);
-            self.delete_all_from_page(PageId(child_page_id as u64), key)
+            let count = internal.key_count();
+
+            // Find if the key matches any separator
+            let mut separator_match_idx: Option<usize> = None;
+            for i in 0..count {
+                if let Some(sep_key) = internal.get_key(i) {
+                    if sep_key == *key {
+                        separator_match_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(idx) = separator_match_idx {
+                let left_child = if idx == 0 {
+                    internal.leftmost_child()
+                } else {
+                    internal.get_child_page_id(idx - 1).unwrap_or(internal.leftmost_child())
+                };
+                let right_child = internal.get_child_page_id(idx).unwrap_or(internal.leftmost_child());
+
+                drop(data_guard);
+                drop(guard);
+
+                let left_count = self.delete_all_from_page(PageId(left_child as u64), key)?;
+                let right_count = self.delete_all_from_page(PageId(right_child as u64), key)?;
+                Ok(left_count + right_count)
+            } else {
+                let child_page_id = internal.find_child_page_id_binary(key);
+                drop(data_guard);
+                drop(guard);
+                self.delete_all_from_page(PageId(child_page_id as u64), key)
+            }
         }
     }
 
@@ -467,9 +577,16 @@ impl BTree {
             let matches = leaf_ref.find_all_matches(key);
 
             // Find slot with matching RowId
-            let target_idx = matches.into_iter().find(|idx| {
-                leaf_ref.get_row_id(*idx) == Some(row_id.clone())
-            });
+            let target_idx = matches.iter().find(|idx| {
+                leaf_ref.get_row_id(**idx) == Some(row_id.clone())
+            }).copied();
+
+            let key_has_matches_in_leaf = !matches.is_empty();
+            let next_page_u32 = if key_has_matches_in_leaf {
+                leaf_ref.next_leaf_page_id()
+            } else {
+                0
+            };
 
             drop(data_guard);
             drop(guard);
@@ -483,16 +600,53 @@ impl BTree {
                     Ok::<(), StorageError>(())
                 })?;
                 Ok(())
+            } else if key_has_matches_in_leaf && next_page_u32 != 0 {
+                // Key was found in this leaf but RowId wasn't; continue to next leaf
+                self.delete_exact_from_page(PageId(next_page_u32 as u64), key, row_id)
             } else {
                 Err(StorageError::KeyNotFound)
             }
         } else {
-            // Internal node: find child, recurse
+            // Internal node: for non-unique keys that equal a separator, search both subtrees
             let internal = InternalNodeRef::new(&data_guard);
-            let child_page_id = internal.find_child_page_id_binary(key);
-            drop(data_guard);
-            drop(guard);
-            self.delete_exact_from_page(PageId(child_page_id as u64), key, row_id)
+            let count = internal.key_count();
+
+            // Find if the key matches any separator
+            let mut separator_match_idx: Option<usize> = None;
+            for i in 0..count {
+                if let Some(sep_key) = internal.get_key(i) {
+                    if sep_key == *key {
+                        separator_match_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(idx) = separator_match_idx {
+                let left_child = if idx == 0 {
+                    internal.leftmost_child()
+                } else {
+                    internal.get_child_page_id(idx - 1).unwrap_or(internal.leftmost_child())
+                };
+                let right_child = internal.get_child_page_id(idx).unwrap_or(internal.leftmost_child());
+
+                drop(data_guard);
+                drop(guard);
+
+                // Try left subtree first, then right subtree
+                match self.delete_exact_from_page(PageId(left_child as u64), key, row_id) {
+                    Ok(()) => Ok(()),
+                    Err(StorageError::KeyNotFound) => {
+                        self.delete_exact_from_page(PageId(right_child as u64), key, row_id)
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                let child_page_id = internal.find_child_page_id_binary(key);
+                drop(data_guard);
+                drop(guard);
+                self.delete_exact_from_page(PageId(child_page_id as u64), key, row_id)
+            }
         }
     }
 }
