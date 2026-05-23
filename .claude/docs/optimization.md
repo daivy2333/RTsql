@@ -1,6 +1,6 @@
 # 优化方向与技术债
 
-> 最后更新：2026-05-23（M17.5 Clippy 清理完成，剩余架构 warnings 已留档）
+> 最后更新：2026-05-23（M18 Phase1 架构Warnings清理完成）
 
 ## 已完成的优化
 
@@ -15,6 +15,7 @@
 | 7 | 子查询支持（独立+关联） | M16 | 20 tests |
 | 8 | 非唯一索引（同页多条目） | M17-Phase1 | 5 tests |
 | 9 | B-Tree Split 机制 | M17-Phase2 | 7 tests，支持多层级索引 |
+| 10 | **架构Warnings清理** | **M18-Phase1** | **0 warnings（代码层面）** ⚡ |
 
 ## M14 性能验证（已完成）
 
@@ -129,29 +130,47 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 | Executor WAL 集成 | 未写 WAL | 崩溃恢复 | Executor 写 WAL 记录 | M18 |
 | B-Tree Merge | 未实现 | 删除后 underflow | 页合并 + 页释放 | M18+ |
 
-## 技术债清单（M17.5 清理目标）
+## M17.5 Clippy 清理（已完成）
 
-### Clippy 债务 (47 → 8 warnings)
+> 2026-05-23: M17.5 Clippy 清理（简单 warnings 自动修复）
 
-> M17.5 清理：自动修复 33 个 + 手动修复 6 个 + 架构 warnings 留档
+**结果**：自动修复 33个 + 手动修复 6个，剩余 6个架构 warnings 留档待 M18+
 
-| 优先级 | 类别 | 数量 | 修复策略 | 状态 |
-|--------|------|------|----------|------|
-| P0 | io_other_error | 10 | 批量替换为 io::Error::other() | ✅ 已修复 |
-| P0 | clone_on_copy | 3 | 替换为 *x | ✅ 已修复 |
-| P0 | redundant_closure | 4 | 替换为函数引用 | ✅ 已修复 |
-| P0 | into_iter | 5 | 移除显式调用 | ✅ 已修复 |
-| P1 | to_string_in_format | 3 | 移除多余 to_string() | ✅ 已修复 |
-| P1 | explicit_auto_deref | 1 | 移除显式解引用 | ✅ 已修复 |
-| P1 | byte_char_slices | 1 | 替换为 byte string | ✅ 已修复 |
-| P1 | single_match | 2 | 替换为 if let | ✅ 已修复 |
-| P1 | unnecessary_map_or | 2 | 简化表达式 | ✅ 已修复 |
-| P1 | empty_line_after_doc_comment | 1 | 删除空行 | ✅ 已修复 |
-| P1 | unused_variable | 1 | 加 `_` 前缀 | ✅ 已修复 |
-| P2 | only_used_in_recursion | 4 | 添加 #[allow]（合理递归设计） | ✅ 已修复 |
-| **P3** | **架构 warnings** | **8** | **留档，后续重构** | **⏳ 待 M18+** |
+---
 
-#### 架构 Warnings 留档（M18+ 重构）
+## M18 Phase1 架构Warnings清理（已完成）⚡
+
+> 2026-05-23: Phase1 完成所有架构 warnings 清理
+
+**成果**：
+- ✅ warnings 从 6降至 0（仅剩 cargo config deprecated）
+- ✅ JoinConfig/JoinRelatedConfig：参数组织清晰（解决 too_many_arguments）
+- ✅ CreateExecutorFuture type alias：简化 async 返回类型（解决 type_complexity）
+- ✅ #[allow] await_holding_lock：两阶段锁模式安全设计
+- ✅ #[allow] module_inception：标准命名模式合理
+
+---
+
+## 技术债清单（M18 Phase1 已清理）
+
+### Clippy 债务 ✅ 已解决
+
+| Warning | 解决方案 | 状态 |
+|---------|----------|------|
+| too_many_arguments | JoinConfig/JoinRelatedConfig struct | ✅ 已解决 |
+| type_complexity | CreateExecutorFuture type alias | ✅ 已解决 |
+| await_holding_lock | #[allow] + 两阶段锁注释 | ✅ 已解决 |
+| module_inception | #[allow] + 合理设计注释 | ✅ 已解决 |
+
+### 测试债务
+
+| 问题 | 状态 | 修复方式 |
+|------|------|----------|
+| Executor层非唯一索引测试覆盖缺失 | ⏳ 待 M18-Phase2 | 新增 IndexScanAllExecutor |
+
+---
+
+## 优化路线图
 
 | Warning | 文件 | 说明 | 重构方向 |
 |---------|------|------|----------|
