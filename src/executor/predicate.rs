@@ -11,6 +11,9 @@ pub trait Predicate: Send + Sync + Debug {
     /// Evaluate the predicate against a row
     /// Returns true if the row satisfies the predicate
     fn evaluate(&self, row: &[Value]) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Recursively inject correlated parameter values into ParameterExpression nodes
+    fn inject_parameters(&self, _params: &[(String, Value)]) {}
 }
 
 /// Reference to a Predicate (Arc<dyn Predicate>)
@@ -20,6 +23,11 @@ pub type PredicateRef = Arc<dyn Predicate>;
 pub trait Expression: Send + Sync + Debug {
     /// Evaluate the expression against a row
     fn evaluate(&self, row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Try to set a parameter value by name. Returns true if matched and set.
+    fn set_parameter_value(&self, _param_name: &str, _value: &Value) -> bool {
+        false
+    }
 }
 
 /// Reference to an Expression (Arc<dyn Expression>)
@@ -72,6 +80,13 @@ impl Predicate for ComparisonPredicate {
 
         result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
+
+    fn inject_parameters(&self, params: &[(String, Value)]) {
+        for (name, value) in params {
+            self.left.set_parameter_value(name, value);
+            self.right.set_parameter_value(name, value);
+        }
+    }
 }
 
 /// Logical operators
@@ -112,6 +127,11 @@ impl Predicate for LogicalPredicate {
             }
         }
     }
+
+    fn inject_parameters(&self, params: &[(String, Value)]) {
+        self.left.inject_parameters(params);
+        self.right.inject_parameters(params);
+    }
 }
 
 /// Column expression - evaluates to a column value from the row
@@ -143,6 +163,49 @@ pub struct ConstantExpression {
 impl Expression for ConstantExpression {
     fn evaluate(&self, _row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         Ok(self.value.clone())
+    }
+}
+
+/// Parameter expression - a placeholder for correlated outer column value
+/// The value is injected at execution time via set_parameter_value
+pub struct ParameterExpression {
+    pub param_name: String,
+    value: std::sync::Mutex<Value>,
+}
+
+impl ParameterExpression {
+    pub fn new(param_name: String) -> Self {
+        Self {
+            param_name,
+            value: std::sync::Mutex::new(Value::Null),
+        }
+    }
+
+    pub fn set_value(&self, value: Value) {
+        *self.value.lock().unwrap() = value;
+    }
+}
+
+impl Debug for ParameterExpression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParameterExpression")
+            .field("param_name", &self.param_name)
+            .finish()
+    }
+}
+
+impl Expression for ParameterExpression {
+    fn evaluate(&self, _row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.value.lock().unwrap().clone())
+    }
+
+    fn set_parameter_value(&self, param_name: &str, value: &Value) -> bool {
+        if self.param_name == param_name {
+            *self.value.lock().unwrap() = value.clone();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -214,5 +277,18 @@ mod tests {
             right: pred2,
         };
         assert!(logical.evaluate(&row).unwrap());
+    }
+
+    #[test]
+    fn test_parameter_expression() {
+        let row = vec![];
+        let expr = ParameterExpression::new("emp.dept".to_string());
+        expr.set_value(Value::Int(10));
+        assert_eq!(expr.evaluate(&row).unwrap(), Value::Int(10));
+        expr.set_value(Value::Int(20));
+        assert_eq!(expr.evaluate(&row).unwrap(), Value::Int(20));
+        // name mismatch → no change
+        assert!(!expr.set_parameter_value("wrong.name", &Value::Int(99)));
+        assert_eq!(expr.evaluate(&row).unwrap(), Value::Int(20));
     }
 }

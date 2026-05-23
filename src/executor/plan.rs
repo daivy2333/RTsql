@@ -42,6 +42,14 @@ pub enum PhysicalPlan {
     Aggregate(AggregateNode),
     /// HAVING 过滤节点
     Having(HavingNode),
+    /// Semi-Join 节点（IN/EXISTS 子查询反嵌套）
+    SemiJoin(SemiJoinNode),
+    /// Anti-Join 节点（NOT IN / NOT EXISTS 子查询反嵌套）
+    AntiJoin(AntiJoinNode),
+    /// 标量子查询求值节点
+    SubqueryEval(SubqueryEvalNode),
+    /// FROM 子查询（派生表）节点
+    DerivedScan(DerivedScanNode),
 }
 
 /// 全表扫描节点
@@ -279,4 +287,82 @@ pub struct HavingNode {
     pub input: Box<PhysicalPlan>,
     pub predicate: PredicateRef,
     pub table_name: String,
+}
+
+/// 相关子查询参数（外层列 → 内层替换位置）
+#[derive(Debug, Clone)]
+pub struct CorrelatedParam {
+    /// 外层表名
+    pub outer_table: String,
+    /// 外层列名
+    pub outer_column: String,
+    /// 限定参数名（如 "emp.dept"），匹配 ParameterExpression::param_name
+    pub param_name: String,
+}
+
+impl CorrelatedParam {
+    pub fn new(outer_table: String, outer_column: String, param_name: String) -> Self {
+        Self { outer_table, outer_column, param_name }
+    }
+}
+
+/// Semi-Join 节点（IN/EXISTS 子查询反嵌套）
+/// 输出仅包含左表行，当左表行在右表中有匹配时输出
+#[derive(Debug, Clone)]
+pub struct SemiJoinNode {
+    /// 左表计划（外层查询）
+    pub left: Box<PhysicalPlan>,
+    /// 右表计划（子查询物化结果）
+    pub right: Box<PhysicalPlan>,
+    /// 等值条件（左表列 = 子查询结果列）
+    /// EXISTS 子查询时 conditions 为空，仅检测右表非空
+    pub conditions: Vec<JoinCondition>,
+    /// 输出列（仅左表列）
+    pub output_columns: Vec<OutputColumn>,
+    /// 相关子查询参数（空 = 独立子查询）
+    pub correlated_params: Vec<CorrelatedParam>,
+}
+
+/// Anti-Join 节点（NOT IN / NOT EXISTS 子查询反嵌套）
+/// 输出仅包含左表行，当左表行在右表中无匹配时输出
+#[derive(Debug, Clone)]
+pub struct AntiJoinNode {
+    /// 左表计划（外层查询）
+    pub left: Box<PhysicalPlan>,
+    /// 右表计划（子查询物化结果）
+    pub right: Box<PhysicalPlan>,
+    /// 等值条件
+    pub conditions: Vec<JoinCondition>,
+    /// 输出列（仅左表列）
+    pub output_columns: Vec<OutputColumn>,
+    /// 相关子查询参数
+    pub correlated_params: Vec<CorrelatedParam>,
+}
+
+/// 标量子查询求值节点（SELECT 列中的子查询）
+/// 逐行对外层行执行子查询，取首行首列作为标量结果追加到输出
+#[derive(Debug, Clone)]
+pub struct SubqueryEvalNode {
+    /// 外层查询输入
+    pub input: Box<PhysicalPlan>,
+    /// 子查询计划（标量子查询）
+    pub subquery: Box<PhysicalPlan>,
+    /// 结果列名
+    pub output_column: String,
+    /// 子查询结果在输出行中的列索引
+    pub result_column_index: usize,
+    /// 相关子查询参数
+    pub correlated_params: Vec<CorrelatedParam>,
+}
+
+/// FROM 子查询（派生表）节点
+/// 将子查询结果物化为内存表，作为 Scan 数据源
+#[derive(Debug, Clone)]
+pub struct DerivedScanNode {
+    /// 子查询计划
+    pub subquery: Box<PhysicalPlan>,
+    /// 派生表别名
+    pub alias: String,
+    /// 输出列名列表
+    pub columns: Vec<String>,
 }

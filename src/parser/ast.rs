@@ -84,6 +84,7 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                         _ => Err(PlanError::UnsupportedStatement),
                     }
                 }
+                Expr::Value(v) => Ok(format!("_{}", v.to_string())),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => Ok(alias.value.to_string().to_lowercase()),
@@ -152,6 +153,7 @@ pub fn extract_qualified_columns(
                         _ => Err(PlanError::UnsupportedStatement),
                     }
                 }
+                Expr::Value(v) => Ok((None, format!("_{}", v.to_string()))),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => {

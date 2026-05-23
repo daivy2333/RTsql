@@ -3,16 +3,17 @@
 //! M4: SQL Parser and Physical Plan
 
 use crate::executor::{
-    AggregateFunc, AggregateNode, ColumnConstraint, ColumnDef, ColumnType, ComparisonOp,
-    ComparisonPredicate, ConstantExpression, CreateTableNode, DeleteNode, DropTableNode,
-    ExpressionRef, FilterNode, HavingNode, IndexScanNode, InsertNode, LimitNode, LogicalOp,
-    LogicalPredicate, OrderByColumn, PhysicalPlan, PredicateRef, ScanNode, SortNode, UpdateNode,
-    Value,
+    AggregateFunc, AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef,
+    ColumnType, ComparisonOp, ComparisonPredicate, ConstantExpression, CorrelatedParam,
+    CreateTableNode, DeleteNode, DerivedScanNode, DropTableNode, ExpressionRef, FilterNode, HavingNode,
+    IndexScanNode, InsertNode, JoinCondition, LimitNode, LogicalOp, LogicalPredicate,
+    OrderByColumn, OutputColumn, ParameterExpression, PhysicalPlan, PredicateRef, ScanNode,
+    SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode, Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
-use sqlparser::ast::{Expr, ObjectType, Query, SetExpr, Statement};
+use sqlparser::ast::{Expr, ObjectType, Query, SetExpr, Statement, TableFactor};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,6 +26,9 @@ pub struct PlanBuilder {
     tables: HashMap<String, Vec<String>>,
     /// Table name -> primary key column name
     primary_keys: HashMap<String, String>,
+    /// Set of inner table names when building a subquery (for detecting outer references).
+    /// None when building a top-level query.
+    pub(crate) inner_table_names: Option<Vec<String>>,
 }
 
 impl PlanBuilder {
@@ -33,6 +37,7 @@ impl PlanBuilder {
         Self {
             tables: HashMap::new(),
             primary_keys: HashMap::new(),
+            inner_table_names: None,
         }
     }
 
@@ -44,7 +49,7 @@ impl PlanBuilder {
     }
 
     /// Build PhysicalPlan from Statement
-    pub fn build_plan(&self, stmt: &Statement) -> Result<PhysicalPlan, PlanError> {
+    pub fn build_plan(&mut self, stmt: &Statement) -> Result<PhysicalPlan, PlanError> {
         match stmt {
             Statement::Query(query) => self.build_query(query),
             Statement::Insert {
@@ -210,8 +215,29 @@ impl PlanBuilder {
     }
 
     /// 构建 FROM + JOIN 链计划（支持列投影）
+    /// 从 PhysicalPlan 中提取输出列名（用于派生表的列注册）
+    fn get_plan_output_columns(&self, plan: &PhysicalPlan) -> Vec<String> {
+        match plan {
+            PhysicalPlan::Scan(node) => node.columns.clone(),
+            PhysicalPlan::DerivedScan(node) => node.columns.clone(),
+            PhysicalPlan::Filter(node) => self.get_plan_output_columns(&node.input),
+            PhysicalPlan::Sort(node) => self.get_plan_output_columns(&node.input),
+            PhysicalPlan::Limit(node) => self.get_plan_output_columns(&node.input),
+            PhysicalPlan::Aggregate(node) => node.output_columns.clone(),
+            PhysicalPlan::Having(node) => self.get_plan_output_columns(&node.input),
+            PhysicalPlan::IndexScan(node) => node.columns.clone(),
+            PhysicalPlan::Join(_) | PhysicalPlan::SemiJoin(_) | PhysicalPlan::AntiJoin(_) => {
+                // JOIN 的列来自左右子计划的合并
+                Vec::new()
+            }
+            PhysicalPlan::SubqueryEval(node) => self.get_plan_output_columns(&node.input),
+            PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => Vec::new(),
+            PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => Vec::new(),
+        }
+    }
+
     fn build_from_clause_with_projection(
-        &self,
+        &mut self,
         from: &[sqlparser::ast::TableWithJoins],
         qualified_columns: &[(Option<String>, String)],
     ) -> Result<PhysicalPlan, PlanError> {
@@ -222,14 +248,37 @@ impl PlanBuilder {
             return Err(PlanError::MissingField("FROM clause".into()));
         }
 
-        // 基础表
-        let base_table = crate::parser::ast::extract_table_name(from)?;
-        self.validate_table(&base_table)?;
-        let base_columns = self.tables.get(&base_table).cloned().unwrap_or_default();
-        let base_plan = PhysicalPlan::Scan(ScanNode {
-            table_name: base_table.clone(),
-            columns: base_columns.clone(),
-        });
+        // 基础表 — 支持 TableFactor::Table（普通表）和 TableFactor::Derived（派生表）
+        let (base_plan, base_table) = match &from[0].relation {
+            TableFactor::Table { name, .. } => {
+                let table_name = name.to_string().to_lowercase();
+                self.validate_table(&table_name)?;
+                let base_columns = self.tables.get(&table_name).cloned().unwrap_or_default();
+                let plan = PhysicalPlan::Scan(ScanNode {
+                    table_name: table_name.clone(),
+                    columns: base_columns.clone(),
+                });
+                (plan, table_name)
+            }
+            TableFactor::Derived { subquery, alias, .. } => {
+                let subquery_plan = self.build_query(subquery)?;
+                let alias_name = alias
+                    .as_ref()
+                    .map(|a| a.name.value.to_lowercase())
+                    .unwrap_or_else(|| "derived".to_string());
+                // 提取子查询输出列名
+                let columns = self.get_plan_output_columns(&subquery_plan);
+                // 注册派生表列信息（供后续 WHERE/ORDER BY 引用）
+                self.register_table(&alias_name, columns.clone(), "");
+                let plan = PhysicalPlan::DerivedScan(DerivedScanNode {
+                    subquery: Box::new(subquery_plan),
+                    alias: alias_name.clone(),
+                    columns,
+                });
+                (plan, alias_name)
+            }
+            _ => return Err(PlanError::InvalidQuery("unsupported table factor in FROM clause".into())),
+        };
 
         // 递归处理 JOIN 链
         let mut current_plan = base_plan;
@@ -331,15 +380,63 @@ impl PlanBuilder {
     }
 
     /// Build PhysicalPlan for SELECT query
-    fn build_query(&self, query: &Query) -> Result<PhysicalPlan, PlanError> {
+    fn build_query(&mut self, query: &Query) -> Result<PhysicalPlan, PlanError> {
         // Extract Select body
         let select = extract_select_body(query)?;
 
-        // Extract columns from projection (for filtering JOIN output)
-        let projection_columns = extract_columns(&select.projection)?;
+        // === Scalar subquery detection in SELECT projection ===
+        // Scan projection for Expr::Subquery items and build subquery plans
+        // Also detect correlated parameters (outer table column references)
+        let mut subquery_evals: Vec<(usize, PhysicalPlan, String, Vec<CorrelatedParam>)> = Vec::new();
+        for (idx, item) in select.projection.iter().enumerate() {
+            let (expr, col_name) = match item {
+                sqlparser::ast::SelectItem::UnnamedExpr(Expr::Subquery(subquery)) => {
+                    (subquery, "__subquery".to_string())
+                }
+                sqlparser::ast::SelectItem::ExprWithAlias {
+                    expr: Expr::Subquery(subquery),
+                    alias,
+                } => (subquery, alias.value.to_lowercase()),
+                _ => continue,
+            };
+            // Detect correlated parameters before building the plan
+            let inner_tables = Self::extract_subquery_table_names(expr);
+            self.inner_table_names = Some(inner_tables.clone());
+            let correlated_params = self.extract_correlated_params(expr, &inner_tables)?;
+            let subquery_plan = match self.build_query(expr) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.inner_table_names = None;
+                    return Err(e);
+                }
+            };
+            self.inner_table_names = None;
+            subquery_evals.push((idx, subquery_plan, col_name, correlated_params));
+        }
 
-        // Extract qualified columns for JOIN filtering
-        let qualified_columns = extract_qualified_columns(&select.projection)?;
+        // Build a filtered projection that excludes subquery items
+        // (SubqueryEval will insert the scalar results at the correct positions later)
+        let filtered_projection: Vec<sqlparser::ast::SelectItem> = select
+            .projection
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !subquery_evals.iter().any(|(sq_idx, _, _, _)| *sq_idx == *idx))
+            .map(|(_, item)| item.clone())
+            .collect();
+
+        // Extract columns from filtered projection (for filtering JOIN output)
+        let projection_columns = if filtered_projection.is_empty() {
+            extract_columns(&select.projection)?
+        } else {
+            extract_columns(&filtered_projection)?
+        };
+
+        // Extract qualified columns from filtered projection for JOIN filtering
+        let qualified_columns = if filtered_projection.is_empty() {
+            extract_qualified_columns(&select.projection)?
+        } else {
+            extract_qualified_columns(&filtered_projection)?
+        };
 
         // Build FROM + JOIN chain (with projection columns for filtering)
         let base_plan = self.build_from_clause_with_projection(&select.from, &qualified_columns)?;
@@ -347,6 +444,7 @@ impl PlanBuilder {
         // Extract table name from base plan for single-table queries (for WHERE/ORDER BY processing)
         let table_name = match &base_plan {
             PhysicalPlan::Scan(scan_node) => scan_node.table_name.clone(),
+            PhysicalPlan::DerivedScan(derived_node) => derived_node.alias.clone(),
             PhysicalPlan::Join(_) => "join_result".to_string(), // 虚拟表名用于 JOIN 结果
             _ => "unknown".to_string(),
         };
@@ -358,8 +456,16 @@ impl PlanBuilder {
                 return Err(PlanError::UnsupportedStatement);
             }
 
-            // Try to extract primary key from WHERE clause for index scan
-            if let Some(key) = self.extract_pk_from_where(&table_name, where_expr)? {
+            // Try subquery patterns first (IN subquery / EXISTS)
+            if let Some(subquery_plan) = self.try_build_where_subquery(
+                where_expr,
+                &base_plan,
+                &table_name,
+                &projection_columns,
+            )? {
+                subquery_plan
+            } else if let Some(key) = self.extract_pk_from_where(&table_name, where_expr)? {
+                // Try to extract primary key from WHERE clause for index scan
                 // Simple PK equality check - use index scan
                 // Note: This is a simplification. A more sophisticated optimizer would
                 // check if the WHERE clause is ONLY pk = value, not part of a complex expression
@@ -398,7 +504,11 @@ impl PlanBuilder {
         let mut non_agg_columns = Vec::new();
         let mut agg_output_columns = Vec::new();
 
-        for item in &select.projection {
+        for (item_idx, item) in select.projection.iter().enumerate() {
+            // Skip subquery items (handled by SubqueryEval plan node later)
+            if subquery_evals.iter().any(|(idx, _, _, _)| *idx == item_idx) {
+                continue;
+            }
             match item {
                 sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
                     if is_aggregate_expr(expr) {
@@ -529,7 +639,7 @@ impl PlanBuilder {
         };
 
         // Parse LIMIT/OFFSET
-        if let Some(limit_expr) = &query.limit {
+        let plan_with_limit = if let Some(limit_expr) = &query.limit {
             let limit = parse_limit_value(limit_expr)?;
             let offset = query
                 .offset
@@ -538,14 +648,35 @@ impl PlanBuilder {
                 .transpose()?
                 .unwrap_or(0);
 
-            Ok(PhysicalPlan::Limit(LimitNode {
+            PhysicalPlan::Limit(LimitNode {
                 input: Box::new(plan_with_order),
                 limit,
                 offset,
-            }))
+            })
         } else {
-            Ok(plan_with_order)
+            plan_with_order
+        };
+
+        // === Wrap with SubqueryEval nodes for scalar subqueries in SELECT ===
+        // Process from right to left so that result_column_index calculations remain stable
+        // result_column_index = projection_index - (number of subqueries at indices < projection_index)
+        let mut plan = plan_with_limit;
+        for (proj_idx, subquery_plan, col_name, correlated_params) in subquery_evals.iter().rev() {
+            let subqueries_before = subquery_evals
+                .iter()
+                .filter(|(idx, _, _, _)| idx < proj_idx)
+                .count();
+            let result_column_index = proj_idx - subqueries_before;
+            plan = PhysicalPlan::SubqueryEval(SubqueryEvalNode {
+                input: Box::new(plan),
+                subquery: Box::new(subquery_plan.clone()),
+                output_column: col_name.clone(),
+                result_column_index,
+                correlated_params: correlated_params.clone(),
+            });
         }
+
+        Ok(plan)
     }
 
     /// Check if WHERE clause is a simple PK equality (pk = value)
@@ -821,6 +952,36 @@ impl PlanBuilder {
                     column_index,
                 }))
             }
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let table_ref = parts[0].value.to_lowercase();
+                let column_name = parts[1].value.to_lowercase();
+
+                // Check if this is an outer (correlated) reference
+                if let Some(ref inner_tables) = self.inner_table_names {
+                    if !inner_tables.iter().any(|t| t.eq_ignore_ascii_case(&table_ref)) {
+                        let param_name = format!("{}.{}", table_ref, column_name);
+                        return Ok(Arc::new(ParameterExpression::new(param_name)));
+                    }
+                }
+
+                // Resolve the table reference
+                let columns = self.tables.get(&table_ref).ok_or_else(|| {
+                    PlanError::ParseError(format!("Table '{}' not found", table_ref))
+                })?;
+                let column_index = columns
+                    .iter()
+                    .position(|c| c.to_lowercase() == column_name)
+                    .ok_or_else(|| {
+                        PlanError::ParseError(format!(
+                            "Column '{}' not found in table '{}'",
+                            column_name, table_ref
+                        ))
+                    })?;
+                Ok(Arc::new(crate::executor::ColumnExpression {
+                    column_name,
+                    column_index,
+                }))
+            }
             Expr::Value(v) => {
                 // Constant value
                 let value = value_from_sqlparser(v)?;
@@ -894,6 +1055,425 @@ impl PlanBuilder {
             Expr::Nested(expr) => self.build_where(table_name, expr),
             _ => Err(PlanError::UnsupportedExpression),
         }
+    }
+
+    /// Try to build a SemiJoin/AntiJoin plan from WHERE subquery expressions.
+    /// Returns Ok(Some(plan)) if the expression is an IN subquery or EXISTS subquery,
+    /// returns Ok(None) if the expression does not match any subquery pattern.
+    fn try_build_where_subquery(
+        &mut self,
+        expr: &Expr,
+        base_plan: &PhysicalPlan,
+        table_name: &str,
+        projection_columns: &[String],
+    ) -> Result<Option<PhysicalPlan>, PlanError> {
+        match expr {
+            Expr::InSubquery {
+                expr: left_expr,
+                subquery,
+                negated,
+            } => {
+                let inner_tables = Self::extract_subquery_table_names(subquery);
+
+                self.inner_table_names = Some(inner_tables.clone());
+                let right_plan = match self.build_query(subquery) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.inner_table_names = None;
+                        return Err(e);
+                    }
+                };
+                self.inner_table_names = None;
+
+                let left_column = self.resolve_column_in_plan(left_expr, table_name)?;
+                let right_column = self.get_subquery_first_column(&right_plan)?;
+
+                let conditions = vec![JoinCondition {
+                    left_column,
+                    right_column,
+                }];
+
+                let output_columns =
+                    self.build_output_columns_for_table(table_name, projection_columns);
+
+                // Detect correlated parameters
+                let correlated_params = self.extract_correlated_params(subquery, &inner_tables)?;
+
+                if *negated {
+                    Ok(Some(PhysicalPlan::AntiJoin(AntiJoinNode {
+                        left: Box::new(base_plan.clone()),
+                        right: Box::new(right_plan),
+                        conditions,
+                        output_columns,
+                        correlated_params,
+                    })))
+                } else {
+                    Ok(Some(PhysicalPlan::SemiJoin(SemiJoinNode {
+                        left: Box::new(base_plan.clone()),
+                        right: Box::new(right_plan),
+                        conditions,
+                        output_columns,
+                        correlated_params,
+                    })))
+                }
+            }
+            Expr::Exists { subquery, negated } => {
+                let inner_tables = Self::extract_subquery_table_names(subquery);
+
+                self.inner_table_names = Some(inner_tables.clone());
+                let right_plan = match self.build_query(subquery) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.inner_table_names = None;
+                        return Err(e);
+                    }
+                };
+                self.inner_table_names = None;
+
+                let output_columns =
+                    self.build_output_columns_for_table(table_name, projection_columns);
+
+                let conditions = vec![]; // EXISTS does not need equality conditions
+
+                // Detect correlated parameters
+                let correlated_params = self.extract_correlated_params(subquery, &inner_tables)?;
+
+                if *negated {
+                    Ok(Some(PhysicalPlan::AntiJoin(AntiJoinNode {
+                        left: Box::new(base_plan.clone()),
+                        right: Box::new(right_plan),
+                        conditions,
+                        output_columns,
+                        correlated_params,
+                    })))
+                } else {
+                    Ok(Some(PhysicalPlan::SemiJoin(SemiJoinNode {
+                        left: Box::new(base_plan.clone()),
+                        right: Box::new(right_plan),
+                        conditions,
+                        output_columns,
+                        correlated_params,
+                    })))
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Extract table names from a subquery's FROM clause
+    fn extract_subquery_table_names(subquery: &Query) -> Vec<String> {
+        match subquery.body.as_ref() {
+            SetExpr::Select(select) => select
+                .from
+                .iter()
+                .flat_map(|twj| {
+                    let mut names = Vec::new();
+                    match &twj.relation {
+                        TableFactor::Table { name, .. } => {
+                            names.push(name.to_string().to_lowercase());
+                        }
+                        _ => {}
+                    }
+                    for join in &twj.joins {
+                        match &join.relation {
+                            TableFactor::Table { name, .. } => {
+                                names.push(name.to_string().to_lowercase());
+                            }
+                            _ => {}
+                        }
+                    }
+                    names
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Extract correlated parameters from a subquery by scanning its WHERE clause
+    /// for column references to tables NOT in the subquery's own FROM clause.
+    ///
+    /// For each outer column reference (e.g., `emp.region` where `emp` is not in the
+    /// subquery's FROM), creates a CorrelatedParam that maps the outer table/column
+    /// to the inner column index where the value will be injected at execution time.
+    fn extract_correlated_params(
+        &self,
+        subquery: &Query,
+        inner_tables: &[String],
+    ) -> Result<Vec<CorrelatedParam>, PlanError> {
+        let where_expr = match subquery.body.as_ref() {
+            SetExpr::Select(select) => select.selection.as_ref(),
+            _ => return Ok(Vec::new()),
+        };
+        let Some(where_expr) = where_expr else {
+            return Ok(Vec::new());
+        };
+
+        let mut params = Vec::new();
+        self.collect_outer_column_refs(where_expr, inner_tables, &mut params)?;
+        Ok(params)
+    }
+
+    /// Recursively walk an expression tree to find outer column references.
+    /// An outer column reference is a CompoundIdentifier (table.column) where
+    /// the table is NOT in the inner_tables list.
+    fn collect_outer_column_refs(
+        &self,
+        expr: &Expr,
+        inner_tables: &[String],
+        params: &mut Vec<CorrelatedParam>,
+    ) -> Result<(), PlanError> {
+        match expr {
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let table = parts[0].value.to_lowercase();
+                let column = parts[1].value.to_lowercase();
+
+                // If this table is NOT in the inner tables, it's an outer reference
+                if !inner_tables.iter().any(|t| t.eq_ignore_ascii_case(&table)) {
+                    // Build qualified param name (e.g. "emp.dept") for matching
+                    // ParameterExpression nodes at execution time
+                    let param_name = format!("{}.{}", table, column);
+                    params.push(CorrelatedParam::new(table, column, param_name));
+                }
+                Ok(())
+            }
+            // Recurse into binary operations
+            Expr::BinaryOp { left, right, .. } => {
+                self.collect_outer_column_refs(left, inner_tables, params)?;
+                self.collect_outer_column_refs(right, inner_tables, params)?;
+                Ok(())
+            }
+            // Recurse into unary operations
+            Expr::UnaryOp { expr, .. } => {
+                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                Ok(())
+            }
+            // Recurse into nested expressions
+            Expr::Nested(expr) => {
+                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                Ok(())
+            }
+            // Recurse into BETWEEN
+            Expr::Between { expr, low, high, .. } => {
+                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                self.collect_outer_column_refs(low, inner_tables, params)?;
+                self.collect_outer_column_refs(high, inner_tables, params)?;
+                Ok(())
+            }
+            // Recurse into IN list
+            Expr::InList { expr, .. } => {
+                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                Ok(())
+            }
+            // Recurse into IN subquery
+            Expr::InSubquery { expr, subquery, .. } => {
+                // Multi-level correlated: check for nested outer refs beyond inner_tables
+                let nested_inner_tables = Self::extract_subquery_table_names(subquery);
+                if let SetExpr::Select(select) = subquery.body.as_ref() {
+                    if let Some(ref where_expr) = select.selection {
+                        let all_allowed: Vec<String> = inner_tables.iter()
+                            .chain(nested_inner_tables.iter())
+                            .cloned()
+                            .collect();
+                        if Self::has_outer_refs_outside(where_expr, &all_allowed) {
+                            return Err(PlanError::CorrelatedParamError(
+                                "Multi-level correlated subqueries are not supported".to_string()
+                            ));
+                        }
+                    }
+                }
+                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                Ok(())
+            }
+            // Recurse into EXISTS / NOT EXISTS (subquery itself may have outer refs)
+            Expr::Exists { subquery, .. } => {
+                // Multi-level correlated: check for nested outer refs beyond inner_tables
+                let nested_inner_tables = Self::extract_subquery_table_names(subquery);
+                if let SetExpr::Select(select) = subquery.body.as_ref() {
+                    if let Some(ref where_expr) = select.selection {
+                        let all_allowed: Vec<String> = inner_tables.iter()
+                            .chain(nested_inner_tables.iter())
+                            .cloned()
+                            .collect();
+                        if Self::has_outer_refs_outside(where_expr, &all_allowed) {
+                            return Err(PlanError::CorrelatedParamError(
+                                "Multi-level correlated subqueries are not supported".to_string()
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            },
+            // Recurse into CASE
+            Expr::Case { operand, conditions, results, else_result, .. } => {
+                if let Some(op) = operand {
+                    self.collect_outer_column_refs(op, inner_tables, params)?;
+                }
+                for cond in conditions {
+                    self.collect_outer_column_refs(cond, inner_tables, params)?;
+                }
+                for res in results {
+                    self.collect_outer_column_refs(res, inner_tables, params)?;
+                }
+                if let Some(else_expr) = else_result {
+                    self.collect_outer_column_refs(else_expr, inner_tables, params)?;
+                }
+                Ok(())
+            }
+            // Simple identifiers, values, functions, etc. — no outer refs to collect
+            _ => Ok(()),
+        }
+    }
+
+    /// Check if an expression tree contains column references to tables outside the allowed set
+    fn has_outer_refs_outside(expr: &Expr, allowed_tables: &[String]) -> bool {
+        match expr {
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let table = parts[0].value.to_lowercase();
+                !allowed_tables.iter().any(|t| t.eq_ignore_ascii_case(&table))
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::has_outer_refs_outside(left, allowed_tables)
+                    || Self::has_outer_refs_outside(right, allowed_tables)
+            }
+            Expr::Nested(inner) => Self::has_outer_refs_outside(inner, allowed_tables),
+            Expr::UnaryOp { expr, .. } => Self::has_outer_refs_outside(expr, allowed_tables),
+            Expr::Between { expr, low, high, .. } => {
+                Self::has_outer_refs_outside(expr, allowed_tables)
+                    || Self::has_outer_refs_outside(low, allowed_tables)
+                    || Self::has_outer_refs_outside(high, allowed_tables)
+            }
+            Expr::InList { expr, .. } => Self::has_outer_refs_outside(expr, allowed_tables),
+            Expr::InSubquery { expr, subquery, .. } => {
+                if Self::has_outer_refs_outside(expr, allowed_tables) {
+                    return true;
+                }
+                let nested_tables = Self::extract_subquery_table_names(subquery);
+                let all_allowed: Vec<String> = allowed_tables
+                    .iter()
+                    .chain(nested_tables.iter())
+                    .cloned()
+                    .collect();
+                if let SetExpr::Select(select) = subquery.body.as_ref() {
+                    select
+                        .selection
+                        .as_ref()
+                        .map_or(false, |w| Self::has_outer_refs_outside(w, &all_allowed))
+                } else {
+                    false
+                }
+            }
+            Expr::Exists { subquery, .. } => {
+                let nested_tables = Self::extract_subquery_table_names(subquery);
+                let all_allowed: Vec<String> = allowed_tables
+                    .iter()
+                    .chain(nested_tables.iter())
+                    .cloned()
+                    .collect();
+                if let SetExpr::Select(select) = subquery.body.as_ref() {
+                    select
+                        .selection
+                        .as_ref()
+                        .map_or(false, |w| Self::has_outer_refs_outside(w, &all_allowed))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Resolve column reference from an expression (for IN subquery left-table column)
+    fn resolve_column_in_plan(
+        &self,
+        expr: &Expr,
+        table_name: &str,
+    ) -> Result<ColumnRef, PlanError> {
+        match expr {
+            Expr::Identifier(ident) => {
+                let column = ident.value.to_lowercase();
+                Ok(ColumnRef {
+                    table: Some(table_name.to_string()),
+                    column,
+                })
+            }
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let table = parts[0].value.to_lowercase();
+                let column = parts[1].value.to_lowercase();
+                Ok(ColumnRef {
+                    table: Some(table),
+                    column,
+                })
+            }
+            _ => Err(PlanError::UnsupportedExpression),
+        }
+    }
+
+    /// Get the first output column name from a subquery plan (IN subquery requires single column)
+    fn get_subquery_first_column(&self, plan: &PhysicalPlan) -> Result<ColumnRef, PlanError> {
+        match plan {
+            PhysicalPlan::Scan(node) => {
+                if node.columns.is_empty() {
+                    return Err(PlanError::SubqueryReturnsMultipleColumns);
+                }
+                Ok(ColumnRef {
+                    table: Some(node.table_name.clone()),
+                    column: node.columns[0].clone(),
+                })
+            }
+            PhysicalPlan::Filter(node) => self.get_subquery_first_column(&node.input),
+            PhysicalPlan::Aggregate(node) => {
+                if node.output_columns.is_empty() {
+                    return Err(PlanError::SubqueryReturnsMultipleColumns);
+                }
+                Ok(ColumnRef {
+                    table: Some(node.table_name.clone()),
+                    column: node.output_columns[0].clone(),
+                })
+            }
+            PhysicalPlan::SemiJoin(node) => {
+                if node.output_columns.is_empty() {
+                    return Err(PlanError::SubqueryReturnsMultipleColumns);
+                }
+                Ok(ColumnRef {
+                    table: Some(node.output_columns[0].table.clone().unwrap_or_default()),
+                    column: node.output_columns[0].column.clone(),
+                })
+            }
+            PhysicalPlan::AntiJoin(node) => {
+                if node.output_columns.is_empty() {
+                    return Err(PlanError::SubqueryReturnsMultipleColumns);
+                }
+                Ok(ColumnRef {
+                    table: Some(node.output_columns[0].table.clone().unwrap_or_default()),
+                    column: node.output_columns[0].column.clone(),
+                })
+            }
+            _ => Err(PlanError::SubqueryReturnsMultipleColumns),
+        }
+    }
+
+    /// Build output_columns for a single-table query
+    fn build_output_columns_for_table(
+        &self,
+        table_name: &str,
+        projection_columns: &[String],
+    ) -> Vec<OutputColumn> {
+        let columns = self.tables.get(table_name).cloned().unwrap_or_default();
+        projection_columns
+            .iter()
+            .map(|col| {
+                let column_index = columns
+                    .iter()
+                    .position(|c| c.to_lowercase() == col.to_lowercase())
+                    .unwrap_or(0);
+                OutputColumn {
+                    table: Some(table_name.to_string()),
+                    column: col.clone(),
+                    table_alias: table_name.to_string(),
+                    column_index,
+                }
+            })
+            .collect()
     }
 
     /// Build PhysicalPlan for INSERT statement
@@ -1361,13 +1941,14 @@ fn extract_single_column_arg(
     }
 }
 
-/// Extract column name from Expr (Identifier or CompoundIdentifier)
+/// Extract column name from Expr (Identifier, CompoundIdentifier, or Value literal)
 fn expr_to_column_name(expr: &Expr) -> Result<String, PlanError> {
     match expr {
         Expr::Identifier(ident) => Ok(ident.value.clone()),
         Expr::CompoundIdentifier(parts) if !parts.is_empty() => {
             Ok(parts.last().unwrap().value.clone())
         }
+        Expr::Value(v) => Ok(format!("_{}", v.to_string())),
         _ => Err(PlanError::InvalidAggregateArgument(
             "Expected column name".to_string(),
         )),
@@ -1532,7 +2113,7 @@ mod tests {
 
     #[test]
     fn test_nonexistent_table() {
-        let builder = PlanBuilder::new();
+        let mut builder = PlanBuilder::new();
 
         let sql = "SELECT * FROM nonexistent";
         let stmts = parse_sql(sql).unwrap();
