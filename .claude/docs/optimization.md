@@ -1,6 +1,6 @@
 # 优化方向与技术债
 
-> 最后更新：2026-05-23（M16-Phase2 完成）
+> 最后更新：2026-05-23（M17-Phase1 非唯一索引 完成）
 
 ## 已完成的优化
 
@@ -13,6 +13,7 @@
 | 5 | Async search (AtomicPageId) | M14 | 17x internal + 8x vs SQLite |
 | 6 | 聚合函数 + GROUP BY | M15 | 19 tests，功能完善 |
 | 7 | 子查询支持（独立+关联） | M16 | 20 tests，SemiJoin/AntiJoin/SubqueryEval/DerivedScan |
+| 8 | 非唯一索引（同页多条目） | M17-Phase1 | 5 tests，search_all/delete_by_key/delete_exact |
 
 ## M14 性能验证（已完成）
 
@@ -30,8 +31,8 @@
 | 瓶颈 | 现状 | 目标 | 优化方案 | 里程碑 |
 |------|------|------|----------|--------|
 | INSERT 慢 | ~440µs/行 | 5-10x 提速 | WAL Group Commit | M18 |
-| B-Tree split/merge 缺失 | 单叶节点 | 多层级索引 | 实现 split + InternalNode | M17 |
-| 非唯一索引缺失 | 仅 PK | 辅助索引 | duplicate key 支持 | M17 |
+| B-Tree split 缺失 | 单叶节点容量受限 | 多层级索引 | 实现 split_leaf/split_internal | M17-Phase2 |
+| **非唯一索引缺失** | **✅ 已完成** | **duplicate key 支持** | **同页多条目方案** | **M17-Phase1 ✅** |
 | Executor WAL 集成 | 未写 WAL | 崩溃恢复 | Executor 写 WAL 记录 | M18 |
 
 ## 优化路线图
@@ -39,7 +40,9 @@
 | 里程碑 | 优化项 | 目标 | 状态 |
 |--------|--------|------|------|
 | M16 | 子查询支持 | 功能完善 | ✅ 完成 |
-| M17 | B-Tree split/merge + 非唯一索引 | 索引完整性 | ⏳ 待开始 |
+| **M17-Phase1** | **非唯一索引** | **duplicate key 支持** | **✅ 完成** |
+| M17-Phase2 | B-Tree Split 机制 | 索引容量扩展 | ⏳ 待实现 |
+| M17.5 | B-Tree Merge 机制 | 删除后 underflow | ⏳ 待规划 |
 | M18 | WAL 集成 + Group Commit | INSERT 5-10x 提速 | ⏳ 待开始 |
 | M19 | 行缓存 + 并发优化 | 热点行 2-3x | ⏳ 待开始 |
 

@@ -1,6 +1,6 @@
 # 学习记忆
 
-> 最后更新：2026-05-23（M16-Phase2 相关子查询 完成）
+> 最后更新：2026-05-23（M17-Phase1 非唯一索引 完成）
 
 ## API 路径速查
 
@@ -22,6 +22,12 @@
 | inject_correlated_values(plan, values) | 向谓词树注入外层列值 | executor/correlated.rs |
 | ParameterExpression::new(name) | 创建可注入参数占位符 | executor/predicate.rs |
 | predicate.inject_parameters(values) | 递归注入参数值到谓词树 | executor/predicate.rs |
+| **LeafNodeRef::find_all_matches(key)** | 查找所有匹配 key 的 slot 索引 | storage/btree/node.rs |
+| **BTree::search_all(key)** | 返回所有匹配 RowId（非唯一索引） | storage/btree/btree.rs |
+| **BTree::delete_by_key(key)** | 删除所有匹配 entries（返回数量） | storage/btree/btree.rs |
+| **BTree::delete_exact(key, row_id)** | 精确删除（key + RowId 匹配） | storage/btree/btree.rs |
+| **InternalNode::insert_separator(key, right_child)** | 插入分隔符（用于 split） | storage/btree/node.rs |
+| **LeafNode::delete_slot(index)** | 按索引删除 slot（公开方法） | storage/btree/node.rs |
 
 ## 文件速查
 
@@ -76,6 +82,9 @@
 | **Mutex 参数注入** | ParameterExpression 携带 Mutex<Value>，clone plan → inject → rebuild executor | 相关子查询外层值注入 |
 | **双路径执行器** | correlated_params 非空走按行重建路径，空走预构建快速路径 | SemiJoin/AntiJoin/SubqueryEval |
 | **inner_table_names 上下文** | PlanBuilder 字段，build_query 前设置子查询表列表，build_expression 据此创建 ParameterExpression | 外部引用检测 |
+| **非唯一索引同页多条目** | LeafNode 去掉 DuplicateKey 检查，find_all_matches 遍历所有匹配 slot | 索引允许重复 key |
+| **批量删除从后向前** | delete_by_key matches 从后向前删除 slot，避免索引错位 | 批量删除同页多个 slot |
+| **两次加载页模式** | 先 page_data() 读取找匹配，再 modify_page() 删除，避免闭包借用冲突 | 页面读写分离操作 |
 
 ## 待探索
 
