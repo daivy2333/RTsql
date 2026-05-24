@@ -1,6 +1,60 @@
 # 学习记忆
 
-> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
+> 最后更新：2026-05-24（gc_test bug 修复完成 + logical Row ID）
+
+## 2026-05-24 新增（gc_test bug 修复 — logical Row ID）
+
+### Logical Row ID 修复要点
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **Slot 扩展为 6B** | `Slot { logical_id: u16, offset: u16, length: u16 }`，从 4B 扩展为 6B | slotted_page.rs |
+| **next_logical_id 分配** | SlottedPageHeader 新增 next_logical_id: u16，每次 add_slot 递增，永不回收 | slotted_page.rs:36 |
+| **header padding 调整** | _padding 从 5B 减为 3B，总 header 仍 16B（next_logical_id 占 2B） | slotted_page.rs:24 |
+| **add_slot 返回 (u16, usize)** | 返回 (logical_id, slot_index)，调用方需适配 | slotted_page.rs:202 |
+| **delete_slot 必须序列化 header** | `slot_count -= 1` 后必须 `serialize` 回 page.data，否则 BufferPool 缓存提供过期 slot_count | slotted_page.rs:272-273 |
+| **get_slot_by_logical_id** | 线性扫描 slot 数组匹配 logical_id，返回 (Slot, slot_index) | slotted_page.rs:113-122, 183-192 |
+| **data_page.rs 全改 logical_id** | read/write/update/delete 全部使用 logical_id 查找，不再用物理 slot_index | data_page.rs |
+| **B-Tree 只需适配返回类型** | B-Tree 不需要 logical_id 映射（用物理 slot_index 排序），只需适配 add_slot 返回值 | btree/node.rs |
+| **RowId.slot_id 语义变更** | slot_id 现在是 logical_id（稳定跨 compact），不再是物理 slot_index | row_id.rs:8 |
+
+### 关键踩坑：delete_slot 不序列化 header
+
+| 问题 | 原因 | 解决 | 预防 |
+|------|------|------|------|
+| delete_slot 后 BufferPool 读到过期 slot_count | `self.header.slot_count -= 1` 只修改了内存 header，未 serialize 回 page.data | 在 slot_count 修改后立即调用 `self.header.serialize(&mut self.page.data[..SIZE])` | **SlottedPage 任何 header 修改后必须 serialize 回 page.data** |
+
+---
+
+## 2026-05-23 新增（M18 Phase3 T1/T2）
+
+### WAL 记录扩展 + CRC32 + LSN
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **WalRecord 新变体** | BeginTxn{tx_id}/CommitTxn{tx_id,timestamp}/AbortTxn{tx_id}，类型码 0x07/0x08/0x09 | wal/record.rs |
+| **LSN + CRC32 序列化** | `[lsn:8B][type:1B][len:4B][body:var][crc32:4B]`，CRC 对 lsn+type+len+body 计算 | wal/record.rs serialize_with_lsn |
+| **WalWriter::write_batch** | 批量写入多条记录，最后一次 fsync | wal/writer.rs |
+| **WalReader 格式自动检测** | 检查 byte[8] 是否有效 RecordType + byte[0] 是否无效，区分新旧格式 | wal/reader.rs |
+
+### WALBuffer + Group Commit
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **WALBuffer 核心** | Mutex<Vec<(u64,WalRecord)>> 缓冲 + AtomicU64 LSN + Notify 信号 + 后台 tokio task | wal/buffer.rs |
+| **Group Commit 机制** | append_commit_and_wait 注册 Notify 等待 → flush_notify 唤醒后台 → do_flush 批量写入 + fsync → 通知所有等待者 | wal/buffer.rs |
+| **tokio::select! 双监听** | 后台 task 同时监听 flush_notify 和定时器（flush_interval_ms） | wal/buffer.rs flush_loop |
+| **std::sync::Mutex for flush_handle** | tokio::sync::Mutex 不能在 runtime 外调用 blocking_lock()，JoinHandle 存储用 std::sync::Mutex | wal/buffer.rs |
+| **Database 添加 wal_buffer** | Arc<WALBuffer> 字段，open() 中初始化并 start_flush_loop() | database.rs |
+
+### WAL 集成踩坑（gc_test bug）
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **gc_test panic** | GC 删除 tuple 后 SlottedPage compacting 改变 SlotID，但版本链/索引仍持有旧 row_id → read_tuple_from_data_page 访问空 slot → slice 越界 panic | tests/gc_test.rs + data_page.rs:82 |
+| **PoisonError 连锁** | 第一个 panic poison BufferPool Mutex → 第二个测试 unwrap() 触发 PoisonError panic → 析构中再 panic → abort | page_frame.rs:95 |
+
+---
 
 ## 2026-05-23 新增（M18 Phase2）
 
@@ -123,6 +177,7 @@
 | **get_subquery_first_column 不支持 SemiJoin** | 嵌套 IN 子查询 Plan 是 SemiJoin 节点 | 添加 SemiJoin/AntiJoin 分支，使用 output_columns | Plan 递归提取函数需覆盖所有带 output_columns 的节点 |
 | **多层检测永远不触发** | 1089 行 get_subquery_first_column 在 1100 行 extract_correlated_params 之前调用，且未处理 SemiJoin | 修复 get_subquery_first_column 让流程走到 extract_correlated_params | 检查顺序敏感的函数需确保上游验证不影响下游逻辑 |
 | **inner_column_index 设计错误** | 设为 usize 表示"替换位置索引"，但 ColumnExpression 在谓词树非输出列 | 改为 param_name: String，按列名匹配 ParameterExpression | 设计相关子查询注入时用名称匹配而非索引匹配 |
+| **gc_test SlottedPage SlotID 失效** | ✅ 已修复 | 引入 logical_id 解耦 RowId.slot_id 与物理 slot_index，Slot 从 4B 扩展为 6B | GC 删除操作不影响版本链/索引中的 row_id 引用 |
 
 ## 技巧模式
 
@@ -195,3 +250,11 @@
 **根因**: 设计时未区分"内层输出列索引"和"谓词树内匹配"两个概念
 **解决**: 重构为 param_name: String，注入时按列名遍历谓词树匹配 ParameterExpression
 **预防**: 设计相关子查询注入机制时首选名称匹配而非索引匹配，避免位置语义歧义
+
+### gc_test SlottedPage SlotID 失效（M10 遗留 bug，2026-05-23 发现，2026-05-24 修复）
+
+**症状**: gc_test 3 个测试 panic，`range end index 22 out of range for slice of length 0` at data_page.rs:82
+**根因**: `gc_table()` 对 SlottedPage 执行 `delete_slot` + compacting 后，物理 SlotID 布局变化，但版本链（next_version row_id）和索引中的 row_id 引用仍指向旧 slot_id → `get_slot_data()` 返回空切片 → `slot_data[..22]` slice 越界
+**连锁效果**: 第一个 panic poison BufferPool 内 Mutex → 第二个测试触发 PoisonError → 析构中再 panic → SIGABRT
+**解决**: 引入 logical_id 解耦 RowId.slot_id 与物理 slot_index。Slot 从 4B 扩展为 6B（新增 logical_id: u16），header 新增 next_logical_id 字段。所有 data_page.rs 操作改用 logical_id 查找。delete_slot 必须序列化 header 回 page.data。
+**预防**: 数据页引用应使用 stable ID（logical_id），而非物理位置（slot_index）；SlottedPage header 修改后必须 serialize

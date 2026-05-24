@@ -1,8 +1,28 @@
 # 任务追踪
 
-> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
+> 最后更新：2026-05-24（gc_test bug 已修复，M18 Phase3 T3 解除阻塞）
 
-## 当前阶段：M17.5 代码清理 + 全面对比 ✅
+## ✅ 已完成：修复 gc_test SlottedPage SlotID 失效 bug
+
+**优先级**: P0 — 已修复
+
+- [x] 引入 logical_id 解耦 RowId.slot_id 与物理 slot_index
+- [x] Slot 从 4B 扩展为 6B（新增 logical_id: u16）
+- [x] SlottedPageHeader 新增 next_logical_id 字段
+- [x] 新增 get_slot_by_logical_id / delete_slot_by_logical_id 方法
+- [x] delete_slot 修复：serialize header back to page.data
+- [x] data_page.rs 全部改用 logical_id 查找
+- [x] btree/node.rs 适配 add_slot 返回值
+- [x] gc_test 3 个测试全部通过
+- [x] 全量 cargo test 通过（101+ tests, 0 failures）
+- [x] Clippy 0 warnings
+
+**修复方案**: 逻辑 Row ID（SlottedPage 内部 logical_id → slot_index 映射）
+**详细踩坑档案**: `.claude/docs/learned.md` — gc_test SlottedPage SlotID 失效
+
+---
+
+## 当前阶段：M18 优化项目与技术债清理 ⏳
 
 ### 已完成
 
@@ -63,16 +83,21 @@
 
 ---
 
-### Phase3: WAL集成 + Group Commit（待开始）
+### Phase3: WAL集成 + Group Commit + 崩溃恢复
 
-- [ ] T1: 设计 WALRecord 结构
-- [ ] T2: 实现 WALWriter + buffer管理
-- [ ] T3: Group Commit策略实现
-- [ ] T4: INSERT Executor 集成 WAL
-- [ ] T5: 性能基准测试（验证 5-10x faster）
-- [ ] T6: 崩溃恢复测试
+- [x] T1: WalRecord 扩展 + CRC32 + LSN (1fcc213)
+- [x] T2: WALBuffer + Group Commit (f2a4973)
+- [ ] ~~T1: 设计 WALRecord 结构~~ (已被 T1 覆盖)
+- [ ] ~~T2: 实现 WALWriter + buffer管理~~ (已被 T2 覆盖)
+- [ ] ~~T3: Group Commit策略实现~~ (已被 T2 覆盖)
+- [ ] T4: TransactionManager 集成 WAL（被 gc_test bug 阻塞）
+- [ ] T5: Executor 集成 WAL
+- [ ] T6: RecoveryManager 数据重放
+- [ ] T7: 性能基准测试（验证 5-10x faster）
+- [ ] T8: 崩溃恢复 E2E 测试
 
-**预估工期**：3-5天
+**阻塞项**: gc_test 3 个测试 panic（M10 GC 遗留 bug）
+**预估工期**：3-5天（剩余 T4-T8 约 2-3 天）
 
 ---
 
@@ -123,4 +148,4 @@
 - M17-Phase1: ✅ 非唯一索引
 - M17-Phase2: ✅ B-Tree Split 机制
 - **M17.5**: ⏳ 代码清理 + 全面对比
-- M18: WAL 集成 + 写入优化
+- **M18-Phase3**: ⏸ **WAL集成 + Group Commit + 崩溃恢复**（T1✅ T2✅，T3⏸被gc_test bug阻塞）

@@ -1,6 +1,6 @@
 # 架构决策记录
 
-> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
+> 最后更新：2026-05-24（gc_test bug 修复 + logical Row ID ADR）
 
 ## 存储层架构决策（M17.5 新增）
 
@@ -49,22 +49,30 @@
 
 ---
 
-### ADR-003: SlottedPage 页格式（2026-05-23）
+### ADR-003: SlottedPage 页格式 + Logical Row ID（2026-05-24 更新）
 
-**决策**：使用标准 SlottedPage 格式（Slot 数组 + Row Data），而非紧凑存储。
+**决策**：使用标准 SlottedPage 格式（Slot 数组 + Row Data），Slot 内含 logical_id 实现稳定行引用。
+
+**Logical Row ID 设计**（2026-05-24 修复 gc_test bug）：
+- Slot 从 4B 扩展为 6B：`{ logical_id: u16, offset: u16, length: u16 }`
+- Header 新增 `next_logical_id: u16`（递增分配，永不回收）
+- RowId.slot_id 语义变更为 logical_id（稳定跨 compact）
+- 所有数据页操作使用 `get_slot_by_logical_id` / `delete_slot_by_logical_id`
 
 **原因**：
 - ✅ **标准格式**：主流数据库（PostgreSQL、MySQL）都使用类似格式
 - ✅ **MVCC 友好**：Slot 易于管理多个版本（版本链指针）
 - ✅ **零拷贝读**：page_data() 直接访问，无需反序列化整个页
+- ✅ **引用稳定**：logical_id 不受 compacting 影响，版本链/索引引用始终有效
 
 **代价**：
-- ❌ **Slot overhead**：每个 entry 多 4 bytes（offset + length）
+- ❌ **Slot overhead**：每个 entry 多 6 bytes（logical_id + offset + length），比修复前多 2B
 - ❌ **页填充率低**：50-70%（不如 SQLite 的 70-90%）
+- ❌ **查找开销**：get_slot_by_logical_id 需线性扫描 slot 数组（O(n)）
 
-**影响分析**：
-- 每个 tuple 多 4 bytes Slot overhead
-- 页填充率低导致文件大小 ~1.3x larger
+**替代方案**：
+- 内部映射表（HashMap<logical_id, slot_index>）：更快查找但增加内存开销和同步复杂度
+- 不做 compacting（保留空洞）：空间浪费但无需 logical_id
 
 ---
 
@@ -185,26 +193,35 @@ SQL层 → Planner → PhysicalPlan::IndexScanAll
 ```
 Executor（INSERT/UPDATE/DELETE）
     ↓ 写操作
-WALWriter
-    ↓ 记录 WAL log
 WALBuffer（内存缓冲）
     ↓ Group Commit触发
-WALFile（持久化）
+    ↓ 缓冲区满(100条) / 定时(100ms) / commit 通知
+WalWriter::write_batch()
+    ↓ 批量写入 WAL 文件
+    ↓ fsync
+WALFile (持久化)
 ```
 
 **核心组件**：
 
-1. **WALRecord**：记录写操作类型（Insert/Update/Delete/Commit）
-2. **WALWriter**：缓冲管理 + 批量刷盘
-3. **Group Commit策略**：
-   - 缓冲区满（100条）→ 立即刷盘
-   - 事务提交 → 刷盘当前事务的所有记录
-   - 定时刷盘（例如每 100ms）
+1. **WALRecord 扩展**（T1 已完成）：
+   - 新增 BeginTxn/CommitTxn/AbortTxn 记录类型
+   - LSN + CRC32 序列化格式：`[lsn:8B][type:1B][len:4B][body:var][crc32:4B]`
 
-**性能优化原理**：
-- ✅ 减少 fsync 次数（从 N次降至 N/100次）
-- ✅ 批量写入提高磁盘 I/O效率
-- ✅ 目标：INSERT 5-10x faster
+2. **WALBuffer**（T2 已完成）：
+   - 内存缓冲区 + Notify 信号 + 后台 tokio task
+   - Group Commit: append_commit_and_wait 注册等待 → flush 批量写入 → 通知等待者
+   - tokio::select! 双监听：flush_notify + 定时器
+
+3. **Executor 集成**（T4 待实现）：Insert/Update/Delete 持有 wal_buffer
+4. **TransactionManager 集成**（T3 待实现）：begin/commit/abort 写 WAL 记录
+5. **RecoveryManager 数据重放**（T5 待实现）：Redo committed + 清理 uncommitted
+
+**验证结果**（T1/T2 已完成）：
+- ✅ WalRecord 新增 3 种类型 + LSN + CRC32 序列化往返通过
+- ✅ WalWriter::write_batch 批量写入 + fsync
+- ✅ WALBuffer append/flush/commit_wait/shutdown 全部通过
+- ✅ Group Commit 多事务并发 commit 共享 fsync 测试通过
 
 **原因**：
 - ✅ **崩溃恢复**：WAL 保证数据持久性
@@ -262,7 +279,7 @@ pub fn merge(&mut self, sibling: &mut LeafNode) -> MergeResult {
 |----------|---------|---------|-----------|
 | 两层分离索引 | ~3x larger | PK lookup 5.6x faster ⚡ | 多索引、非唯一索引 ✅ |
 | 固定 Key 32B | ~10x per key | CPU 开销低 ✅ | 实现简洁 ✅ |
-| SlottedPage | ~1.3x larger | MVCC 无锁读 ⚡ | 版本链管理 ✅ |
+| SlottedPage | ~1.4x larger | MVCC 无锁读 ⚡ | 版本链管理 ✅ + logical_id 稳定引用 ✅ |
 | 二进制序列化 | ~1.2x larger | 比 JSON 快 ✅ | 无外部依赖 ✅ |
 
 **总体权衡**：空间效率换取实现简洁性 + 架构灵活性。
