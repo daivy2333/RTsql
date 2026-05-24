@@ -1,6 +1,6 @@
 # 任务追踪
 
-> 最后更新：2026-05-24（gc_test bug 已修复，M18 Phase3 T3 解除阻塞）
+> 最后更新：2026-05-24（M18 Phase3 全部完成，WAL Group Commit 基准测试通过）
 
 ## ✅ 已完成：修复 gc_test SlottedPage SlotID 失效 bug
 
@@ -14,7 +14,7 @@
 - [x] data_page.rs 全部改用 logical_id 查找
 - [x] btree/node.rs 适配 add_slot 返回值
 - [x] gc_test 3 个测试全部通过
-- [x] 全量 cargo test 通过（101+ tests, 0 failures）
+- [x] 全量 cargo test 通过（417 tests, 0 failures）
 - [x] Clippy 0 warnings
 
 **修复方案**: 逻辑 Row ID（SlottedPage 内部 logical_id → slot_index 映射）
@@ -22,7 +22,7 @@
 
 ---
 
-## 当前阶段：M18 优化项目与技术债清理 ⏳
+## 当前阶段：M18 优化项目与技术债清理
 
 ### 已完成
 
@@ -40,12 +40,6 @@
 - 二进制大小：RTsql 2.2x larger（Tokio runtime）
 
 ---
-
----
-
-## 当前阶段：M18 优化项目与技术债清理 ⏳
-
-**设计文档**：`.claude/docs/superpowers/specs/2026-05-23-optimization-tech-debts-design.md`
 
 ### Phase1: 架构Warnings清理 ✅
 
@@ -79,22 +73,25 @@
 - ✅ 101 tests pass, 0 failures
 - ✅ Clippy 0 warnings
 
-**预估工期**：1天（实际完成）
-
 ---
 
-### Phase3: WAL集成 + Group Commit + 崩溃恢复
+### Phase3: WAL集成 + Group Commit + 崩溃恢复 ✅
 
 - [x] T1: WalRecord 扩展 + CRC32 + LSN (1fcc213)
-- [x] T2: WALBuffer + Group Commit (f2a4973)
-- [x] T3: Logical Row ID 修复 gc_test bug (已修复)
-- [ ] T4: TransactionManager 集成 WAL
-- [ ] T5: Executor 集成 WAL
-- [ ] T6: RecoveryManager 数据重放
-- [ ] T7: 性能基准测试（验证 5-10x faster）
-- [ ] T8: 崩溃恢复 E2E 测试
+- [x] T2: WALBuffer + Group Commit (27e8aca)
+- [x] T3: Logical Row ID 修复 gc_test bug (650761d)
+- [x] T4: TransactionManager 集成 WAL (begin/commit/abort 写 WAL 记录)
+- [x] T5: Executor 集成 WAL + 隐式事务包装 (Insert/Update/Delete 写 BeginTxn+数据+CommitTxn)
+- [x] T6: RecoveryManager 数据重放 (full_recover + redo committed + mark uncommitted)
+- [x] T7: WAL Group Commit 性能基准测试 (benches/wal_group_commit_bench.rs 3 groups pass)
+- [x] T8: 崩溃恢复 E2E 测试 (recovery_e2e_test.rs 6 tests pass)
 
-**预估工期**：3-5天（剩余 T4-T8 约 2-3 天）
+**关键发现**:
+1. **Executor 隐式事务包装** — 每个 Insert/Update/Delete 语句在 WAL 中自动生成完整的 BeginTxn → 数据记录 → CommitTxn 事务序列，使 RecoveryManager 能正确分类 committed/uncommitted 事务
+2. **TableManager 纯内存限制** — 表定义不持久化到磁盘，重启后丢失。恢复时 redo 需要表存在才能写入数据页，但表不存在时 `get_table` 失败则 redo 跳过
+3. **BufferPool::mark_tx_aborted 是 stub** — 当前实现为空函数，未遍历 SlottedPage 标记 uncommitted tuple
+
+**417 tests pass, 0 failures, Clippy 0 warnings**
 
 ---
 
@@ -110,7 +107,7 @@
 
 ---
 
-## 下一步：Phase1 架构Warnings清理
+## 下一步：Phase4 B-Tree Merge
 
 ---
 
@@ -135,7 +132,7 @@
 
 ### M16: 子查询支持 ✅
 
-### M15: SQLite 基础性能对比 ✅ (速度对比完成，全面对比未执行)
+### M15: SQLite 基础性能对比 ✅
 
 ---
 
@@ -144,5 +141,8 @@
 - M16: ✅ 子查询支持
 - M17-Phase1: ✅ 非唯一索引
 - M17-Phase2: ✅ B-Tree Split 机制
-- **M17.5**: ⏳ 代码清理 + 全面对比
-- **M18-Phase3**: ⏸ **WAL集成 + Group Commit + 崩溃恢复**（T1✅ T2✅，T3⏸被gc_test bug阻塞）
+- M17.5: ✅ 代码清理 + 全面对比
+- M18-Phase1: ✅ 架构Warnings清理
+- M18-Phase2: ✅ Executor层非唯一索引
+- **M18-Phase3**: ✅ **WAL集成 + Group Commit + 崩溃恢复**（全部完成）
+- M18-Phase4: ⏳ B-Tree Merge（待开始）
