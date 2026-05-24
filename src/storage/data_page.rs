@@ -21,7 +21,7 @@ pub async fn write_tuple_to_data_page(
 
     let guard = buffer_pool.get_page(tail_id).await?;
 
-    let add_result: std::result::Result<usize, String> = guard.modify_page(|page| {
+    let add_result: std::result::Result<(u16, usize), String> = guard.modify_page(|page| {
         let page_type = page.data[0];
         let mut slotted = if page_type == 0 {
             SlottedPage::init(page, 0x03)
@@ -32,7 +32,7 @@ pub async fn write_tuple_to_data_page(
     });
 
     match add_result {
-        Ok(slot_idx) => Ok(RowId::new(tail_id.0 as u32, slot_idx as u16)),
+        Ok((logical_id, _slot_index)) => Ok(RowId::new(tail_id.0 as u32, logical_id)),
         Err(_) => {
             let new_page_id = buffer_pool.storage().allocate_page().await?;
 
@@ -46,7 +46,7 @@ pub async fn write_tuple_to_data_page(
                 page.data[5..9].copy_from_slice(&next_id.to_le_bytes());
             });
 
-            let slot_idx: usize = new_guard
+            let (logical_id, _slot_index): (u16, usize) = new_guard
                 .modify_page(|page| {
                     let mut slotted = SlottedPage::new(page);
                     slotted.add_slot(&slot_data)
@@ -55,7 +55,7 @@ pub async fn write_tuple_to_data_page(
 
             *table_meta.data_page_tail.lock().unwrap() = new_page_id;
 
-            Ok(RowId::new(new_page_id.0 as u32, slot_idx as u16))
+            Ok(RowId::new(new_page_id.0 as u32, logical_id))
         }
     }
 }
@@ -72,8 +72,8 @@ pub async fn read_tuple_from_data_page(
     let data_guard = guard.page_data();
     let slotted = SlottedPageRef::new(&data_guard);
 
-    let slot = slotted
-        .get_slot(row_id.slot_id as usize)
+    let (slot, _) = slotted
+        .get_slot_by_logical_id(row_id.slot_id)
         .ok_or(StorageError::SlotNotFound(row_id))?;
 
     let slot_data = slotted.get_slot_data(&slot);
@@ -99,22 +99,19 @@ pub async fn update_version_header_in_data_page(
     _tuple_bytes: &[u8],
 ) -> Result<()> {
     let page_id = PageId(row_id.page_id as u64);
-    let slot_id = row_id.slot_id as usize;
 
     let page_guard = buffer_pool.get_page(page_id).await?;
 
     let result: std::result::Result<(), String> = page_guard.modify_page(|page| {
         let slotted = SlottedPage::new(page);
 
-        let slot = slotted
-            .get_slot(slot_id)
-            .ok_or_else(|| format!("slot {} not found", slot_id))?;
+        let (slot, _) = slotted
+            .get_slot_by_logical_id(row_id.slot_id)
+            .ok_or_else(|| format!("logical_id {} not found", row_id.slot_id))?;
         let slot_offset = slot.offset as usize;
 
-        // Write the new header in place
         let header_bytes = new_header.to_bytes();
         page.data[slot_offset..slot_offset + VersionHeader::SIZE].copy_from_slice(&header_bytes);
-
         Ok(())
     });
 
@@ -126,13 +123,12 @@ pub async fn update_version_header_in_data_page(
 /// This is used for garbage collection to remove old committed versions.
 pub async fn delete_tuple_from_data_page(buffer_pool: &BufferPool, row_id: RowId) -> Result<()> {
     let page_id = PageId(row_id.page_id as u64);
-    let slot_id = row_id.slot_id as usize;
 
     let page_guard = buffer_pool.get_page(page_id).await?;
 
     let result: std::result::Result<(), String> = page_guard.modify_page(|page| {
         let mut slotted = SlottedPage::new(page);
-        slotted.delete_slot(slot_id)
+        slotted.delete_slot_by_logical_id(row_id.slot_id)
     });
 
     result.map_err(|_| StorageError::SlotNotFound(row_id))?;

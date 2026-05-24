@@ -4,7 +4,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RowId {
     pub page_id: u32, // 数据页 ID
-    pub slot_id: u16, // Slotted Page 中的 slot index
+    pub slot_id: u16, // Logical ID in SlottedPage (stable across compact)
 }
 
 impl RowId {
