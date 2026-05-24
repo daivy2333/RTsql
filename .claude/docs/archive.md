@@ -152,6 +152,40 @@
 
 ---
 
+<!-- archive: learned #16 -->
+**日期**: 2026-05-24
+**条目**: 历史里程碑分段知识（M17.5/M18 Phase1-4 详细记录）
+**原分类**: 按里程碑分段的知识记录
+**置信度**: HIGH
+**理由**: 已精简合并为"架构知识""关键踩坑""实现技巧"等统一表格
+**恢复条件**: 需要查看按里程碑组织的原始知识记录时
+
+精简内容已在 learned.md 的统一表格中保留核心信息。
+
+---
+
+<!-- archive: learned #17 -->
+**日期**: 2026-05-24
+**条目**: 踩坑记录表格（旧格式 4 列：问题/原因/解决/预防）
+**原分类**: 踩坑记录
+**置信度**: HIGH
+**理由**: 已精简为 3 列紧凑格式（问题/根因/解决）
+**恢复条件**: 需要查看预防措施列时
+
+原始 4 列格式中的"预防"列已合并到"解决"列。
+
+---
+
+<!-- archive: learned #18 -->
+**日期**: 2026-05-24
+**条目**: 重复 API 路径记录
+**原分类**: API 速查
+**置信度**: HIGH
+**理由**: 合并去重，去除过细行号引用
+**恢复条件**: 需要查看精确行号时
+
+---
+
 ## optimization.md 归档
 
 <!-- archive: optimization #01 -->
@@ -283,6 +317,34 @@
 
 ---
 
+<!-- archive: tasks #04 -->
+**日期**: 2026-05-24
+**条目**: M18 Phase1-4 子任务详情
+**完成时间**: 2026-05-24
+**置信度**: HIGH
+**理由**: 已完成，子任务列表精简
+**恢复条件**: 需要查看具体子任务分解时
+
+原始内容:
+### M18 Phase4: B-Tree Merge ✅ (2026-05-24)
+- [x] T1: LeafNode::merge_right + redistribute_right + can_merge_with
+- [x] T2: BTree::delete 递归 merge 回传（redistribution-first）
+- [x] T3: InternalNode::merge_right + remove_separator + min_keys
+- [x] T4: AsyncStorage::free_page + FileStorage free-list + BufferPool/SyncPageLoader
+- [x] T5: tests/btree_merge_test.rs 10 场景覆盖
+- [x] T5+T7: root shrink 传播 + IndexManager root_page_id 更新
+
+### M18 Phase3: WAL集成 + Group Commit + 崩溃恢复 ✅
+- [x] T1-T8 全部完成，417 tests pass
+
+### M18 Phase2: Executor层非唯一索引 ✅
+- [x] T1-T4 全部完成，101 tests pass
+
+### M18 Phase1: 架构Warnings清理 ✅
+- [x] T1-T5 全部完成，0 warnings
+
+---
+
 ## architecture.md 归档
 
 <!-- architecture.md entries below -->
@@ -300,6 +362,32 @@
 
 原始内容:
 M17-Phase2 新增功能表 + M17 提交列表 (72c69dc, f54a6c7, 95b60b2, d3a7c0c, 238d9a7)
+
+---
+
+<!-- archive: snapshot #02 -->
+**日期**: 2026-05-24
+**条目**: M1-M18 性能数据表 + 最近提交记录
+**置信度**: HIGH
+**理由**: 项目进入 M19-M23 优化阶段，历史性能数据和提交记录归档
+**恢复条件**: 需要对比优化前后数据时
+
+原始内容:
+| 操作 | RTsql | SQLite | 对比 |
+|------|-------|--------|------|
+| INSERT 10K rows | 60ms | 20s | **332x faster** |
+| PK lookup | 5µs | 28µs | **5.6x faster** |
+| Full Scan 1K rows | 327µs | 80µs | 4x slower |
+| Sequential Read 10K rows | 9.7ms | 5.8ms | 1.7x slower |
+| 文件大小 10K rows | 1.4MB | 217KB | 6.5x larger |
+
+最近提交:
+docs: final README rewrite with comprehensive SQLite comparison
+docs(M18-Phase4): update all documents for BTree Merge completion
+feat(M18-Phase4-T6): add BTree merge integration tests
+feat(M18-Phase4-T4-T5-T7): rewrite BTree delete with merge propagation
+feat(M18-Phase4-T1-T2): add LeafNode and InternalNode merge helpers
+feat(M18-Phase4-T3): add free_page to storage stack with free-list reuse
 
 ---
 
