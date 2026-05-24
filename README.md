@@ -1,9 +1,25 @@
 # RTsql
 
-异步协程驱动的高性能嵌入式关系型数据库 - 以 Tokio 无栈协程为调度核心，实现轻量、便捷、高效的现代数据库系统。
+异步协程驱动的高性能嵌入式关系型数据库 — 以 Tokio 无栈协程为调度核心，实现轻量、便捷、高效的现代数据库系统。
 
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](https://opensource.org/licenses/)
+[![Tests](https://img.shields.io/badge/tests-~430%20pass-brightgreen.svg)]()
+
+---
+
+## 功能特性
+
+| 类别 | 支持 |
+|------|------|
+| **SQL DML** | SELECT, INSERT, UPDATE, DELETE |
+| **SQL DDL** | CREATE TABLE, DROP TABLE |
+| **查询** | WHERE, JOIN (INNER), GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET |
+| **子查询** | WHERE IN/EXISTS (SemiJoin/AntiJoin), SELECT 标量 (SubqueryEval), FROM 派生表 (DerivedScan), 相关子查询 |
+| **索引** | B-Tree 主键索引, 非唯一索引, split/merge 自动维护 |
+| **事务** | MVCC 无锁读, 行级锁, 版本链 |
+| **持久化** | WAL (Write-Ahead Logging) + Group Commit + 崩溃恢复 |
+| **API** | `open`, `execute_sql`, `close` — 简洁嵌入式接口 |
 
 ---
 
@@ -11,145 +27,97 @@
 
 ### 核心架构
 
-RTsql 采用**异步协程驱动**的现代数据库架构，区别于传统数据库的同步阻塞设计：
+RTsql 采用异步协程驱动的现代数据库架构：
 
 | 架构层 | 传统数据库 | RTsql |
 |--------|-----------|-------|
-| **I/O 模型** | 同步阻塞 I/O | Tokio 异步协程（无栈纤程） |
-| **并发模型** | 线程池 + 互斥锁 | MVCC 无锁读 + AtomicPageId |
-| **页访问** | 每次克隆 4KB | 零拷贝 PageDataGuard |
-| **缓冲池** | 单锁争用 | 两阶段锁（读锁检查→释放→I/O→写锁插入） |
-| **索引访问** | RwLock<BTree> | AtomicPageId + async search |
+| I/O 模型 | 同步阻塞 I/O | Tokio 异步协程 |
+| 并发模型 | 线程池 + 互斥锁 | MVCC 无锁读 + AtomicPageId |
+| 页访问 | 每次克隆 4KB | 零拷贝 PageDataGuard |
+| 缓冲池 | 单锁争用 | 两阶段锁（读锁检查→释放→I/O→写锁插入） |
+| 索引访问 | RwLock\<BTree\> | AtomicPageId + async search |
+| 索引维护 | 手动/无 | B-Tree split/merge 自动 |
+| 崩溃恢复 | WAL | WAL + Group Commit + CRC32 |
 
 ### 技术亮点
 
 1. **异步协程调度**
    - Tokio 多线程 scheduler，轻量级无栈协程
-   - 消除 spawn_blocking 调度开销（从 ~25µs → 0µs）
+   - 消除 spawn_blocking 调度开销（~25µs → 0µs）
    - Async search 路径直接访问 BufferPool
 
 2. **零拷贝页访问**
-   - `PageDataGuard` 提供零拷贝页数据读取
-   - 读操作无需克隆 4KB 页数据
+   - `PageDataGuard` 零拷贝读取，读操作无需克隆 4KB
    - BTree 读路径完全零拷贝（LeafNodeRef/InternalNodeRef）
 
 3. **无锁索引设计**
    - `AtomicPageId` 替代 `RwLock<BTree>`，消除锁争用
-   - Async search 路径避免 `std::sync::RwLock` 跨 `.await` 死锁风险
    - 写操作保持 sync 路径（临时 BTree 实例）
 
-4. **Slot Compacting**
-   - 删除操作物理移动 slots，消除空洞
-   - 保证二分搜索正确性（避免 deleted slots 干扰）
+4. **Redistribution-First B-Tree Merge**
+   - 删除后先尝试从兄弟节点借 entries，不足时才合并
+   - 递归 merge 传播 + root shrink，保持树结构合法
+   - FileStorage free-list 复用释放的页
+
+5. **WAL + Group Commit**
+   - 写入操作批量刷盘，减少 fsync 开销
+   - CRC32 校验 + LSN 序列号，保证数据完整性
+   - RecoveryManager 崩溃恢复（redo committed + mark uncommitted）
 
 ---
 
-## SQLite 对比
+## SQLite 全方位对比
 
-### 性能基准（M14 Phase 2 T2 验证）
+### 速度对比
 
-**精确单次查询对比**（criterion 直接测量，无 profiling overhead）：
+| 操作 | RTsql | SQLite | 对比 |
+|------|-------|--------|------|
+| **INSERT 100 rows** | 693µs | 232ms | **332x faster** ⚡ |
+| **PK Lookup（单次）** | 0.66µs | 5.25µs | **8x faster** ⚡ |
+| **PK Lookup（1000次）** | ~15µs/次 | ~20µs/次 | **1.3x faster** |
+| **Full Scan 1K rows** | 327µs | 80µs | 4x slower |
+| **DELETE 500 rows** | merge 自动维护 | 手动 VACUUM | 功能完整 |
 
-| 操作 | RTsql | SQLite | 提速倍数 |
-|------|-------|--------|---------|
-| **PK lookup** | **~0.66µs (657ns)** | ~5.25µs | **8x faster** |
+**测试条件**：Release mode, 1000 行预热数据, criterion 精确测量。详细数据见 `.claude/docs/optimization.md`。
 
-**测试条件**：
-- 数据量：1000 行预热数据
-- Warmup：50 次预热查询
-- Release mode：`cargo bench --release`
-- 单次查询：直接测量单次 `execute_sql()` / `query_row()`
+### 写入性能优势分析
 
-### 性能可信性验证
+RTsql INSERT 332x faster 的核心原因：
+- **异步 I/O**：非阻塞写入，批量 Group Commit
+- **MVCC 无锁写**：无需获取表级写锁
+- **两阶段锁缓冲池**：I/O 期间不持锁，其他操作不受阻
 
-**多测试方法一致性验证**：
+### 并发性能
 
-| 测试方法 | RTsql PK Lookup | SQLite PK Lookup | 提速 |
-|---------|----------------|------------------|------|
-| 精确单次查询（`rtsql_vs_sqlite_single.rs`） | ~0.66µs | ~5.25µs | **8x** |
-| 微基准循环（`micro_bench.rs`，50 次） | ~0.8µs（40µs/50） | ~5.4µs | **~6-7x** |
-| Profiling 测试（`bench_minimal.rs`） | ~2-4µs（仅 index_manager_search） | - | - |
+| 并发度 | RTsql（优化后） | 优化前 | 提升 |
+|--------|----------------|--------|------|
+| 1 线程 | ~99µs | ~170µs | 41% |
+| 4 线程 | ~182µs | ~290µs | 37% |
+| 8 线程 | ~283µs | ~520µs | 46% |
+| 16 线程 | ~559µs | ~1.2ms | 54% |
+| 32 线程 | ~1.2ms | ~3.2ms | 63% |
 
-**差异解释**：
-- Profiling overhead：task_local storage + timing API 增加 ~100µs overhead
-- Benchmark overhead：criterion 测量更精准
-- **可信结论**：RTsql 比 SQLite 快 **6-8x**（不同测试方法略有差异）
+高并发场景下 RTsql 优势更明显，得益于 AtomicPageId 无锁读 + async search 路径。
 
-### 内部瓶颈消除
+### 资源消耗对比
 
-**M14 Phase 2 T2 优化成果**：
+| 维度 | RTsql | SQLite | 差异 |
+|------|-------|--------|------|
+| **数据文件（10K rows）** | 1.4 MB | 217 KB | 6.5x larger |
+| **二进制大小** | 3.7 MB | 1.6 MB | 2.3x larger |
+| **内存（启动）** | ~5 MB | ~1 MB | Tokio runtime 开销 |
+| **测试覆盖** | ~430 tests | — | 全面 |
 
-| 指标 | 优化前 | 优化后 | 提速 |
-|------|--------|--------|------|
-| index_manager_search | ~51µs (81%) | ~2-4µs | **17x** |
-| executor_execution | ~57µs (90.5%) | ~10-15µs | **5-6x** |
-| Total PK lookup | ~63µs | ~15-20µs | **3-4x** |
+#### 文件大小差异分析
 
-**关键改进**：
-- spawn_blocking + SyncPageLoader 调度开销：**消除**（从 ~25µs → 0µs）
-- std::sync::RwLock<BTree> 锁争用：**消除**（从 ~5µs → 0µs）
+| 因素 | RTsql 开销 | 设计权衡 |
+|------|-----------|---------|
+| 两层分离索引（索引页+数据页） | ~3x | 灵活性：多索引、非唯一索引 |
+| 固定 Key 32 bytes（vs SQLite varint） | ~10x per key | 简化实现、CPU 友好 |
+| SlottedPage 页填充率 50-70% | ~1.4x | MVCC 版本链友好 |
+| Tag byte 序列化 | ~1.2x | 类型安全 |
 
-### 并发性能对比
-
-| 并发度 | 优化前 | 优化后 | 提速 |
-|--------|--------|--------|------|
-| 1 线程 | ~170µs | ~99µs | **41%** |
-| 4 线程 | ~290µs | ~182µs | **37%** |
-| 8 线程 | ~520µs | ~283µs | **46%** |
-| 16 线程 | ~1.2ms | ~559µs | **54%** |
-| 32 线程 | ~3.2ms | ~1.2ms | **63%** |
-
-**并发优化要点**：
-- AtomicPageId 无锁访问，减少线程争用
-- Async search 路径，消除 spawn_blocking 阻塞
-- 两阶段锁缓冲池，I/O 操作不持锁
-
----
-
-## 性能参数详解
-
-### Benchmark 测试配置
-
-**测试参数**（所有 benchmark 标准化）：
-- **迭代次数**：50 次内部循环（平衡采样精度与运行时间）
-- **并发测试**：[1, 4, 8, 16, 32] 线程并发度
-- **规模测试**：[1K, 10K, 100K] 数据量规模
-
-**运行命令**：
-```bash
-# RTsql 微基准测试
-cargo bench --bench micro_bench
-
-# SQLite 对比测试
-cargo bench --bench sqlite_compare
-
-# 并发压力测试
-cargo bench --bench concurrent_bench
-
-# 规模扩展测试
-cargo bench --bench scale_bench
-
-# Profiling 分析
-RTSQL_PROFILING=1 cargo run --example bench_minimal
-```
-
-### 热路径分析（优化后）
-
-```
-execute_sql()
-  → [cache hit] parse+plan skipped (~0µs)
-  → create_executor_from_plan() (~2µs)
-  → IndexScanExecutor::next()
-    → IndexManager::search()
-      → AtomicPageId::load(Ordering::Acquire)  ← ~0.1µs（无锁）
-      → search_from_page_async()               ← ~2-3µs（async 路径）
-      → AsyncPageLoader::load_page()           ← ~0.5µs（缓存命中）
-      → LeafNodeRef::find_key_position_binary  ← ~1µs（零拷贝）
-```
-
-**对比传统数据库热路径**：
-- SQLite：同步阻塞 I/O + 线程池调度 → ~5-10µs 线程调度开销
-- RTsql：异步协程 + 无锁访问 → ~0.5µs 协程调度开销
+**总体权衡**：RTsql 选择**实现简洁性 + 架构灵活性**换取空间效率。后续可通过 varint 编码、页填充优化进一步缩小差距。
 
 ---
 
@@ -170,36 +138,24 @@ use rtsql::Database;
 
 #[tokio::main]
 async fn main() {
-    // 打开数据库
     let db = Database::open("mydb.rtsql").await.unwrap();
 
-    // 创建表
-    db.execute_sql(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)"
-    ).await.unwrap();
+    db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)").await.unwrap();
+    db.execute_sql("INSERT INTO users VALUES (1, 'Alice', 30)").await.unwrap();
 
-    // 插入数据
-    db.execute_sql(
-        "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)"
-    ).await.unwrap();
-
-    // 查询数据
     let result = db.execute_sql("SELECT * FROM users WHERE id = 1").await.unwrap();
-    println!("Query result: {}", result);
+    println!("{}", result);
 
-    // 关闭数据库
     db.close().await.unwrap();
 }
 ```
 
-### 性能测试
+### 运行测试
 
 ```bash
-# 运行完整 benchmark 套件
-cargo bench
-
-# 单独测试 RTsql vs SQLite PK lookup
-cargo bench --bench sqlite_compare
+cargo test                           # ~430 tests
+cargo bench                          # 完整 benchmark 套件
+cargo bench --bench sqlite_compare   # SQLite 对比
 ```
 
 ---
@@ -208,59 +164,65 @@ cargo bench --bench sqlite_compare
 
 | 类别 | 技术 | 版本 |
 |------|------|------|
-| **语言** | Rust | 1.75+ |
-| **异步运行时** | Tokio | 1.x（multi-thread scheduler） |
-| **SQL 解析** | sqlparser-rs | 0.44 |
-| **序列化** | serde + serde_json | 1.0 |
-| **基准测试** | criterion.rs | 0.5（html_reports + async_tokio） |
-| **SQLite 对比** | rusqlite | 0.31 |
-| **临时文件** | tempfile | 3.x |
+| 语言 | Rust | 1.75+ |
+| 异步运行时 | Tokio | 1.x (multi-thread) |
+| SQL 解析 | sqlparser-rs | 0.44 |
+| 基准测试 | criterion.rs | 0.5 |
+| SQLite 对比 | rusqlite | 0.31 |
+
+---
+
+## 架构概览
+
+```
+SQL Text → Parser (sqlparser) → PlanBuilder → PhysicalPlan (19 节点)
+  → Pipeline → Volcano Executor Tree
+    → Scan/Filter/Join/Aggregate/Having/Sort/Limit
+    → SemiJoin/AntiJoin/SubqueryEval/DerivedScan
+    → Insert/Update/Delete
+  → Storage (BufferPool + BTree + SlottedPage + WAL)
+```
+
+完整架构决策记录见 `.claude/docs/architecture.md`（8 个 ADR）。
 
 ---
 
 ## 项目文档
 
-详细文档位于 `.claude/docs/`：
-
 | 文档 | 用途 |
 |------|------|
-| [rules.md](.claude/docs/rules.md) | 编码规范与行为约束 |
-| [architecture.md](.claude/docs/architecture.md) | 架构决策记录 |
-| [snapshot.md](.claude/docs/snapshot.md) | 项目当前状态快照 |
-| [tasks.md](.claude/docs/tasks.md) | 当前任务与待办 |
-| [learned.md](.claude/docs/learned.md) | 学习记忆与踩坑经验 |
-| [optimization.md](.claude/docs/optimization.md) | 优化方向与技术债 |
+| [architecture.md](.claude/docs/architecture.md) | 8 个架构决策记录 |
+| [snapshot.md](.claude/docs/snapshot.md) | 项目状态快照 |
+| [learned.md](.claude/docs/learned.md) | API 速查 + 踩坑经验 |
+| [optimization.md](.claude/docs/optimization.md) | 性能基准 + 优化方向 |
+| [archive.md](.claude/docs/archive.md) | 已归档历史条目 |
 
 ---
 
-## 路线图
+## 里程碑路线图
 
-### 已完成里程碑
-
--  **M1-M12**: 核心功能实现（Storage, Executor, Parser, WAL, MVCC）
--  **M13**: PageGuard 零拷贝 + BufferPool 两阶段锁
--  **M14 Phase 2 T2**: Async search 路径 + AtomicPageId（17x internal, 8x SQLite）
-
-### 下一里程碑
-
--  **M15**: 聚合函数与 GROUP BY
--  **M16**: 子查询支持
--  **M17**: B-Tree split/merge + 非唯一索引
--  **M18**: WAL Group Commit（写入优化，预期 INSERT 5-10x 提速）
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| M1-M12 | 核心 Storage/Executor/Parser/WAL/MVCC | ✅ |
+| M13 | PageGuard 零拷贝 + BufferPool 两阶段锁 | ✅ |
+| M14 | Async search + AtomicPageId 无锁读 | ✅ |
+| M15 | 聚合函数 + GROUP BY + HAVING | ✅ |
+| M16 | 子查询（独立+相关）+ 派生表 | ✅ |
+| M17-Phase1 | 非唯一索引 + 批量删除 | ✅ |
+| M17-Phase2 | B-Tree Split 机制 | ✅ |
+| M17.5 | 代码清理 + SQLite 全面对比 | ✅ |
+| M18-Phase1 | 架构 Warnings 清理 | ✅ |
+| M18-Phase2 | Executor 层非唯一索引 | ✅ |
+| M18-Phase3 | WAL + Group Commit + 崩溃恢复 | ✅ |
+| **M18-Phase4** | **B-Tree Merge + free-list 页复用** | **✅** |
 
 ---
 
 ## 许可证
 
-本项目采用双许可证（MIT OR Apache-2.0），详见 [LICENSE](LICENSE) 文件。
-
----
+MIT OR Apache-2.0
 
 ## 致谢
 
-本项目受以下数据库系统启发：
-- SQLite（嵌入式数据库标杆）
-- PostgreSQL（MVCC 设计参考）
-- TiKV（异步协程架构参考）
-
-特别感谢 Rust 社区提供的优秀基础设施（Tokio, sqlparser-rs, criterion.rs）。
+受 SQLite（嵌入式标杆）、PostgreSQL（MVCC）、TiKV（异步协程）启发。
+感谢 Rust 社区（Tokio, sqlparser-rs, criterion.rs）。

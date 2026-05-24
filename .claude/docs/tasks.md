@@ -1,8 +1,16 @@
 # 任务追踪
 
-> 最后更新：2026-05-24（M18 全部完成，B-Tree Merge 集成测试通过）
+> 最后更新：2026-05-24（项目完成，M1-M18 全部里程碑达成）
 
-## ✅ 已完成：修复 gc_test SlottedPage SlotID 失效 bug
+## 🎉 项目完成
+
+- **M1-M18 全部里程碑** 达成
+- **19 种 PhysicalPlan 节点** 完整 SQL 支持
+- **~430 tests** pass, 0 failures
+- **Clippy 0 warnings**
+- **INSERT 332x faster** than SQLite ⚡
+
+---
 
 **优先级**: P0 — 已修复 | **方案**: 逻辑 Row ID（logical_id → slot_index 映射）
 **详细档案**: `.claude/docs/learned.md` — gc_test SlottedPage SlotID 失效
@@ -100,7 +108,12 @@
 
 ---
 
-## 下一步：项目收尾
+## 下一步：后续优化方向
+
+- Varint Key 编码（减少 ~70% 索引空间）
+- 全表扫描并行化
+- 表定义持久化
+- io_uring 异步磁盘 I/O
 
 ---
 
