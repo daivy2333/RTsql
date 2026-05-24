@@ -133,7 +133,7 @@ async fn test_delete_by_key() {
         assert_eq!(btree.search_all(key).unwrap().len(), 3);
 
         // Delete all matches
-        let deleted_count = btree.delete_by_key(key).unwrap();
+        let (deleted_count, _) = btree.delete_by_key(key).unwrap();
         assert_eq!(deleted_count, 3);
 
         // Verify deleted
@@ -278,7 +278,7 @@ async fn test_non_unique_key_split() {
         }
 
         // Delete all entries with this key
-        let deleted = btree.delete_by_key(key).unwrap();
+        let (deleted, _) = btree.delete_by_key(key).unwrap();
         assert_eq!(
             deleted, total as usize,
             "delete_by_key should delete all {} entries",
@@ -393,7 +393,7 @@ async fn test_delete_after_split() {
         // Delete keys in the first half
         for i in 0..30u32 {
             let key = make_key(i);
-            let deleted = btree.delete_by_key(&key).unwrap();
+            let (deleted, _) = btree.delete_by_key(&key).unwrap();
             assert_eq!(deleted, 1, "Should delete exactly 1 entry for key {}", i);
         }
 

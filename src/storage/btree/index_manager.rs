@@ -182,11 +182,17 @@ impl IndexManager {
         let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
 
-        tokio::task::spawn_blocking(move || {
-            let btree = BTree::from_root(PageId(root_page_id), sync_loader);
+        let new_root = tokio::task::spawn_blocking(move || {
+            let mut btree = BTree::from_root(PageId(root_page_id), sync_loader);
             btree.delete(&key_vec)
         })
-        .await?
+        .await??;
+
+        if let Some(new_root_id) = new_root {
+            self.root_page_id.store(new_root_id.0, Ordering::Release);
+        }
+
+        Ok(())
     }
 
     /// Async scan all entries — direct async path
