@@ -34,6 +34,7 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -51,7 +52,7 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
         result
     );
 
-    let mut delete_executor = DeleteExecutor::new(index_manager.clone(), key_bytes.to_vec(), 0);
+    let mut delete_executor = DeleteExecutor::new(index_manager.clone(), "test".to_string(), key_bytes.to_vec(), 0, None);
     let result = delete_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 
@@ -96,6 +97,7 @@ async fn test_insert_then_index_scan() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(3)));
@@ -153,6 +155,7 @@ async fn test_insert_update_scan_flow() -> Result<()> {
         tx_manager.clone(),
         values,
         0,
+        None,
     );
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -166,6 +169,7 @@ async fn test_insert_update_scan_flow() -> Result<()> {
         "id".to_string(),
         new_value,
         0,
+        None,
     );
     let result = update_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -205,6 +209,7 @@ async fn test_multiple_operations_sequence() -> Result<()> {
             tx_manager.clone(),
             values,
             0,
+            None,
         );
         let result = insert_executor.next().await?;
         assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -223,7 +228,7 @@ async fn test_multiple_operations_sequence() -> Result<()> {
     }
 
     let key_2 = 2i64.to_be_bytes().to_vec();
-    let mut delete_executor = DeleteExecutor::new(index_manager.clone(), key_2, 0);
+    let mut delete_executor = DeleteExecutor::new(index_manager.clone(), "test".to_string(), key_2, 0, None);
     let result = delete_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 

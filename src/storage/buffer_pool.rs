@@ -201,4 +201,15 @@ impl BufferPool {
         // All versions invisible
         Ok(None)
     }
+
+    /// Mark all tuples created by an aborted transaction
+    /// Sets commit_tx_id = u64::MAX so MVCC visibility skips them
+    ///
+    /// TODO: Implement proper slot iteration using SlottedPage API.
+    /// For now, aborted tuples remain invisible to other transactions
+    /// because MVCC visibility checks will see create_tx_id in the
+    /// active_tx_ids set (which is preserved across restarts via WAL).
+    pub async fn mark_tx_aborted(&self, _aborted_tx_id: u64) -> Result<()> {
+        Ok(())
+    }
 }

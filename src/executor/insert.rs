@@ -1,7 +1,10 @@
+//! Insert executor - MVCC-aware row insert
+
 use crate::executor::{ExecResult, Executor, Value};
 use crate::storage::page_format::{compute_tuple_size, serialize_tuple, ColumnType};
 use crate::storage::{write_tuple_to_data_page, BufferPool, Result, StorageError, TableMeta};
 use crate::transaction::{TransactionManager, VersionHeader};
+use crate::wal::{WALBuffer, WalRecord};
 use std::sync::Arc;
 
 pub struct InsertExecutor {
@@ -13,6 +16,7 @@ pub struct InsertExecutor {
     pk_index: usize,
     tx_id: u64,
     executed: bool,
+    wal_buffer: Option<Arc<WALBuffer>>,
 }
 
 impl InsertExecutor {
@@ -22,6 +26,7 @@ impl InsertExecutor {
         tx_manager: Arc<TransactionManager>,
         values: Vec<Vec<Value>>,
         tx_id: u64,
+        wal_buffer: Option<Arc<WALBuffer>>,
     ) -> Self {
         let schema: Vec<ColumnType> = table_meta
             .columns
@@ -38,6 +43,7 @@ impl InsertExecutor {
             pk_index,
             tx_id,
             executed: false,
+            wal_buffer,
         }
     }
 }
@@ -50,6 +56,12 @@ impl Executor for InsertExecutor {
         }
 
         self.executed = true;
+
+        // WAL: BeginTxn (implicit transaction per statement)
+        if let Some(wal) = &self.wal_buffer {
+            wal.append(WalRecord::BeginTxn { tx_id: self.tx_id })
+                .await;
+        }
 
         let mut count = 0u64;
         for row_values in &self.values {
@@ -84,6 +96,17 @@ impl Executor for InsertExecutor {
             )
             .await?;
 
+            // WAL: Insert record
+            if let Some(wal) = &self.wal_buffer {
+                wal.append(WalRecord::Insert {
+                    tx_id: self.tx_id,
+                    table_name: self.table_meta.name.clone(),
+                    row_id,
+                    tuple_data: buf.clone(),
+                })
+                .await;
+            }
+
             // Record version in tx_versions (M10)
             self.tx_manager.record_version(self.tx_id, row_id).await;
 
@@ -93,6 +116,17 @@ impl Executor for InsertExecutor {
                 .await?;
 
             count += 1;
+        }
+
+        // WAL: CommitTxn (implicit transaction per statement)
+        if let Some(wal) = &self.wal_buffer {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            wal.append(WalRecord::CommitTxn { tx_id: self.tx_id, timestamp })
+                .await;
+            let _ = wal.append_commit_and_wait(self.tx_id).await;
         }
 
         Ok(Some(ExecResult::AffectedRows(count)))

@@ -9,6 +9,7 @@ use crate::storage::{
     TableMeta,
 };
 use crate::transaction::{TransactionManager, VersionHeader};
+use crate::wal::{WALBuffer, WalRecord};
 use std::sync::Arc;
 
 pub struct UpdateExecutor {
@@ -21,9 +22,11 @@ pub struct UpdateExecutor {
     tx_id: u64,
     schema: Vec<ColumnType>,
     executed: bool,
+    wal_buffer: Option<Arc<WALBuffer>>,
 }
 
 impl UpdateExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         table_meta: Arc<TableMeta>,
         buffer_pool: Arc<BufferPool>,
@@ -32,6 +35,7 @@ impl UpdateExecutor {
         column_name: String,
         new_value: Value,
         tx_id: u64,
+        wal_buffer: Option<Arc<WALBuffer>>,
     ) -> Self {
         let schema: Vec<ColumnType> = table_meta
             .columns
@@ -48,6 +52,7 @@ impl UpdateExecutor {
             tx_id,
             schema,
             executed: false,
+            wal_buffer,
         }
     }
 }
@@ -86,6 +91,12 @@ impl Executor for UpdateExecutor {
         let mut buf = vec![0u8; size];
         serialize_tuple(&values, &self.schema, &mut buf)?;
 
+        // WAL: BeginTxn (implicit transaction per statement)
+        if let Some(wal) = &self.wal_buffer {
+            wal.append(WalRecord::BeginTxn { tx_id: self.tx_id })
+                .await;
+        }
+
         // Step 5: Create new VersionHeader with next_version → old RowId
         let version_header = VersionHeader::new(self.tx_id, None).with_next_version(old_row_id);
 
@@ -93,6 +104,25 @@ impl Executor for UpdateExecutor {
         let new_row_id =
             write_tuple_to_data_page(&self.buffer_pool, &self.table_meta, &version_header, &buf)
                 .await?;
+
+        // WAL: Update + CommitTxn
+        if let Some(wal) = &self.wal_buffer {
+            wal.append(WalRecord::Update {
+                tx_id: self.tx_id,
+                table_name: self.table_meta.name.clone(),
+                row_id: new_row_id,
+                old_tuple: old_tuple_bytes.clone(),
+                new_tuple: buf.clone(),
+            })
+            .await;
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            wal.append(WalRecord::CommitTxn { tx_id: self.tx_id, timestamp })
+                .await;
+            let _ = wal.append_commit_and_wait(self.tx_id).await;
+        }
 
         // Step 6.1: Record version in tx_versions (M10)
         self.tx_manager.record_version(self.tx_id, new_row_id).await;

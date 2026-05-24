@@ -37,6 +37,7 @@ async fn test_scan_executor_full_table() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(3)));
@@ -78,6 +79,7 @@ async fn test_index_scan_executor_found() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     insert_executor.next().await?;
 
@@ -141,6 +143,7 @@ async fn test_insert_executor_single_row() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
 
     let result = executor.next().await?;
@@ -184,6 +187,7 @@ async fn test_insert_executor_batch() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
 
     let result = executor.next().await?;
@@ -225,6 +229,7 @@ async fn test_update_executor() -> Result<()> {
         tx_manager.clone(),
         values,
         0,
+        None,
     );
     insert_executor.next().await?;
 
@@ -238,6 +243,7 @@ async fn test_update_executor() -> Result<()> {
         "id".to_string(),
         new_value,
         0,
+        None,
     );
 
     let result = executor.next().await?;
@@ -268,7 +274,7 @@ async fn test_delete_executor() -> Result<()> {
     let row_id = RowId::new(0, 1);
     index_manager.insert(&key, row_id).await.unwrap();
 
-    let mut executor = DeleteExecutor::new(index_manager.clone(), key.to_vec(), 0);
+    let mut executor = DeleteExecutor::new(index_manager.clone(), "test".to_string(), key.to_vec(), 0, None);
 
     let result = executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -302,13 +308,14 @@ async fn test_insert_duplicate_key_error() -> Result<()> {
         tx_manager.clone(),
         values,
         0,
+        None,
     );
     let result = executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 
     let values2 = vec![vec![Value::Int(1)]];
     let mut executor2 =
-        InsertExecutor::new(table_meta, buffer_pool.clone(), tx_manager, values2, 0);
+        InsertExecutor::new(table_meta, buffer_pool.clone(), tx_manager, values2, 0, None);
     let err = executor2.next().await.unwrap_err();
     assert!(matches!(err, rtsql::storage::StorageError::DuplicateKey));
 
@@ -344,6 +351,7 @@ async fn test_insert_stores_tuple_data() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
 
     let result = executor.next().await?;
@@ -393,6 +401,7 @@ async fn test_index_scan_returns_row_data() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     insert_executor.next().await?;
 
@@ -467,6 +476,7 @@ async fn test_insert_creates_version_header() -> Result<()> {
         tx_manager,
         values,
         5,
+        None,
     );
 
     let result = executor.next().await?;
@@ -509,6 +519,7 @@ async fn test_snapshot_hides_uncommitted() -> Result<()> {
         tx_manager,
         values,
         1,
+        None,
     );
     insert_executor.next().await?;
 
@@ -548,6 +559,7 @@ async fn test_snapshot_shows_committed() -> Result<()> {
         tx_manager,
         values,
         1,
+        None,
     );
     insert_executor.next().await?;
 
@@ -612,6 +624,7 @@ async fn test_update_creates_new_version() -> Result<()> {
         tx_manager.clone(),
         values,
         1,
+        None,
     );
     insert_executor.next().await?;
 
@@ -624,6 +637,7 @@ async fn test_update_creates_new_version() -> Result<()> {
         "name".to_string(),
         Value::String("bob".to_string()),
         2,
+        None,
     );
     let result = update_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -893,6 +907,7 @@ async fn test_filter_executor_gt() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     insert_executor.next().await?;
 
@@ -964,6 +979,7 @@ async fn test_filter_executor_and() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     insert_executor.next().await?;
 
@@ -1048,6 +1064,7 @@ async fn test_filter_executor_empty_result() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     insert_executor.next().await?;
 
@@ -1179,6 +1196,7 @@ async fn test_index_scan_all_executor_single() -> Result<()> {
         tx_manager,
         values,
         0,
+        None,
     );
     insert_executor.next().await?;
 

@@ -48,6 +48,7 @@ async fn test_version_chain_traversal() -> Result<()> {
         tx_manager.clone(),
         values,
         tx1_id,
+        None,
     );
     insert_executor.next().await?;
 
@@ -80,6 +81,7 @@ async fn test_version_chain_traversal() -> Result<()> {
         "id".to_string(),
         Value::Int(20),
         tx2_id,
+        None,
     );
     update_executor.next().await?;
 
@@ -122,6 +124,7 @@ async fn test_version_chain_traversal() -> Result<()> {
         "id".to_string(),
         Value::Int(30),
         tx3_id,
+        None,
     );
     update_executor.next().await?;
 
@@ -258,6 +261,7 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
         tx_manager.clone(),
         values,
         tx1_id,
+        None,
     );
     insert_executor.next().await?;
     tx_manager.commit(tx1, &buffer_pool).await?;
@@ -276,6 +280,7 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
         "id".to_string(),
         Value::Int(200),
         tx2_id,
+        None,
     );
     update_executor.next().await?;
 
@@ -291,6 +296,7 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
         "id".to_string(),
         Value::Int(300),
         tx3_id,
+        None,
     );
     update_executor.next().await?;
     tx_manager.commit(tx3, &buffer_pool).await?;
@@ -357,6 +363,7 @@ async fn test_all_versions_invisible() -> Result<()> {
         tx_manager.clone(),
         values,
         tx1_id,
+        None,
     );
     insert_executor.next().await?;
 

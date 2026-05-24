@@ -1,6 +1,8 @@
 use crate::storage::{BufferPool, Result, RowId, TableMeta};
 use crate::transaction::{Snapshot, TransactionError, TransactionId};
+use crate::wal::{WALBuffer, WalRecord};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Transaction state
@@ -50,6 +52,8 @@ pub struct TransactionManager {
     active_tx_ids: RwLock<HashSet<u64>>,
     // M10: 跟踪每个事务的未提交版本
     tx_versions: RwLock<HashMap<u64, HashSet<RowId>>>,
+    // WAL buffer for writing transaction lifecycle records
+    wal_buffer: RwLock<Option<Arc<WALBuffer>>>,
 }
 
 impl TransactionManager {
@@ -58,7 +62,12 @@ impl TransactionManager {
             tx_id_allocator: TransactionId::new(),
             active_tx_ids: RwLock::new(HashSet::new()),
             tx_versions: RwLock::new(HashMap::new()),
+            wal_buffer: RwLock::new(None),
         }
+    }
+
+    pub async fn set_wal_buffer(&self, wal_buffer: Arc<WALBuffer>) {
+        *self.wal_buffer.write().await = Some(wal_buffer);
     }
 
     /// Begin a new transaction
@@ -68,6 +77,11 @@ impl TransactionManager {
     /// - Creates snapshot
     pub async fn begin(&self) -> Transaction {
         let tx_id = self.tx_id_allocator.allocate();
+
+        // WAL: write BeginTxn record
+        if let Some(wal) = self.wal_buffer.read().await.as_ref() {
+            wal.append(WalRecord::BeginTxn { tx_id }).await;
+        }
 
         // Get current active transactions for snapshot
         let active_ids: Vec<u64> = self.active_tx_ids.read().await.iter().copied().collect();
@@ -86,6 +100,16 @@ impl TransactionManager {
     /// - Clears tx_versions
     pub async fn commit(&self, tx: Transaction, buffer_pool: &BufferPool) -> Result<()> {
         let tx_id = tx.id();
+
+        // WAL: write CommitTxn record and wait for persistence (Group Commit)
+        if let Some(wal) = self.wal_buffer.read().await.as_ref() {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            wal.append(WalRecord::CommitTxn { tx_id, timestamp }).await;
+            wal.append_commit_and_wait(tx_id).await?;
+        }
 
         // M10: Mark all versions as committed
         self.commit_mark_versions(tx_id, buffer_pool).await?;
@@ -114,6 +138,11 @@ impl TransactionManager {
         table_meta: &TableMeta,
     ) -> Result<()> {
         let tx_id = tx.id();
+
+        // WAL: write AbortTxn record (no need to wait for persistence)
+        if let Some(wal) = self.wal_buffer.read().await.as_ref() {
+            wal.append(WalRecord::AbortTxn { tx_id }).await;
+        }
 
         // M10: Cleanup uncommitted versions
         self.abort_cleanup_versions(tx_id, buffer_pool, table_meta)

@@ -34,6 +34,7 @@ async fn test_insert_records_version() -> Result<()> {
         tx_manager.clone(),
         values,
         5,
+        None,
     );
     insert_executor.next().await?;
 
@@ -90,6 +91,7 @@ async fn test_update_records_version() -> Result<()> {
         tx_manager.clone(),
         values,
         1,
+        None,
     );
     insert_executor.next().await?;
 
@@ -107,6 +109,7 @@ async fn test_update_records_version() -> Result<()> {
         "name".to_string(),
         Value::String("bob".to_string()),
         2,
+        None,
     );
     update_executor.next().await?;
 
@@ -167,6 +170,7 @@ async fn test_multiple_inserts_multiple_versions() -> Result<()> {
         tx_manager.clone(),
         values,
         10,
+        None,
     );
     insert_executor.next().await?;
 
@@ -225,6 +229,7 @@ async fn test_batch_insert_records_all_versions() -> Result<()> {
         tx_manager.clone(),
         values,
         100,
+        None,
     );
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(5)));
@@ -262,6 +267,7 @@ async fn test_different_tx_separate_versions() -> Result<()> {
         tx_manager.clone(),
         vec![vec![Value::Int(1)]],
         1,
+        None,
     );
     insert1.next().await?;
 
@@ -272,6 +278,7 @@ async fn test_different_tx_separate_versions() -> Result<()> {
         tx_manager.clone(),
         vec![vec![Value::Int(2)]],
         2,
+        None,
     );
     insert2.next().await?;
 
@@ -282,6 +289,7 @@ async fn test_different_tx_separate_versions() -> Result<()> {
         tx_manager.clone(),
         vec![vec![Value::Int(3)]],
         3,
+        None,
     );
     insert3.next().await?;
 

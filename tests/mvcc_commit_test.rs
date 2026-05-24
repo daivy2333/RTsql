@@ -35,6 +35,7 @@ async fn test_uncommitted_version_not_visible() -> Result<()> {
         tx_manager.clone(),
         values,
         1,
+        None,
     );
     insert_executor.next().await?;
 
@@ -97,6 +98,7 @@ async fn test_committed_version_visible() -> Result<()> {
         tx_manager.clone(),
         values,
         tx1_id,
+        None,
     );
     insert_executor.next().await?;
 
@@ -191,6 +193,7 @@ async fn test_tx_versions_cleared_after_commit() -> Result<()> {
         tx_manager.clone(),
         values,
         tx_id,
+        None,
     );
     insert_executor.next().await?;
 
@@ -243,6 +246,7 @@ async fn test_self_visibility() -> Result<()> {
         tx_manager.clone(),
         values,
         tx_id,
+        None,
     );
     insert_executor.next().await?;
 
