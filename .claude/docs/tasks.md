@@ -10,10 +10,7 @@
 - **Clippy 0 warnings**
 - **INSERT 332x faster** than SQLite ⚡
 
----
-
-**优先级**: P0 — 已修复 | **方案**: 逻辑 Row ID（logical_id → slot_index 映射）
-**详细档案**: `.claude/docs/learned.md` — gc_test SlottedPage SlotID 失效
+**已修复 Bug**: `gc_test SlottedPage SlotID 失效` — 详见 `.claude/docs/learned.md`
 
 ---
 

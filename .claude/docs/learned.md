@@ -1,8 +1,20 @@
 # 学习记忆
 
-> 最后更新：2026-05-24（M18-Phase4 B-Tree Merge 完成）
+> 最后更新：2026-05-24（项目完成，知识库定稿）
 
 ## 2026-05-24 新增（M18-Phase4 B-Tree Merge）
+
+### 项目完成总结
+
+| 维度 | 数据 |
+|------|------|
+| 总里程 | M1-M18 全部完成 |
+| 核心源码 | 16+ 文件，~8000 行 |
+| PhysicalPlan 节点 | 19 种 |
+| 架构决策 (ADR) | 8 个 |
+| 测试总数 | ~430 tests |
+| 性能亮点 | INSERT 332x faster, PK lookup 8x faster than SQLite |
+| 技术栈 | Rust + Tokio + sqlparser-rs + criterion |
 
 ### B-Tree Merge 架构知识
 

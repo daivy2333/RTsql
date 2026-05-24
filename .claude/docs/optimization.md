@@ -1,6 +1,6 @@
 # 优化方向与技术债
 
-> 最后更新：2026-05-24（归档旧优化项）
+> 最后更新：2026-05-24（项目完成）
 
 ## 已完成的优化
 
@@ -13,6 +13,8 @@
 | 9 | B-Tree Split 机制 | M17-Phase2 | 7 tests，支持多层级索引 |
 | 10 | **架构Warnings清理** | **M18-Phase1** | **0 warnings（代码层面）** ⚡ |
 | 11 | **Executor层非唯一索引** | **M18-Phase2** | **IndexScanAllExecutor + 3 tests** ⚡ |
+| 12 | **WAL + Group Commit + 崩溃恢复** | **M18-Phase3** | **T1-T8 完成，417 tests** ⚡ |
+| 13 | **B-Tree Merge + free-list 页复用** | **M18-Phase4** | **redistribution-first，~430 tests** ⚡ |
 
 <!-- tombstone: optimization #01 --> Archived to archive.md §optimization #01 2026-05-24 — M13已完成 >90d
 <!-- tombstone: optimization #02 --> Archived to archive.md §optimization #02 2026-05-24 — M13已完成 >90d

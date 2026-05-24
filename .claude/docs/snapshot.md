@@ -22,18 +22,12 @@
 
 ## 最近提交
 
-- feat(M18-T3): introduce logical Row ID to fix gc_test SlottedPage SlotID invalidation bug
-- feat(M18-T2): implement WALBuffer with Group Commit strategy
-- feat(M18-T1): extend WalRecord with BeginTxn/CommitTxn/AbortTxn, add LSN + CRC32
-
-**M18-Phase4 未提交变更**:
-- node.rs: +LeafMergeResult/InternalMergeResult, +merge_right/redistribute_right/remove_separator/can_merge_with
-- btree.rs: 完整重写 delete 路径（MergeInfo + redistribution-first + root shrink 传播）
-- async_storage.rs: +free_page trait 方法
-- file_storage.rs: +free-list (Mutex<Vec<u64>>)
-- buffer_pool.rs / sync_loader.rs: +free_page
-- index_manager.rs: delete 返回 Option<PageId> 处理 root shrink
-- tests/btree_merge_test.rs: 新增 10 个 merge 集成测试
+- docs: final README rewrite with comprehensive SQLite comparison
+- docs(M18-Phase4): update all documents for BTree Merge completion
+- feat(M18-Phase4-T6): add BTree merge integration tests
+- feat(M18-Phase4-T4-T5-T7): rewrite BTree delete with merge propagation
+- feat(M18-Phase4-T1-T2): add LeafNode and InternalNode merge helpers
+- feat(M18-Phase4-T3): add free_page to storage stack with free-list reuse
 
 ## 已知限制
 
