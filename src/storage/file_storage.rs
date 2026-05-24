@@ -2,7 +2,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::task::spawn_blocking;
@@ -13,6 +13,7 @@ pub struct FileStorage {
     file: Arc<std::fs::File>,
     page_size: usize,
     file_len: AtomicU64,
+    free_pages: Mutex<Vec<u64>>,
 }
 
 impl FileStorage {
@@ -41,6 +42,7 @@ impl FileStorage {
             file: Arc::new(file),
             page_size,
             file_len: AtomicU64::new(page_count),
+            free_pages: Mutex::new(Vec::new()),
         })
     }
 
@@ -91,6 +93,11 @@ impl AsyncStorage for FileStorage {
     }
 
     async fn allocate_page(&self) -> Result<PageId> {
+        // Try free list first
+        if let Some(freed_id) = self.free_pages.lock().unwrap().pop() {
+            return Ok(PageId(freed_id));
+        }
+        // Otherwise allocate new
         let page_id = self.file_len.fetch_add(1, Ordering::SeqCst);
         let offset = PageId(page_id).to_offset(self.page_size);
         let file = self.file.clone();
@@ -101,6 +108,14 @@ impl AsyncStorage for FileStorage {
         })
         .await??;
         Ok(PageId(page_id))
+    }
+
+    async fn free_page(&self, page_id: PageId) -> Result<()> {
+        self.free_pages.lock().unwrap().push(page_id.0);
+        // Zero the page on disk
+        let zero_page = Page::new(page_id);
+        self.write_page(page_id, &zero_page).await?;
+        Ok(())
     }
 
     async fn sync(&self) -> Result<()> {
