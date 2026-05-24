@@ -1,6 +1,6 @@
 # 架构决策记录
 
-> 最后更新：2026-05-24（M18 Phase3 全部完成 + WAL Group Commit benchmark ADR）
+> 最后更新：2026-05-24（M18-Phase4 B-Tree Merge 完成 + 全面更新）
 
 ## 存储层架构决策（M17.5 新增）
 
@@ -251,42 +251,50 @@ WALFile (持久化)
 
 ---
 
-### ADR-008: B-Tree Merge机制（2026-05-23）
+### ADR-008: B-Tree Merge 机制（2026-05-24 实现完成）
 
-**决策**：实现 B-Tree页合并机制，避免删除后的 underflow，支持页释放。
+**决策**：实现 B-Tree 页合并机制，采用 redistribution-first 策略，配合 free-list 页复用。
 
-**Merge触发条件**：
-- 页利用率 < 50%（underflow）
-- 页删除后条目数 < 最小阈值
+**实际实现策略（vs 设计）**：
 
-**Merge策略**：
+| 方面 | 设计（ADR-008 初版） | 实现（M18-Phase4） |
+|------|---------------------|-------------------|
+| Merge 触发 | 页利用率 < 50% | `key_count() < min_keys()`（48） |
+| 策略 | Pure Merge | **Redistribution-first**：先借后合 |
+| Leaf Merge | `merge()` → `MergeResult` | `merge_right(right_sibling) → LeafMergeResult` |
+| Internal Merge | 合并 separator | `merge_right(sibling, parent_separator) → InternalMergeResult` |
+| 页释放 | 未定义 | **free-list 复用**（AsyncStorage::free_page） |
+| 传播 | 递归 | **MergeInfo 递归回传**（mirror SplitResult） |
 
-1. **Leaf Merge**：
-   - 左兄弟页 + 当前页 → 合并为一个页
-   - 更新父节点 separator
-   - 释放空页
+**核心数据流**：
+```
+DELETE → delete_from_page(page, key, parent, child_idx)
+  ├─ Leaf: LeafNode::delete(key)
+  │     → underflow? → try redistribute_left/right
+  │     → merge_left/right → MergeInfo { freed_page_id, separator_key } ↑
+  └─ Internal: InternalNodeRef::find_child → recurse
+        → child MergeInfo? → remove_separator → underflow?
+        → redistribute/merge → MergeInfo ↑
+        → root shrink: 0 keys → free root, leftmost = new root
+```
 
-2. **Internal Merge**：
-   - 合并子节点后，父节点 separator减少
-   - 父节点可能也需要 merge（递归）
+**Redistribution-first 逻辑**：
+1. 左兄弟存在且 `key_count > min_keys` → 从左侧借 entries
+2. 右兄弟存在且 `key_count > min_keys` → 从右侧借 entries
+3. 两者都不满足 → merge（优先合并到左兄弟）
 
-**设计**：
-```rust
-pub fn merge(&mut self, sibling: &mut LeafNode) -> MergeResult {
-    // 将 sibling 的条目合并到 self
-    // 更新 next_leaf_page_id
-    // 返回 MergeResult { freed_page_id, separator_key }
-}
+**Page free-list 架构**：
+```
+FileStorage::free_pages: Mutex<Vec<u64>>  // 释放页 ID 列表
+allocate_page() → pop free_list? → fetch_add  // 复用优先
+free_page(id) → push free_list + zero page    // 归零后回收
 ```
 
 **原因**：
-- ✅ **空间效率**：避免删除后页利用率低
-- ✅ **页释放**：空页可回收，减少文件大小
-- ✅ **性能稳定**：保持 B-Tree查询性能
-
-**替代方案**：
-- 不实现 Merge：页利用率低，文件大小增长
-- 简化 Merge：仅处理 Leaf Merge，不处理 Internal（可能导致父节点 underflow）
+- ✅ **Redistribution-first** 避免 ping-pong merge/split（PostgreSQL/SQLite 标准做法）
+- ✅ **free-list 复用** 避免删除后文件无限增长
+- ✅ **递归传播** 确保树结构始终合法（mirror split 传播模式）
+- ✅ **root shrink** 正确处理树高缩减
 
 ---
 

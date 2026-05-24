@@ -1,8 +1,46 @@
 # 学习记忆
 
-> 最后更新：2026-05-24（WAL Group Commit benchmark 知识）
+> 最后更新：2026-05-24（M18-Phase4 B-Tree Merge 完成）
 
-## 2026-05-24 新增（WAL Group Commit 基准测试 T7）
+## 2026-05-24 新增（M18-Phase4 B-Tree Merge）
+
+### B-Tree Merge 架构知识
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| Redistribution-first 策略 | 先借后合优于纯 merge，避免 ping-pong merge/split | M18-Phase4 T4 |
+| MergeInfo 传播模式 | 新增 `new_root: Option<PageId>` 字段处理 root shrink | M18-Phase4 T5 |
+| InternalNode sibling 查找 | `child_index` 定位后，left = pos-1 (leftmost for pos=1)，right = pos+1 | M18-Phase4 T4 |
+| separator_key 匹配 | merge 时 separator_key = 被吸收页的 first key，父节点据此找到 slot 删除 | M18-Phase4 T4 |
+| free-list 实现 | `Mutex<Vec<u64>>` + allocate_page 先 pop + free_page 先 push 后 zero | M18-Phase4 T3 |
+| PageGuard drop 时机 | `modify_page` 闭包内修改，闭包返回后 guard 自动释放 | M18-Phase4 T4 |
+
+### API 速查
+
+| API | 文件 | 行 | 用途 |
+|-----|------|-----|------|
+| `LeafNode::merge_right` | `src/storage/btree/node.rs` | ~380 | 吸收右兄弟 entries，返回 LeafMergeResult |
+| `LeafNode::redistribute_right` | `src/storage/btree/node.rs` | ~440 | 从右兄弟借 entries 平衡分布 |
+| `LeafNode::can_merge_with` | `src/storage/btree/node.rs` | ~374 | 检查合并后是否超 page 容量 |
+| `InternalNode::remove_separator` | `src/storage/btree/node.rs` | ~730 | 删除指定索引的 separator |
+| `InternalNode::merge_right` | `src/storage/btree/node.rs` | ~760 | 吸收右兄弟 + 降级 parent separator |
+| `InternalNode::can_merge_with` | `src/storage/btree/node.rs` | ~810 | 检查合并后是否超 page 容量 |
+| `MergeInfo` | `src/storage/btree/btree.rs` | ~21 | `{freed_page_id, separator_key, new_root}` |
+| `SyncPageLoader::free_page` | `src/storage/btree/sync_loader.rs` | ~33 | 释放页（同步包装） |
+| `FileStorage.free_pages` | `src/storage/file_storage.rs` | ~18 | `Mutex<Vec<u64>>` free-list |
+| `BTree::delete` | `src/storage/btree/btree.rs` | ~401 | 返回 `Result<Option<PageId>>`（root shrink 时返回新 root） |
+
+### 踩坑记录
+
+#### delete_by_key 并发 merge 位置偏移
+- **症状**：`delete_by_key` 遍历多个子节点时，第一个 merge 改变了父节点结构，后续子节点位置偏移导致 "no siblings" 错误
+- **根因**：子节点列表在 merge 前收集，merge 后 separator 被删除，子节点索引失效
+- **解决**：改用 `&mut self` 签名 + root_page_id 现场更新，每次 delete 从新 root 遍历
+
+#### merge 容量溢出
+- **症状**：merge_leaves 时 `PageFull` 错误
+- **根因**：`min_keys=48`，leaf 容量=92，合并 47+48=95 > 92 溢出
+- **解决**：redistribution-first 避免了绝大多数溢出场景；极端情况下 `can_merge_with` 检查拦截
 
 ### WAL Group Commit Benchmark 技巧
 
@@ -245,10 +283,10 @@
 
 | 主题 | 优先级 | 备注 |
 |------|--------|------|
-| WAL Group Commit | 中 | M18，INSERT 5-10x 提速 |
 | io_uring | 低 | Linux 5.1+，需 tokio-uring |
 | jemalloc/mimalloc | 低 | 内存分配器优化 |
-| B-Tree split/merge | 中 | M17 索引优化 |
+<!-- tombstone: learned #14 --> Archived to archive.md §learned #14 2026-05-24 — 已完成探索项 (WAL Group Commit)
+<!-- tombstone: learned #15 --> Archived to archive.md §learned #15 2026-05-24 — 已完成探索项 (B-Tree split/merge)
 
 ## 详细踩坑档案
 

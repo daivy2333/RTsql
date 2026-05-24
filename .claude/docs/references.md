@@ -1,6 +1,6 @@
 # 外部参考资料
 
-> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
+> 最后更新：2026-05-24（M18 全部完成）
 
 ## 核心依赖文档
 
@@ -35,8 +35,8 @@
 
 ## 项目测试统计
 
-- 总测试数: 101 tests pass, 0 failures（M18 Phase2 完成）
+- 总测试数: ~430 tests pass, 0 failures（M18 全部完成）
 - Executor 测试: executor_test.rs（27 tests，含 IndexScanAllExecutor 3 tests）
 - 聚合测试: aggregate_test.rs（19 tests）
-- B-Tree 测试: btree_test.rs + btree_split_test.rs（12 tests）
+- B-Tree 测试: btree_test.rs + btree_split_test.rs + btree_merge_test.rs（22 tests）
 - 基准测试: 6 套（micro/concurrent/scale/sqlite_compare/single/precise_compare）

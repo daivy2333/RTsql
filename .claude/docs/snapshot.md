@@ -1,14 +1,13 @@
 # 项目快照
 
-> 最后更新：2026-05-24（M18 Phase3 全部完成，WAL Group Commit 基准测试通过）
+> 最后更新：2026-05-24（M18 全部完成，B-Tree Merge + ~430 tests pass）
 
 ## 当前状态
 
-- **阶段**: M18 Phase3 WAL集成 + Group Commit + 崩溃恢复 ✅ 全部完成
-- **进度**: T1-T8 全部 ✅
-- **测试**: 410+ tests pass, 0 failures
+- **阶段**: M18 全部完成 ✅
+- **进度**: Phase1-Phase4 全部 ✅
+- **测试**: ~430 tests pass, 0 failures
 - **Clippy**: 0 warnings
-- **Benchmark**: wal_group_commit_bench.rs 3 groups pass（baseline/group_commit/capacity_impact）
 
 ## 最近提交
 
@@ -16,13 +15,14 @@
 - feat(M18-T2): implement WALBuffer with Group Commit strategy
 - feat(M18-T1): extend WalRecord with BeginTxn/CommitTxn/AbortTxn, add LSN + CRC32
 
-**未提交变更**:
-- TransactionManager WAL 集成 (begin/commit/abort 写 WAL 记录)
-- Executor 隐式事务包装 (Insert/Update/Delete 写 BeginTxn+数据+CommitTxn)
-- RecoveryManager 数据重放 (full_recover + redo committed + mark uncommitted)
-- recovery_e2e_test.rs 6 个测试
-- wal_group_commit_bench.rs 3 个 benchmark groups
-- Clippy 修复 (too_many_arguments, collapsible_if)
+**M18-Phase4 未提交变更**:
+- node.rs: +LeafMergeResult/InternalMergeResult, +merge_right/redistribute_right/remove_separator/can_merge_with
+- btree.rs: 完整重写 delete 路径（MergeInfo + redistribution-first + root shrink 传播）
+- async_storage.rs: +free_page trait 方法
+- file_storage.rs: +free-list (Mutex<Vec<u64>>)
+- buffer_pool.rs / sync_loader.rs: +free_page
+- index_manager.rs: delete 返回 Option<PageId> 处理 root shrink
+- tests/btree_merge_test.rs: 新增 10 个 merge 集成测试
 
 ## 遗留问题清单
 
@@ -50,8 +50,8 @@
 
 ## 下一步行动
 
-1. **Phase3 T7**: WAL Group Commit 性能基准测试（验证 5-10x faster）
-2. **Phase4**: B-Tree Merge（删除后页合并）
+1. **提交 Phase4 变更**：commits 按 wave 组织
+2. **项目收尾**：清理遗留问题，性能优化
 
 **里程碑路线图**:
 - M16: ✅ 子查询支持
@@ -60,5 +60,5 @@
 - M17.5: ✅ 代码清理 + 全面对比
 - M18-Phase1: ✅ 架构Warnings清理
 - M18-Phase2: ✅ Executor层非唯一索引
-- **M18-Phase3**: ✅ **WAL集成 + Group Commit + 崩溃恢复**（T1-T6/T8 完成）
-- M18-Phase4: ⏳ B-Tree Merge（待开始）
+- **M18-Phase3**: ✅ **WAL集成 + Group Commit + 崩溃恢复**
+- **M18-Phase4**: ✅ **B-Tree Merge**（项目完成）
