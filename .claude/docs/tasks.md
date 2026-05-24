@@ -1,8 +1,8 @@
 # 任务追踪
 
-> 最后更新：2026-05-24（M19-M23 全维度性能优化规划）
+> 最后更新：2026-05-24（M24-M29 规划阶段新增）
 
-## 当前阶段：全维度性能优化（M19-M23）
+## 当前阶段：全维度性能优化（M19-M23）+ 功能完善（M24-M29）
 
 ### 背景
 
@@ -22,6 +22,12 @@ M1-M18 项目核心开发完成。当前性能短板：
 | **M21** | 页面级 MVCC | ~10-15% 提速 | 中 | 待开始 |
 | **M22** | 预取 Prefetch | 大表 ~15-25% 提速 | 低 | 待开始 |
 | **M23** | Varint Key 编码 | 索引空间 ~70% 缩减 | 中 | 待开始 |
+| **M24** | 多隔离级别 | Read Committed + Serializable | 高 | 待开始 |
+| **M25** | 多 Join 算法 | NLJ + SMJ + 代价选择 | 中 | 待开始 |
+| **M26** | 代价模型 + Join 重排 | 统计信息 + 代价估算 + 重排序 | 中 | 待开始 |
+| **M27** | 关联子查询缓存 | 参数化缓存 + 物化 | 中 | 待开始 |
+| **M28** | 多层关联子查询 | 递归参数注入 | 低 | 待开始 |
+| **M29** | PG Extended Query | Parse/Bind/Describe/Execute | 中 | 待开始 |
 
 ---
 
@@ -115,6 +121,126 @@ M1-M18 项目核心开发完成。当前性能短板：
 
 ---
 
+### M24: 多隔离级别
+
+**问题**：只实现了 Repeatable Read（快照隔离），无 Read Committed / Serializable。
+
+**方案**：
+- Read Committed：每条语句重新获取 snapshot（而非事务开始时）
+- Serializable：SSI（Serializable Snapshot Isolation）+ 写偏序检测
+
+**任务分解**：
+- [ ] T1: `IsolationLevel` 枚举定义（ReadCommitted / RepeatableRead / Serializable）
+- [ ] T2: `BEGIN TRANSACTION ISOLATION LEVEL ...` SQL 语法支持
+- [ ] T3: Read Committed 实现（每语句刷新 snapshot）
+- [ ] T4: Serializable SSI 实现（写偏序检测 + predicate locking）
+- [ ] T5: 隔离级别测试（ANSI SQL 隔离级别标准测试用例）
+
+**默认假设**：
+- 默认隔离级别保持 Repeatable Read（向后兼容）
+- Read Committed 实现相对简单，优先完成
+- Serializable SSI 复杂度高，可分阶段交付
+
+**预期**：支持标准 SQL 隔离级别，满足不同业务场景需求
+
+---
+
+### M25: 多 Join 算法
+
+**问题**：只有 Hash Join，无 Nested Loop Join / Sort-Merge Join。小表 join 或有序数据场景效率低。
+
+**方案**：
+- Nested Loop Join：小表驱动大表，无需 build hash table
+- Sort-Merge Join：已排序数据直接归并
+- 代价模型自动选择 Join 算法（与 M26 协同）
+
+**任务分解**：
+- [ ] T1: `JoinAlgorithm` 枚举 + `PhysicalPlan::Join` 扩展算法字段
+- [ ] T2: `NestedLoopJoinExecutor` 实现
+- [ ] T3: `SortMergeJoinExecutor` 实现
+- [ ] T4: Planner 简单启发式选择（小表 NLJ，有序 SMJ，默认 HJ）
+- [ ] T5: Join 算法基准测试对比
+
+**预期**：小表 join 场景显著提速，有序数据避免额外排序
+
+---
+
+### M26: 代价模型 + Join 重排序
+
+**问题**：Planner 固定 join 顺序，无 cardinality/selectivity 估算，无代价模型。
+
+**方案**：
+- 统计信息收集（行数、NDV、直方图）
+- 代价估算模型（CPU + I/O 代价）
+- Join 重排序（动态规划 / 贪心）
+
+**任务分解**：
+- [ ] T1: `TableStatistics` 结构（行数、NDV、min/max、null_count）
+- [ ] T2: `ANALYZE TABLE` 命令 + 统计信息持久化
+- [ ] T3: `CostEstimator` 代价估算（scan cost / join cost / filter selectivity）
+- [ ] T4: Join 重排序算法（DP for <10 tables, greedy for ≥10）
+- [ ] T5: 代价模型驱动的执行计划选择测试
+
+**预期**：多表 join 自动选最优顺序，避免最差执行计划
+
+---
+
+### M27: 关联子查询缓存
+
+**问题**：关联子查询每行外层都重新执行，无物化缓存。N 行外层 = N 次子查询执行。
+
+**方案**：
+- 参数化缓存：相同关联参数值命中缓存
+- 子查询物化：将子查询结果物化为临时表
+
+**任务分解**：
+- [ ] T1: `SubqueryCache` 结构（关联参数值 → 结果集映射）
+- [ ] T2: `SubqueryEvalExecutor` 集成缓存逻辑
+- [ ] T3: 缓存淘汰策略（LRU / 事务结束清空）
+- [ ] T4: 关联子查询性能基准测试
+
+**预期**：重复关联参数场景避免重复执行，性能提升与参数重复率正相关
+
+---
+
+### M28: 多层关联子查询
+
+**问题**：代码显式拒绝多层嵌套关联子查询，复杂查询直接报错。
+
+**方案**：
+- 递归注入外层参数到多层子查询
+- 逐层解析关联列引用
+
+**任务分解**：
+- [ ] T1: `extract_correlated_params` 改为递归遍历子查询嵌套
+- [ ] T2: `inject_correlated_values` 支持多层参数注入
+- [ ] T3: 移除多层嵌套拒绝逻辑
+- [ ] T4: 多层关联子查询测试用例
+
+**预期**：支持 `WHERE EXISTS (SELECT ... WHERE col = (SELECT ...))` 等嵌套结构
+
+---
+
+### M29: PG Extended Query Protocol
+
+**问题**：只支持 Simple Query Protocol，无 Parse/Bind/Describe/Execute。
+
+**方案**：
+- 实现 Extended Query Protocol 消息流
+- 支持 prepared statement 缓存
+- 二进制格式 DataRow 传输
+
+**任务分解**：
+- [ ] T1: Parse / Bind / Describe / Execute 消息解析与序列化
+- [ ] T2: Prepared Statement 缓存与生命周期管理
+- [ ] T3: 二进制格式 DataRow 编码（Int/Text/Float/Bool）
+- [ ] T4: Close / Sync / Flush 消息支持
+- [ ] T5: psql 预编译语句集成测试
+
+**预期**：支持预编译语句，减少重复解析开销；二进制传输提升效率
+
+---
+
 ## 已完成（M1-M18）
 
 > 详细子任务已归档至 archive.md §tasks。
@@ -139,3 +265,9 @@ M1-M18 项目核心开发完成。当前性能短板：
 - **M21**: 📋 页面级 MVCC（~10-15% 提速）
 - **M22**: 📋 预取 Prefetch（大表 ~15-25% 提速）
 - **M23**: 📋 Varint Key 编码（索引空间 ~70% 缩减）
+- **M24**: 📋 多隔离级别（Read Committed + Serializable）
+- **M25**: 📋 多 Join 算法（NLJ + SMJ + 代价选择）
+- **M26**: 📋 代价模型 + Join 重排序
+- **M27**: 📋 关联子查询缓存
+- **M28**: 📋 多层关联子查询
+- **M29**: 📋 PG Extended Query Protocol
