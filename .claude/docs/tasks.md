@@ -1,151 +1,141 @@
 # 任务追踪
 
-> 最后更新：2026-05-24（项目完成，M1-M18 全部里程碑达成）
+> 最后更新：2026-05-24（M19-M23 全维度性能优化规划）
 
-## 🎉 项目完成
+## 当前阶段：全维度性能优化（M19-M23）
 
-- **M1-M18 全部里程碑** 达成
-- **19 种 PhysicalPlan 节点** 完整 SQL 支持
-- **~430 tests** pass, 0 failures
-- **Clippy 0 warnings**
-- **INSERT 332x faster** than SQLite ⚡
+### 背景
 
-**已修复 Bug**: `gc_test SlottedPage SlotID 失效` — 详见 `.claude/docs/learned.md`
+M1-M18 项目核心开发完成。当前性能短板：
 
----
+| 操作 | RTsql | SQLite | 差距 | 根因 |
+|------|-------|--------|------|------|
+| **Full Scan 1K rows** | 327µs | 80µs | **4x slower** | Index-to-Data 双读 + 每行堆分配 + MVCC 逐行检查 |
+| **文件大小 10K rows** | 1.4MB | 217KB | **6.5x larger** | 固定 Key 32B + 两层索引 + Tag byte |
 
-## 当前阶段：M18 优化项目与技术债清理
+### 优化路线图
 
-### 已完成
-
-- [x] M17.5-T1: Clippy 零警告（6 个架构 warnings 已留档）
-- [x] M17.5-T2: 测试修复（174+ tests pass, 0 failures）
-- [x] M17.5-T3: SQLite 全面对比基准测试（扩展 benches/sqlite_compare.rs，多维度对比完成）
-- [x] M17.5-T4: 代码格式统一（cargo fmt 已完成）
-
-**M17.5 核心成果**：
-- INSERT 性能：RTsql 332x faster than SQLite ⚡
-- PK lookup 性能：RTsql 5.6x faster than SQLite ⚡
-- B-Tree Split 性能验证：稳定
-- 非唯一索引功能验证：正常
-- 文件大小：RTsql 6.5x larger（页格式开销）
-- 二进制大小：RTsql 2.2x larger（Tokio runtime）
+| 里程碑 | 优化项 | 预期收益 | 风险 | 状态 |
+|--------|--------|---------|------|------|
+| **M19** | DataScan 路径 | 全表扫描 ~2x 提速 | 中 | 待开始 |
+| **M20** | 零拷贝读取 | I/O ~20-30% 提速 | 低 | 待开始 |
+| **M21** | 页面级 MVCC | ~10-15% 提速 | 中 | 待开始 |
+| **M22** | 预取 Prefetch | 大表 ~15-25% 提速 | 低 | 待开始 |
+| **M23** | Varint Key 编码 | 索引空间 ~70% 缩减 | 中 | 待开始 |
 
 ---
 
-### Phase1: 架构Warnings清理 ✅
+### M19: DataScan 路径（全表扫描直读数据页）
 
-- [x] T1: 引入 JoinConfig/JoinRelatedConfig struct（解决 too_many_arguments）
-- [x] T2: 定义 CreateExecutorFuture type alias（解决 type_complexity）
-- [x] T3: #[allow] await_holding_lock（两阶段锁模式安全）
-- [x] T4: #[allow] module_inception（标准命名模式）
-- [x] T5: Clippy 验证（warnings 从 6降至 0）
+**问题**：当前全表扫描走 B+tree → RowId → 数据页，每行双读（索引页 + 数据页）。
 
-**Phase1成果**：
-- ✅ 所有代码 warnings 已清理（仅剩 cargo config deprecated）
-- ✅ 参数组织清晰（JoinConfig/JoinRelatedConfig）
-- ✅ 类型签名简洁（CreateExecutorFuture）
-- ✅ #[allow] 有明确注释说明合理设计
+**方案**：新增 `DataScanExecutor`，直接按 page_id 顺序遍历数据页，跳过 B+tree。
 
----
+**任务分解**：
+- [ ] T1: `PhysicalPlan::DataScan` 节点 + Planner 自动选择（无 WHERE 时用 DataScan）
+- [ ] T2: `DataScanExecutor` 实现（按 page 范围顺序读数据页 + 遍历 slots）
+- [ ] T3: `SlottedPage::iter_slots()` 接口（遍历所有有效 slot）
+- [ ] T4: Pipeline 层集成（DataScan → DataScanExecutor 创建）
+- [ ] T5: 基准测试 + 对比验证
 
-### Phase2: Executor层非唯一索引测试覆盖 ✅
+**默认假设**：
+- DataScan 只读已提交数据（MVCC 可见性仍逐行检查）
+- 并发写入时 DataScan 可运行（读快照可见行）
+- 空表返回空结果
+- 有 WHERE 条件仍走 B+tree Scan
 
-- [x] T1: 新增 IndexManager::search_all 方法
-- [x] T2: 实现 IndexScanAllExecutor::execute
-- [x] T3: executor_test.rs 新增非唯一索引测试
-- [x] T4: SQL层集成验证
-
-**Phase2成果**：
-- ✅ IndexManager 新增 search_all 方法（支持非唯一索引查询）
-- ✅ IndexScanAllExecutor 实现完成（逐行返回，MVCC 可见性）
-- ✅ executor_test.rs 新增 3 个测试（基础功能/空结果/单结果）
-- ✅ PhysicalPlan::IndexScanAll 节点集成
-- ✅ Pipeline 创建 IndexScanAllExecutor 逻辑
-- ✅ 101 tests pass, 0 failures
-- ✅ Clippy 0 warnings
+**预期**：Full Scan 从 327µs → ~160µs（消除 B+tree 页读取开销）
 
 ---
 
-### Phase3: WAL集成 + Group Commit + 崩溃恢复 ✅
+### M20: 零拷贝读取
 
-- [x] T1: WalRecord 扩展 + CRC32 + LSN (1fcc213)
-- [x] T2: WALBuffer + Group Commit (27e8aca)
-- [x] T3: Logical Row ID 修复 gc_test bug (650761d)
-- [x] T4: TransactionManager 集成 WAL (begin/commit/abort 写 WAL 记录)
-- [x] T5: Executor 集成 WAL + 隐式事务包装 (Insert/Update/Delete 写 BeginTxn+数据+CommitTxn)
-- [x] T6: RecoveryManager 数据重放 (full_recover + redo committed + mark uncommitted)
-- [x] T7: WAL Group Commit 性能基准测试 (benches/wal_group_commit_bench.rs 3 groups pass)
-- [x] T8: 崩溃恢复 E2E 测试 (recovery_e2e_test.rs 6 tests pass)
+**问题**：`SlottedPage::get` 每行 `Vec::from` 堆分配，全表扫描 N 行 = N 次堆分配。
 
-**关键发现**:
-1. **Executor 隐式事务包装** — 每个 Insert/Update/Delete 语句在 WAL 中自动生成完整的 BeginTxn → 数据记录 → CommitTxn 事务序列，使 RecoveryManager 能正确分类 committed/uncommitted 事务
-2. **TableManager 纯内存限制** — 表定义不持久化到磁盘，重启后丢失。恢复时 redo 需要表存在才能写入数据页，但表不存在时 `get_table` 失败则 redo 跳过
-3. **BufferPool::mark_tx_aborted 是 stub** — 当前实现为空函数，未遍历 SlottedPage 标记 uncommitted tuple
+**方案**：返回 `&[u8]` 切片引用直接指向页缓冲区，消除每行堆分配。
 
-**417 tests pass, 0 failures, Clippy 0 warnings**
+**任务分解**：
+- [ ] T1: `SlottedPage::get_slice()` 返回 `&[u8]`（零拷贝接口）
+- [ ] T2: `DataPage::get_row_slice()` 零拷贝接口
+- [ ] T3: Scan/DataScan executor 适配零拷贝路径
+- [ ] T4: 基准测试对比（堆分配 vs 零拷贝）
+
+**预期**：I/O 密集场景 ~20-30% 提速，减少内存分配压力
 
 ---
 
-### Phase4: B-Tree Merge ✅
+### M21: 页面级 MVCC
 
-- [x] T1: LeafNode::merge_right + redistribute_right + can_merge_with
-- [x] T2: BTree::delete 递归 merge 回传（redistribution-first）
-- [x] T3: InternalNode::merge_right + remove_separator + min_keys
-- [x] T4: AsyncStorage::free_page + FileStorage free-list + BufferPool/SyncPageLoader
-- [x] T5: tests/btree_merge_test.rs 10 场景覆盖
-- [x] T5+T7: root shrink 传播 + IndexManager root_page_id 更新
+**问题**：每行 16 字节 VersionHeader，全表扫描逐行检查可见性，纯开销。
 
-**核心成果**：
-- ✅ redistribution-first 策略（先借后合，稳定 B-Tree）
-- ✅ 递归 merge 传播（mirror split 传播模式）
-- ✅ free-list 页复用（FileStorage 释放页可重新分配）
-- ✅ root shrink 正确处理（IndexManager AtomicU64 同步更新）
-- ✅ ~430 tests pass, 0 failures, Clippy 0 warnings
+**方案**：页面级可见性标记（page header 记录 min_commit_ts/max_txn_id），整页可跳过时跳过。
 
----
+**任务分解**：
+- [ ] T1: Page header 扩展（min_commit_ts/max_txn_id 字段）
+- [ ] T2: 写入时更新页面级 MVCC 元数据
+- [ ] T3: DataScan 页面级可见性快速判断（整页跳过 or 逐行检查）
+- [ ] T4: 基准测试 + 正确性验证
 
-## 下一步：后续优化方向
+**默认假设**：
+- 页面级判断保守：min_commit_ts > snapshot_ts → 整页可见；max_txn_id 活跃 → 退回逐行检查
+- 误判时退回逐行检查，保证正确性
 
-- Varint Key 编码（减少 ~70% 索引空间）
-- 全表扫描并行化
-- 表定义持久化
-- io_uring 异步磁盘 I/O
+**预期**：读多写少场景 ~10-15% 提速
 
 ---
 
-## 已完成
+### M22: 预取 Prefetch
 
-### M17-Phase2: B-Tree Split 机制 ✅ (2026-05-23)
+**问题**：顺序扫描无 read-ahead，每次只读一页，I/O 延迟未重叠。
 
-- [x] T6: LeafNode::split 实现
-- [x] T6: InternalNode::split 实现
-- [x] T7: BTree::insert 递归 + split 回传
-- [x] T8: 根分裂处理 + IndexManager root_page_id 更新
-- [x] T8: InternalNodeRef find_child_page_id 路由修复
-- [x] T9: 测试套件（7 个场景覆盖）
+**方案**：DataScan 顺序扫描时异步预读下一页（tokio::spawn 预取），处理当前页时下一页已在缓冲池。
 
-### M17-Phase1: 非唯一索引 ✅ (2026-05-23)
+**任务分解**：
+- [ ] T1: `BufferPool::prefetch_page()` 异步预读接口
+- [ ] T2: DataScanExecutor 双缓冲预取逻辑
+- [ ] T3: 基准测试（小表/大表对比）
 
-- [x] T1: NonUniqueIndex 模式 + DuplicateKey 处理
-- [x] T2: search_all / scan_all 支持
-- [x] T3: delete_by_key / delete_exact
-- [x] T4: SplitResult 结构体
-- [x] T5: InternalNode::insert_separator
+**预期**：大表（>1K rows）~15-25% 提速，小表效果不明显
 
-### M16: 子查询支持 ✅
+---
 
-### M15: SQLite 基础性能对比 ✅
+### M23: Varint Key 编码
+
+**问题**：B-Tree Key 固定 32 bytes，INT PRIMARY KEY 浪费 ~28 bytes，索引空间 ~10x 膨胀。
+
+**方案**：Key 改用 varint 编码（1-9 bytes），大幅缩减索引页占用。
+
+**任务分解**：
+- [ ] T1: Varint 编解码实现（u64 ↔ 1-9 bytes）
+- [ ] T2: LeafNode/InternalNode Key 存储改用 varint
+- [ ] T3: B-Tree 查找/插入/删除适配变长 Key
+- [ ] T4: 基准测试 + 文件大小对比
+
+**预期**：索引空间 ~70% 缩减，文件大小从 6.5x → ~2-3x SQLite
+
+---
+
+## 已完成（M1-M18）
+
+> 详细子任务已归档至 archive.md §tasks。
+
+- **M18**: WAL + Group Commit + 崩溃恢复 + B-Tree Merge ✅
+- **M17**: 非唯一索引 + B-Tree Split ✅
+- **M16**: 子查询支持 ✅
+- **M15**: SQLite 基础性能对比 ✅
+- **M1-M14**: 核心功能（SQL解析/执行器/存储/B-Tree/MVCC/事务/索引） ✅
 
 ---
 
 ## 里程碑路线图
 
+- M1-M15: ✅ 核心功能 + 性能验证
 - M16: ✅ 子查询支持
-- M17-Phase1: ✅ 非唯一索引
-- M17-Phase2: ✅ B-Tree Split 机制
+- M17: ✅ 非唯一索引 + B-Tree Split
 - M17.5: ✅ 代码清理 + 全面对比
-- M18-Phase1: ✅ 架构Warnings清理
-- M18-Phase2: ✅ Executor层非唯一索引
-- **M18-Phase3**: ✅ **WAL集成 + Group Commit + 崩溃恢复**（全部完成）
-- **M18-Phase4**: ✅ **B-Tree Merge**（全部完成）
+- M18: ✅ WAL + Group Commit + B-Tree Merge
+- **M19**: 📋 DataScan 路径（全表扫描 ~2x 提速）
+- **M20**: 📋 零拷贝读取（I/O ~20-30% 提速）
+- **M21**: 📋 页面级 MVCC（~10-15% 提速）
+- **M22**: 📋 预取 Prefetch（大表 ~15-25% 提速）
+- **M23**: 📋 Varint Key 编码（索引空间 ~70% 缩减）
