@@ -1,6 +1,6 @@
 # 架构决策记录
 
-> 最后更新：2026-05-24（gc_test bug 修复 + logical Row ID ADR）
+> 最后更新：2026-05-24（M18 Phase3 全部完成 + WAL Group Commit benchmark ADR）
 
 ## 存储层架构决策（M17.5 新增）
 
@@ -185,14 +185,14 @@ SQL层 → Planner → PhysicalPlan::IndexScanAll
 
 ---
 
-### ADR-007: WAL + Group Commit架构（2026-05-23）
+### ADR-007: WAL + Group Commit架构（2026-05-23，T4-T6/T8 完成更新）
 
 **决策**：实现 WAL（Write-Ahead Logging）机制，结合 Group Commit 优化 INSERT 性能（5-10x）。
 
 **架构设计**：
 ```
 Executor（INSERT/UPDATE/DELETE）
-    ↓ 写操作
+    ↓ 写操作（隐式事务：BeginTxn → 数据记录 → CommitTxn）
 WALBuffer（内存缓冲）
     ↓ Group Commit触发
     ↓ 缓冲区满(100条) / 定时(100ms) / commit 通知
@@ -213,19 +213,36 @@ WALFile (持久化)
    - Group Commit: append_commit_and_wait 注册等待 → flush 批量写入 → 通知等待者
    - tokio::select! 双监听：flush_notify + 定时器
 
-3. **Executor 集成**（T4 待实现）：Insert/Update/Delete 持有 wal_buffer
-4. **TransactionManager 集成**（T3 待实现）：begin/commit/abort 写 WAL 记录
-5. **RecoveryManager 数据重放**（T5 待实现）：Redo committed + 清理 uncommitted
+3. **Executor 隐式事务包装**（T5 已完成）：
+   - 每个 Insert/Update/Delete 语句自动在 `next()` 中生成完整事务
+   - WAL 写入序列：BeginTxn → Insert/Update/Delete → CommitTxn → append_commit_and_wait
+   - 无需 pipeline 层显式事务管理，executor 自包含
 
-**验证结果**（T1/T2 已完成）：
+4. **TransactionManager 集成**（T4 已完成）：
+   - begin/commit/abort 写 WAL 记录
+   - commit 调用 append_commit_and_wait 等待持久化确认
+
+5. **RecoveryManager 数据重放**（T6 已完成）：
+   - full_recover: 扫描 WAL → 分类事务 → Redo committed → Mark uncommitted
+   - 基础版 recover: 仅分类 committed/aborted 事务
+
+**验证结果**（T1-T6, T8 已完成）：
 - ✅ WalRecord 新增 3 种类型 + LSN + CRC32 序列化往返通过
 - ✅ WalWriter::write_batch 批量写入 + fsync
 - ✅ WALBuffer append/flush/commit_wait/shutdown 全部通过
 - ✅ Group Commit 多事务并发 commit 共享 fsync 测试通过
+- ✅ Executor 隐式事务包装：WAL 中包含 BeginTxn+数据+CommitTxn 完整记录
+- ✅ RecoveryManager full_recover + redo committed + mark uncommitted 通过
+- ✅ E2E 崩溃恢复测试 6 个通过（WAL 记录完整性/事务分类/数据页持久化/Update/Delete 记录）
+
+**已知限制**：
+- TableManager 纯内存：表定义不持久化，重启后丢失
+- BufferPool::mark_tx_aborted 是 stub：未遍历 SlottedPage 标记 uncommitted tuple
+- wal_sync_mode 配置推迟到后续 milestone
 
 **原因**：
 - ✅ **崩溃恢复**：WAL 保证数据持久性
-- ✅ **性能提升**：Group Commit 减少 fsync开销
+- ✅ **性能提升**：Group Commit 减少 fsync 开销
 - ✅ **主流方案**：PostgreSQL、MySQL 都采用类似机制
 
 **替代方案**：

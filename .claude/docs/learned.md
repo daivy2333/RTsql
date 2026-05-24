@@ -1,8 +1,20 @@
 # 学习记忆
 
-> 最后更新：2026-05-24（gc_test bug 修复完成 + logical Row ID）
+> 最后更新：2026-05-24（WAL Group Commit benchmark 知识）
 
-## 2026-05-24 新增（gc_test bug 修复 — logical Row ID）
+## 2026-05-24 新增（WAL Group Commit 基准测试 T7）
+
+### WAL Group Commit Benchmark 技巧
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **独立 WAL 层 benchmark** | 直接操作 WALBuffer，不经过 SQL 层，精确度量 WAL 性能无噪声 | benches/wal_group_commit_bench.rs |
+| **tempdir leak 模式** | `std::mem::forget(dir)` 保证 WAL 文件在 benchmark 期间存活 | benches/wal_group_commit_bench.rs |
+| **AtomicU64 tx_id 分配** | 全局 AtomicU64 计数器避免跨 criterion iterations 的 tx_id 冲突 | benches/wal_group_commit_bench.rs |
+| **三组 benchmark** | wal_baseline(capacity=1 逐条fsync) / wal_group_commit(并发1-32) / wal_capacity_impact(capacity 1/10/100) | benches/wal_group_commit_bench.rs |
+| **benchmark 参数** | sample_size=50, measurement_time=10s, baseline 1000条, 并发每线程 200 条 | benches/wal_group_commit_bench.rs |
+
+---
 
 ### Logical Row ID 修复要点
 
@@ -23,6 +35,37 @@
 | 问题 | 原因 | 解决 | 预防 |
 |------|------|------|------|
 | delete_slot 后 BufferPool 读到过期 slot_count | `self.header.slot_count -= 1` 只修改了内存 header，未 serialize 回 page.data | 在 slot_count 修改后立即调用 `self.header.serialize(&mut self.page.data[..SIZE])` | **SlottedPage 任何 header 修改后必须 serialize 回 page.data** |
+
+---
+
+## 2026-05-24 新增（M18 Phase3 WAL 集成 — T4/T5/T6/T8）
+
+### Executor 隐式事务包装
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **隐式事务模式** | 每个 Insert/Update/Delete 语句在 executor 的 next() 中自动写 BeginTxn → 数据记录 → CommitTxn WAL 记录，无需 pipeline 层显式事务管理 | executor/insert.rs, update.rs, delete.rs |
+| **append_commit_and_wait 调用** | CommitTxn 写入后必须调用 wal_buffer.append_commit_and_wait(tx_id) 确保 WAL 持久化确认（Group Commit） | executor/insert.rs:105-111 |
+| **Pipeline tx_id 仍为 0** | pipeline.rs 传入 tx_id=0 给 executor，但 executor WAL 写入使用 TransactionManager.begin() 分配的真实 tx_id 不可用——隐式事务包装在 executor 内部完成，不需要 pipeline 传 tx_id | pipeline.rs:326 |
+| **TableManager 纯内存限制** | 表定义不持久化到磁盘，重启后丢失。恢复时 redo 需要表存在才能写入数据页，但 get_table 失败时 redo 静默跳过 | storage/table_manager.rs |
+| **BufferPool::mark_tx_aborted 是 stub** | 当前实现为空函数 `Ok(())`，未遍历 SlottedPage 标记 uncommitted tuple。MVCC 可见性依赖 VersionHeader 的 create_tx_id 在 active_tx_ids 中 | storage/buffer_pool.rs:212 |
+
+### RecoveryManager 数据重放踩坑
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **RecoveryManager::recover 返回元组** | 基础版 recover 返回 `(HashSet<u64>, HashSet<u64>)`（committed, aborted），full_recover 返回 RecoveryResult struct | wal/recovery.rs |
+| **collapsible_if Clippy 规则** | 嵌套 if `committed.contains(&tx_id) { if redo.is_ok() { ... } }` 应合并为 `committed.contains(&tx_id) && redo.is_ok() { ... }` | wal/recovery.rs:115 |
+| **RecoveryManager 需要表才能 redo** | redo_record 中 Insert/Update 需要 `table_manager.get_table()` 获取 TableMeta，表不存在则静默跳过。这意味着表定义持久化是实现完整恢复的前提 | wal/recovery.rs redo_record |
+| **HashSet difference 需要链式调用** | `&all_tx_ids - &committed_tx_ids - &aborted_tx_ids` 不能直接用 `-`，需要 `all_tx_ids.difference(&committed).cloned().collect()` 两次链式调用 | wal/recovery.rs:102-109 |
+
+### E2E 崩溃恢复测试策略
+
+| 发现 | 详情 | 来源 |
+|------|------|------|
+| **WAL 记录验证优于重启验证** | 由于 TableManager 纯内存，重启后表丢失，无法验证数据恢复。改为直接读取 WAL 文件验证记录完整性 | tests/recovery_e2e_test.rs |
+| **RecoveryManager::recover 分类验证** | 使用基础版 recover（仅分类事务）验证 committed/aborted 事务被正确识别，不需要 BufferPool/TableManager | tests/recovery_e2e_test.rs |
+| **Database 重开后重建表** | 重启后重建表可以继续执行新操作，但旧数据的索引丢失（IndexManager 也是纯内存） | tests/recovery_e2e_test.rs test_data_pages_survive_restart |
 
 ---
 
