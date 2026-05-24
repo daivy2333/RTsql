@@ -164,20 +164,20 @@
 
 | 问题 | 原因 | 解决 | 预防 |
 |------|------|------|------|
-| SlottedPage delete 不减少 slot_count | 只标记删除留空洞 | slot compacting | 删除操作必须更新 header |
-| RwLock<BTree> 跨 .await | 死锁风险 | AtomicPageId | async 避免 std::sync::RwLock |
-| search_from_page_async lifetime | Future 捕获 &self lifetime | Pin<Box<dyn Future + Send + 'a>> | async 递归显式标注 lifetime |
-| criterion iterations 过多 | 100 个独立 case | 减至 50 个代表性 case | benchmark 避免大量独立 case |
-| extract_columns 遇到 Expr::Function | 只处理 Identifier | 添加 Expr::Function 处理 | AST 辅助需覆盖所有 Expr 类型 |
-| HAVING 无法解析聚合列 | build_where 针对原始列 | build_having 针对聚合输出列 | HAVING 谓词必须用聚合输出列索引 |
-| AVG 整数除法 | Int/Int div 返回 Int | AVG 先转 f64 再除 | 聚合 AVG 必须返回 Float |
 | AggregateExecutor::new partial move | Pipeline 解构 AggregateNode | 改为传单个字段 | 避免结构体解构导致 partial move |
-| **extract_columns 遇到 Expr::Value** | EXISTS 惯用 SELECT 1，Value 未被处理 | 添加 Expr::Value 分支返回字符串表示 | AST 辅助需覆盖所有 sqlparser Expr 类型 |
-| **expr_to_column_name 不处理 Value** | 同上，SELECT 1 作为非聚合列处理失败 | 添加 Expr::Value 分支 | 确保列名提取与 extract_columns 覆盖一致 |
 | **get_subquery_first_column 不支持 SemiJoin** | 嵌套 IN 子查询 Plan 是 SemiJoin 节点 | 添加 SemiJoin/AntiJoin 分支，使用 output_columns | Plan 递归提取函数需覆盖所有带 output_columns 的节点 |
-| **多层检测永远不触发** | 1089 行 get_subquery_first_column 在 1100 行 extract_correlated_params 之前调用，且未处理 SemiJoin | 修复 get_subquery_first_column 让流程走到 extract_correlated_params | 检查顺序敏感的函数需确保上游验证不影响下游逻辑 |
+| **多层检测永远不触发** | get_subquery_first_column 在 extract_correlated_params 之前调用，且未处理 SemiJoin | 修复 get_subquery_first_column 让流程走到 extract_correlated_params | 检查顺序敏感的函数需确保上游验证不影响下游逻辑 |
 | **inner_column_index 设计错误** | 设为 usize 表示"替换位置索引"，但 ColumnExpression 在谓词树非输出列 | 改为 param_name: String，按列名匹配 ParameterExpression | 设计相关子查询注入时用名称匹配而非索引匹配 |
 | **gc_test SlottedPage SlotID 失效** | ✅ 已修复 | 引入 logical_id 解耦 RowId.slot_id 与物理 slot_index，Slot 从 4B 扩展为 6B | GC 删除操作不影响版本链/索引中的 row_id 引用 |
+
+<!-- tombstone: learned #01 --> Archived to archive.md §learned #01 2026-05-24 — 已修复踩坑 >30d
+<!-- tombstone: learned #02 --> Archived to archive.md §learned #02 2026-05-24 — 已修复踩坑 >30d
+<!-- tombstone: learned #03 --> Archived to archive.md §learned #03 2026-05-24 — 已修复踩坑 >30d
+<!-- tombstone: learned #04 --> Archived to archive.md §learned #04 2026-05-24 — 已修复踩坑 >30d
+<!-- tombstone: learned #05 --> Archived to archive.md §learned #05 2026-05-24 — 已修复踩坑 >30d
+<!-- tombstone: learned #06 --> Archived to archive.md §learned #06 2026-05-24 — 已修复踩坑 >30d
+<!-- tombstone: learned #07 --> Archived to archive.md §learned #07 2026-05-24 — 已修复踩坑 >30d
+<!-- tombstone: learned #08 --> Archived to archive.md §learned #08 2026-05-24 — 已修复踩坑 >30d
 
 ## 技巧模式
 
@@ -209,52 +209,20 @@
 
 ## 详细踩坑档案
 
-### extract_columns 遇到 Expr::Function
+<!-- tombstone: learned #09 --> Archived to archive.md §learned #09 2026-05-24 — 已修复踩坑详细档案，表格行已归档
+<!-- tombstone: learned #10 --> Archived to archive.md §learned #10 2026-05-24 — 已修复踩坑详细档案，表格行已归档
+<!-- tombstone: learned #11 --> Archived to archive.md §learned #11 2026-05-24 — 已修复踩坑详细档案，表格行已归档
+<!-- tombstone: learned #12 --> Archived to archive.md §learned #12 2026-05-24 — 已修复踩坑详细档案，表格行已归档
+<!-- tombstone: learned #13 --> Archived to archive.md §learned #13 2026-05-24 — 已修复踩坑详细档案，表格行已归档
 
-**症状**: 聚合函数出现在 SELECT 投影中时，extract_columns 只处理 Identifier，导致 parse 错误
-**根因**: AST 辅助函数缺少 Expr::Function 分支
-**解决**: extract_columns/extract_qualified_columns 添加 Expr::Function 处理，返回聚合结果列名
-**预防**: AST 辅助需覆盖所有 sqlparser Expr 类型
+### get_subquery_first_column 不支持 SemiJoin/AntiJoin — Simplified
 
-### HAVING 无法解析聚合列
+**症状→根因→解决**: 嵌套 IN 子查询 SemiJoin 节点未被 get_subquery_first_column 处理 → 添加 SemiJoin/AntiJoin 分支 + output_columns → Plan 递归提取需覆盖所有带 output_columns 的节点
 
-**症状**: `HAVING COUNT(*) > 5` 报错列找不到
-**根因**: build_where 将列引用解析为原始表列（如 `count_star` 不在原始表中）
-**解决**: 新增 build_having + build_having_expression，将列引用解析为聚合输出列索引
-**预防**: HAVING 谓词中的列引用需映射到 AggregateNode 的 output_columns
+### inner_column_index 设计失误 — Simplified
 
-### AVG 整数除法问题
+**症状→根因→解决**: CorrelatedParam 用 usize 級引匹配，但 ColumnExpression 不在输出列 → 改为 param_name: String 按列名匹配 ParameterExpression → 相关子查询注入首选名称匹配
 
-**症状**: `AVG(90,80,70)` 返回 80（Int），而非 80.0（Float）
-**根因**: Value::div 对 Int/Int 做整数除法
-**解决**: AVG finalize 时先将 sum 转为 f64，再做浮点除法
-**预防**: 聚合 AVG 结果类型必须是 Value::Float
+### gc_test SlottedPage SlotID 失效 — Simplified
 
-### extract_columns / expr_to_column_name 遇到 Expr::Value
-
-**症状**: `EXISTS (SELECT 1 FROM ...)` 返回 "Unsupported statement type"
-**根因**: extract_columns、extract_qualified_columns、expr_to_column_name 三处均未处理 Expr::Value（SQL 惯用 `SELECT 1`）
-**解决**: 三处均添加 Expr::Value 分支，返回 value 字符串表示作为列名
-**预防**: 每新增一种 Expr 类型到系统时，需在所有 AST 辅助函数中同步更新
-
-### get_subquery_first_column 不支持 SemiJoin/AntiJoin
-
-**症状**: 嵌套 IN 子查询（中间层含 SemiJoin）返回 "Subquery returns multiple columns"
-**根因**: get_subquery_first_column 在 extract_correlated_params（多层检测）之前调用，且仅处理 Scan/Filter/Aggregate
-**解决**: 添加 SemiJoin/AntiJoin 分支，使用 output_columns 字段提取首列
-**预防**: Plan 递归提取函数需覆盖所有带 output_columns 的节点类型
-
-### inner_column_index 设计失误
-
-**症状**: CorrelatedParam 中用 usize 表示"替换位置"，但 ColumnExpression 在谓词树内不在输出列中
-**根因**: 设计时未区分"内层输出列索引"和"谓词树内匹配"两个概念
-**解决**: 重构为 param_name: String，注入时按列名遍历谓词树匹配 ParameterExpression
-**预防**: 设计相关子查询注入机制时首选名称匹配而非索引匹配，避免位置语义歧义
-
-### gc_test SlottedPage SlotID 失效（M10 遗留 bug，2026-05-23 发现，2026-05-24 修复）
-
-**症状**: gc_test 3 个测试 panic，`range end index 22 out of range for slice of length 0` at data_page.rs:82
-**根因**: `gc_table()` 对 SlottedPage 执行 `delete_slot` + compacting 后，物理 SlotID 布局变化，但版本链（next_version row_id）和索引中的 row_id 引用仍指向旧 slot_id → `get_slot_data()` 返回空切片 → `slot_data[..22]` slice 越界
-**连锁效果**: 第一个 panic poison BufferPool 内 Mutex → 第二个测试触发 PoisonError → 析构中再 panic → SIGABRT
-**解决**: 引入 logical_id 解耦 RowId.slot_id 与物理 slot_index。Slot 从 4B 扩展为 6B（新增 logical_id: u16），header 新增 next_logical_id 字段。所有 data_page.rs 操作改用 logical_id 查找。delete_slot 必须序列化 header 回 page.data。
-**预防**: 数据页引用应使用 stable ID（logical_id），而非物理位置（slot_index）；SlottedPage header 修改后必须 serialize
+**症状→根因→解决**: GC delete_slot + compacting 后物理 SlotID 变化，版本链引用旧 slot_id → slice 越界 → 引入 logical_id 解耦（Slot 4B→6B，header 新增 next_logical_id） → 数据页引用用 stable ID，header 修改后必须 serialize

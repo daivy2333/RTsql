@@ -87,16 +87,13 @@
 
 - [x] T1: WalRecord 扩展 + CRC32 + LSN (1fcc213)
 - [x] T2: WALBuffer + Group Commit (f2a4973)
-- [ ] ~~T1: 设计 WALRecord 结构~~ (已被 T1 覆盖)
-- [ ] ~~T2: 实现 WALWriter + buffer管理~~ (已被 T2 覆盖)
-- [ ] ~~T3: Group Commit策略实现~~ (已被 T2 覆盖)
-- [ ] T4: TransactionManager 集成 WAL（被 gc_test bug 阻塞）
+- [x] T3: Logical Row ID 修复 gc_test bug (已修复)
+- [ ] T4: TransactionManager 集成 WAL
 - [ ] T5: Executor 集成 WAL
 - [ ] T6: RecoveryManager 数据重放
 - [ ] T7: 性能基准测试（验证 5-10x faster）
 - [ ] T8: 崩溃恢复 E2E 测试
 
-**阻塞项**: gc_test 3 个测试 panic（M10 GC 遗留 bug）
 **预估工期**：3-5天（剩余 T4-T8 约 2-3 天）
 
 ---
