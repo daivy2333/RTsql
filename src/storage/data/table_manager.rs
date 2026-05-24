@@ -73,7 +73,6 @@ impl TableMeta {
                 let header = buffer_pool.read_version_header(current_id).await?;
 
                 // Collect committed old versions (not the latest)
-                // The latest version is the one pointed to by the index (row_id)
                 if header.commit_tx_id().is_some() && current_id != row_id {
                     old_versions.push(current_id);
                 }

@@ -131,7 +131,7 @@ impl<'a> LeafNode<'a> {
 
         // 5. 添加 slot（注意：SlottedPage 的 add_slot 总是添加到末尾）
         // 我们需要手动调整 slot 顺序以保持有序
-        let slot_index = self
+        let (_logical_id, slot_index) = self
             .slotted
             .add_slot(&data)
             .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
@@ -194,7 +194,8 @@ impl<'a> LeafNode<'a> {
         row_id.serialize(&mut data[MAX_KEY_LEN..]);
 
         // 添加 slot（直接添加到末尾）
-        self.slotted
+        let _: (u16, usize) = self
+            .slotted
             .add_slot(&data)
             .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
 
@@ -574,7 +575,7 @@ impl<'a> InternalNode<'a> {
         data[MAX_KEY_LEN..].copy_from_slice(&(right_child.0 as u32).to_le_bytes());
 
         // 4. 添加 slot
-        let slot_index = self
+        let (_logical_id, slot_index) = self
             .slotted
             .add_slot(&data)
             .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
@@ -647,7 +648,8 @@ impl<'a> InternalNode<'a> {
         key.serialize(&mut data[..MAX_KEY_LEN]);
         data[MAX_KEY_LEN..].copy_from_slice(&(right_child.0 as u32).to_le_bytes());
 
-        self.slotted
+        let _: (u16, usize) = self
+            .slotted
             .add_slot(&data)
             .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
 
@@ -961,13 +963,13 @@ mod tests {
         let mut entry0 = vec![0u8; MAX_KEY_LEN + 4];
         Key::new(b"b").serialize(&mut entry0[..MAX_KEY_LEN]);
         entry0[MAX_KEY_LEN..MAX_KEY_LEN + 4].copy_from_slice(&100u32.to_le_bytes());
-        slotted.add_slot(&entry0).unwrap();
+        let _: (u16, usize) = slotted.add_slot(&entry0).unwrap();
 
         // 写入 slot 1: Key("d") + child_page_id(200)
         let mut entry1 = vec![0u8; MAX_KEY_LEN + 4];
         Key::new(b"d").serialize(&mut entry1[..MAX_KEY_LEN]);
         entry1[MAX_KEY_LEN..MAX_KEY_LEN + 4].copy_from_slice(&200u32.to_le_bytes());
-        slotted.add_slot(&entry1).unwrap();
+        let _: (u16, usize) = slotted.add_slot(&entry1).unwrap();
 
         // 通过 InternalNodeRef 读取验证
         let data: &[u8] = page.data.as_ref();
@@ -1020,7 +1022,7 @@ mod tests {
                 let mut entry = vec![0u8; MAX_KEY_LEN + 4];
                 Key::new(&[ch]).serialize(&mut entry[..MAX_KEY_LEN]);
                 entry[MAX_KEY_LEN..MAX_KEY_LEN + 4].copy_from_slice(&child.to_le_bytes());
-                slotted.add_slot(&entry).unwrap();
+                let _: (u16, usize) = slotted.add_slot(&entry).unwrap();
             }
         }
         // Now slotted is dropped, we can modify page.data directly
