@@ -212,4 +212,11 @@ impl BufferPool {
     pub async fn mark_tx_aborted(&self, _aborted_tx_id: u64) -> Result<()> {
         Ok(())
     }
+
+    pub async fn free_page(&self, page_id: PageId) -> Result<()> {
+        self.pages.write().await.remove(&page_id);
+        let mut hand = self.clock_hand.write().await;
+        hand.retain(|id| *id != page_id);
+        self.storage.free_page(page_id).await
+    }
 }

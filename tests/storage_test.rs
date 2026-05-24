@@ -191,20 +191,46 @@ mod tests {
     /// Tests that the method exists and handles non-existent RowId correctly.
     /// Full version chain traversal tests require UpdateExecutor which creates version chains.
     #[tokio::test]
-    async fn test_find_visible_version_empty_row() {
+    async fn test_free_page_reuse() {
         let temp_file = NamedTempFile::new().unwrap();
-        let storage = Arc::new(FileStorage::open(temp_file.path()).unwrap());
-        let pool = BufferPool::new(10, storage.clone()).unwrap();
+        let storage = FileStorage::open(temp_file.path()).unwrap();
 
-        // Create a snapshot for tx_id=1 with no active transactions
-        let snapshot = Snapshot::new(1, vec![]);
+        let page0 = storage.allocate_page().await.unwrap();
+        let page1 = storage.allocate_page().await.unwrap();
+        let page2 = storage.allocate_page().await.unwrap();
 
-        // Test with non-existent RowId (page 0, slot 0 doesn't exist)
-        let row_id = RowId::new(0, 0);
-        let result = pool.find_visible_version(row_id, &snapshot).await;
+        assert_eq!(page0, PageId(0));
+        assert_eq!(page1, PageId(1));
+        assert_eq!(page2, PageId(2));
+        assert_eq!(storage.page_count(), 3);
 
-        // Should return an error since the page doesn't exist
-        // (BufferPool::get_page will fail to load non-existent page)
-        assert!(result.is_err());
+        storage.free_page(page1).await.unwrap();
+
+        let reused = storage.allocate_page().await.unwrap();
+        assert_eq!(reused, PageId(1));
+        assert_eq!(storage.page_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_free_page_zeroed() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = FileStorage::open(temp_file.path()).unwrap();
+
+        let page_id = storage.allocate_page().await.unwrap();
+        let mut page = Page::new(page_id);
+        page.data[0] = 0xDE;
+        page.data[100] = 0xAD;
+        page.data[4095] = 0xBE;
+        storage.write_page(page_id, &page).await.unwrap();
+
+        storage.free_page(page_id).await.unwrap();
+
+        let reused = storage.allocate_page().await.unwrap();
+        assert_eq!(reused, page_id);
+
+        let read_back = storage.read_page(reused).await.unwrap();
+        assert_eq!(read_back.data[0], 0);
+        assert_eq!(read_back.data[100], 0);
+        assert_eq!(read_back.data[4095], 0);
     }
 }

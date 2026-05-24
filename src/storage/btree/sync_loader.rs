@@ -30,4 +30,9 @@ impl SyncPageLoader {
         self.runtime
             .block_on(self.buffer_pool.storage().allocate_page())
     }
+
+    /// Free page synchronously using block_on
+    pub fn free_page(&self, page_id: PageId) -> Result<()> {
+        self.runtime.block_on(self.buffer_pool.free_page(page_id))
+    }
 }
