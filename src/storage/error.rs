@@ -65,6 +65,15 @@ pub enum StorageError {
 
     #[error("WAL error: {0}")]
     WalError(String),
+
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+impl From<crate::wal::WalError> for StorageError {
+    fn from(e: crate::wal::WalError) -> Self {
+        StorageError::WalError(e.to_string())
+    }
+}

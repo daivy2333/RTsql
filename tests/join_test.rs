@@ -32,7 +32,7 @@ async fn create_and_populate_table(
 
     if !rows.is_empty() {
         let mut insert_executor =
-            InsertExecutor::new(table_meta.clone(), buffer_pool, tx_manager, rows, 0);
+            InsertExecutor::new(table_meta.clone(), buffer_pool, tx_manager, rows, 0, None);
         insert_executor.next().await?;
     }
 

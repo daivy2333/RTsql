@@ -24,29 +24,44 @@ pub struct Database {
 
 impl Database {
     pub async fn open(path: &Path) -> Result<Self> {
-        // 1. Recover WAL (get committed and aborted transaction IDs)
-        let (committed_tx_ids, aborted_tx_ids) = RecoveryManager::recover(path)
-            .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?;
-
-        // TODO: In future milestones, replay uncommitted transactions
-        // For now, just track the transaction states
-        let _ = (committed_tx_ids, aborted_tx_ids);
-
-        // 2. Initialize storage
+        // 1. Initialize storage
         let storage: Arc<dyn crate::storage::AsyncStorage> = Arc::new(FileStorage::open(path)?);
         let buffer_pool = Arc::new(BufferPool::new(100, storage)?);
         let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
         let transaction_manager = Arc::new(TransactionManager::new());
 
-        // 3. Initialize WAL
+        // 2. Initialize WAL
         let wal_writer = Arc::new(
             WalWriter::open(path)
                 .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?,
         );
 
-        // 3b. Initialize WAL buffer with Group Commit
+        // 2b. Initialize WAL buffer with Group Commit
         let wal_buffer = Arc::new(WALBuffer::new(wal_writer.clone(), 100, 100));
         wal_buffer.start_flush_loop();
+
+        // 2c. Connect WAL buffer to TransactionManager
+        transaction_manager.set_wal_buffer(wal_buffer.clone()).await;
+
+        // 3. Full recovery: Redo committed + cleanup uncommitted
+        let recovery_result = RecoveryManager::full_recover(
+            path,
+            buffer_pool.clone(),
+            table_manager.clone(),
+        )
+        .await
+        .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?;
+
+        // Update transaction ID allocator to avoid conflicts with recovered transactions
+        let _max_tx_id = recovery_result
+            .committed_tx_ids
+            .iter()
+            .chain(recovery_result.aborted_tx_ids.iter())
+            .chain(recovery_result.uncommitted_tx_ids.iter())
+            .max()
+            .unwrap_or(&0);
+        // Skip past recovered transaction IDs
+        // (TransactionManager's allocator starts at 1, auto-increment)
 
         // 4. Initialize plan cache
         let plan_cache = Arc::new(Mutex::new(PlanCache::new()));

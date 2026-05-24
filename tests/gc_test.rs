@@ -46,6 +46,7 @@ async fn test_gc_removes_old_versions() -> Result<()> {
         tx_manager.clone(),
         values,
         tx1.id(),
+        None,
     );
     insert_executor.next().await?;
 
@@ -69,6 +70,7 @@ async fn test_gc_removes_old_versions() -> Result<()> {
         "id".to_string(),
         Value::Int(20),
         tx2.id(),
+        None,
     );
     update_executor.next().await?;
 
@@ -92,6 +94,7 @@ async fn test_gc_removes_old_versions() -> Result<()> {
         "id".to_string(),
         Value::Int(30),
         tx3.id(),
+        None,
     );
     update_executor.next().await?;
 
@@ -182,6 +185,7 @@ async fn test_gc_preserves_uncommitted_versions() -> Result<()> {
         tx_manager.clone(),
         values,
         tx1.id(),
+        None,
     );
     insert_executor.next().await?;
 
@@ -200,6 +204,7 @@ async fn test_gc_preserves_uncommitted_versions() -> Result<()> {
         "id".to_string(),
         Value::Int(200),
         tx2.id(),
+        None,
     );
     update_executor.next().await?;
 
@@ -287,6 +292,7 @@ async fn test_gc_multiple_keys() -> Result<()> {
             tx_manager.clone(),
             vec![vec![Value::Int(versions[i][0])]],
             tx1.id(),
+            None,
         );
         insert_executor.next().await?;
         tx_manager.commit(tx1, &buffer_pool).await?;
@@ -301,6 +307,7 @@ async fn test_gc_multiple_keys() -> Result<()> {
             "id".to_string(),
             Value::Int(versions[i][1]),
             tx2.id(),
+            None,
         );
         update_executor.next().await?;
         tx_manager.commit(tx2, &buffer_pool).await?;
@@ -315,6 +322,7 @@ async fn test_gc_multiple_keys() -> Result<()> {
             "id".to_string(),
             Value::Int(versions[i][2]),
             tx3.id(),
+            None,
         );
         update_executor.next().await?;
         tx_manager.commit(tx3, &buffer_pool).await?;

@@ -323,7 +323,8 @@ pub(crate) fn create_executor_from_plan(
                     database.buffer_pool.clone(),
                     database.transaction_manager.clone(),
                     node.values,
-                    0,
+                    0, // placeholder, will be set by execute_inner
+                    Some(database.wal_buffer.clone()),
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -336,7 +337,8 @@ pub(crate) fn create_executor_from_plan(
                     node.key.as_bytes().to_vec(),
                     node.column,
                     node.new_value,
-                    0,
+                    0, // placeholder, will be set by execute_inner
+                    Some(database.wal_buffer.clone()),
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -345,8 +347,10 @@ pub(crate) fn create_executor_from_plan(
                 let index_manager = table_meta.index_manager.clone();
                 Ok(Box::new(DeleteExecutor::new(
                     index_manager,
+                    table_meta.name.clone(),
                     node.key.as_bytes().to_vec(),
-                    0,
+                    0, // placeholder, will be set by execute_inner
+                    Some(database.wal_buffer.clone()),
                 )) as Box<dyn Executor + Send>)
             }
 
