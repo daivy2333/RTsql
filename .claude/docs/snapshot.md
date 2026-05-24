@@ -1,23 +1,20 @@
 # 项目快照
 
-> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
+> 最后更新：2026-05-24（gc_test bug 已修复，M18 Phase3 T3 解除阻塞）
 
 ## 当前状态
 
-- **阶段**: M18 Phase2 Executor层非唯一索引测试覆盖 ✅ 已完成
-- **状态**: IndexScanAllExecutor 实现完成，SQL层集成验证通过
-- **测试**: 101 tests pass, 0 failures
-- **Clippy**: 0 warnings
-- **下一步**: Phase3 WAL集成 + Group Commit
-
-## 最近提交（M17.5）
-
-- 修复 Clippy warnings（自动修复 33 + 手动修复 6 + 架构 warnings 留档）
-- 修复测试失败（planner_test.rs 编译错误 + btree_test 非唯一索引测试）
-- 扩展基准测试（benches/sqlite_compare.rs + 多维度对比）
-- 代码格式统一（cargo fmt）
+- **阶段**: M18 Phase3 WAL集成 + Group Commit + 崩溃恢复
+- **进度**: T1 ✅ T2 ✅ T3 ✅（logical Row ID 修复完成），T4-T8 待开发
+- **测试**: 101+ tests pass, 0 failures（含 gc_test 3 个测试）
+- **Clippy**: 0 warnings（代码层面）
+- **解除阻塞**: gc_test SlottedPage SlotID 失效 bug 已通过 logical Row ID 修复
 
 ## 最近提交
+
+- 27e8aca feat(M18-T2): implement WALBuffer with Group Commit strategy
+- 1fcc213 feat(M18-T1): extend WalRecord with BeginTxn/CommitTxn/AbortTxn, add LSN + CRC32
+- feat(M18-T3): introduce logical Row ID to fix gc_test SlottedPage SlotID invalidation bug
 
 - 72c69dc fix(M17): fix InternalNodeRef::find_child_page_id linear search routing
 - f54a6c7 feat(M17-T5/T8): add B-Tree split test suite and fix split/search/delete bugs
@@ -39,31 +36,7 @@
 
 ## 遗留问题清单
 
-### Clippy (47 warnings)
-
-| 类别 | 数量 | 修复难度 |
-|------|------|----------|
-| io::Error::other (io_other_error) | 10 | 简单 |
-| clone_on_copy (Copy类型 .clone()) | 3 | 简单 |
-| redundant_closure | 4 | 简单 |
-| into_iter on IntoIterator | 5 | 简单 |
-| to_string in format args | 3 | 简单 |
-| only_used_in_recursion | 4 | 中等 |
-| too_many_arguments | 2 | 中等(需重构参数) |
-| await_holding_lock | 1 | 中等(需重构buffer_pool) |
-| dead_code (unused fields) | 2 | 需评估是否删除 |
-| unused imports/variables | 2 | 简单 |
-| 其他 (single_match, byte_str, etc.) | 6 | 简单 |
-| module_inception | 1 | 需评估 |
-| explicit_auto_deref | 1 | 简单 |
-
-### 测试问题
-
-| 问题 | 状态 | 修复方式 |
-|------|------|----------|
-| test_btree_insert_duplicate_key_returns_error | ❌ 失败 | 更新为测试非唯一索引行为 |
-| planner_test.rs (19 编译错误) | ❌ 无法编译 | 修复 builder mutability |
-| M15 SQLite 全面对比 | ⏳ 未执行 | 编写基准测试脚本 |
+### Clippy — 0 warnings ✅（Phase1 已全部清理）
 
 ### M15 全面对比待完成项
 
@@ -81,14 +54,12 @@
 
 ## 下一步行动
 
-1. **Phase1: 架构Warnings清理**（8个 Clippy warnings 修复）
-2. **Phase2: Executor层非唯一索引测试覆盖**（新增 IndexScanAllExecutor）
-3. **Phase3: WAL集成 + Group Commit**（INSERT 性能优化）
-4. **Phase4: B-Tree Merge**（删除后页合并）
+1. **Phase3: WAL集成 T4-T8**（TransactionManager集成 + Executor集成 + RecoveryManager + 基准测试 + 崩溃恢复E2E）
+2. **Phase4: B-Tree Merge**（删除后页合并）
 
 **里程碑路线图**:
 - M16: ✅ 子查询支持
 - M17-Phase1: ✅ 非唯一索引
 - M17-Phase2: ✅ B-Tree Split 机制
 - M17.5: ✅ **代码清理 + 全面对比**
-- **M18**: ⏳ **优化项目与技术债清理**（Phase1-4）
+- **M18**: ⏳ **优化项目与技术债清理**（Phase1-3 进行中，Phase4 待开始）

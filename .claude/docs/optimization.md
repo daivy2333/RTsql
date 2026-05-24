@@ -171,6 +171,27 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 
 ---
 
+## M18 Phase3 WAL集成 + Group Commit + 崩溃恢复（进行中）
+
+> 2026-05-23: Phase3 开始，T1/T2 完成，T3 被 gc_test bug 阻塞
+
+**T1 成果**（WalRecord 扩展 + CRC32 + LSN）：
+- ✅ WalRecord 新增 BeginTxn/CommitTxn/AbortTxn 变体
+- ✅ LSN + CRC32 序列化格式：[lsn:8B][type:1B][len:4B][body:var][crc32:4B]
+- ✅ WalWriter::write_batch 批量写入 + 单次 fsync
+- ✅ WalReader CRC 校验 + 新旧格式自动检测
+
+**T2 成果**（WALBuffer + Group Commit）：
+- ✅ WALBuffer 内存缓冲 + Notify 信号 + 后台 tokio task
+- ✅ Group Commit: append_commit_and_wait → flush_notify → do_flush → 通知等待者
+- ✅ tokio::select! 双监听: flush_notify + 定时器
+- ✅ Database 添加 wal_buffer 字段 + start_flush_loop()
+
+**阻塞项**：
+- ❌ gc_test 3 个测试 panic — GC 删除 tuple 后 SlottedPage SlotID 失效（M10 遗留 bug）
+
+---
+
 ## 技术债清单（M18 Phase1 已清理）
 
 ### Clippy 债务 ✅ 已解决
@@ -216,6 +237,7 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 | P0 | test_btree_insert_duplicate_key_returns_error 失败 | 更新为非唯一索引行为测试 | ✅ 已修复 |
 | P0 | planner_test.rs 19 个编译错误 | 修复 builder mutability | ✅ 已修复 |
 | P1 | Executor 层非唯一索引测试覆盖缺失 | IndexScanAllExecutor + 3 tests | ✅ 已修复（M18-Phase2） |
+| **P0** | **gc_test 3 个测试 panic** | **GC delete_slot + compacting 后 SlotID 变化，但 row_id 引用未更新 → slice 越界** | **❌ 未修复** |
 
 **Executor 层测试覆盖说明**：M17 的非唯一索引功能（NonUniqueIndex + search_all）已在 BTree 层通过 btree_test 和 btree_split_test 验证，但 Executor 层（IndexScanExecutor）暂不支持 search_all。需要后续添加 IndexScanAllExecutor 或修改 IndexScanExecutor 以支持非唯一索引扫描。
 
