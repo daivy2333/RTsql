@@ -124,6 +124,34 @@
 
 ---
 
+<!-- archive: learned #14 -->
+**日期**: 2026-05-24
+**条目**: 待探索 — WAL Group Commit
+**原分类**: 待探索
+**置信度**: HIGH
+**理由**: M18-Phase3 已完成，不再需要探索
+**恢复条件**: 需要回顾 WAL Group Commit 原始规划时
+
+原始内容:
+
+| WAL Group Commit | 中 | M18，INSERT 5-10x 提速 |
+
+---
+
+<!-- archive: learned #15 -->
+**日期**: 2026-05-24
+**条目**: 待探索 — B-Tree split/merge
+**原分类**: 待探索
+**置信度**: HIGH
+**理由**: M17-Phase2 + M18-Phase4 已完成，不再需要探索
+**恢复条件**: 需要回顾 B-Tree 优化原始规划时
+
+原始内容:
+
+| B-Tree split/merge | 中 | M17 索引优化 |
+
+---
+
 ## optimization.md 归档
 
 <!-- archive: optimization #01 -->
@@ -175,6 +203,34 @@
 
 原始内容:
 | 4 | BTree 零拷贝读 | M14 | PK 查询 1.2x |
+
+---
+
+<!-- archive: optimization #08 -->
+**日期**: 2026-05-24
+**条目**: INSERT 慢 — WAL Group Commit
+**状态**: 已完成 (M18-Phase3)
+**置信度**: HIGH
+**理由**: WAL + Group Commit 已于 M18-Phase3 实现
+**恢复条件**: 需要回顾 INSERT 优化原始规划时
+
+原始内容:
+
+| INSERT 慢 | ~440µs/行 | 5-10x 提速 | WAL Group Commit | M18 |
+
+---
+
+<!-- archive: optimization #09 -->
+**日期**: 2026-05-24
+**条目**: B-Tree Merge 未实现
+**状态**: 已完成 (M18-Phase4)
+**置信度**: HIGH
+**理由**: B-Tree Merge 已于 M18-Phase4 实现
+**恢复条件**: 需要回顾 Merge 原始规划时
+
+原始内容:
+
+| B-Tree Merge | 未实现 | 删除后 underflow | 页合并 + 页释放 | M18+ |
 
 ---
 

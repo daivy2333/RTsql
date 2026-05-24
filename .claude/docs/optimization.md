@@ -125,12 +125,11 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 
 ## 当前性能瓶颈
 
-| 瓶颈 | 现状 | 目标 | 优化方案 | 里程碑 |
-|------|------|------|----------|--------|
-| INSERT 慢 | ~440µs/行 | 5-10x 提速 | WAL Group Commit | M18 |
-| **B-Tree split 缺失** | **✅ 已完成** | **多层级索引** | **递归 split + 回传** | **M17-Phase2 ✅** |
-| Executor WAL 集成 | 未写 WAL | 崩溃恢复 | Executor 写 WAL 记录 | M18 |
-| B-Tree Merge | 未实现 | 删除后 underflow | 页合并 + 页释放 | M18+ |
+> 原性能瓶颈均已解决（M17-Phase2 / M18-Phase3 / M18-Phase4）。
+> 下一轮性能瓶颈识别待项目收尾后进行。
+
+<!-- tombstone: optimization #08 --> Archived to archive.md §optimization #08 2026-05-24 — INSERT 慢 WAL Group Commit 已完成
+<!-- tombstone: optimization #09 --> Archived to archive.md §optimization #09 2026-05-24 — B-Tree Merge 已完成
 
 ## M17.5 Clippy 清理（已完成）
 
@@ -172,24 +171,9 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 
 ---
 
-## M18 Phase3 WAL集成 + Group Commit + 崩溃恢复（进行中）
+## M18 Phase3 WAL集成 + Group Commit + 崩溃恢复（已完成）✅
 
-> 2026-05-23: Phase3 开始，T1/T2 完成，T3 被 gc_test bug 阻塞
-
-**T1 成果**（WalRecord 扩展 + CRC32 + LSN）：
-- ✅ WalRecord 新增 BeginTxn/CommitTxn/AbortTxn 变体
-- ✅ LSN + CRC32 序列化格式：[lsn:8B][type:1B][len:4B][body:var][crc32:4B]
-- ✅ WalWriter::write_batch 批量写入 + 单次 fsync
-- ✅ WalReader CRC 校验 + 新旧格式自动检测
-
-**T2 成果**（WALBuffer + Group Commit）：
-- ✅ WALBuffer 内存缓冲 + Notify 信号 + 后台 tokio task
-- ✅ Group Commit: append_commit_and_wait → flush_notify → do_flush → 通知等待者
-- ✅ tokio::select! 双监听: flush_notify + 定时器
-- ✅ Database 添加 wal_buffer 字段 + start_flush_loop()
-
-**阻塞项**：
-- ❌ gc_test 3 个测试 panic — GC 删除 tuple 后 SlottedPage SlotID 失效（M10 遗留 bug）
+> 2026-05-24: T1-T8 全部完成，417 tests pass。关键成果：WalRecord 扩展 + CRC32/LSN、WALBuffer + Group Commit、Logical Row ID 修复 gc_test、Executor 隐式事务包装、RecoveryManager 数据重放、E2E 崩溃恢复测试。
 
 ---
 
@@ -244,11 +228,11 @@ RTsql 在写入和点查询场景展现出显著性能优势，验证了异步�
 
 ## 优化路线图
 
-| 里程碑 | 优化项 | 目标 | 状态 |
-|--------|--------|------|------|
-| M17-Phase2 | B-Tree Split | 索引容量扩展 | ✅ 完成 |
-| **M17.5** | **代码清理 + 全面对比** | **0 clippy、0 test failures、全面基准** | **⏳ 规划中** |
-| M18 | WAL 集成 + Group Commit | INSERT 5-10x 提速 | ⏳ 待开始 |
+| 里程碑 | 优化项 | 状态 |
+|--------|--------|------|
+| M17-Phase2 | B-Tree Split | ✅ 完成 |
+| M17.5 | 代码清理 + 全面对比 | ✅ 完成 |
+| M18 | WAL + Group Commit + B-Tree Merge | ✅ 完成 |
 
 ## 低优先级优化
 

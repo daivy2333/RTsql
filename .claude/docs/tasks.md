@@ -1,24 +1,11 @@
 # 任务追踪
 
-> 最后更新：2026-05-24（M18 Phase3 全部完成，WAL Group Commit 基准测试通过）
+> 最后更新：2026-05-24（M18 全部完成，B-Tree Merge 集成测试通过）
 
 ## ✅ 已完成：修复 gc_test SlottedPage SlotID 失效 bug
 
-**优先级**: P0 — 已修复
-
-- [x] 引入 logical_id 解耦 RowId.slot_id 与物理 slot_index
-- [x] Slot 从 4B 扩展为 6B（新增 logical_id: u16）
-- [x] SlottedPageHeader 新增 next_logical_id 字段
-- [x] 新增 get_slot_by_logical_id / delete_slot_by_logical_id 方法
-- [x] delete_slot 修复：serialize header back to page.data
-- [x] data_page.rs 全部改用 logical_id 查找
-- [x] btree/node.rs 适配 add_slot 返回值
-- [x] gc_test 3 个测试全部通过
-- [x] 全量 cargo test 通过（417 tests, 0 failures）
-- [x] Clippy 0 warnings
-
-**修复方案**: 逻辑 Row ID（SlottedPage 内部 logical_id → slot_index 映射）
-**详细踩坑档案**: `.claude/docs/learned.md` — gc_test SlottedPage SlotID 失效
+**优先级**: P0 — 已修复 | **方案**: 逻辑 Row ID（logical_id → slot_index 映射）
+**详细档案**: `.claude/docs/learned.md` — gc_test SlottedPage SlotID 失效
 
 ---
 
@@ -95,19 +82,25 @@
 
 ---
 
-### Phase4: B-Tree Merge（待开始）
+### Phase4: B-Tree Merge ✅
 
-- [ ] T1: LeafNode::merge 实现
-- [ ] T2: BTree::delete 递归 merge回传
-- [ ] T3: InternalNode merge处理
-- [ ] T4: BufferPool.free_page 集成
-- [ ] T5: btree_merge_test.rs 新增测试
+- [x] T1: LeafNode::merge_right + redistribute_right + can_merge_with
+- [x] T2: BTree::delete 递归 merge 回传（redistribution-first）
+- [x] T3: InternalNode::merge_right + remove_separator + min_keys
+- [x] T4: AsyncStorage::free_page + FileStorage free-list + BufferPool/SyncPageLoader
+- [x] T5: tests/btree_merge_test.rs 10 场景覆盖
+- [x] T5+T7: root shrink 传播 + IndexManager root_page_id 更新
 
-**预估工期**：2-3天
+**核心成果**：
+- ✅ redistribution-first 策略（先借后合，稳定 B-Tree）
+- ✅ 递归 merge 传播（mirror split 传播模式）
+- ✅ free-list 页复用（FileStorage 释放页可重新分配）
+- ✅ root shrink 正确处理（IndexManager AtomicU64 同步更新）
+- ✅ ~430 tests pass, 0 failures, Clippy 0 warnings
 
 ---
 
-## 下一步：Phase4 B-Tree Merge
+## 下一步：项目收尾
 
 ---
 
@@ -145,4 +138,4 @@
 - M18-Phase1: ✅ 架构Warnings清理
 - M18-Phase2: ✅ Executor层非唯一索引
 - **M18-Phase3**: ✅ **WAL集成 + Group Commit + 崩溃恢复**（全部完成）
-- M18-Phase4: ⏳ B-Tree Merge（待开始）
+- **M18-Phase4**: ✅ **B-Tree Merge**（全部完成）
