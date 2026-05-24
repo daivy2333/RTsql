@@ -19,6 +19,14 @@ pub struct LeafSplitData {
     pub new_page_id: PageId,
 }
 
+/// Leaf merge 操作的中间数据（由 BTree 层消费）
+pub struct LeafMergeResult {
+    /// 需要释放的页
+    pub freed_page_id: PageId,
+    /// 父节点中需要移除的 separator key（被吸收页的第一个 key）
+    pub separator_key: Key,
+}
+
 /// Internal split 操作的中间数据（由 BTree 层消费）
 pub struct InternalSplitData {
     /// 上推到父节点的中间 key（不保留在任一子节点）
@@ -29,6 +37,14 @@ pub struct InternalSplitData {
     pub right_separators: Vec<(Key, u32)>,
     /// 新页的 PageId
     pub new_page_id: PageId,
+}
+
+/// Internal merge 操作的结果（由 BTree 层消费）
+pub struct InternalMergeResult {
+    /// 需要释放的页 ID（被合并的兄弟页）
+    pub freed_page_id: PageId,
+    /// 需要从祖父节点移除的 separator key
+    pub separator_key: Key,
 }
 
 /// LeafNode：存储 Key + RowId
@@ -353,6 +369,152 @@ impl<'a> LeafNode<'a> {
             old_next_page_id,
             new_page_id,
         })
+    }
+
+    /// 判断是否可以将 sibling 的所有 entry 合并到 self 中（不超过 page 容量）
+    pub fn can_merge_with(&self, sibling: &LeafNode) -> bool {
+        let total = self.key_count() + sibling.key_count();
+        let entry_size = MAX_KEY_LEN + RowId::SIZE;
+        SlottedPageHeader::SIZE + total * (entry_size + Slot::SIZE) <= Page::PAGE_SIZE
+    }
+
+    /// 将右兄弟节点的所有 entry 吸收到 self 中
+    pub fn merge_right(
+        &mut self,
+        right_sibling: &LeafNode,
+        right_sibling_page_id: PageId,
+    ) -> Result<LeafMergeResult, StorageError> {
+        let self_entries: Vec<(Key, RowId)> = (0..self.key_count())
+            .filter_map(|i| {
+                let key = self.get_key(i)?;
+                let row_id = self.get_row_id(i)?;
+                Some((key, row_id))
+            })
+            .collect();
+
+        let right_entries: Vec<(Key, RowId)> = (0..right_sibling.key_count())
+            .filter_map(|i| {
+                let key = right_sibling.get_key(i)?;
+                let row_id = right_sibling.get_row_id(i)?;
+                Some((key, row_id))
+            })
+            .collect();
+
+        let separator_key = right_entries
+            .first()
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| {
+                StorageError::Io(std::io::Error::other("right sibling is empty"))
+            })?;
+
+        let mut entries = self_entries;
+        entries.extend(right_entries);
+        entries.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+
+        if !self.can_merge_with(right_sibling) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "merge would exceed page capacity",
+            )));
+        }
+
+        let next_leaf = right_sibling.next_leaf_page_id();
+
+        // Rebuild self with combined entries
+        let page_id = self.slotted.page_id();
+        let mut new_page = Page::new(page_id);
+        let mut new_leaf = LeafNode::init(&mut new_page);
+        for (key, row_id) in &entries {
+            new_leaf.insert_simple(key, row_id)?;
+        }
+        self.slotted
+            .page
+            .data
+            .copy_from_slice(new_page.data.as_ref());
+        self.slotted.reload_header();
+
+        self.set_next_leaf_page_id(next_leaf);
+
+        Ok(LeafMergeResult {
+            freed_page_id: right_sibling_page_id,
+            separator_key,
+        })
+    }
+
+    /// 从右兄弟节点借 entry，使两边的 entry 数量趋于均衡
+    pub fn redistribute_right(
+        &mut self,
+        right_sibling: &mut LeafNode,
+        _right_sibling_page_id: PageId,
+    ) -> Result<Key, StorageError> {
+        let moves = (right_sibling.key_count() - self.key_count()) / 2;
+
+        if moves == 0 {
+            return Err(StorageError::Io(std::io::Error::other(
+                "redistribute: nothing to move (right sibling has no extra entries)",
+            )));
+        }
+
+        let self_entries: Vec<(Key, RowId)> = (0..self.key_count())
+            .filter_map(|i| {
+                let key = self.get_key(i)?;
+                let row_id = self.get_row_id(i)?;
+                Some((key, row_id))
+            })
+            .collect();
+
+        let right_entries: Vec<(Key, RowId)> = (0..right_sibling.key_count())
+            .filter_map(|i| {
+                let key = right_sibling.get_key(i)?;
+                let row_id = right_sibling.get_row_id(i)?;
+                Some((key, row_id))
+            })
+            .collect();
+
+        let mut entries = self_entries;
+        entries.extend(right_entries);
+        entries.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+
+        let self_count = self.key_count() + moves;
+        let self_share = &entries[..self_count];
+        let right_share = &entries[self_count..];
+
+        let new_right_first_key = right_share
+            .first()
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| {
+                StorageError::Io(std::io::Error::other(
+                    "no entries left for right sibling after redistribute",
+                ))
+            })?;
+
+        // Rebuild self
+        let self_page_id = self.slotted.page_id();
+        let mut new_self_page = Page::new(self_page_id);
+        let mut new_self = LeafNode::init(&mut new_self_page);
+        for (key, row_id) in self_share {
+            new_self.insert_simple(key, row_id)?;
+        }
+        self.slotted
+            .page
+            .data
+            .copy_from_slice(new_self_page.data.as_ref());
+        self.slotted.reload_header();
+
+        // Rebuild right_sibling
+        let right_page_id = right_sibling.slotted.page_id();
+        let mut new_right_page = Page::new(right_page_id);
+        let mut new_right = LeafNode::init(&mut new_right_page);
+        for (key, row_id) in right_share {
+            new_right.insert_simple(key, row_id)?;
+        }
+        right_sibling
+            .slotted
+            .page
+            .data
+            .copy_from_slice(new_right_page.data.as_ref());
+        right_sibling.slotted.reload_header();
+
+        Ok(new_right_first_key)
     }
 }
 
@@ -714,6 +876,92 @@ impl<'a> InternalNode<'a> {
             right_separators,
             new_page_id,
         })
+    }
+
+    /// 删除指定位置的 separator 及其关联的子页 ID
+    pub fn remove_separator(&mut self, index: usize) -> Result<(), StorageError> {
+        self.slotted
+            .delete_slot(index)
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
+        self.slotted.sync_header();
+        Ok(())
+    }
+
+    /// 合并右侧兄弟节点：将 parent_separator 下推，吸收 right_sibling 的全部 entry
+    pub fn merge_right(
+        &mut self,
+        right_sibling: &InternalNode,
+        parent_separator: &Key,
+        right_sibling_page_id: PageId,
+    ) -> Result<InternalMergeResult, StorageError> {
+        let self_leftmost = self.slotted.header().next_page_id;
+        let right_sibling_leftmost = right_sibling.slotted.header().next_page_id;
+
+        let self_entries: Vec<(Key, u32)> = (0..self.key_count())
+            .filter_map(|i| {
+                let key = self.get_key(i)?;
+                let child = self.get_child_page_id(i)?;
+                Some((key, child))
+            })
+            .collect();
+
+        let right_entries: Vec<(Key, u32)> = (0..right_sibling.key_count())
+            .filter_map(|i| {
+                let key = right_sibling.get_key(i)?;
+                let child = right_sibling.get_child_page_id(i)?;
+                Some((key, child))
+            })
+            .collect();
+
+        let mut combined = self_entries;
+        combined.push((parent_separator.clone(), right_sibling_leftmost));
+        combined.extend(right_entries);
+
+        let page_id = self.slotted.page_id();
+        let mut new_page = Page::new(page_id);
+        let mut new_internal = InternalNode::init(&mut new_page);
+        new_internal.slotted.page.data[5..9].copy_from_slice(&self_leftmost.to_le_bytes());
+        new_internal.slotted.reload_header();
+
+        for (key, child) in &combined {
+            new_internal.insert_separator_simple(key, PageId(*child as u64))?;
+        }
+
+        self.slotted
+            .page
+            .data
+            .copy_from_slice(new_page.data.as_ref());
+        self.slotted.reload_header();
+
+        Ok(InternalMergeResult {
+            freed_page_id: right_sibling_page_id,
+            separator_key: parent_separator.clone(),
+        })
+    }
+
+    /// 检查是否可以与兄弟节点合并（+1 是为下推的 parent separator）
+    pub fn can_merge_with(&self, sibling: &InternalNode) -> bool {
+        let total = self.key_count() + 1 + sibling.key_count();
+        let entry_size = MAX_KEY_LEN + 4;
+        let needed = total * (Slot::SIZE + entry_size);
+        let available = self.slotted.page.data.len();
+        needed <= available
+    }
+
+    /// 最小 key 数量（用于 merge 触发判断）
+    pub fn min_keys(&self) -> usize {
+        48
+    }
+
+    /// 获取所有 separator 的 (key, child_page_id)
+    pub fn get_all_separators(&self) -> Vec<(Key, u32)> {
+        (0..self.key_count())
+            .filter_map(|i| {
+                let key = self.get_key(i)?;
+                let child = self.get_child_page_id(i)?;
+                Some((key, child))
+            })
+            .collect()
     }
 }
 
@@ -1311,5 +1559,277 @@ mod tests {
         assert_eq!(split_data.right_separators[1].0.as_bytes(), b"e");
         assert_eq!(split_data.right_separators[1].1, 500);
         assert_eq!(split_data.new_page_id, PageId(10));
+    }
+
+    #[test]
+    fn test_internal_remove_separator() {
+        let mut page = Page::new(PageId(0));
+        let mut internal = InternalNode::init(&mut page);
+        internal.slotted.page.data[5..9].copy_from_slice(&10u32.to_le_bytes());
+        internal.slotted.reload_header();
+
+        internal
+            .insert_separator(&Key::new(b"a"), PageId(100))
+            .unwrap();
+        internal
+            .insert_separator(&Key::new(b"b"), PageId(200))
+            .unwrap();
+        internal
+            .insert_separator(&Key::new(b"c"), PageId(300))
+            .unwrap();
+
+        assert_eq!(internal.key_count(), 3);
+        assert_eq!(internal.get_key(0).unwrap().as_bytes(), b"a");
+        assert_eq!(internal.get_key(1).unwrap().as_bytes(), b"b");
+        assert_eq!(internal.get_key(2).unwrap().as_bytes(), b"c");
+
+        internal.remove_separator(1).unwrap();
+
+        assert_eq!(internal.key_count(), 2);
+        assert_eq!(internal.get_key(0).unwrap().as_bytes(), b"a");
+        assert_eq!(internal.get_key(1).unwrap().as_bytes(), b"c");
+    }
+
+    #[test]
+    fn test_internal_merge_right() {
+        let mut page = Page::new(PageId(0));
+        let mut internal = InternalNode::init(&mut page);
+        internal.slotted.page.data[5..9].copy_from_slice(&10u32.to_le_bytes());
+        internal.slotted.reload_header();
+        internal
+            .insert_separator(&Key::new(b"b"), PageId(100))
+            .unwrap();
+        internal
+            .insert_separator(&Key::new(b"c"), PageId(200))
+            .unwrap();
+
+        let mut right_page = Page::new(PageId(1));
+        let mut right = InternalNode::init(&mut right_page);
+        right.slotted.page.data[5..9].copy_from_slice(&300u32.to_le_bytes());
+        right.slotted.reload_header();
+        right
+            .insert_separator(&Key::new(b"e"), PageId(400))
+            .unwrap();
+        right
+            .insert_separator(&Key::new(b"f"), PageId(500))
+            .unwrap();
+
+        let parent_sep = Key::new(b"d");
+        let result = internal
+            .merge_right(&right, &parent_sep, PageId(1))
+            .unwrap();
+
+        assert_eq!(result.freed_page_id, PageId(1));
+        assert_eq!(result.separator_key.as_bytes(), parent_sep.as_bytes());
+
+        let all = internal.get_all_separators();
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0].0.as_bytes(), b"b");
+        assert_eq!(all[0].1, 100);
+        assert_eq!(all[1].0.as_bytes(), b"c");
+        assert_eq!(all[1].1, 200);
+        assert_eq!(all[2].0.as_bytes(), b"d");
+        assert_eq!(all[2].1, 300);
+        assert_eq!(all[3].0.as_bytes(), b"e");
+        assert_eq!(all[3].1, 400);
+        assert_eq!(all[4].0.as_bytes(), b"f");
+        assert_eq!(all[4].1, 500);
+    }
+
+    #[test]
+    fn test_internal_can_merge_with() {
+        let mut page = Page::new(PageId(0));
+        let internal = InternalNode::init(&mut page);
+
+        let mut page2 = Page::new(PageId(1));
+        let sibling = InternalNode::init(&mut page2);
+
+        assert!(internal.can_merge_with(&sibling));
+    }
+
+    #[test]
+    fn test_internal_min_keys() {
+        let mut page = Page::new(PageId(0));
+        let internal = InternalNode::init(&mut page);
+
+        assert_eq!(internal.min_keys(), 48);
+    }
+
+    #[test]
+    fn test_leaf_can_merge_with() {
+        let mut page1 = Page::new(PageId(0));
+        let mut page2 = Page::new(PageId(1));
+        let mut leaf1 = LeafNode::init(&mut page1);
+        let mut leaf2 = LeafNode::init(&mut page2);
+
+        for i in 0..46 {
+            leaf1
+                .insert(
+                    &Key::new(format!("k_{:02}", i).as_bytes()),
+                    &RowId::new(i, 0),
+                )
+                .unwrap();
+        }
+        for i in 46..92 {
+            leaf2
+                .insert(
+                    &Key::new(format!("k_{:02}", i).as_bytes()),
+                    &RowId::new(i, 0),
+                )
+                .unwrap();
+        }
+
+        // 46 + 46 = 92 fits in one page
+        assert!(leaf1.can_merge_with(&leaf2));
+
+        // Add one more to exceed capacity (93 > 92)
+        leaf2
+            .insert(&Key::new(b"overflow"), &RowId::new(999, 0))
+            .unwrap();
+        assert!(!leaf1.can_merge_with(&leaf2));
+    }
+
+    #[test]
+    fn test_leaf_merge_right() {
+        let mut page1 = Page::new(PageId(0));
+        let mut page2 = Page::new(PageId(1));
+        let mut leaf1 = LeafNode::init(&mut page1);
+        let mut leaf2 = LeafNode::init(&mut page2);
+
+        // leaf1: keys 0-39, leaf2: keys 40-79
+        for i in 0..40 {
+            leaf1
+                .insert(
+                    &Key::new(format!("k_{:02}", i).as_bytes()),
+                    &RowId::new(i, 0),
+                )
+                .unwrap();
+        }
+        for i in 40..80 {
+            leaf2
+                .insert(
+                    &Key::new(format!("k_{:02}", i).as_bytes()),
+                    &RowId::new(i, 0),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(leaf1.key_count(), 40);
+        assert_eq!(leaf2.key_count(), 40);
+
+        let result = leaf1.merge_right(&leaf2, PageId(1)).unwrap();
+
+        // All 80 entries present and sorted
+        assert_eq!(leaf1.key_count(), 80);
+        for i in 0..80 {
+            let key = leaf1.get_key(i).unwrap();
+            assert_eq!(key.as_bytes(), format!("k_{:02}", i).as_bytes());
+        }
+
+        assert_eq!(result.freed_page_id, PageId(1));
+        assert_eq!(result.separator_key.as_bytes(), b"k_40");
+    }
+
+    #[test]
+    fn test_leaf_merge_chain() {
+        let mut page1 = Page::new(PageId(0));
+        let mut page2 = Page::new(PageId(1));
+        let mut leaf1 = LeafNode::init(&mut page1);
+        let mut leaf2 = LeafNode::init(&mut page2);
+
+        leaf1
+            .insert(&Key::new(b"a"), &RowId::new(1, 0))
+            .unwrap();
+        leaf2
+            .insert(&Key::new(b"b"), &RowId::new(2, 0))
+            .unwrap();
+        leaf2.set_next_leaf_page_id(99);
+
+        let result = leaf1.merge_right(&leaf2, PageId(1)).unwrap();
+
+        assert_eq!(leaf1.next_leaf_page_id(), 99);
+        assert_eq!(leaf1.key_count(), 2);
+        assert_eq!(result.freed_page_id, PageId(1));
+        assert_eq!(result.separator_key.as_bytes(), b"b");
+    }
+
+    #[test]
+    fn test_leaf_redistribute_right() {
+        let mut page1 = Page::new(PageId(0));
+        let mut page2 = Page::new(PageId(1));
+        let mut leaf1 = LeafNode::init(&mut page1);
+        let mut leaf2 = LeafNode::init(&mut page2);
+
+        // leaf1: 30 entries, leaf2: 70 entries
+        for i in 0..30 {
+            leaf1
+                .insert(
+                    &Key::new(format!("k_{:02}", i).as_bytes()),
+                    &RowId::new(i, 0),
+                )
+                .unwrap();
+        }
+        for i in 30..100 {
+            leaf2
+                .insert(
+                    &Key::new(format!("k_{:02}", i).as_bytes()),
+                    &RowId::new(i, 0),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(leaf1.key_count(), 30);
+        assert_eq!(leaf2.key_count(), 70);
+
+        let new_right_first = leaf1
+            .redistribute_right(&mut leaf2, PageId(1))
+            .unwrap();
+
+        // moves = (70 - 30) / 2 = 20, so leaf1: 50, leaf2: 50
+        assert_eq!(leaf1.key_count(), 50);
+        assert_eq!(leaf2.key_count(), 50);
+
+        // New first key of right sibling = k_50 (0-indexed: the 51st entry)
+        assert_eq!(new_right_first.as_bytes(), b"k_50");
+
+        // Verify leaf1 entries sorted
+        for i in 0..50 {
+            let key = leaf1.get_key(i).unwrap();
+            assert_eq!(key.as_bytes(), format!("k_{:02}", i).as_bytes());
+        }
+        // Verify leaf2 entries sorted
+        for i in 0..50 {
+            let key = leaf2.get_key(i).unwrap();
+            assert_eq!(key.as_bytes(), format!("k_{:02}", 50 + i).as_bytes());
+        }
+    }
+
+    #[test]
+    fn test_leaf_merge_overflow() {
+        let mut page1 = Page::new(PageId(0));
+        let mut page2 = Page::new(PageId(1));
+        let mut leaf1 = LeafNode::init(&mut page1);
+        let mut leaf2 = LeafNode::init(&mut page2);
+
+        // Max entries per page = 92, so 47 + 46 = 93 > 92 → overflow
+        for i in 0..47 {
+            leaf1
+                .insert(
+                    &Key::new(format!("k_{:02}", i).as_bytes()),
+                    &RowId::new(i, 0),
+                )
+                .unwrap();
+        }
+        for i in 47..93 {
+            leaf2
+                .insert(
+                    &Key::new(format!("k_{:02}", i).as_bytes()),
+                    &RowId::new(i, 0),
+                )
+                .unwrap();
+        }
+
+        let result = leaf1.merge_right(&leaf2, PageId(1));
+        assert!(result.is_err());
     }
 }
