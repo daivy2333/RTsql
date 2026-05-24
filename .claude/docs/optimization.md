@@ -1,15 +1,11 @@
 # 优化方向与技术债
 
-> 最后更新：2026-05-23（M18 Phase2 Executor层非唯一索引测试覆盖 完成）
+> 最后更新：2026-05-24（归档旧优化项）
 
 ## 已完成的优化
 
 | # | 优化项 | 里程碑 | 结果 |
 |---|--------|--------|------|
-| 1 | PageGuard 零拷贝 | M13 | scan/filter/sort 5-15% |
-| 2 | BufferPool 两阶段锁 | M13 | 并发读 ~5% |
-| 3 | Plan Cache (LRU) | M14 | 相同 SQL 1.1x |
-| 4 | BTree 零拷贝读 | M14 | PK 查询 1.2x |
 | 5 | Async search (AtomicPageId) | M14 | 17x internal + 8x vs SQLite |
 | 6 | 聚合函数 + GROUP BY | M15 | 19 tests |
 | 7 | 子查询支持（独立+关联） | M16 | 20 tests |
@@ -17,6 +13,11 @@
 | 9 | B-Tree Split 机制 | M17-Phase2 | 7 tests，支持多层级索引 |
 | 10 | **架构Warnings清理** | **M18-Phase1** | **0 warnings（代码层面）** ⚡ |
 | 11 | **Executor层非唯一索引** | **M18-Phase2** | **IndexScanAllExecutor + 3 tests** ⚡ |
+
+<!-- tombstone: optimization #01 --> Archived to archive.md §optimization #01 2026-05-24 — M13已完成 >90d
+<!-- tombstone: optimization #02 --> Archived to archive.md §optimization #02 2026-05-24 — M13已完成 >90d
+<!-- tombstone: optimization #03 --> Archived to archive.md §optimization #03 2026-05-24 — M14已完成 >90d
+<!-- tombstone: optimization #04 --> Archived to archive.md §optimization #04 2026-05-24 — M14已完成 >90d
 
 ## M14 性能验证（已完成）
 

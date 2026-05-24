@@ -12,27 +12,11 @@
 
 ## 最近提交
 
-- 27e8aca feat(M18-T2): implement WALBuffer with Group Commit strategy
-- 1fcc213 feat(M18-T1): extend WalRecord with BeginTxn/CommitTxn/AbortTxn, add LSN + CRC32
 - feat(M18-T3): introduce logical Row ID to fix gc_test SlottedPage SlotID invalidation bug
+- feat(M18-T2): implement WALBuffer with Group Commit strategy
+- feat(M18-T1): extend WalRecord with BeginTxn/CommitTxn/AbortTxn, add LSN + CRC32
 
-- 72c69dc fix(M17): fix InternalNodeRef::find_child_page_id linear search routing
-- f54a6c7 feat(M17-T5/T8): add B-Tree split test suite and fix split/search/delete bugs
-- 95b60b2 feat(M17-T7/T8): rewrite BTree::insert with recursive split propagation and root split
-- d3a7c0c feat(M17-T6): add InternalNode::split for b-tree internal node splitting
-- 238d9a7 feat(M17-T6): add LeafNode::split for b-tree leaf node splitting
-
-## M17-Phase2 新增功能
-
-| 功能 | 实现方式 | 测试 |
-|------|----------|------|
-| LeafNode::split | 中间分裂 + LeafSplitData | ✅ |
-| InternalNode::split | 中间分裂 + middle_key 上推 + InternalSplitData | ✅ |
-| BTree::insert 递归 + split 回传 | Result<Option<SplitResult>> 递归 | ✅ |
-| 根分裂处理 | 新 InternalNode 根 + 返回新 root_page_id | ✅ |
-| IndexManager root_page_id 更新 | AtomicU64 store after split | ✅ |
-| Leaf 链表维护 | split 后 next_leaf_page_id 正确链接 | ✅ |
-| InternalNodeRef 路由修复 | find_child_page_id 线性/二分搜索一致 | ✅ |
+<!-- tombstone: snapshot #01 --> Archived to archive.md §snapshot #01 2026-05-24 — M17-Phase2历史快照
 
 ## 遗留问题清单
 
