@@ -1,0 +1,228 @@
+# Architecture — 架构决策记录
+
+> 版本：v1.0 | 最后更新：2026-06-02
+> 由 openspec-init 从 `.claude/docs/architecture.md` 迁移。
+> 条目格式: <!-- A{编号} --> ### {DATE} - {决策标题}
+
+---
+
+## Purpose
+
+记录 RTsql 数据库的所有架构决策（ADR），确保设计决策有据可查，便于后续维护和新人理解。每个决策包含：决策内容、原因、代价、替代方案。
+
+---
+
+## Requirements
+
+### Requirement: 架构决策可追溯
+
+所有重大架构决策 SHALL 以 ADR 格式记录，包含决策、原因、代价、替代方案。
+
+#### Scenario: 新增架构决策
+- **WHEN** 做出影响系统架构的技术决策
+- **THEN** 在本文件新增 ADR 条目，编号递增，包含完整四要素
+
+#### Scenario: 查询已有决策
+- **WHEN** 需要了解某个设计选择的原因
+- **THEN** 通过 `grep "关键词" openspec/specs/architecture/spec.md` 定位对应 ADR
+
+### Requirement: 系统架构可理解
+
+系统整体架构 SHALL 以架构图和数据流图形式记录。
+
+#### Scenario: 新成员了解架构
+- **WHEN** 新开发者需要理解系统结构
+- **THEN** 通过系统架构图和 PhysicalPlan 节点表快速建立全局认知
+
+---
+
+## 系统架构
+
+```
+┌──────────────┐
+│   SQL Text   │
+└──────┬───────┘
+       ▼
+┌──────────────┐     ┌──────────┐
+│   Parser     │────▶│ PlanCache│ (LRU, SELECT only)
+│ (sqlparser)  │     └──────────┘
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│  PlanBuilder │───▶ PhysicalPlan
+│ (register +  │     (19 种节点)
+│  build_plan) │
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│   Pipeline   │───▶ create_executor_from_plan (递归)
+│              │
+└──────┬───────┘
+       ▼
+┌──────────────────────────────────────┐
+│         Volcano Executor Tree        │
+│                                      │
+│  Scan → Filter → Join → Aggregate   │
+│       → Having → Sort → Limit       │
+│  IndexScan → Insert/Update/Delete   │
+│  SemiJoin → AntiJoin                │
+│  SubqueryEval → DerivedScan         │
+└──────────────────────────────────────┘
+       │
+       ▼
+┌──────────────┐
+│  Storage     │
+│  BufferPool  │───▶ PageGuard (零拷贝/修改)
+│  BTree       │───▶ AtomicPageId (async) + from_root (sync)
+│  SlottedPage │───▶ 读: SlottedPageRef / 写: SlottedPage + compacting
+└──────────────┘
+```
+
+---
+
+## 决策列表
+
+<!-- A001 --> ### ADR-001: 两层分离索引结构 (2026-05-23)
+
+**决策**：RTsql 使用两层分离的索引结构（索引页 + 数据页），而非 SQLite 的聚簇索引。
+
+**原因**：
+- ✅ **灵活性**：支持多索引、非唯一索引模式（M17 已验证）
+- ✅ **MVCC 友好**：数据页独立管理，版本链实现更简单
+- ✅ **实现简洁**：避免聚簇索引的复杂性
+
+**代价**：
+- ❌ **空间开销**：文件大小 ~3x larger（索引页额外开销）
+- ❌ **点查询路径**：索引页 → 数据页（两次页访问）
+
+**验证结果**（M17.5）：PK lookup 5.6x faster than SQLite
+
+**替代方案**：SQLite 聚簇索引（更紧凑但灵活性受限）、PostgreSQL 分离索引（类似架构）
+
+---
+
+<!-- A002 --> ### ADR-002: 固定长度 Key（32 bytes）(2026-05-23)
+
+**决策**：B-Tree Key 使用固定 32 bytes 存储，而非变长编码。
+
+**原因**：实现简洁、性能稳定、调试友好。
+**代价**：短 Key 浪费 ~28 bytes，无法支持 >32 bytes 的 Key。
+**后续优化**（M23）：Varint Key 编码减少 ~70% Key 开销。
+
+---
+
+<!-- A003 --> ### ADR-003: SlottedPage 页格式 + Logical Row ID (2026-05-24)
+
+**决策**：使用标准 SlottedPage 格式，Slot 内含 logical_id 实现稳定行引用。
+
+**Logical Row ID 设计**：
+- Slot 6B：`{ logical_id: u16, offset: u16, length: u16 }`
+- Header `next_logical_id: u16`（递增分配，永不回收）
+- RowId.slot_id = logical_id（稳定跨 compact）
+
+**原因**：标准格式、MVCC 友好、零拷贝读、引用稳定。
+**代价**：Slot overhead 6 bytes/entry，页填充率 50-70%。
+
+---
+
+<!-- A004 --> ### ADR-004: 自定义二进制序列化 (2026-05-23)
+
+**决策**：使用自定义二进制格式（Tag + Value），而非 JSON 或 Protobuf。
+
+```
+Int    = [Tag 0x01][8 bytes i64 LE]
+String = [Tag 0x02][2 bytes len][N bytes UTF-8]
+Null   = [Tag 0x03]
+Float  = [Tag 0x04][8 bytes f64]
+Bool   = [Tag 0x05][1 byte]
+```
+
+---
+
+<!-- A005 --> ### ADR-005: 务实 Clippy warnings 清理策略 (2026-05-23)
+
+**决策**：采用务实策略清理架构 warnings，平衡性能、安全、重构成本。
+
+| Warning | 修复方案 |
+|---------|----------|
+| too_many_arguments | JoinConfig struct |
+| type_complexity | type alias |
+| await_holding_lock | #[allow] + 安全评估 |
+| module_inception | #[allow] |
+
+---
+
+<!-- A006 --> ### ADR-006: IndexScanAllExecutor 非唯一索引 (2026-05-23)
+
+**决策**：新增 IndexScanAllExecutor 处理非唯一索引扫描，而非扩展 IndexScanExecutor。
+**关键特性**：惰性初始化 + MVCC 可见性迭代 + 逐行返回。
+
+---
+
+<!-- A007 --> ### ADR-007: WAL + Group Commit 架构 (2026-05-23)
+
+**决策**：实现 WAL 机制，结合 Group Commit 优化 INSERT 性能（5-10x）。
+
+**架构**：
+```
+Executor → WALBuffer → WalWriter::write_batch() → WALFile
+触发：缓冲区满(100条) / 定时(100ms) / commit 通知
+```
+
+**核心组件**：WALRecord（BeginTxn/CommitTxn/AbortTxn）、WALBuffer（Notify + 后台 task）、Executor 隐式事务包装、RecoveryManager。
+
+---
+
+<!-- A008 --> ### ADR-008: B-Tree Merge 机制 (2026-05-24)
+
+**决策**：实现 B-Tree 页合并机制，采用 redistribution-first 策略，配合 free-list 页复用。
+
+**核心数据流**：
+```
+DELETE → delete_from_page
+  ├─ Leaf: underflow? → redistribute → merge → MergeInfo ↑
+  └─ Internal: recurse → remove_separator → underflow? → redistribute/merge → MergeInfo ↑
+      → root shrink
+```
+
+---
+
+## 架构权衡总结
+
+| 设计决策 | 空间代价 | 性能收益 | 灵活性收益 |
+|----------|---------|---------|-----------|
+| 两层分离索引 | ~3x larger | PK lookup 5.6x faster ⚡ | 多索引 ✅ |
+| 固定 Key 32B | ~10x per key | CPU 开销低 ✅ | 实现简洁 ✅ |
+| SlottedPage | ~1.4x larger | MVCC 无锁读 ⚡ | 版本链管理 ✅ |
+| 二进制序列化 | ~1.2x larger | 比 JSON 快 ✅ | 无外部依赖 ✅ |
+
+---
+
+## PhysicalPlan 节点（19 种）
+
+| 节点 | 输入 | 用途 |
+|------|------|------|
+| Scan | - | 全表扫描 |
+| IndexScan | - | 主键索引扫描 |
+| Filter | 1 | WHERE 过滤 |
+| Join | 2 | 哈希连接 |
+| Aggregate | 1 | 聚合 + GROUP BY |
+| Having | 1 | HAVING 过滤 |
+| Sort | 1 | ORDER BY |
+| Limit | 1 | LIMIT/OFFSET |
+| SemiJoin | 2 | IN/EXISTS 子查询 |
+| AntiJoin | 2 | NOT IN/NOT EXISTS |
+| SubqueryEval | 1 | SELECT 标量子查询 |
+| DerivedScan | 1 | FROM 子查询 |
+| Insert/Update/Delete | - | DML |
+| CreateTable/DropTable | - | DDL |
+
+---
+
+## 架构原则
+
+1. **Volcano 迭代器模型**：算子可自由组合，扩展方便
+2. **Tokio async 协程**：无栈协程轻量，适合 I/O 密集
+3. **两阶段锁 BufferPool**：I/O 期间不持锁，避免阻塞
+4. **AtomicPageId 无锁读**：async 路径避免死锁
+5. **空间换简洁**：固定 Key、二进制序列化等选择优先实现简洁性
