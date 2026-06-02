@@ -1,6 +1,24 @@
 # 项目快照
 
-> 最后更新：2026-05-24（M19-M23 全维度性能优化规划）
+> 最后更新：2026-06-02（OpenSpec 文档体系迁移完成）
+
+## 文档体系变更
+
+**2026-06-02 完成 OpenSpec 文档体系迁移**：
+
+| 状态 | 内容 |
+|------|------|
+| ✅ 已完成 | OpenSpec v1.4.0 初始化，5 个 spec 全部通过验证 |
+| ✅ 已完成 | 旧 `.claude/docs/{architecture,rules,learned,references,optimization}.md` 内容迁移到 `openspec/specs/`，旧文件已删除 |
+| ✅ 已完成 | `CLAUDE.md` 更新为索引入口，指向 `openspec/specs/` + `.claude/docs/` 状态文档 |
+| 📋 保留 | `snapshot.md` / `tasks.md` / `archive.md` / `superpowers/` 不迁移 |
+
+**新文档结构**：
+- `openspec/specs/{architecture,rules,learned,references,optimization}/spec.md` — 规范文档
+- `.claude/docs/snapshot.md` — 项目快照（本文件）
+- `.claude/docs/tasks.md` — 任务追踪
+- `.claude/docs/archive.md` — 历史归档
+- `CLAUDE.md` — 索引入口
 
 ## 当前阶段
 
