@@ -639,4 +639,150 @@ async fn test_response_mapping_pong() {
 
     assert!(has_command_complete, "Should have CommandComplete");
     assert!(has_ready, "Should have ReadyForQuery");
+
+
+    // Drain: send a query to force server state to Querying, then write Pong
+    let query_msg = build_query_message("PING_2");
+    client.write_all(&query_msg).await.unwrap();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_batched_write_large_result() {
+    let (mut client, mut server) = create_stream_pair().await;
+
+    let startup_msg = build_startup_message(&[("user", "test")]);
+    client.write_all(&startup_msg).await.unwrap();
+
+    let mut protocol = PgProtocol::new();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    let mut buf = [0u8; 2048];
+    let _ = client.read(&mut buf).await.unwrap();
+
+    let query_msg = build_query_message("SELECT * FROM big_table");
+    client.write_all(&query_msg).await.unwrap();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    // 100 rows x 3 columns - exceeds 8KB buffer, tests auto-expansion
+    let rows: Vec<Vec<serde_json::Value>> = (0..100)
+        .map(|i| vec![json!(i), json!(format!("row_{}", i)), json!(i as f64 * 1.5)])
+        .collect();
+    let response = Response::QueryResult { rows };
+    protocol
+        .write_response(&mut server, &response)
+        .await
+        .unwrap();
+
+    assert_eq!(protocol.state(), "Ready");
+
+    let mut all_data = Vec::new();
+    for _ in 0..20 {
+        let n = client.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        all_data.extend_from_slice(&buf[..n]);
+        if all_data
+            .windows(5)
+            .any(|w| w[0] == b'Z' && w[1] == 0 && w[2] == 0 && w[3] == 0 && w[4] == 5)
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let mut pos = 0;
+    let mut has_row_description = false;
+    let mut data_row_count = 0;
+    let mut has_command_complete = false;
+    let mut has_ready = false;
+
+    while pos < all_data.len() {
+        let msg_type = all_data[pos];
+        let length = i32::from_be_bytes([
+            all_data[pos + 1],
+            all_data[pos + 2],
+            all_data[pos + 3],
+            all_data[pos + 4],
+        ]) as usize;
+
+        match msg_type {
+            b'T' => has_row_description = true,
+            b'D' => data_row_count += 1,
+            b'C' => has_command_complete = true,
+            b'Z' => has_ready = true,
+            _ => {}
+        }
+        pos += 1 + length;
+    }
+
+    assert!(has_row_description, "Should have RowDescription");
+    assert_eq!(data_row_count, 100, "Should have 100 DataRow messages");
+    assert!(has_command_complete, "Should have CommandComplete");
+    assert!(has_ready, "Should have ReadyForQuery");
+}
+
+#[tokio::test]
+async fn test_multiple_queries_buffer_reuse() {
+    let (mut client, mut server) = create_stream_pair().await;
+
+    let startup_msg = build_startup_message(&[("user", "test")]);
+    client.write_all(&startup_msg).await.unwrap();
+
+    let mut protocol = PgProtocol::new();
+    let _ = protocol.parse_request(&mut server).await.unwrap();
+
+    let mut buf = [0u8; 2048];
+    let _ = client.read(&mut buf).await.unwrap();
+
+    // Run multiple queries to verify write_buf is properly cleared and reused
+    for batch in 0..4 {
+        let query_msg = build_query_message(&format!("SELECT * FROM t{}", batch));
+        client.write_all(&query_msg).await.unwrap();
+        let _ = protocol.parse_request(&mut server).await.unwrap();
+
+        let rows: Vec<Vec<serde_json::Value>> = (0..5)
+            .map(|i| vec![json!(batch * 5 + i), json!("val")])
+            .collect();
+        let response = Response::QueryResult { rows };
+        protocol
+            .write_response(&mut server, &response)
+            .await
+            .unwrap();
+
+        assert_eq!(protocol.state(), "Ready");
+
+        let mut all_data = Vec::new();
+        for _ in 0..10 {
+            let n = client.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            all_data.extend_from_slice(&buf[..n]);
+            if all_data
+                .windows(5)
+                .any(|w| w[0] == b'Z' && w[1] == 0 && w[2] == 0 && w[3] == 0 && w[4] == 5)
+            {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        }
+
+        let mut data_count = 0;
+        let mut pos = 0;
+        while pos < all_data.len() {
+            if all_data[pos] == b'D' {
+                data_count += 1;
+            }
+            let length = i32::from_be_bytes([
+                all_data[pos + 1],
+                all_data[pos + 2],
+                all_data[pos + 3],
+                all_data[pos + 4],
+            ]) as usize;
+            pos += 1 + length;
+        }
+        assert_eq!(data_count, 5, "Batch {}: should have 5 DataRows", batch);
+    }
 }

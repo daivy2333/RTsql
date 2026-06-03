@@ -40,6 +40,8 @@ impl Server {
             tokio::select! {
                 result = listener.accept() => {
                     let (stream, peer_addr) = result?;
+                    // Disable Nagle's algorithm for lower latency interactive PG protocol
+                    stream.set_nodelay(true)?;
 
                     let mut handler = ConnectionHandler::new(
                         PgProtocol::new(),

@@ -26,6 +26,7 @@ pub struct PgProtocol {
     process_id: u32,
     secret_key: u32,
     buffer: Vec<u8>,
+    write_buf: Vec<u8>,
 }
 
 impl PgProtocol {
@@ -36,6 +37,7 @@ impl PgProtocol {
             process_id: rng.gen::<u32>(),
             secret_key: rng.gen::<u32>(),
             buffer: Vec::with_capacity(8192),
+            write_buf: Vec::with_capacity(8192),
         }
     }
 
@@ -111,31 +113,23 @@ impl PgProtocol {
 
     /// Send startup response messages
     async fn send_startup_response(&mut self, stream: &mut TcpStream) -> Result<(), NetworkError> {
-        // AuthenticationOk
-        stream.write_all(&pg_messages::authentication_ok()).await?;
+        self.write_buf.clear();
 
-        // ParameterStatus messages (standard parameters)
-        stream
-            .write_all(&pg_messages::parameter_status("server_version", "14.0"))
-            .await?;
-        stream
-            .write_all(&pg_messages::parameter_status("client_encoding", "UTF8"))
-            .await?;
-        stream
-            .write_all(&pg_messages::parameter_status("server_encoding", "UTF8"))
-            .await?;
+        self.write_buf.extend_from_slice(&pg_messages::authentication_ok());
+        self.write_buf
+            .extend_from_slice(&pg_messages::parameter_status("server_version", "14.0"));
+        self.write_buf
+            .extend_from_slice(&pg_messages::parameter_status("client_encoding", "UTF8"));
+        self.write_buf
+            .extend_from_slice(&pg_messages::parameter_status("server_encoding", "UTF8"));
+        self.write_buf.extend_from_slice(&pg_messages::backend_key_data(
+            self.process_id,
+            self.secret_key,
+        ));
+        self.write_buf
+            .extend_from_slice(&pg_messages::ready_for_query('I'));
 
-        // BackendKeyData
-        stream
-            .write_all(&pg_messages::backend_key_data(
-                self.process_id,
-                self.secret_key,
-            ))
-            .await?;
-
-        // ReadyForQuery (Idle)
-        stream.write_all(&pg_messages::ready_for_query('I')).await?;
-
+        stream.write_all(&self.write_buf).await?;
         stream.flush().await?;
         Ok(())
     }
@@ -247,16 +241,14 @@ impl Protocol for PgProtocol {
         stream: &mut TcpStream,
         response: &Response,
     ) -> Result<(), NetworkError> {
+        self.write_buf.clear();
+
         match response {
             Response::QueryResult { rows } => {
                 if rows.is_empty() {
-                    // Empty result: CommandComplete("SELECT 0")
-                    stream
-                        .write_all(&pg_messages::command_complete("SELECT 0"))
-                        .await?;
+                    self.write_buf
+                        .extend_from_slice(&pg_messages::command_complete("SELECT 0"));
                 } else {
-                    // RowDescription (use first row for column metadata)
-                    // Generate column names
                     let col_names: Vec<String> =
                         (0..rows[0].len()).map(|i| format!("col{}", i)).collect();
 
@@ -266,40 +258,38 @@ impl Protocol for PgProtocol {
                         .map(|(name, v)| (name.as_str(), Self::json_to_value(v)))
                         .collect();
 
-                    stream
-                        .write_all(&pg_messages::row_description(&columns))
-                        .await?;
+                    self.write_buf
+                        .extend_from_slice(&pg_messages::row_description(&columns));
 
-                    // DataRow (each row)
                     for row in rows {
                         let values: Vec<Value> = row.iter().map(Self::json_to_value).collect();
-                        stream.write_all(&pg_messages::data_row(&values)).await?;
+                        self.write_buf
+                            .extend_from_slice(&pg_messages::data_row(&values));
                     }
 
-                    // CommandComplete
-                    stream
-                        .write_all(&pg_messages::command_complete(&format!(
-                            "SELECT {}",
-                            rows.len()
-                        )))
-                        .await?;
+                    self.write_buf.extend_from_slice(
+                        &pg_messages::command_complete(&format!("SELECT {}", rows.len())),
+                    );
                 }
 
-                // ReadyForQuery
-                stream.write_all(&pg_messages::ready_for_query('I')).await?;
+                self.write_buf
+                    .extend_from_slice(&pg_messages::ready_for_query('I'));
+
+                stream.write_all(&self.write_buf).await?;
                 stream.flush().await?;
 
-                // Transition back to Ready
                 self.state = ProtocolState::Ready;
 
                 Ok(())
             }
             Response::AffectedRows { count } => {
-                // CommandComplete + ReadyForQuery
-                stream
-                    .write_all(&pg_messages::command_complete(&format!("INSERT {}", count)))
-                    .await?;
-                stream.write_all(&pg_messages::ready_for_query('I')).await?;
+                self.write_buf.extend_from_slice(
+                    &pg_messages::command_complete(&format!("INSERT {}", count)),
+                );
+                self.write_buf
+                    .extend_from_slice(&pg_messages::ready_for_query('I'));
+
+                stream.write_all(&self.write_buf).await?;
                 stream.flush().await?;
 
                 self.state = ProtocolState::Ready;
@@ -307,12 +297,13 @@ impl Protocol for PgProtocol {
                 Ok(())
             }
             Response::Error { message } => {
-                // ErrorResponse + ReadyForQuery
                 let (severity, code) = ("ERROR", "58000");
-                stream
-                    .write_all(&pg_messages::error_response(severity, code, message))
-                    .await?;
-                stream.write_all(&pg_messages::ready_for_query('I')).await?;
+                self.write_buf
+                    .extend_from_slice(&pg_messages::error_response(severity, code, message));
+                self.write_buf
+                    .extend_from_slice(&pg_messages::ready_for_query('I'));
+
+                stream.write_all(&self.write_buf).await?;
                 stream.flush().await?;
 
                 self.state = ProtocolState::Ready;
@@ -320,11 +311,12 @@ impl Protocol for PgProtocol {
                 Ok(())
             }
             Response::Pong => {
-                // Custom PING response
-                stream
-                    .write_all(&pg_messages::command_complete("PING"))
-                    .await?;
-                stream.write_all(&pg_messages::ready_for_query('I')).await?;
+                self.write_buf
+                    .extend_from_slice(&pg_messages::command_complete("PING"));
+                self.write_buf
+                    .extend_from_slice(&pg_messages::ready_for_query('I'));
+
+                stream.write_all(&self.write_buf).await?;
                 stream.flush().await?;
 
                 self.state = ProtocolState::Ready;
