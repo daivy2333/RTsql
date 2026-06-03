@@ -14,7 +14,7 @@ async fn start_test_server(port: u16) -> (Server, std::net::SocketAddr, NamedTem
     let temp_file = NamedTempFile::new().unwrap();
     let database = Arc::new(Database::open(temp_file.path()).await.unwrap());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let server = Server::new(addr, database);
+    let server = Server::new(addr, database, 64);
     (server, addr, temp_file)
 }
 

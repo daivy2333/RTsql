@@ -1,6 +1,6 @@
 # Learned — 学习记忆
 
-> 版本：v1.1 | 最后更新：2026-06-03（M41 L017 实测数据追加）
+> 版本：v1.2 | 最后更新：2026-06-03（M30 Server Semaphore L018 + L019）
 > 由 openspec-init 从 `.claude/docs/learned.md` 迁移。
 > 条目格式: <!-- L{编号} --> 标记开头，支持 grep 精确定位。
 
@@ -68,6 +68,8 @@
 | LeafNode::merge_right | src/storage/btree/node.rs | 吸收右兄弟 entries | 2026-05 |
 | InternalNode::merge_right | src/storage/btree/node.rs | 吸收右兄弟 + 降级 separator | 2026-05 |
 | FileStorage.free_pages | src/storage/file_storage.rs | Mutex<Vec<u64>> free-list | 2026-05 |
+| Server::new | src/network/server.rs | 创建服务器（addr, db, max_connections） | 2026-06 |
+| Server::shutdown_token | src/network/server.rs | 获取 CancellationToken 用于优雅关闭 | 2026-06 |
 
 ---
 
@@ -138,7 +140,7 @@
 | 批量删除从后向前 | delete_by_key 从后向前删除 slot | 批量删除同页多个 slot |
 | 两次加载页模式 | 先 page_data() 读找，再 modify_page() 删除 | 页面读写分离 |
 | 惰性初始化 | search_all 在首次 next() 调用时执行 | IndexScanAll |
-| MVCC 可见性迭代 | while 循环跳过不可见版本 | IndexScanAll |
+| 连接并发 Semaphore | `Arc<Semaphore>` + `acquire_owned()` in spawn | 限流并发连接、防连接风暴 |
 
 ---
 

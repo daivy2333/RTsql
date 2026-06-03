@@ -22,21 +22,15 @@ impl<P: Protocol> ConnectionHandler<P> {
             // 1. Parse request
             let request = self.protocol.parse_request(&mut stream).await?;
 
-            match request {
-                Some(req) => {
-                    // 2. Execute SQL
-                    let response = self.handler.execute(req).await;
+            if let Some(req) = request {
+                // 2. Execute SQL
+                let response = self.handler.execute(req).await;
 
-                    // 3. Write response
-                    self.protocol.write_response(&mut stream, &response).await?;
-                }
-                None => {
-                    // Connection closed
-                    break;
-                }
+                // 3. Write response
+                self.protocol.write_response(&mut stream, &response).await?;
             }
+            // On None (startup complete or idle) continue the loop — handler stays alive,
+            // keeping the connection semaphore permit held until I/O error disconnects.
         }
-
-        Ok(())
     }
 }

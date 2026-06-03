@@ -51,10 +51,12 @@
   - 详见：`architecture/spec.md` ADR-009 + `learned/spec.md` L017
   - 状态：✅ P1 完成（见下方"已完成"区）
 
-<!-- O002 --> - **M30: 连接并发上限**
+<!-- O002 --> - **M30: 连接并发上限** ✅ 已完成 (2026-06-03)
   - 问题：PG 连接无限 `tokio::spawn`，连接风暴压垮系统
-  - 方案：`Semaphore` 限制 `max_connections`（默认 64）
-  - 状态：📋 P1
+  - 方案：`Server` 新增 `Arc<Semaphore>` 字段，`max_connections` 默认 64；accept 循环 `acquire_owned()` in spawn；`_permit` 随 handler 生命周期释放
+  - 实测：3 个并发压测全部通过（within-limit / over-limit queued / permit-release）
+  - 详见：`learned/spec.md` L018 + L019
+  - 状态：✅ P1 完成（见下方"已完成"区）
 
 <!-- O003 --> - **M38: 网络 BufWriter + TCP_NODELAY**
   - 问题：DataRow 逐行 `write_all()` + `flush()`，每行一次 syscall
@@ -233,6 +235,9 @@
 <!-- 完成后移到此处，标注完成日期 -->
 > M1-M18 核心开发已完成（2026-05-24 归档）
 > ~430 tests pass, INSERT 332x faster, PK lookup 5.6x faster than SQLite
+
+<!-- O002 已完成（2026-06-03）-->
+**M30: 连接并发上限** — `Server::new(addr, db, max_connections)` + `Arc<Semaphore>` + 3 并发压测通过
 
 <!-- O001 已完成（2026-06-03）-->
 **M41: 事务 ID AtomicU64 无锁分配**（commit `634764d` + `ee9ceee`）
