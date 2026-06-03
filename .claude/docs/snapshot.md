@@ -1,10 +1,19 @@
 # 项目快照
 
-> 最后更新：2026-06-02（OpenSpec 文档体系迁移完成）
+> 最后更新：2026-06-03（规则整合升级 v2.0）
 
 ## 文档体系变更
 
-**2026-06-02 完成 OpenSpec 文档体系迁移**：
+**2026-06-03 完成规则整合升级 v2.0**：
+
+| 状态 | 内容 |
+|------|------|
+| ✅ 已完成 | 废弃 `openspec/specs/rules/`（266 行规则内容已迁移到 `CLAUDE.md`） |
+| ✅ 已完成 | `CLAUDE.md` 升级为"文档索引 + 规则唯一事实来源"双角色（356 行） |
+| ✅ 已完成 | OpenSpec 验证通过：4 个 spec 全部 PASS |
+| 📋 变更 | 走 OpenSpec change 流程：`consolidate-rules-into-claude-md` |
+
+**2026-06-02 完成 OpenSpec 文档体系迁移**（v1.0）：
 
 | 状态 | 内容 |
 |------|------|
@@ -13,12 +22,13 @@
 | ✅ 已完成 | `CLAUDE.md` 更新为索引入口，指向 `openspec/specs/` + `.claude/docs/` 状态文档 |
 | 📋 保留 | `snapshot.md` / `tasks.md` / `archive.md` / `superpowers/` 不迁移 |
 
-**新文档结构**：
-- `openspec/specs/{architecture,rules,learned,references,optimization}/spec.md` — 规范文档
+**新文档结构**（v2.0，2026-06-03）：
+- `openspec/specs/{architecture,learned,references,optimization}/spec.md` — 规范文档（4 个）
+- `openspec/changes/` — 变更提案（含 active + archive）
 - `.claude/docs/snapshot.md` — 项目快照（本文件）
 - `.claude/docs/tasks.md` — 任务追踪
 - `.claude/docs/archive.md` — 历史归档
-- `CLAUDE.md` — 索引入口
+- `CLAUDE.md` — **索引入口 + 规则唯一事实来源**（356 行）
 
 ## 当前阶段
 
