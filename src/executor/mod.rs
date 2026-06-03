@@ -29,6 +29,7 @@ mod sort;
 mod subquery_eval;
 mod update;
 mod value;
+mod value_ref;
 
 pub use join_config::JoinConfig;
 pub use join_related_config::JoinRelatedConfig;
@@ -65,3 +66,4 @@ pub use sort::SortExecutor;
 pub use subquery_eval::SubqueryEvalExecutor;
 pub use update::UpdateExecutor;
 pub use value::{ColumnType, Value, ValueError};
+pub use value_ref::ValueRef;
