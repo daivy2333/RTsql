@@ -81,9 +81,11 @@
 | ✅ 已完成 | 3 个 Expression 实现补 `evaluate_ref`（Column/Constant/Parameter，Parameter 的 String 路径走 Null + M37 TODO）|
 | ✅ 已完成 | 3 个 Scan 执行器闭包改造（Scan/IndexScan/IndexScanAll 各 2 路径）|
 | ✅ 已完成 | 全量测试 0 失败（29 executor_test 含 2 个 M36 集成测试）+ clippy 0 M36 warning + fmt 4 文件 |
-| ✅ 已完成 | Commits：ed81610/4f9a8e8/03c2deb/3ce2672/9bc8d28/75199d6/b75d307 (7 个) |
-| ⏳ 性能验证 | 详见 learned/spec.md L025（待 T9 跑完填数据） |
-| 📋 变更 | 走 OpenSpec change：`m36-zero-copy-value-ref`（T10 归档中） |
+| ✅ 已完成 | Commits：ed81610/4f9a8e8/03c2deb/3ce2672/9bc8d28/75199d6/b75d307/95bb3f9/73076ac (9 个) |
+| ✅ 性能验证 | after-m36 baseline 10 场景已存 `target/criterion/before-m36`（详见 learned/spec.md L025） |
+| ⚠️ 限制 | 30万→0 分配 + ≥ 5% 速度未直接验证：micro_bench 用 Int 列（无 String 分配） + 无 before-m36 baseline（M36 已实施后才存）；L025 已标注 |
+| ✅ 已归档 | OpenSpec change `m36-zero-copy-value-ref` → `archive/2026-06-03-m36-zero-copy-value-ref/`；增量 spec 同步到 `specs/zero-copy-value-ref/spec.md` |
+| 📋 推送 | 10 commits pushed to origin/master（commit 73076ac） |
 
 ---**2026-06-03 M30 连接并发上限完成**：
 
@@ -104,7 +106,7 @@
 | M30 | 连接并发 Semaphore | 防连接风暴 | ✅ 完成 (3 压测通过) |
 | M38 | 网络 BufWriter + TCP_NODELAY | write 调用 -99% | ✅ 完成 (N→2 syscalls) |
 
-**Phase 2 待开始**：M19 DataScan 路径 → M20 零拷贝 SlottedPageRef → M21 页面级 MVCC → M36 零拷贝 ValueRef
+**Phase 2 进展**：M20 ✅ (2026-06-03, commit 4e17362) → M36 ✅ (2026-06-03, commit 73076ac)；待开始 M19 DataScan → M21 页面级 MVCC
 
 ## 历史里程碑
 

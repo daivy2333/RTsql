@@ -53,7 +53,7 @@ M23 ──→ M33(P5)
 | **P2** | **M20** | 零拷贝 SlottedPageRef | I/O ~20-30% 提速 | 低 |
 | | **M19** | DataScan 路径 | 全表扫描 ~2x | 中 |
 | | **M21** | 页面级 MVCC | ~10-15% 提速 | 中 |
-| | **M36** | 零拷贝 ValueRef | 堆分配 30万→0 | 中 |
+| | **M36** | 零拷贝 ValueRef（✅ 2026-06-03, L025）| 堆分配 30万→0 | 中 |
 | **P3** | **M31** | BufferPool DashMap+Semaphore | 并发读吞吐提升 | 低 |
 | | **M40** | RowLockTable DashMap | 行锁争抢 -5-10x | 低 |
 | | **M34** | WAL fsync 合并 | TPS 3-10x | 低 |
@@ -198,7 +198,7 @@ M23 ──→ M33(P5)
 - **范围严格**：M36 不改 `Value` 枚举（M37 范围）、不改 `UpdateExecutor`/Sort/Aggregate/Join（写路径反正要 to_value）
 - **验收**：详见 learned/spec.md L025（双标准：30万→0 AND ≥ 5%）
 - **改动文件**：6 个（新建 value_ref.rs + 改 value.rs / tuple.rs / predicate.rs / 3 个 Scan + 2 个 mod.rs + 集成测试）
-- **Commits**：ed81610 (T1) / 4f9a8e8 (T2) / 03c2deb (T3) / 3ce2672 (T4) / 9bc8d28 (T5) / 75199d6 (T6) / b75d307 (T8)
+- **Commits**：ed81610 (T1) / 4f9a8e8 (T2) / 03c2deb (T3) / 3ce2672 (T4) / 9bc8d28 (T5) / 75199d6 (T6) / b75d307 (T8) / 95bb3f9 (T9+T10 docs) / 73076ac (T10 archive + push)
 - **下一步**：Phase 2 启动 M19 (DataScan) 或 M21 (页面级 MVCC)
 
 ---
@@ -227,13 +227,8 @@ M23 ──→ M33(P5)
 
 #### M36: 零拷贝 ValueRef
 
-- **问题**：`Expression::evaluate()` 每行每列返回 `Value` 枚举，String/Vec 分配
-- **任务**：
-  - [ ] T1: `ValueRef<'a>` 枚举（Text→`&'a str`，Bytes→`&'a [u8]`）
-  - [ ] T2: `Expression::evaluate_ref()` 返回 `ValueRef<'_>`
-  - [ ] T3: 执行器适配 ValueRef 路径
-  - [ ] T4: 需所有权时 `ValueRef::to_owned()` 转换
-  - [ ] T5: 堆分配计数基准测试
+> ✅ **已迁移到上方 line 188 "M36: 零拷贝 ValueRef ✅ 已完成" 段。**
+> 本段为 brainstorming 阶段占位，现已过时，删除。
 
 ---
 
