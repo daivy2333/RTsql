@@ -185,6 +185,22 @@ M23 ──→ M33(P5)
 - **验证**：cargo test --lib --tests 0 失败（110 lib + 全部集成测试 ok）
 - **下一步**：Phase 2 启动 M19 (DataScan) 或 M21 (页面级 MVCC)
 
+#### M36: 零拷贝 ValueRef ✅ 已完成 (2026-06-03)
+
+- **问题**：`deserialize_tuple` 每次 String 列做 `to_vec()` 堆分配，1K 行 × 300B/行 = 30万次分配
+- **方案**：
+  - 新增 `ValueRef<'a>` 零拷贝枚举（`src/executor/value_ref.rs`，含 9 个方法 + 10 测试）
+  - 新增 `deserialize_value_refs` 借用 `&'a [u8]` 零 String 分配（`src/storage/page_format/tuple.rs`）
+  - `Value::as_value_ref` owned-to-borrowed 视图
+  - `Expression` trait 新增 `evaluate_ref<'a>` 抽象方法；`evaluate` 改为 trait 默认方法内部转调 `evaluate_ref().to_value()`
+  - 3 个 Expression 实现补 `evaluate_ref`（ColumnExpression / ConstantExpression / ParameterExpression）
+  - 3 个 Scan 执行器闭包改用 `deserialize_value_refs` + `.to_value()`
+- **范围严格**：M36 不改 `Value` 枚举（M37 范围）、不改 `UpdateExecutor`/Sort/Aggregate/Join（写路径反正要 to_value）
+- **验收**：详见 learned/spec.md L025（双标准：30万→0 AND ≥ 5%）
+- **改动文件**：6 个（新建 value_ref.rs + 改 value.rs / tuple.rs / predicate.rs / 3 个 Scan + 2 个 mod.rs + 集成测试）
+- **Commits**：ed81610 (T1) / 4f9a8e8 (T2) / 03c2deb (T3) / 3ce2672 (T4) / 9bc8d28 (T5) / 75199d6 (T6) / b75d307 (T8)
+- **下一步**：Phase 2 启动 M19 (DataScan) 或 M21 (页面级 MVCC)
+
 ---
 
 #### M19: DataScan 路径
