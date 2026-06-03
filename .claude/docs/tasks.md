@@ -107,14 +107,17 @@ M23 ──→ M33(P5)
 
 ---
 
-#### M30: 连接并发上限
+#### M30: 连接并发上限 ✅ 已完成 (2026-06-03)
 
 - **问题**：PG 连接无限 `tokio::spawn`，连接风暴压垮系统
 - **任务**：
-  - [ ] T1: `Server` 新增 `Arc<Semaphore>` 字段，配置 `max_connections`（默认 64）
-  - [ ] T2: accept 循环 `acquire_owned().await` 后再 spawn
-  - [ ] T3: 连接结束 `drop(permit)` 释放
-  - [ ] T4: 并发连接压测 + 超限测试
+  - [x] T1: `Server` 新增 `Arc<Semaphore>` 字段，配置 `max_connections`（默认 64）
+  - [x] T2: accept 循环 `acquire_owned().await` 后再 spawn
+  - [x] T3: 连接结束 `drop(permit)` 释放
+  - [x] T4: 并发连接压测 + 超限测试
+- **结果**：3 个连接限制测试全部通过（within-limit / over-limit queued / permit-release），全量回归 0 失败
+- **改动**：`server.rs` +8 行（Semaphore）、`connection.rs` match→if let（startup 后保持存活）、`main.rs` / `pg_integration_test.rs` 更新签名、`connection_limit_test.rs` 新增 201 行
+- **下一步**：Phase 1 可启动 M38（网络 BufWriter + TCP_NODELAY）
 
 ---
 

@@ -20,7 +20,7 @@ async fn main() {
         .ok();
 
     let addr = "127.0.0.1:9876".parse().unwrap();
-    let server = Server::new(addr, database);
+    let server = Server::new(addr, database, 64);
 
     println!("RTsql server listening on {}", addr);
     server.run().await.unwrap();

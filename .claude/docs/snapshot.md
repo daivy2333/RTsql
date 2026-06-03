@@ -1,6 +1,6 @@
 # 项目快照
 
-> 最后更新：2026-06-03（M41 完成 + rustfmt 重格式化 + 文档体系同步）
+> 最后更新：2026-06-03（M30 连接并发上限完成）
 
 ## 文档体系变更
 
@@ -45,14 +45,23 @@
 | ✅ 已完成 | 文档同步：ADR-009 + O001 完成 + L017 实测 + tasks.md M41 状态 |
 | 📋 变更 | 走 OpenSpec change：`consolidate-m41-tx-id-atomic`（已归档） |
 
+**2026-06-03 M30 连接并发上限完成**：
+
+| 状态 | 内容 |
+|------|------|
+| ✅ 已完成 | M30 连接并发 Semaphore：`Server::new(addr, db, max_connections)` + `Arc<Semaphore>` in spawn |
+| ✅ 已完成 | 3 个并发压测全部通过：within-limit / over-limit queued / permit-release |
+| ✅ 已完成 | 改动 4 文件 + 新增 `connection_limit_test.rs`（201 行）|
+| ✅ 已完成 | 文档同步：O002 完成 + L018/L019 新增 + tasks.md M30 状态 + snapshot.md 更新 |
+
 ## 当前阶段
 
-**Phase 1 基础设施**：M41 ✅ 完成 → 可启动 **M30（连接并发 Semaphore）** 和 **M38（网络 BufWriter + TCP_NODELAY）**
+**Phase 1 基础设施**：M41 ✅ 完成 → M30 ✅ 完成 → 可启动 **M38（网络 BufWriter + TCP_NODELAY）**
 
 | 里程碑 | 优化项 | 预期收益 | 状态 |
 |--------|--------|---------|------|
 | M41 | 事务 ID AtomicU64 | 分配延迟 100ns→10ns | ✅ 完成 (5.1 ns/op) |
-| M30 | 连接并发 Semaphore | 防连接风暴 | 📋 P1 |
+| M30 | 连接并发 Semaphore | 防连接风暴 | ✅ 完成 (3 压测通过) |
 | M38 | 网络 BufWriter + TCP_NODELAY | write 调用 -99% | 📋 P1 |
 
 **Phase 2-5 待开始**：M19-M23（M19 DataScan、M20 零拷贝、M21 页面级 MVCC、M22 预取、M23 Varint Key）仍是核心短板（Full Scan 4x slower than SQLite，文件大小 6.5x larger）。
@@ -89,5 +98,5 @@
 ## 待办与清理
 
 - ⚠️ `git stash list` 有 `stash@{0}: Pre-merge stash: local docs updates`，是已过时的 OpenSpec 迁移前文档 stash（已被覆盖）。可手动 `git stash drop` 清理。
-- 📋 Phase 1 下一步：M30（连接并发 Semaphore）或 M38（网络 BufWriter）
+- 📋 Phase 1 下一步：M38（网络 BufWriter）
 - 📋 Phase 2 下一步：M19（DataScan 路径）或 M20（零拷贝 SlottedPageRef）
