@@ -238,6 +238,45 @@ Database ──→ Pipeline ──→ Executor Tree
 - 当前 4%-8% 改进已符合 "I/O ~20-30% 提速" 路线图（实际是分配开销 ~5%）
 - update 写路径回归在阈值内，可接受；进一步优化需避免 `.to_vec()` 但要重做写路径设计
 
+### M36 闭包方案（zero-copy ValueRef）
+
+<!-- L025 -->
+| Benchmark | After-m36 (median) | 场景 |
+|-----------|---------------------|------|
+| insert/single_row/50 | 3.6922 ms | 单行插入（50B 值）|
+| insert/single_row/99 | 3.9623 ms | 单行插入（99B 值）|
+| select/pk_lookup | 73.951 µs | 主键查询 |
+| update/single_column | 125.76 ms | 单列更新（写路径）|
+| delete/by_pk | 258.43 ms | 按主键删除 |
+| scan/full_table | 53.274 µs | 全表扫描 |
+| filter/where_value_gt_500 | 57.388 µs | 过滤 |
+| sort/order_by_value_desc | 76.624 µs | 排序 |
+| limit/limit_10_offset_5 | 37.665 µs | 限制+偏移 |
+| join/inner_join | 81.133 µs | Hash Join |
+
+**vs design.md 目标**：
+- 30万→0 分配 — ⚠️ **未直接验证**（micro_bench 当前用 Int 列，无 String 分配；30万→0 是 String 列场景的设计目标）
+- ≥ 5% 速度 — ⚠️ **未直接验证**（无 before-m36 baseline，因为 M36 改动已发生）
+
+**为什么没直接验证 5%/30万→0**：
+- M36 实施前未保存 before-m36 baseline（plan T9 步骤 1 设计缺陷 — 应在 M36 改动**前**保存）
+- micro_bench 当前用 Int 列，**M36 主要消除 String 分配，对 Int-only 场景收益不直接可测**
+- 实际收益场景：String 列 ≥ 100B 的 Scan 路径，1K 行可减 30万次 String 分配
+
+**对比 M20 经验**：
+- M20 留了 before-m20 baseline（M38/M30 漏 commit 后未受影响），所以有真实对比
+- M36 T9 步骤 1 跑 baseline 时已是 M36 实施**后**状态（git stash 与 master 上其它改动冲突，无法干净 stash M36 改动）
+- 这是 T9 plan 的盲点：未来 M19/M37 等 milestone 应**先**留 baseline 再实施
+
+**已知 L025 局限**：
+- 数据是 after-m36 snapshot，仅供未来回归参考（M19/M37 实施后跑 `--baseline before-m36` 即可对比）
+- 30万→0 分配目标需要 String 列 benchmark 单独验证（建议 `benches/string_scan_bench.rs` 新建）
+
+**How to apply**：
+- 未来 zero-copy 改进（M19/M37）实施前应先 `cargo bench --save-baseline before-X`
+- micro_bench 需扩展 String 列场景才能验证 M36 真实收益
+- M36 设计本身正确（闭包内 `deserialize_value_refs` 借用 + `.to_value()` 消费），性能差异主要在 String 列
+
 ---
 
 ## M30 连接并发 Semaphore

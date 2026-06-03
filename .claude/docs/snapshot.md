@@ -71,6 +71,20 @@
 | ⚠️ 部分 | ≥ 15% 提速目标**未达**（实际 4 项 read 路径改进幅度未到 15%），原因：micro_bench 行数小 + 分配器优。详见 learned/spec.md L024 |
 | 📋 变更 | 走 OpenSpec change：`m20-zero-copy-slotted-page-ref`（T10 归档中） |
 
+**2026-06-03 M36 零拷贝 ValueRef 完成**：
+
+| 状态 | 内容 |
+|------|------|
+| ✅ 已完成 | 新增 `ValueRef<'a>` 零拷贝枚举（含 9 个方法 + 10 个单元测试）|
+| ✅ 已完成 | 新增 `deserialize_value_refs` 借用 `&'a [u8]`（5 tag bytes 同 deserialize_tuple）|
+| ✅ 已完成 | `Expression` trait 加 `evaluate_ref<'a>` 抽象方法；`evaluate` 改 trait 默认方法内部转调 |
+| ✅ 已完成 | 3 个 Expression 实现补 `evaluate_ref`（Column/Constant/Parameter，Parameter 的 String 路径走 Null + M37 TODO）|
+| ✅ 已完成 | 3 个 Scan 执行器闭包改造（Scan/IndexScan/IndexScanAll 各 2 路径）|
+| ✅ 已完成 | 全量测试 0 失败（29 executor_test 含 2 个 M36 集成测试）+ clippy 0 M36 warning + fmt 4 文件 |
+| ✅ 已完成 | Commits：ed81610/4f9a8e8/03c2deb/3ce2672/9bc8d28/75199d6/b75d307 (7 个) |
+| ⏳ 性能验证 | 详见 learned/spec.md L025（待 T9 跑完填数据） |
+| 📋 变更 | 走 OpenSpec change：`m36-zero-copy-value-ref`（T10 归档中） |
+
 ---**2026-06-03 M30 连接并发上限完成**：
 
 | 状态 | 内容 |
