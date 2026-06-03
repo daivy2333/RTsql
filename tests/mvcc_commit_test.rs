@@ -61,7 +61,7 @@ async fn test_uncommitted_version_not_visible() -> Result<()> {
 
     // Also test with find_visible_version
     let visible_tuple = buffer_pool
-        .find_visible_version(row_id, &snapshot_tx2)
+        .find_visible_version(row_id, &snapshot_tx2, |_| Ok(()))
         .await?;
     assert!(
         visible_tuple.is_none(),
@@ -145,7 +145,7 @@ async fn test_committed_version_visible() -> Result<()> {
 
     // Also test with find_visible_version for tx_id = 3
     let visible_tuple = buffer_pool
-        .find_visible_version(row_id, &snapshot_tx3)
+        .find_visible_version(row_id, &snapshot_tx3, |_| Ok(()))
         .await?;
     assert!(
         visible_tuple.is_some(),
@@ -266,7 +266,9 @@ async fn test_self_visibility() -> Result<()> {
     );
 
     // Also test with find_visible_version
-    let visible_tuple = buffer_pool.find_visible_version(row_id, &snapshot).await?;
+    let visible_tuple = buffer_pool
+        .find_visible_version(row_id, &snapshot, |_| Ok(()))
+        .await?;
     assert!(
         visible_tuple.is_some(),
         "find_visible_version should return the tuple for self-created version"

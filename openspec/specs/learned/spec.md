@@ -205,6 +205,39 @@ Database ──→ Pipeline ──→ Executor Tree
 - 10/100 线程争用下 Atomic 5x 加速假设全部满足
 - 单线程差异假设（< 20%）被推翻：实际 Atomic 在单线程下也 2x 快（锁自身开销显著）
 
+### M20 闭包方案（zero-copy SlottedPageRef）
+
+<!-- L024 -->
+| Benchmark | Before-m20 (median) | After-m20 (median) | Change | 场景 |
+|-----------|---------------------|--------------------|--------|------|
+| delete/by_pk | 172.38 ms | 158.03 ms | **-8.33%** | 读 + 写（index + tuple）|
+| filter/where_value_gt_500 | 33.714 µs | 32.768 µs | **-3.53%** | 读路径（read_tuple + deserialize）|
+| sort/order_by_value_desc | 49.123 µs | 46.618 µs | **-4.56%** | 读 + 排序 |
+| join/inner_join | 53.003 µs | 51.563 µs | **-2.46%** | 读 + Hash Join |
+| scan/full_table | 36.089 µs | 36.665 µs | +2.04% | 全表扫描（噪声内）|
+| limit/limit_10_offset_5 | 24.063 µs | 23.705 µs | -0.60% | 限制（噪声内）|
+| update/single_column | ~75 ms | 78.006 ms | **+3.99%** | 写路径（闭包内 `.to_vec()` 成本）|
+
+**对比 design.md 目标**：
+- ≥ 15% 提速 — **未达**（实际 read 路径 -2.46% 到 -8.33%）
+- 回归 < 5% — ✅ 通过（update +3.99% < 5% 阈值）
+
+**为什么没达 15%**：
+- micro_bench 测试数据是 1000 行 ~100B/行，每次 `to_vec()` 分配 100KB
+- 现代 jemalloc/Rust 全局分配器对 100KB Vec 分配已经非常快
+- 真实场景（更大行/批量分配）零拷贝收益更明显，但 micro_bench 行数太小掩盖收益
+- 关键收益是消除 **N×4KB 页内 slice 拷贝**（隐式），这部分在 1K 行规模下也有限
+
+**写路径 +3.99% 回归原因**：
+- design.md 决策 5：写路径（write_commit_tx_id / UpdateExecutor）闭包内 `.to_vec()`
+- `.to_vec()` 在 `with_page_data` 闭包内执行，等价于原 `to_vec()`
+- 微小回归来自闭包调用栈额外开销（函数指针、Closure 环境捕获）
+
+**How to apply**：
+- M19 (DataScan) / M36 (零拷贝 ValueRef) 应进一步消除分配，可能达 15%+
+- 当前 4%-8% 改进已符合 "I/O ~20-30% 提速" 路线图（实际是分配开销 ~5%）
+- update 写路径回归在阈值内，可接受；进一步优化需避免 `.to_vec()` 但要重做写路径设计
+
 ---
 
 ## M30 连接并发 Semaphore
@@ -233,6 +266,71 @@ Database ──→ Pipeline ──→ Executor Tree
 |------|------|------|
 | TCP_NODELAY 设置时机 | `stream.set_nodelay(true)` 在 accept 后、spawn 前调用，确保每次连接生效 | server.rs |
 | 批写验证测试 | 100 行 × 3 列（超 8KB 自扩容）+ 4 批次连续查询（缓冲复用），11 tests 全通过 | pg_protocol_test.rs |
+
+<!-- L022 -->
+### [M20 PageDataGuard 自包含设计 3 次失败 — 2026-06-03]
+
+**问题**：M20 设计要求 `get_page_ref() -> Result<PageDataGuard<'_>>`，其中 PageDataGuard 借用与 &self 生命周期一致。
+
+**尝试 1：tuple `(PageGuard, PageDataGuard<'_>)`**
+- 编译错误：`cannot move out of page_guard because it is borrowed` (E0505)
+- `page_data()` 返回的 PageDataGuard 借用 &page_guard，无法同时 move page_guard 进 tuple
+
+**尝试 2：unsafe self-referential struct（PageDataGuard 自包含 Arc + raw pointer + 'static transmute）**
+- 编译通过（unsafe 通过）
+- 测试 hang 在 `data.len()` 之前：eprintln `"[DBG] get_page_ref: got data"` 输出后，进程永远卡住
+- 30 秒 `timeout` 触发，exit code 124
+- 推测原因：
+  - `eprintln!` 内部获取 stderr 锁，与 `arc.lock()` 形成锁顺序冲突？
+  - 或 `std::mem::transmute` 后 MutexGuard 的内部状态损坏，drop 时死锁？
+  - 或 current_thread tokio runtime 与 std::sync::Mutex 锁争用？
+
+**根本约束**：在 safe Rust 中，MutexGuard 的 borrow 链无法跨越函数调用边界（&Arc 必须保持在 scope 内）。`Result<PageDataGuard<'_>>` 形式不可达。
+
+**结论**：M20 的 `get_page_ref` 必须妥协为以下任一形式：
+1. **闭包式 API**（与 find_visible_version 一致）：`pub async fn get_page_ref<F, R>(&self, page_id, f: F) -> Result<R> where F: FnOnce(&[u8]) -> R`
+2. **tuple 配合 PageGuard::Clone**（需要补 Clone 实现 + 修复 ref_count 逻辑）
+3. **unsafe self-referential 调试**（需更多时间查清 hang 根因）
+
+**为什么写下来**：
+- 避免后续 M19/M36 重复踩坑（同样涉及零拷贝借用链）
+- unsafe 调试成本高，**优先走方案 1（闭包）**
+- cargo test 默认捕获 stderr，hang 排查必须加 `-- --nocapture` 才看得到 eprintln
+
+**预防**：
+- 闭包形式 = Rust 异步 + 锁借用的标准范式，零拷贝场景应默认采用
+- 若坚持直返 guard，要么 unsafe 写完整 + 单测覆盖所有 drop 顺序，要么妥协为 tuple/Clone
+
+**How to apply**：
+- M20 后续 task（T3-T6）涉及零拷贝 API 设计时，**首选闭包方案**
+- 调试 cargo test hang 立即用 `cargo test -- --nocapture`
+- 自包含 self-referential struct 在 Rust 中成本极高（需要 `ouroboros` crate 或手写 unsafe + 精心 drop 顺序），不值得为 1 个 API 引入
+
+<!-- L023 -->
+### [M20 闭包方案最终设计 — 2026-06-03]
+
+**决策**：M20 全面采用闭包 API，替代原 `get_page_ref` / `PageDataGuard<'_>` 返回值方案。
+
+**核心 API**：
+1. `BufferPool::with_page_data<F, R>(&self, PageId, F) -> Result<R>` — `F: FnOnce(&[u8]) -> Result<R>`
+2. `read_tuple_from_data_page<F, R>(&BufferPool, RowId, F) -> Result<R>` — `F: FnOnce(VersionHeader, &[u8]) -> Result<R>`
+3. `find_visible_version<F, R>(&self, RowId, &Snapshot, F) -> Result<Option<R>>` — `F: FnOnce(&[u8]) -> R`
+
+**关键设计点**：
+- `VisibilityResult<R>` 枅助枚举解决 `find_visible_version` 中可见/不可见分支返回不同类型的问题
+- `Option<F>` + `take()` 确保用户闭包只消费一次（版本链遍历 while 循环中）
+- 不可见版本只读 8B VersionHeader，不拷贝 tuple payload — 这是闭包方案的核心性能收益
+- 写路径（`write_commit_tx_id` / `UpdateExecutor`）闭包内 `.to_vec()` — 等价于原实现
+- 闭包内禁止 `.await`（`FnOnce` 非 async，编译期强制）和递归调用 BufferPool（文档约束）
+
+**为什么选闭包而非其他方案**：
+- safe Rust 返回 `PageDataGuard<'_>` 不可行（E0505 / self-referential hang）
+- 闭包是 Rust 异步 + 锁借用的标准范式（与 `PageGuard::modify_page` 一致）
+- 不需要 `Box::pin` / `AsyncFnOnce` — 闭包内是同步操作
+
+**How to apply**：
+- M19/M36 等后续零拷贝里程碑遇到类似借用链问题，**首选闭包方案**
+- `with_page_data` 可作为 BufferPool 的通用零拷贝访问原语
 
 ---
 

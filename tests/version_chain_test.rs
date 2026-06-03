@@ -152,7 +152,7 @@ async fn test_version_chain_traversal() -> Result<()> {
 
     // Tx4 should see v2 (committed by Tx2), not v3 (uncommitted by Tx3)
     let visible_tuple = buffer_pool
-        .find_visible_version(row_id_v3, &tx4_snapshot)
+        .find_visible_version(row_id_v3, &tx4_snapshot, |bytes| Ok(bytes.to_vec()))
         .await?;
     assert!(visible_tuple.is_some(), "Tx4 should see a visible version");
 
@@ -181,7 +181,7 @@ async fn test_version_chain_traversal() -> Result<()> {
     // Step 6: Tx4 still sees v2 (Repeatable Read)
     // Tx4's snapshot was taken before Tx3 committed, so it still sees v2
     let visible_tuple_after = buffer_pool
-        .find_visible_version(row_id_v3, &tx4_snapshot)
+        .find_visible_version(row_id_v3, &tx4_snapshot, |bytes| Ok(bytes.to_vec()))
         .await?;
     assert!(
         visible_tuple_after.is_some(),
@@ -207,7 +207,7 @@ async fn test_version_chain_traversal() -> Result<()> {
     let tx5_snapshot = tx5.snapshot();
 
     let visible_tuple_tx5 = buffer_pool
-        .find_visible_version(row_id_v3, &tx5_snapshot)
+        .find_visible_version(row_id_v3, &tx5_snapshot, |bytes| Ok(bytes.to_vec()))
         .await?;
     assert!(
         visible_tuple_tx5.is_some(),
@@ -313,7 +313,7 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
     let tx4_snapshot = tx4.snapshot();
 
     let visible_tuple = buffer_pool
-        .find_visible_version(row_id_v3, &tx4_snapshot)
+        .find_visible_version(row_id_v3, &tx4_snapshot, |bytes| Ok(bytes.to_vec()))
         .await?;
     assert!(visible_tuple.is_some(), "Tx4 should see a visible version");
 
@@ -379,7 +379,7 @@ async fn test_all_versions_invisible() -> Result<()> {
     let tx2_snapshot = tx2.snapshot();
 
     let visible_tuple = buffer_pool
-        .find_visible_version(row_id, &tx2_snapshot)
+        .find_visible_version(row_id, tx2_snapshot, |_| Ok(()))
         .await?;
     assert!(
         visible_tuple.is_none(),

@@ -640,7 +640,6 @@ async fn test_response_mapping_pong() {
     assert!(has_command_complete, "Should have CommandComplete");
     assert!(has_ready, "Should have ReadyForQuery");
 
-
     // Drain: send a query to force server state to Querying, then write Pong
     let query_msg = build_query_message("PING_2");
     client.write_all(&query_msg).await.unwrap();

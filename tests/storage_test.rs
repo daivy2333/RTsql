@@ -187,6 +187,50 @@ mod tests {
         assert_eq!(guard.page().id, PageId(0));
     }
 
+    // M20: Test zero-copy with_page_data API (closure-based)
+    // Closure receives &[u8] (4096 bytes) without copying.
+    #[tokio::test]
+    async fn test_with_page_data_returns_zero_copy_bytes() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = Arc::new(FileStorage::open(temp_file.path()).unwrap());
+        let page_id = storage.allocate_page().await.unwrap();
+
+        let pool = BufferPool::new(100, storage.clone()).unwrap();
+
+        // Closure receives &[u8] zero-copy, must return Result<R>
+        let (data_len, first_byte) = pool
+            .with_page_data(page_id, |data| -> rtsql::storage::Result<(usize, u8)> {
+                Ok((data.len(), data[0]))
+            })
+            .await
+            .unwrap();
+        assert_eq!(data_len, 4096);
+        assert_eq!(first_byte, 0);
+    }
+
+    // M20: Test with_page_data cache-hit path (read same page twice)
+    #[tokio::test]
+    async fn test_with_page_data_cache_hit() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let storage = Arc::new(FileStorage::open(temp_file.path()).unwrap());
+        let page_id = storage.allocate_page().await.unwrap();
+
+        let pool = BufferPool::new(100, storage.clone()).unwrap();
+
+        let len1 = pool
+            .with_page_data(page_id, |data| Ok(data.len()))
+            .await
+            .unwrap();
+        assert_eq!(len1, 4096);
+
+        // Second call: must return same content from cache
+        let len2 = pool
+            .with_page_data(page_id, |data| Ok(data.len()))
+            .await
+            .unwrap();
+        assert_eq!(len2, 4096);
+    }
+
     /// M10: Test find_visible_version method (TDD compliance)
     /// Tests that the method exists and handles non-existent RowId correctly.
     /// Full version chain traversal tests require UpdateExecutor which creates version chains.

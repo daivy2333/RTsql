@@ -29,6 +29,12 @@ pub struct PageGuard {
 
 /// Zero-copy page data accessor. Holds the MutexGuard so the borrow
 /// stays valid while the caller reads the data.
+///
+/// Borrow lifetime is tied to the source `PageGuard` — caller must keep
+/// the `PageGuard` alive for as long as the `PageDataGuard` borrow is used.
+///
+/// SAFETY: This uses std::sync::Mutex which must NOT be held across .await.
+/// The returned PageDataGuard is not Send and cannot be held across await points.
 pub struct PageDataGuard<'a> {
     _guard: std::sync::MutexGuard<'a, PageFrame>,
 }

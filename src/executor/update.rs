@@ -72,9 +72,12 @@ impl Executor for UpdateExecutor {
             None => return Err(StorageError::KeyNotFound),
         };
 
-        // Step 2: Read old tuple from data page
+        // Step 2: Read old tuple from data page (M20 closure form, .to_vec() for WAL ownership)
         let (_version_header, old_tuple_bytes) =
-            read_tuple_from_data_page(&self.buffer_pool, old_row_id).await?;
+            read_tuple_from_data_page(&self.buffer_pool, old_row_id, |vh, bytes| {
+                Ok((vh, bytes.to_vec()))
+            })
+            .await?;
         let mut values = deserialize_tuple(&old_tuple_bytes, &self.schema)?;
 
         // Step 3: Find column index and modify the target column

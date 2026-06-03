@@ -115,17 +115,19 @@ impl PgProtocol {
     async fn send_startup_response(&mut self, stream: &mut TcpStream) -> Result<(), NetworkError> {
         self.write_buf.clear();
 
-        self.write_buf.extend_from_slice(&pg_messages::authentication_ok());
+        self.write_buf
+            .extend_from_slice(&pg_messages::authentication_ok());
         self.write_buf
             .extend_from_slice(&pg_messages::parameter_status("server_version", "14.0"));
         self.write_buf
             .extend_from_slice(&pg_messages::parameter_status("client_encoding", "UTF8"));
         self.write_buf
             .extend_from_slice(&pg_messages::parameter_status("server_encoding", "UTF8"));
-        self.write_buf.extend_from_slice(&pg_messages::backend_key_data(
-            self.process_id,
-            self.secret_key,
-        ));
+        self.write_buf
+            .extend_from_slice(&pg_messages::backend_key_data(
+                self.process_id,
+                self.secret_key,
+            ));
         self.write_buf
             .extend_from_slice(&pg_messages::ready_for_query('I'));
 
@@ -267,9 +269,11 @@ impl Protocol for PgProtocol {
                             .extend_from_slice(&pg_messages::data_row(&values));
                     }
 
-                    self.write_buf.extend_from_slice(
-                        &pg_messages::command_complete(&format!("SELECT {}", rows.len())),
-                    );
+                    self.write_buf
+                        .extend_from_slice(&pg_messages::command_complete(&format!(
+                            "SELECT {}",
+                            rows.len()
+                        )));
                 }
 
                 self.write_buf
@@ -283,9 +287,11 @@ impl Protocol for PgProtocol {
                 Ok(())
             }
             Response::AffectedRows { count } => {
-                self.write_buf.extend_from_slice(
-                    &pg_messages::command_complete(&format!("INSERT {}", count)),
-                );
+                self.write_buf
+                    .extend_from_slice(&pg_messages::command_complete(&format!(
+                        "INSERT {}",
+                        count
+                    )));
                 self.write_buf
                     .extend_from_slice(&pg_messages::ready_for_query('I'));
 
