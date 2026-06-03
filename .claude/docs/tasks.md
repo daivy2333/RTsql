@@ -137,14 +137,53 @@ M23 ──→ M33(P5)
 
 ### Phase 2: 存储引擎核心
 
-#### M20: 零拷贝 SlottedPageRef
+#### M20: 零拷贝 SlottedPageRef ✅ 已完成 (2026-06-03)
 
-- **问题**：`SlottedPage::get()` 返回 `Vec<u8>` 拷贝
-- **任务**：
-  - [ ] T1: `SlottedPageRef<'_>` 只读视图（借用页缓冲区）
-  - [ ] T2: `LeafNodeRef` / `InternalNodeRef` 零拷贝（已有设计）
-  - [ ] T3: `BufferPool::get_page_ref()` 返回零拷贝引用
-  - [ ] T4: 执行器 Scan 路径改用零拷贝
+- **问题**：`read_tuple_from_data_page` / `find_visible_version` 返回 `Vec<u8>`，每行一次堆分配
+- **方案**：纯闭包 API（用户已选择方案 A）
+  - 新增 `BufferPool::with_page_data<F, R>(&self, PageId, F) -> Result<R>` — 闭包内零拷贝 `&[u8]`
+  - `read_tuple_from_data_page` 改为 `async fn<F, R>(buffer_pool, row_id, f: F) -> Result<R>` — 闭包接收 `(VersionHeader, &[u8])`
+  - `find_visible_version` 改为 `async fn<F, R>(&self, row_id, snapshot, f: F) -> Result<Option<R>>` — 闭包 `FnOnce(&[u8]) -> Result<R>`（修订：原 design 误，错误传播必须 Result<R>）
+  - 引入 `VisibilityResult<R>` 辅助枚举
+  - 删除编译不过的 `get_page_ref`
+- **状态**：
+  - [x] T1: 验证既有零拷贝类型（SlottedPageRef / LeafNodeRef / InternalNodeRef / PageDataGuard）
+  - [x] T2: `with_page_data` 闭包 API 实现 + `VisibilityResult<R>` + 删除 `get_page_ref`
+  - [x] T3: `read_tuple_from_data_page` 闭包形式（+ data_page.rs 5 单元测试迁移）
+  - [x] T4: `find_visible_version` 闭包形式（+ design.md 决策 3 修订 F 返回 Result<R>）
+  - [x] T5: `read_version_header` / `write_commit_tx_id` 闭包适配
+  - [x] T6: 3 个 Scan 执行器闭包调用（ScanExecutor / IndexScanExecutor / IndexScanAllExecutor）
+  - [x] T7: UpdateExecutor 闭包内 `.to_vec()` 适配
+  - [x] T8: cargo test 0 失败 + cargo fmt 12 文件 + cargo clippy M20 范围内 0 warning
+  - [x] T9: 性能验证（before-m20 baseline 留底 + 对比）
+  - [x] T10: 归档
+- **性能对比**（micro_bench，详见 learned/spec.md L024）：
+  - delete/by_pk: **-8.33%** ✅
+  - filter/where_value_gt_500: **-3.53%** ✅
+  - sort/order_by_value_desc: **-4.56%** ✅
+  - join/inner_join: **-2.46%** ✅
+  - scan/full_table: +2.04%（噪声内）
+  - limit/limit_10_offset_5: -0.60%（噪声内）
+  - update/single_column: **+3.99%** ⚠️ 写路径回归（在 5% 阈值内）
+- **vs 目标**：
+  - ≥ 15% 提速 — ❌ 未达（实际 -2.46% 到 -8.33%）
+  - 回归 < 5% — ✅ 通过
+  - 原因：micro_bench 行数小（1K × 100B），现代分配器对 100KB Vec 已经极快；M19/M36 进一步消除分配可能达 15%+
+- **改动文件**（12 个）：
+  - `src/storage/buffer_pool.rs` (+98 -32) — `with_page_data` + `find_visible_version` 闭包形式
+  - `src/storage/data_page.rs` (+24 -19) — `read_tuple_from_data_page` 闭包形式 + 5 单元测试
+  - `src/storage/page_frame.rs` (+6 -0) — PageDataGuard 文档补充
+  - `src/executor/scan.rs` (+17 -22) — ScanExecutor 闭包调用
+  - `src/executor/index_scan.rs` (+20 -19) — IndexScanExecutor 闭包调用
+  - `src/executor/index_scan_all.rs` (+17 -19) — IndexScanAllExecutor 闭包调用
+  - `src/executor/update.rs` (+6 -2) — UpdateExecutor 闭包内 .to_vec()
+  - `tests/storage_test.rs` (+33 -10) — 2 with_page_data 测试
+  - `tests/executor_test.rs` (+23 -10) — 6 read_tuple_from_data_page 闭包适配
+  - `tests/gc_test.rs` (+8 -3) — 2 read_tuple_from_data_page 闭包适配
+  - `tests/version_chain_test.rs` (+13 -5) — 6 find_visible_version 闭包适配
+  - `tests/mvcc_commit_test.rs` (+6 -3) — 3 find_visible_version 闭包适配
+- **验证**：cargo test --lib --tests 0 失败（110 lib + 全部集成测试 ok）
+- **下一步**：Phase 2 启动 M19 (DataScan) 或 M21 (页面级 MVCC)
 
 ---
 

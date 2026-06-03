@@ -68,7 +68,11 @@ async fn try_handshake(client: &mut TcpStream) -> Result<Vec<u8>, ()> {
 /// Convenience: assert handshake succeeds within timeout.
 async fn assert_handshake_ok(client: &mut TcpStream, label: &str) {
     let resp = try_handshake(client).await;
-    assert!(resp.is_ok(), "{}: handshake timed out (handler not started?)", label);
+    assert!(
+        resp.is_ok(),
+        "{}: handshake timed out (handler not started?)",
+        label
+    );
     assert!(
         has_auth_ok(&resp.unwrap()),
         "{}: response missing AuthenticationOk",

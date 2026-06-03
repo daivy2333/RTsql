@@ -130,7 +130,10 @@ async fn test_gc_removes_old_versions() -> Result<()> {
 
     // Read the latest version and verify value
     let (version_header, tuple_bytes) =
-        rtsql::storage::read_tuple_from_data_page(&buffer_pool, latest_row_id).await?;
+        rtsql::storage::read_tuple_from_data_page(&buffer_pool, latest_row_id, |vh, bytes| {
+            Ok((vh, bytes.to_vec()))
+        })
+        .await?;
     assert!(
         version_header.commit_tx_id().is_some(),
         "latest version should be committed"
@@ -348,7 +351,10 @@ async fn test_gc_multiple_keys() -> Result<()> {
             .expect("key should exist");
 
         let (_, tuple_bytes) =
-            rtsql::storage::read_tuple_from_data_page(&buffer_pool, row_id).await?;
+            rtsql::storage::read_tuple_from_data_page(&buffer_pool, row_id, |vh, bytes| {
+                Ok((vh, bytes.to_vec()))
+            })
+            .await?;
         let deserialized = rtsql::storage::page_format::deserialize_tuple(
             &tuple_bytes,
             &table_meta

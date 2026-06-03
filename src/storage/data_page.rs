@@ -61,34 +61,42 @@ pub async fn write_tuple_to_data_page(
 }
 
 /// Read a tuple and its version header from a data page by RowId.
-/// Uses zero-copy page access (page_data + SlottedPageRef).
-pub async fn read_tuple_from_data_page(
+///
+/// M20: closure-based zero-copy API. The closure receives
+/// `(VersionHeader, &[u8])` where `&[u8]` is the tuple payload
+/// (no VersionHeader prefix). The page lock is held for the closure's
+/// lifetime; the closure must not call `.await` or recursively invoke
+/// `BufferPool` methods.
+///
+/// Callers that need owned bytes (e.g. write paths, WAL) can call
+/// `bytes.to_vec()` inside the closure.
+pub async fn read_tuple_from_data_page<F, R>(
     buffer_pool: &BufferPool,
     row_id: RowId,
-) -> Result<(VersionHeader, Vec<u8>)> {
+    f: F,
+) -> Result<R>
+where
+    F: FnOnce(VersionHeader, &[u8]) -> Result<R>,
+{
     let page_id = PageId(row_id.page_id as u64);
-    let guard = buffer_pool.get_page(page_id).await?;
-
-    let data_guard = guard.page_data();
-    let slotted = SlottedPageRef::new(&data_guard);
-
-    let (slot, _) = slotted
-        .get_slot_by_logical_id(row_id.slot_id)
-        .ok_or(StorageError::SlotNotFound(row_id))?;
-
-    let slot_data = slotted.get_slot_data(&slot);
-
-    let version_header =
-        VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE]).ok_or_else(|| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "malformed version header",
-            ))
-        })?;
-
-    let tuple_bytes = slot_data[VersionHeader::SIZE..].to_vec();
-
-    Ok((version_header, tuple_bytes))
+    buffer_pool
+        .with_page_data(page_id, |data| -> Result<R> {
+            let slotted = SlottedPageRef::new(data);
+            let (slot, _) = slotted
+                .get_slot_by_logical_id(row_id.slot_id)
+                .ok_or(StorageError::SlotNotFound(row_id))?;
+            let slot_data = slotted.get_slot_data(&slot);
+            let version_header = VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE])
+                .ok_or_else(|| {
+                    StorageError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "malformed version header",
+                    ))
+                })?;
+            let tuple_bytes = &slot_data[VersionHeader::SIZE..];
+            f(version_header, tuple_bytes)
+        })
+        .await
 }
 
 /// Update only the version header in a data page slot (M10)
@@ -165,7 +173,10 @@ mod tests {
         let row_id = write_tuple_to_data_page(&pool, &table, &vh, tuple)
             .await
             .unwrap();
-        let (read_vh, read_tuple) = read_tuple_from_data_page(&pool, row_id).await.unwrap();
+        let (read_vh, read_tuple) =
+            read_tuple_from_data_page(&pool, row_id, |vh, bytes| Ok((vh, bytes.to_vec())))
+                .await
+                .unwrap();
 
         assert_eq!(read_vh.create_tx_id(), 1);
         assert_eq!(read_vh.commit_tx_id(), None);
@@ -190,9 +201,15 @@ mod tests {
             .await
             .unwrap();
 
-        let (r1, d1) = read_tuple_from_data_page(&pool, rid1).await.unwrap();
-        let (r2, d2) = read_tuple_from_data_page(&pool, rid2).await.unwrap();
-        let (r3, d3) = read_tuple_from_data_page(&pool, rid3).await.unwrap();
+        let (r1, d1) = read_tuple_from_data_page(&pool, rid1, |vh, bytes| Ok((vh, bytes.to_vec())))
+            .await
+            .unwrap();
+        let (r2, d2) = read_tuple_from_data_page(&pool, rid2, |vh, bytes| Ok((vh, bytes.to_vec())))
+            .await
+            .unwrap();
+        let (r3, d3) = read_tuple_from_data_page(&pool, rid3, |vh, bytes| Ok((vh, bytes.to_vec())))
+            .await
+            .unwrap();
 
         assert_eq!(d1, b"tuple-a");
         assert_eq!(d2, b"tuple-b");
@@ -218,7 +235,10 @@ mod tests {
         }
 
         for (i, rid) in row_ids.iter().enumerate() {
-            let (vh, data) = read_tuple_from_data_page(&pool, *rid).await.unwrap();
+            let (vh, data) =
+                read_tuple_from_data_page(&pool, *rid, |vh, bytes| Ok((vh, bytes.to_vec())))
+                    .await
+                    .unwrap();
             assert_eq!(vh.create_tx_id(), i as u64);
             assert_eq!(data.len(), 1000);
         }
@@ -241,7 +261,7 @@ mod tests {
             .unwrap();
 
         let bad_rid = RowId::new(row_id.page_id, 999);
-        let result = read_tuple_from_data_page(&pool, bad_rid).await;
+        let result = read_tuple_from_data_page(&pool, bad_rid, |_, _| Ok(())).await;
         assert!(result.is_err(), "reading non-existent slot must error");
     }
 
@@ -256,7 +276,10 @@ mod tests {
             .await
             .unwrap();
 
-        let (read_vh, read_data) = read_tuple_from_data_page(&pool, row_id).await.unwrap();
+        let (read_vh, read_data) =
+            read_tuple_from_data_page(&pool, row_id, |vh, bytes| Ok((vh, bytes.to_vec())))
+                .await
+                .unwrap();
 
         assert_eq!(read_vh.create_tx_id(), 42);
         assert_eq!(read_vh.commit_tx_id(), None);

@@ -64,20 +64,24 @@ impl Executor for IndexScanExecutor {
         match row_id {
             Some(id) => {
                 if let Some(ref snapshot) = self.snapshot {
-                    // M10: Use find_visible_version for version chain traversal
-                    let tuple_bytes = self.buffer_pool.find_visible_version(id, snapshot).await?;
+                    // M20: closure-based find_visible_version (zero-copy)
+                    let values_opt = self
+                        .buffer_pool
+                        .find_visible_version(id, snapshot, |bytes| {
+                            deserialize_tuple(bytes, &self.schema)
+                        })
+                        .await?;
 
-                    match tuple_bytes {
-                        Some(data) => {
-                            let values = deserialize_tuple(&data, &self.schema)?;
-                            Ok(Some(ExecResult::Row(values)))
-                        }
-                        None => Ok(None), // All versions invisible
+                    match values_opt {
+                        Some(values) => Ok(Some(ExecResult::Row(values))),
+                        None => Ok(None), // all versions invisible
                     }
                 } else {
-                    // No snapshot: read latest version (backward compat)
-                    let (_, tuple_bytes) = read_tuple_from_data_page(&self.buffer_pool, id).await?;
-                    let values = deserialize_tuple(&tuple_bytes, &self.schema)?;
+                    // M20: closure-based read_tuple_from_data_page (zero-copy)
+                    let values = read_tuple_from_data_page(&self.buffer_pool, id, |_vh, bytes| {
+                        deserialize_tuple(bytes, &self.schema)
+                    })
+                    .await?;
                     Ok(Some(ExecResult::Row(values)))
                 }
             }

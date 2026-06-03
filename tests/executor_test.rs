@@ -157,7 +157,8 @@ async fn test_insert_executor_single_row() -> Result<()> {
         .search(&key)
         .await?
         .expect("row should be indexed");
-    let (_vh, tuple_bytes) = read_tuple_from_data_page(&buffer_pool, row_id).await?;
+    let tuple_bytes =
+        read_tuple_from_data_page(&buffer_pool, row_id, |_vh, bytes| Ok(bytes.to_vec())).await?;
     assert!(!tuple_bytes.is_empty());
 
     Ok(())
@@ -202,7 +203,9 @@ async fn test_insert_executor_batch() -> Result<()> {
             .search(&key)
             .await?
             .expect("row should be indexed");
-        let (_vh, tuple_bytes) = read_tuple_from_data_page(&buffer_pool, row_id).await?;
+        let tuple_bytes =
+            read_tuple_from_data_page(&buffer_pool, row_id, |_vh, bytes| Ok(bytes.to_vec()))
+                .await?;
         assert!(!tuple_bytes.is_empty());
     }
 
@@ -375,7 +378,9 @@ async fn test_insert_stores_tuple_data() -> Result<()> {
         .search(&key)
         .await?
         .expect("row should be indexed");
-    let (_vh, tuple_bytes) = read_tuple_from_data_page(&buffer_poul, row_id).await?;
+    let (_vh, tuple_bytes) =
+        read_tuple_from_data_page(&buffer_poul, row_id, |vh, bytes| Ok((vh, bytes.to_vec())))
+            .await?;
 
     let schema = [ColumnType::Int, ColumnType::String(100)];
     let deserialized = deserialize_tuple(&tuple_bytes, &schema)?;
@@ -500,7 +505,8 @@ async fn test_insert_creates_version_header() -> Result<()> {
         .search(&key)
         .await?
         .expect("row should be indexed");
-    let (version_header, _tuple_bytes) = read_tuple_from_data_page(&buffer_pool, row_id).await?;
+    let version_header =
+        read_tuple_from_data_page(&buffer_pool, row_id, |vh, _bytes| Ok(vh)).await?;
     assert_eq!(version_header.create_tx_id(), 5);
     assert_eq!(version_header.commit_tx_id(), None);
 
@@ -582,7 +588,9 @@ async fn test_snapshot_shows_committed() -> Result<()> {
         .await?
         .expect("row should exist");
 
-    let (_vh, tuple_bytes) = read_tuple_from_data_page(&buffer_pool, row_id).await?;
+    let (_vh, tuple_bytes) =
+        read_tuple_from_data_page(&buffer_pool, row_id, |vh, bytes| Ok((vh, bytes.to_vec())))
+            .await?;
     let committed_header = VersionHeader::new(1, Some(2));
 
     use rtsql::storage::write_tuple_to_data_page;

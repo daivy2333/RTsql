@@ -57,9 +57,21 @@
 
 **当前阶段**：Phase 1 全部完成！进入 Phase 2 存储引擎核心优化。
 
----
+**2026-06-03 M20 零拷贝 SlottedPageRef 完成**：
 
-**2026-06-03 M30 连接并发上限完成**：
+| 状态 | 内容 |
+|------|------|
+| ✅ 已完成 | 闭包 API：`with_page_data` / 改造 `read_tuple_from_data_page` / `find_visible_version` |
+| ✅ 已完成 | 删除编译不过的 `get_page_ref`（L022 记录 3 次失败） |
+| ✅ 已完成 | 引入 `VisibilityResult<R>` 私有枚举 + `Option<F> + take()` 模式 |
+| ✅ 已完成 | 3 个 Scan 执行器 + UpdateExecutor 闭包调用 |
+| ✅ 已完成 | 修订 design.md 决策 3：`F: FnOnce(&[u8]) -> Result<R>`（原 `-> R` 会嵌套 Result） |
+| ✅ 已完成 | 全量测试 0 失败（110 lib + 集成测试）+ cargo fmt 12 文件 + M20 范围内 clippy 0 warning |
+| ✅ 已完成 | 性能对比（before-m20 baseline + after）：read 路径 -2.46% 到 -8.33%，write 路径 +3.99%（< 5% 阈值） |
+| ⚠️ 部分 | ≥ 15% 提速目标**未达**（实际 4 项 read 路径改进幅度未到 15%），原因：micro_bench 行数小 + 分配器优。详见 learned/spec.md L024 |
+| 📋 变更 | 走 OpenSpec change：`m20-zero-copy-slotted-page-ref`（T10 归档中） |
+
+---**2026-06-03 M30 连接并发上限完成**：
 
 | 状态 | 内容 |
 |------|------|
