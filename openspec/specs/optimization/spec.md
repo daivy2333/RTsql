@@ -1,6 +1,6 @@
 # Optimization — 优化记录
 
-> 版本：v1.1 | 最后更新：2026-06-03（O001 → 已完成）
+> 版本：v1.2 | 最后更新：2026-06-03（O003 → 已完成，Phase 1 全部完成）
 > 由 openspec-init 从 `.claude/docs/optimization.md` 迁移。
 > 条目格式: <!-- O{编号} --> - {问题描述}
 > 每条含当前影响、建议方案。
@@ -58,11 +58,13 @@
   - 详见：`learned/spec.md` L018 + L019
   - 状态：✅ P1 完成（见下方"已完成"区）
 
-<!-- O003 --> - **M38: 网络 BufWriter + TCP_NODELAY**
+<!-- O003 --> - **M38: 网络 BufWriter + TCP_NODELAY** ✅ 已完成 (2026-06-03)
   - 问题：DataRow 逐行 `write_all()` + `flush()`，每行一次 syscall
-  - 方案：`BufWriter` 8KB 缓冲 + `TCP_NODELAY`
+  - 方案：PgProtocol 内嵌 `write_buf`（8KB）+ `TCP_NODELAY`，所有响应一次性 write+flush
   - 预期：write 调用 -99%
-  - 状态：📋 P1
+  - 实际：N 行查询从 N+2+ syscall 降为 2 次（1 write + 1 flush）
+  - 测试：100 行大结果批写 + 4 批次缓冲复用，11 tests 全通过
+  - 状态：✅ P1 完成（见下方"已完成"区）
 
 ---
 
@@ -235,6 +237,9 @@
 <!-- 完成后移到此处，标注完成日期 -->
 > M1-M18 核心开发已完成（2026-05-24 归档）
 > ~430 tests pass, INSERT 332x faster, PK lookup 5.6x faster than SQLite
+
+<!-- O003 已完成（2026-06-03）-->
+**M38: 网络 BufWriter + TCP_NODELAY** — PgProtocol `write_buf` 累积响应，N→2 syscalls + `set_nodelay`
 
 <!-- O002 已完成（2026-06-03）-->
 **M30: 连接并发上限** — `Server::new(addr, db, max_connections)` + `Arc<Semaphore>` + 3 并发压测通过

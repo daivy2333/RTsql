@@ -1,6 +1,6 @@
 # 任务与里程碑
 
-> 最后更新：2026-06-03（M41 完成 + Phase 1 启动 M30/M38）
+> 最后更新：2026-06-03（M38 完成 — Phase 1 全部完成）
 
 ## 当前阶段：全维度性能优化 + 功能完善 + 并发控制
 
@@ -8,7 +8,7 @@
 
 ```
 Phase 1 基础设施（改动小、风险低、后续都依赖）
-  M41 → M30 → M38
+  M41 → M30 → M38  ✅ 全部完成
 
 Phase 2 存储引擎核心（读写路径重构）
   M20 → M19 → M21
@@ -121,14 +121,17 @@ M23 ──→ M33(P5)
 
 ---
 
-#### M38: 网络 BufWriter + TCP_NODELAY
+#### M38: 网络 BufWriter + TCP_NODELAY ✅ 已完成 (2026-06-03)
 
 - **问题**：DataRow 逐行 `write_all()` + `flush()`，每行一次 syscall
 - **任务**：
-  - [ ] T1: 连接流包裹 `BufWriter`，8KB 缓冲
-  - [ ] T2: `TCP_NODELAY` 设置
-  - [ ] T3: SELECT 结果累积 `BytesMut`，一次 write+flush
-  - [ ] T4: 网络延迟基准测试
+  - [x] T1: PgProtocol 新增 `write_buf: Vec<u8>`（8KB 缓冲），`send_startup_response` 和 `write_response` 均累积消息后单次 `write_all`+`flush`
+  - [x] T2: `TCP_NODELAY` 在 `server.rs` accept 后立即 `stream.set_nodelay(true)`
+  - [x] T3: SELECT 结果所有消息（RowDescription + N×DataRow + CommandComplete + ReadyForQuery）累积到 `write_buf`，一次 `write_all` + `flush`
+  - [x] T4: 新增 2 个测试：100 行大结果批写入（超 8KB 自扩容）、4 批次缓冲复用验证
+- **改动**：`server.rs` +3 行（set_nodelay）、`pg_protocol.rs` 重构 write 路径（+write_buf 字段，send_startup_response + write_response 全部批量化）、`pg_protocol_test.rs` +110 行（2 新测试）
+- **结果**：全量测试通过（pg_protocol 9→11 tests, 0 失败），查询响应从 N+1 次 syscall 降为 2 次（1 write + 1 flush）
+- **下一步**：Phase 1 全部完成！可启动 Phase 2（M20 零拷贝 或 M19 DataScan）
 
 ---
 

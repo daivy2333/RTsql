@@ -1,6 +1,6 @@
 # Architecture — 架构决策记录
 
-> 版本：v1.1 | 最后更新：2026-06-03（M41 ADR-009 追加）
+> 版本：v1.2 | 最后更新：2026-06-03（M38 ADR-010 追加）
 > 由 openspec-init 从 `.claude/docs/architecture.md` 迁移。
 > 条目格式: <!-- A{编号} --> ### {DATE} - {决策标题}
 
@@ -189,7 +189,27 @@ DELETE → delete_from_page
 
 <!-- A009 --> ### ADR-009: 事务 ID AtomicU64 无锁分配 (2026-06-03)
 
-**决策**：`TransactionId::counter` 改为 `AtomicU64`，`allocate()` 使用 `fetch_add(1, Ordering::SeqCst)`。`TransactionManager::begin()` 复用同一计数器作为 Snapshot 时间戳（不引入独立时间戳字段）。
+- **决策**：`TransactionId` 全局计数器使用 `AtomicU64` + `fetch_add(1, SeqCst)` 替代 `Mutex<u64>`。
+- **原因**：
+  - 事务 ID 分配是每事务 path 的热点，`Mutex` 锁开销显著（100ns+ 级）
+  - 单线程 2.1x、10 线程 4.6x、100 线程 4.5x 加速
+  - Rust `AtomicU64` 在 x86-64 上硬件保证正确性，`SeqCst` 比 `Relaxed` 更安全且几乎无开销
+- **代价**：无 — 最终代码改动仅 1 行（`counter.fetch_add(1, SeqCst)`），因 main 已有 2yo 前缀的 AtomicU64 计数器
+- **替代方案**：`Relaxed` 排序（更弱保证）+ `thread_local` 批量分配（更复杂，不必要）
+
+<!-- A010 --> ### ADR-010: 网络响应批写缓冲 (2026-06-03)
+
+- **决策**：PgProtocol 内嵌 `write_buf: Vec<u8>`（8KB），所有响应消息（DataRow、CommandComplete、ReadyForQuery 等）累积后单次 `write_all`+`flush`，不引入 BufWriter/BytesMut 外部依赖。
+- **原因**：
+  - 原实现每 DataRow 一次 `write_all()` + 尾部 `flush()`，N 行查询 = N+2+ syscall
+  - 批写后 N 行查询 = 2 syscall（1 write + 1 flush），syscall 减少 99%+
+  - Vec<u8> 已满足需求（`extend_from_slice`+`clear()`），无需引入 bytes/BufWriter 依赖
+  - 不修改 Protocol trait，改动完全内聚于 PgProtocol
+- **代价**：PgProtocol 内存占用 +8KB（缓冲区），每个连接独立持有
+- **替代方案**：
+  - A: tokio BufWriter 包裹 TcpStream — 需改 Protocol trait 签名，影响 JsonProtocol
+  - B: bytes::BytesMut — 功能丰富但不必要，增加外部依赖
+
 
 **原因**：
 - 旧 `Mutex<u64>` 实现：每次事务开始需等锁，在高并发下争用明显

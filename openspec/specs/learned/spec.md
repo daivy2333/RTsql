@@ -1,6 +1,6 @@
 # Learned — 学习记忆
 
-> 版本：v1.2 | 最后更新：2026-06-03（M30 Server Semaphore L018 + L019）
+> 版本：v1.3 | 最后更新：2026-06-03（M38 网络优化 L018-L021）
 > 由 openspec-init 从 `.claude/docs/learned.md` 迁移。
 > 条目格式: <!-- L{编号} --> 标记开头，支持 grep 精确定位。
 
@@ -204,6 +204,35 @@ Database ──→ Pipeline ──→ Executor Tree
 - tasks.md 路线图"100ns→10ns"达成（单线程 5.1 ns/op）
 - 10/100 线程争用下 Atomic 5x 加速假设全部满足
 - 单线程差异假设（< 20%）被推翻：实际 Atomic 在单线程下也 2x 快（锁自身开销显著）
+
+---
+
+## M30 连接并发 Semaphore
+
+<!-- L018 --> | 发现 | 详情 | 来源 |
+|------|------|------|
+| Semaphore in tokio::spawn | `acquire_owned().await` 在 spawn 闭包内获取 permit，外层 accept 循环不阻塞 | server.rs |
+| Permit 生命周期绑定 handler | `_permit` 随 handler 生命周期释放，连接断开自动归还信号量 | server.rs |
+
+<!-- L019 --> | 发现 | 详情 | 来源 |
+|------|------|------|
+| 连接限制测试模式 | TcpStream `connect()` 不阻塞；用 `read(&mut [0])` 验证连接仍存活（读取阻塞 = 连接保持）| connection_limit_test.rs |
+| `select! + semaphore` hold | 获取 permit 后 spawn 才返回，控制面与数据面解耦 | server.rs |
+
+---
+
+## M38 网络 BufWriter + TCP_NODELAY
+
+<!-- L020 --> | 发现 | 详情 | 来源 |
+|------|------|------|
+| PgProtocol 内嵌 write_buf | 不修改 Protocol trait，在 PgProtocol 上挂 `write_buf: Vec<u8>`（8KB），`write_response` 中 `self.write_buf.clear()` 后累积，最后单次 `write_all`+`flush` | pg_protocol.rs |
+| send_startup_response 同样批量化 | 启动握手 7 次独立 write_all → 1 次，减少连接建立 syscall | pg_protocol.rs |
+| Vec<u8> 优于 bytes::BytesMut | 无需引入新依赖，Vec 的 `extend_from_slice` + `clear()` + `write_all` 满足批写需求 | pg_protocol.rs |
+
+<!-- L021 --> | 发现 | 详情 | 来源 |
+|------|------|------|
+| TCP_NODELAY 设置时机 | `stream.set_nodelay(true)` 在 accept 后、spawn 前调用，确保每次连接生效 | server.rs |
+| 批写验证测试 | 100 行 × 3 列（超 8KB 自扩容）+ 4 批次连续查询（缓冲复用），11 tests 全通过 | pg_protocol_test.rs |
 
 ---
 

@@ -1,6 +1,6 @@
 # 项目快照
 
-> 最后更新：2026-06-03（M30 连接并发上限完成）
+> 最后更新：2026-06-03（M38 完成 — Phase 1 全部完成）
 
 ## 文档体系变更
 
@@ -45,6 +45,20 @@
 | ✅ 已完成 | 文档同步：ADR-009 + O001 完成 + L017 实测 + tasks.md M41 状态 |
 | 📋 变更 | 走 OpenSpec change：`consolidate-m41-tx-id-atomic`（已归档） |
 
+**2026-06-03 M38 网络 BufWriter + TCP_NODELAY 完成**：
+
+| 状态 | 内容 |
+|------|------|
+| ✅ 已完成 | T2 TCP_NODELAY：`server.rs` accept 后 `set_nodelay(true)` |
+| ✅ 已完成 | T1+T3 写缓冲：`PgProtocol` 新增 `write_buf`（8KB），所有写路径单次 `write_all`+`flush` |
+| ✅ 已完成 | T4 测试：`pg_protocol_test.rs` 新增 2 测试（100 行批写 + 缓冲复用），11 tests 全通过 |
+| ✅ 已完成 | 全量回归 0 失败 |
+| 📋 Phase 2 | 可启动 M20（零拷贝 SlottedPageRef）或 M19（DataScan 路径） |
+
+**当前阶段**：Phase 1 全部完成！进入 Phase 2 存储引擎核心优化。
+
+---
+
 **2026-06-03 M30 连接并发上限完成**：
 
 | 状态 | 内容 |
@@ -56,15 +70,15 @@
 
 ## 当前阶段
 
-**Phase 1 基础设施**：M41 ✅ 完成 → M30 ✅ 完成 → 可启动 **M38（网络 BufWriter + TCP_NODELAY）**
+**Phase 1 基础设施 — 全部完成！** M41 ✅ → M30 ✅ → M38 ✅
 
 | 里程碑 | 优化项 | 预期收益 | 状态 |
 |--------|--------|---------|------|
 | M41 | 事务 ID AtomicU64 | 分配延迟 100ns→10ns | ✅ 完成 (5.1 ns/op) |
 | M30 | 连接并发 Semaphore | 防连接风暴 | ✅ 完成 (3 压测通过) |
-| M38 | 网络 BufWriter + TCP_NODELAY | write 调用 -99% | 📋 P1 |
+| M38 | 网络 BufWriter + TCP_NODELAY | write 调用 -99% | ✅ 完成 (N→2 syscalls) |
 
-**Phase 2-5 待开始**：M19-M23（M19 DataScan、M20 零拷贝、M21 页面级 MVCC、M22 预取、M23 Varint Key）仍是核心短板（Full Scan 4x slower than SQLite，文件大小 6.5x larger）。
+**Phase 2 待开始**：M19 DataScan 路径 → M20 零拷贝 SlottedPageRef → M21 页面级 MVCC → M36 零拷贝 ValueRef
 
 ## 历史里程碑
 
