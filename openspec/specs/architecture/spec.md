@@ -1,6 +1,6 @@
 # Architecture — 架构决策记录
 
-> 版本：v1.0 | 最后更新：2026-06-02
+> 版本：v1.1 | 最后更新：2026-06-03（M41 ADR-009 追加）
 > 由 openspec-init 从 `.claude/docs/architecture.md` 迁移。
 > 条目格式: <!-- A{编号} --> ### {DATE} - {决策标题}
 
@@ -184,6 +184,36 @@ DELETE → delete_from_page
   └─ Internal: recurse → remove_separator → underflow? → redistribute/merge → MergeInfo ↑
       → root shrink
 ```
+
+---
+
+<!-- A009 --> ### ADR-009: 事务 ID AtomicU64 无锁分配 (2026-06-03)
+
+**决策**：`TransactionId::counter` 改为 `AtomicU64`，`allocate()` 使用 `fetch_add(1, Ordering::SeqCst)`。`TransactionManager::begin()` 复用同一计数器作为 Snapshot 时间戳（不引入独立时间戳字段）。
+
+**原因**：
+- 旧 `Mutex<u64>` 实现：每次事务开始需等锁，在高并发下争用明显
+- 任务 ID 分配是单计数器原子操作，天然适合 `AtomicU64`
+- Snapshot 不需要独立时间戳——tx_id 自身就是 MVCC 可见性判断依据（`<= self.tx_id` 规则）
+
+**实测验证**（4 场景 ns/op，详见 `specs/learned/spec.md` L017）：
+| 场景 | Mutex | Atomic | 加速比 |
+|------|-------|--------|--------|
+| 单线程 1M | 10.7 | 5.1 | 2.1x |
+| 10 线程争用 | 84.7 | 18.6 | 4.6x |
+| 100 线程高争用 | 100.8 | 22.5 | 4.5x |
+| 吞吐@1M (单线程) | 90.8 Melem/s | 138.1 Melem/s | 1.52x |
+
+**替代方案**：
+- `Arc<Mutex<u64>>`：保留原状（性能基线，但争用明显）
+- `crossbeam::utils::AtomicCell`：可移植原子类型，但 fetch_add 路径相同无明显收益
+- 引入独立时间戳计数器（如 `Instant::now()`）：不必要，TxId 即时间戳
+
+**影响**：
+- 0 行为变化（仍是单调递增）
+- 0 API 变化（公开方法签名不变）
+- 微基准 `benches/tx_id_bench.rs` 建立 4 场景持续监控
+- 单线程下 Atomic 也快 2.1x（推翻 spec "单线程差异 < 20%" 假设 — 锁自身开销不可忽略）
 
 ---
 
