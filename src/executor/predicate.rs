@@ -2,7 +2,7 @@
 //!
 //! Task 8: WHERE clause expression evaluator
 
-use crate::executor::Value;
+use crate::executor::{Value, ValueRef};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -21,8 +21,19 @@ pub type PredicateRef = Arc<dyn Predicate>;
 
 /// Expression trait - evaluates to a value
 pub trait Expression: Send + Sync + Debug {
-    /// Evaluate the expression against a row
-    fn evaluate(&self, row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>>;
+    /// Backward-compatible owned entry point. Default impl converts the row
+    /// to `&[ValueRef]` via `as_value_ref` and calls `evaluate_ref`, then
+    /// `to_value()`s the result. Implementations SHOULD override only
+    /// `evaluate_ref`; the default `evaluate` will call it correctly.
+    fn evaluate(&self, row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let row_ref: Vec<ValueRef> = row.iter().map(Value::as_value_ref).collect();
+        self.evaluate_ref(&row_ref).map(|vr| vr.to_value())
+    }
+
+    /// M36: zero-copy entry point. Returns a `ValueRef<'row>` borrowing
+    /// from `row`. Implementations MUST NOT `.await` and MUST NOT
+    /// recursively call `BufferPool` methods (deadlock risk).
+    fn evaluate_ref(&self, row: &[ValueRef<'_>]) -> Result<ValueRef<'_>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Try to set a parameter value by name. Returns true if matched and set.
     fn set_parameter_value(&self, _param_name: &str, _value: &Value) -> bool {
