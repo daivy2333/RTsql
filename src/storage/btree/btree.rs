@@ -2,11 +2,9 @@
 use std::sync::Arc;
 
 use crate::storage::{
-    btree::node::{
-        InternalNode, InternalNodeRef, LeafNode, LeafNodeRef, INTERNAL_NODE, LEAF_NODE,
-    },
+    btree::node::{InternalNode, InternalNodeRef, LeafNode, LeafNodeRef, INTERNAL_NODE, LEAF_NODE},
     page_format::{Key, RowId},
-    PageId, PageGuard, Result, StorageError,
+    PageGuard, PageId, Result, StorageError,
 };
 
 use super::{AsyncPageLoader, SyncPageLoader};
@@ -45,9 +43,7 @@ fn find_child_position(iref: &InternalNodeRef, key: &Key) -> (PageId, usize) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
                 std::cmp::Ordering::Equal => {
-                    let child = iref
-                        .get_child_page_id(mid)
-                        .unwrap_or(iref.leftmost_child());
+                    let child = iref.get_child_page_id(mid).unwrap_or(iref.leftmost_child());
                     return (PageId(child as u64), mid + 1);
                 }
             }
@@ -75,8 +71,7 @@ fn sibling_ids(parent_guard: &PageGuard, child_index: usize) -> (Option<PageId>,
         if child_index == 1 {
             Some(PageId(leftmost as u64))
         } else {
-            iref
-                .get_child_page_id(child_index - 2)
+            iref.get_child_page_id(child_index - 2)
                 .map(|c| PageId(c as u64))
         }
     } else {
@@ -84,8 +79,7 @@ fn sibling_ids(parent_guard: &PageGuard, child_index: usize) -> (Option<PageId>,
     };
 
     let right = if child_index < total_children - 1 {
-        iref
-            .get_child_page_id(child_index)
+        iref.get_child_page_id(child_index)
             .map(|c| PageId(c as u64))
     } else {
         None
@@ -419,7 +413,10 @@ impl BTree {
         child_index_in_parent: Option<usize>,
     ) -> Result<Option<MergeInfo>> {
         let guard = self.loader.load_page(page_id)?;
-        let is_leaf = { let d = guard.page_data(); d[0] == LEAF_NODE };
+        let is_leaf = {
+            let d = guard.page_data();
+            d[0] == LEAF_NODE
+        };
         drop(guard);
 
         if is_leaf {
@@ -484,9 +481,19 @@ impl BTree {
         }
 
         if let Some(left_id) = left_sib {
-            Ok(Some(self.merge_leaves(left_id, page_id, parent_id, child_index)?))
+            Ok(Some(self.merge_leaves(
+                left_id,
+                page_id,
+                parent_id,
+                child_index,
+            )?))
         } else if let Some(right_id) = right_sib {
-            Ok(Some(self.merge_leaves(page_id, right_id, parent_id, child_index + 1)?))
+            Ok(Some(self.merge_leaves(
+                page_id,
+                right_id,
+                parent_id,
+                child_index + 1,
+            )?))
         } else {
             let guard = self.loader.load_page(parent_id)?;
             let (is_internal, parent_kc) = {
@@ -577,7 +584,9 @@ impl BTree {
             .collect();
         drop(right_guard);
 
-        let sep_key = r_entries.first().map(|(k, _)| k.clone())
+        let sep_key = r_entries
+            .first()
+            .map(|(k, _)| k.clone())
             .unwrap_or(Key::new(b""));
 
         let left_guard = self.loader.load_page(left_id)?;
@@ -599,7 +608,11 @@ impl BTree {
             Ok::<(), StorageError>(())
         })?;
 
-        Ok(MergeInfo { freed_page_id: right_id, separator_key: sep_key, new_root: None })
+        Ok(MergeInfo {
+            freed_page_id: right_id,
+            separator_key: sep_key,
+            new_root: None,
+        })
     }
 
     fn delete_from_internal(
@@ -714,9 +727,19 @@ impl BTree {
         }
 
         if let Some(left_id) = left_sib {
-            Ok(Some(self.merge_internal_nodes(left_id, page_id, parent_id, child_index)?))
+            Ok(Some(self.merge_internal_nodes(
+                left_id,
+                page_id,
+                parent_id,
+                child_index,
+            )?))
         } else if let Some(right_id) = right_sib {
-            Ok(Some(self.merge_internal_nodes(page_id, right_id, parent_id, child_index + 1)?))
+            Ok(Some(self.merge_internal_nodes(
+                page_id,
+                right_id,
+                parent_id,
+                child_index + 1,
+            )?))
         } else {
             Err(StorageError::Io(std::io::Error::other(
                 "internal underflow with no siblings",
@@ -843,7 +866,11 @@ impl BTree {
             Ok::<(), StorageError>(())
         })?;
 
-        Ok(MergeInfo { freed_page_id: right_id, separator_key: merged_sep, new_root: None })
+        Ok(MergeInfo {
+            freed_page_id: right_id,
+            separator_key: merged_sep,
+            new_root: None,
+        })
     }
 
     fn get_parent_separator_key(&self, parent_id: PageId, slot: usize) -> Result<Option<Key>> {
@@ -869,9 +896,11 @@ impl BTree {
         Ok(())
     }
 
-
-
-    fn read_leaf_pair(&self, left_id: PageId, right_id: PageId) -> Result<(LeafEntries, LeafEntries)> {
+    fn read_leaf_pair(
+        &self,
+        left_id: PageId,
+        right_id: PageId,
+    ) -> Result<(LeafEntries, LeafEntries)> {
         let lg = self.loader.load_page(left_id)?;
         let rg = self.loader.load_page(right_id)?;
         let mut ld = vec![0u8; 4096];
@@ -1133,9 +1162,13 @@ impl BTree {
                 let left_child = if idx == 0 {
                     internal.leftmost_child()
                 } else {
-                    internal.get_child_page_id(idx - 1).unwrap_or(internal.leftmost_child())
+                    internal
+                        .get_child_page_id(idx - 1)
+                        .unwrap_or(internal.leftmost_child())
                 };
-                let right_child = internal.get_child_page_id(idx).unwrap_or(internal.leftmost_child());
+                let right_child = internal
+                    .get_child_page_id(idx)
+                    .unwrap_or(internal.leftmost_child());
 
                 drop(data_guard);
                 drop(guard);
@@ -1172,7 +1205,11 @@ impl BTree {
                 .copied();
 
             let key_has_matches = !matches.is_empty();
-            let next_page = if key_has_matches { leaf_ref.next_leaf_page_id() } else { 0 };
+            let next_page = if key_has_matches {
+                leaf_ref.next_leaf_page_id()
+            } else {
+                0
+            };
 
             drop(data_guard);
             drop(guard);
@@ -1208,9 +1245,13 @@ impl BTree {
                 let left_child = if idx == 0 {
                     internal.leftmost_child()
                 } else {
-                    internal.get_child_page_id(idx - 1).unwrap_or(internal.leftmost_child())
+                    internal
+                        .get_child_page_id(idx - 1)
+                        .unwrap_or(internal.leftmost_child())
                 };
-                let right_child = internal.get_child_page_id(idx).unwrap_or(internal.leftmost_child());
+                let right_child = internal
+                    .get_child_page_id(idx)
+                    .unwrap_or(internal.leftmost_child());
                 drop(data_guard);
                 drop(guard);
 

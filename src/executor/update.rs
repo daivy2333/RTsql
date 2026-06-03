@@ -93,8 +93,7 @@ impl Executor for UpdateExecutor {
 
         // WAL: BeginTxn (implicit transaction per statement)
         if let Some(wal) = &self.wal_buffer {
-            wal.append(WalRecord::BeginTxn { tx_id: self.tx_id })
-                .await;
+            wal.append(WalRecord::BeginTxn { tx_id: self.tx_id }).await;
         }
 
         // Step 5: Create new VersionHeader with next_version → old RowId
@@ -119,8 +118,11 @@ impl Executor for UpdateExecutor {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            wal.append(WalRecord::CommitTxn { tx_id: self.tx_id, timestamp })
-                .await;
+            wal.append(WalRecord::CommitTxn {
+                tx_id: self.tx_id,
+                timestamp,
+            })
+            .await;
             let _ = wal.append_commit_and_wait(self.tx_id).await;
         }
 

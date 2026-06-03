@@ -57,12 +57,8 @@ impl WalReader {
                 return Err(WalError::IncompleteRecord);
             }
 
-            let len = u32::from_le_bytes([
-                peek_buf[9],
-                peek_buf[10],
-                peek_buf[11],
-                peek_buf[12],
-            ]) as usize;
+            let len = u32::from_le_bytes([peek_buf[9], peek_buf[10], peek_buf[11], peek_buf[12]])
+                as usize;
 
             let total_len = 8 + 1 + 4 + len + 4;
             let mut record_buf = vec![0u8; total_len];
@@ -76,16 +72,13 @@ impl WalReader {
             Ok(Some(record))
         } else {
             // 旧格式: [type:1B][len:4B][data:variable]
-            let len = u32::from_le_bytes([
-                peek_buf[1],
-                peek_buf[2],
-                peek_buf[3],
-                peek_buf[4],
-            ]) as usize;
+            let len =
+                u32::from_le_bytes([peek_buf[1], peek_buf[2], peek_buf[3], peek_buf[4]]) as usize;
 
             let total_len = 5 + len;
             let mut record_buf = vec![0u8; total_len];
-            record_buf[..bytes_read.min(total_len)].copy_from_slice(&peek_buf[..bytes_read.min(total_len)]);
+            record_buf[..bytes_read.min(total_len)]
+                .copy_from_slice(&peek_buf[..bytes_read.min(total_len)]);
 
             if total_len > bytes_read {
                 self.file

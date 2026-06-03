@@ -52,7 +52,8 @@ impl IndexManager {
         let root_page_id = PageId(self.root_page_id.load(Ordering::Acquire));
         let key_obj = Key::new(key);
 
-        self.search_all_from_page_async(root_page_id, &key_obj).await
+        self.search_all_from_page_async(root_page_id, &key_obj)
+            .await
     }
 
     /// Recursive async search from a page
@@ -121,9 +122,13 @@ impl IndexManager {
                                 let left_child = if i == 0 {
                                     internal.leftmost_child()
                                 } else {
-                                    internal.get_child_page_id(i - 1).unwrap_or(internal.leftmost_child())
+                                    internal
+                                        .get_child_page_id(i - 1)
+                                        .unwrap_or(internal.leftmost_child())
                                 };
-                                let right_child = internal.get_child_page_id(i).unwrap_or(internal.leftmost_child());
+                                let right_child = internal
+                                    .get_child_page_id(i)
+                                    .unwrap_or(internal.leftmost_child());
                                 child_page_ids.push(PageId(left_child as u64));
                                 child_page_ids.push(PageId(right_child as u64));
                             }

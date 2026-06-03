@@ -357,7 +357,10 @@ async fn test_delete_from_single_leaf() {
         let all = btree.scan_all().unwrap();
         assert_eq!(all.len(), 3);
         let collected: Vec<&[u8]> = all.iter().map(|(k, _)| k.as_bytes()).collect();
-        assert_eq!(collected, vec![b"alice" as &[u8], b"carol" as &[u8], b"eve" as &[u8]]);
+        assert_eq!(
+            collected,
+            vec![b"alice" as &[u8], b"carol" as &[u8], b"eve" as &[u8]]
+        );
     })
     .await
     .unwrap();
@@ -392,7 +395,9 @@ async fn test_free_page_reuse() {
         let mut btree2 = BTree::new(loader.clone()).unwrap();
         let after_free_root = btree2.root_page_id();
         for i in 0..50u32 {
-            btree2.insert(&make_key(i + 1000), RowId::new(i + 1000, 0)).unwrap();
+            btree2
+                .insert(&make_key(i + 1000), RowId::new(i + 1000, 0))
+                .unwrap();
         }
         assert_eq!(btree2.scan_all().unwrap().len(), 50);
         let _ = after_free_root;

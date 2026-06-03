@@ -99,10 +99,8 @@ impl RecoveryManager {
             }
         }
 
-        let uncommitted_tx_ids: HashSet<u64> = all_tx_ids
-            .difference(&committed_tx_ids)
-            .cloned()
-            .collect();
+        let uncommitted_tx_ids: HashSet<u64> =
+            all_tx_ids.difference(&committed_tx_ids).cloned().collect();
         let uncommitted_tx_ids: HashSet<u64> = uncommitted_tx_ids
             .difference(&aborted_tx_ids)
             .cloned()
@@ -171,9 +169,7 @@ impl RecoveryManager {
                 Ok(())
             }
             WalRecord::Delete {
-                table_name,
-                row_id,
-                ..
+                table_name, row_id, ..
             } => {
                 let table_meta = match table_manager.get_table(table_name).await {
                     Ok(m) => m,

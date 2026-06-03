@@ -14,7 +14,11 @@ fn create_wal_buffer(
     flush_interval_ms: u64,
 ) -> Arc<rtsql::wal::WALBuffer> {
     let wal_writer = Arc::new(WalWriter::open(db_path).unwrap());
-    let buffer = Arc::new(rtsql::wal::WALBuffer::new(wal_writer, capacity, flush_interval_ms));
+    let buffer = Arc::new(rtsql::wal::WALBuffer::new(
+        wal_writer,
+        capacity,
+        flush_interval_ms,
+    ));
     buffer.start_flush_loop();
     buffer
 }
