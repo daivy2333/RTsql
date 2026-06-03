@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rtsql::storage::RowId;
-use rtsql::wal::{WalRecord, WalWriter, WALBuffer};
+use rtsql::wal::{WALBuffer, WalRecord, WalWriter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 

@@ -1,6 +1,6 @@
 //! Join executor - INNER JOIN using hash join algorithm
 
-use crate::executor::{ExecResult, Executor, JoinConfig, JoinCondition, OutputColumn, Value};
+use crate::executor::{ExecResult, Executor, JoinCondition, JoinConfig, OutputColumn, Value};
 use crate::storage::Result;
 use std::collections::HashMap;
 

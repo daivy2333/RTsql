@@ -19,7 +19,7 @@ pub struct SlottedPageHeader {
     pub slot_count: u16,        // Current number of slots
     pub free_space_offset: u16, // Start of Row Data area (after header)
     pub next_page_id: u32,      // Next page ID (for linked list)
-    pub next_logical_id: u16,    // Next logical ID to allocate
+    pub next_logical_id: u16,   // Next logical ID to allocate
     _padding: [u8; 3],          // Padding to 16 bytes
 }
 

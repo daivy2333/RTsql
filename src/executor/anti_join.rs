@@ -7,7 +7,8 @@
 
 use crate::database::Database;
 use crate::executor::{
-    CorrelatedParam, ExecResult, Executor, JoinCondition, JoinRelatedConfig, OutputColumn, PhysicalPlan, Value,
+    CorrelatedParam, ExecResult, Executor, JoinCondition, JoinRelatedConfig, OutputColumn,
+    PhysicalPlan, Value,
 };
 use crate::storage::Result;
 use std::collections::HashMap;

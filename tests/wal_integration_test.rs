@@ -8,8 +8,7 @@ async fn test_wal_multiple_inserts_group_commit() {
     let db_path = dir.path().join("test_gc.db");
 
     let db = Database::open(&db_path).await.unwrap();
-    db.execute_sql("CREATE TABLE t2 (id INT, val TEXT)")
-        .await;
+    db.execute_sql("CREATE TABLE t2 (id INT, val TEXT)").await;
 
     for i in 0..10 {
         db.execute_sql(&format!("INSERT INTO t2 VALUES ({}, 'row_{}')", i, i))

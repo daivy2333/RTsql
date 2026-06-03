@@ -403,9 +403,7 @@ impl<'a> LeafNode<'a> {
         let separator_key = right_entries
             .first()
             .map(|(k, _)| k.clone())
-            .ok_or_else(|| {
-                StorageError::Io(std::io::Error::other("right sibling is empty"))
-            })?;
+            .ok_or_else(|| StorageError::Io(std::io::Error::other("right sibling is empty")))?;
 
         let mut entries = self_entries;
         entries.extend(right_entries);
@@ -478,14 +476,11 @@ impl<'a> LeafNode<'a> {
         let self_share = &entries[..self_count];
         let right_share = &entries[self_count..];
 
-        let new_right_first_key = right_share
-            .first()
-            .map(|(k, _)| k.clone())
-            .ok_or_else(|| {
-                StorageError::Io(std::io::Error::other(
-                    "no entries left for right sibling after redistribute",
-                ))
-            })?;
+        let new_right_first_key = right_share.first().map(|(k, _)| k.clone()).ok_or_else(|| {
+            StorageError::Io(std::io::Error::other(
+                "no entries left for right sibling after redistribute",
+            ))
+        })?;
 
         // Rebuild self
         let self_page_id = self.slotted.page_id();
@@ -1737,12 +1732,8 @@ mod tests {
         let mut leaf1 = LeafNode::init(&mut page1);
         let mut leaf2 = LeafNode::init(&mut page2);
 
-        leaf1
-            .insert(&Key::new(b"a"), &RowId::new(1, 0))
-            .unwrap();
-        leaf2
-            .insert(&Key::new(b"b"), &RowId::new(2, 0))
-            .unwrap();
+        leaf1.insert(&Key::new(b"a"), &RowId::new(1, 0)).unwrap();
+        leaf2.insert(&Key::new(b"b"), &RowId::new(2, 0)).unwrap();
         leaf2.set_next_leaf_page_id(99);
 
         let result = leaf1.merge_right(&leaf2, PageId(1)).unwrap();
@@ -1781,9 +1772,7 @@ mod tests {
         assert_eq!(leaf1.key_count(), 30);
         assert_eq!(leaf2.key_count(), 70);
 
-        let new_right_first = leaf1
-            .redistribute_right(&mut leaf2, PageId(1))
-            .unwrap();
+        let new_right_first = leaf1.redistribute_right(&mut leaf2, PageId(1)).unwrap();
 
         // moves = (70 - 30) / 2 = 20, so leaf1: 50, leaf2: 50
         assert_eq!(leaf1.key_count(), 50);

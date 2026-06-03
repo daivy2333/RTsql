@@ -6,7 +6,9 @@
 //! - Correlated subquery: correlated_params non-empty, re-materializes right per left row (placeholder)
 
 use crate::database::Database;
-use crate::executor::{ExecResult, Executor, JoinCondition, JoinRelatedConfig, OutputColumn, PhysicalPlan, Value};
+use crate::executor::{
+    ExecResult, Executor, JoinCondition, JoinRelatedConfig, OutputColumn, PhysicalPlan, Value,
+};
 use crate::storage::Result;
 use std::collections::HashMap;
 use std::sync::Arc;

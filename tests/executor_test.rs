@@ -1,8 +1,8 @@
 //! Executor unit tests
 
 use rtsql::executor::{
-    ColumnDef, CreateTableExecutor, DeleteExecutor, ExecResult, Executor, IndexScanExecutor,
-    IndexScanAllExecutor, InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value,
+    ColumnDef, CreateTableExecutor, DeleteExecutor, ExecResult, Executor, IndexScanAllExecutor,
+    IndexScanExecutor, InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value,
 };
 use rtsql::storage::{
     data::TableManager, page_format::ColumnType, read_tuple_from_data_page, BufferPool,
@@ -274,7 +274,13 @@ async fn test_delete_executor() -> Result<()> {
     let row_id = RowId::new(0, 1);
     index_manager.insert(&key, row_id).await.unwrap();
 
-    let mut executor = DeleteExecutor::new(index_manager.clone(), "test".to_string(), key.to_vec(), 0, None);
+    let mut executor = DeleteExecutor::new(
+        index_manager.clone(),
+        "test".to_string(),
+        key.to_vec(),
+        0,
+        None,
+    );
 
     let result = executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
@@ -314,8 +320,14 @@ async fn test_insert_duplicate_key_error() -> Result<()> {
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 
     let values2 = vec![vec![Value::Int(1)]];
-    let mut executor2 =
-        InsertExecutor::new(table_meta, buffer_pool.clone(), tx_manager, values2, 0, None);
+    let mut executor2 = InsertExecutor::new(
+        table_meta,
+        buffer_pool.clone(),
+        tx_manager,
+        values2,
+        0,
+        None,
+    );
     let err = executor2.next().await.unwrap_err();
     assert!(matches!(err, rtsql::storage::StorageError::DuplicateKey));
 
@@ -669,9 +681,8 @@ async fn test_create_table_executor_success() -> Result<()> {
 
     use rtsql::database::Database;
     use rtsql::executor::ColumnType;
-    let wal_writer = Arc::new(
-        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-    );
+    let wal_writer =
+        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
@@ -710,9 +721,8 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
     use rtsql::database::Database;
     use rtsql::executor::ColumnType as ExecColumnType;
     use rtsql::storage::ColumnType as StorageColumnType;
-    let wal_writer = Arc::new(
-        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-    );
+    let wal_writer =
+        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
@@ -762,9 +772,8 @@ async fn test_drop_table_executor_success() -> Result<()> {
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
-    let wal_writer = Arc::new(
-        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-    );
+    let wal_writer =
+        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
@@ -809,9 +818,8 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
-    let wal_writer = Arc::new(
-        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-    );
+    let wal_writer =
+        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
@@ -847,9 +855,8 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
-    let wal_writer = Arc::new(
-        rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap(),
-    );
+    let wal_writer =
+        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
     let database = Arc::new(Database {
         buffer_pool: buffer_pool.clone(),
         table_manager: table_manager.clone(),
@@ -1125,9 +1132,12 @@ async fn test_index_scan_all_executor_basic() -> Result<()> {
     let version_header = VersionHeader::new(0, None);
     let tuple_bytes = vec![0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]; // Int(1) serialized
 
-    let row_id1 = write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
-    let row_id2 = write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
-    let row_id3 = write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
+    let row_id1 =
+        write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
+    let row_id2 =
+        write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
+    let row_id3 =
+        write_tuple_to_data_page(&buffer_pool, &table_meta, &version_header, &tuple_bytes).await?;
 
     table_meta.index_manager.insert(&key, row_id1).await?;
     table_meta.index_manager.insert(&key, row_id2).await?;

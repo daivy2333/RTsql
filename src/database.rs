@@ -44,13 +44,10 @@ impl Database {
         transaction_manager.set_wal_buffer(wal_buffer.clone()).await;
 
         // 3. Full recovery: Redo committed + cleanup uncommitted
-        let recovery_result = RecoveryManager::full_recover(
-            path,
-            buffer_pool.clone(),
-            table_manager.clone(),
-        )
-        .await
-        .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?;
+        let recovery_result =
+            RecoveryManager::full_recover(path, buffer_pool.clone(), table_manager.clone())
+                .await
+                .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?;
 
         // Update transaction ID allocator to avoid conflicts with recovered transactions
         let _max_tx_id = recovery_result

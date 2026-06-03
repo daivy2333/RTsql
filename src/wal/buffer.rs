@@ -160,11 +160,7 @@ impl WALBuffer {
         // 2. Write to disk if there are records
         if !records.is_empty() {
             // Compute file-offset-based LSN for each record so WalReader can parse them
-            let base_offset = self
-                .wal_writer
-                .get_current_lsn()
-                .await
-                .unwrap_or(0);
+            let base_offset = self.wal_writer.get_current_lsn().await.unwrap_or(0);
 
             let mut file_offset_lsn_records = Vec::with_capacity(records.len());
             let mut offset = base_offset;
@@ -174,7 +170,12 @@ impl WALBuffer {
                 offset += serialized_len;
             }
 
-            if self.wal_writer.write_batch(file_offset_lsn_records).await.is_err() {
+            if self
+                .wal_writer
+                .write_batch(file_offset_lsn_records)
+                .await
+                .is_err()
+            {
                 // Log error but don't panic - WAL write failures are critical
                 // but we still need to notify waiters to avoid hanging
             }
