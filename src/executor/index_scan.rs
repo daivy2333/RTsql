@@ -2,7 +2,7 @@
 
 use crate::executor::{ExecResult, Executor};
 use crate::profiling::{is_profiling_enabled, record_time};
-use crate::storage::page_format::{deserialize_tuple, ColumnType};
+use crate::storage::page_format::{deserialize_value_refs, ColumnType};
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
 use crate::transaction::Snapshot;
 use std::sync::Arc;
@@ -64,11 +64,13 @@ impl Executor for IndexScanExecutor {
         match row_id {
             Some(id) => {
                 if let Some(ref snapshot) = self.snapshot {
-                    // M20: closure-based find_visible_version (zero-copy)
+                    // M36: closure-based zero-copy (deserialize_value_refs + to_value)
                     let values_opt = self
                         .buffer_pool
                         .find_visible_version(id, snapshot, |bytes| {
-                            deserialize_tuple(bytes, &self.schema)
+                            deserialize_value_refs(bytes, &self.schema).map(|vrs| {
+                                vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>()
+                            })
                         })
                         .await?;
 
@@ -77,10 +79,16 @@ impl Executor for IndexScanExecutor {
                         None => Ok(None), // all versions invisible
                     }
                 } else {
-                    // M20: closure-based read_tuple_from_data_page (zero-copy)
-                    let values = read_tuple_from_data_page(&self.buffer_pool, id, |_vh, bytes| {
-                        deserialize_tuple(bytes, &self.schema)
-                    })
+                    // M36: closure-based zero-copy
+                    let values = read_tuple_from_data_page(
+                        &self.buffer_pool,
+                        id,
+                        |_vh, bytes| {
+                            deserialize_value_refs(bytes, &self.schema).map(|vrs| {
+                                vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>()
+                            })
+                        },
+                    )
                     .await?;
                     Ok(Some(ExecResult::Row(values)))
                 }
