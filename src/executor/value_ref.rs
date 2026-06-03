@@ -185,7 +185,11 @@ mod tests {
     #[test]
     fn value_ref_size_is_small() {
         use std::mem::size_of;
-        assert!(size_of::<ValueRef>() <= 24, "ValueRef must be ≤ 24B, got {}", size_of::<ValueRef>());
+        assert!(
+            size_of::<ValueRef>() <= 24,
+            "ValueRef must be ≤ 24B, got {}",
+            size_of::<ValueRef>()
+        );
     }
 
     #[test]
@@ -228,6 +232,6 @@ mod tests {
         let a = ValueRef::Null;
         let b = ValueRef::Int(1);
         assert!(a.gt(&b).is_err());
-        assert!(!b.equals(&a));  // Null != anything, returns false not error
+        assert!(!b.equals(&a)); // Null != anything, returns false not error
     }
 }
