@@ -1,6 +1,6 @@
 # Optimization — 优化记录
 
-> 版本：v1.0 | 最后更新：2026-06-02
+> 版本：v1.1 | 最后更新：2026-06-03（O001 → 已完成）
 > 由 openspec-init 从 `.claude/docs/optimization.md` 迁移。
 > 条目格式: <!-- O{编号} --> - {问题描述}
 > 每条含当前影响、建议方案。
@@ -43,11 +43,13 @@
 
 ## 待优化（Phase 1: 基础设施）
 
-<!-- O001 --> - **M41: 事务 ID AtomicU64 无锁分配**
+<!-- O001 --> - **M41: 事务 ID AtomicU64 无锁分配** ✅ 已完成 (2026-06-03)
   - 问题：`next_tx_id()` 用 `Mutex<u64>`，每次事务开始等锁
-  - 方案：改为 `AtomicU64` + `fetch_add(1, SeqCst)`
+  - 方案：改为 `AtomicU64` + `fetch_add(1, SeqCst)`（主代码已在 main，commit `634764d` 补微基准）
   - 预期：分配延迟 100ns→10ns
-  - 状态：📋 P1
+  - 实际：单线程 5.1 ns/op，10 线程争用 18.6 ns/op（4.6x 加速），100 线程 22.5 ns/op（4.5x 加速）
+  - 详见：`architecture/spec.md` ADR-009 + `learned/spec.md` L017
+  - 状态：✅ P1 完成（见下方"已完成"区）
 
 <!-- O002 --> - **M30: 连接并发上限**
   - 问题：PG 连接无限 `tokio::spawn`，连接风暴压垮系统
@@ -231,3 +233,24 @@
 <!-- 完成后移到此处，标注完成日期 -->
 > M1-M18 核心开发已完成（2026-05-24 归档）
 > ~430 tests pass, INSERT 332x faster, PK lookup 5.6x faster than SQLite
+
+<!-- O001 已完成（2026-06-03）-->
+**M41: 事务 ID AtomicU64 无锁分配**（commit `634764d` + `ee9ceee`）
+
+**实测性能数据**（criterion 4 场景，ns/op）：
+
+| 场景 | Mutex | Atomic | 加速比 |
+|------|-------|--------|--------|
+| 单线程 1M | 10.7 | 5.1 | 2.1x |
+| 10 线程争用 | 84.7 | 18.6 | 4.6x |
+| 100 线程高争用 | 100.8 | 22.5 | 4.5x |
+| 吞吐@1M (单线程) | 90.8 Melem/s | 138.1 Melem/s | 1.52x |
+
+**关键结论**：
+- 路线图"100ns→10ns"达成（实际 5.1 ns/op）
+- 10/100 线程争用下 Atomic 5x 加速假设全部满足
+- 单线程差异假设（< 20%）被推翻：实际 Atomic 在单线程下也 2x 快（锁自身开销不可忽略）
+
+**微基准**：`benches/tx_id_bench.rs`（criterion，黑盒函数 + 4 场景）
+**ADR**：`architecture/spec.md` ADR-009
+**数据记录**：`learned/spec.md` L017

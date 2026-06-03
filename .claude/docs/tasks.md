@@ -1,6 +1,6 @@
 # 任务与里程碑
 
-> 最后更新：2026-05-25（精简合并，优化顺序按 Phase 重排，新增 M43-M48）
+> 最后更新：2026-06-03（M41 完成 + Phase 1 启动 M30/M38）
 
 ## 当前阶段：全维度性能优化 + 功能完善 + 并发控制
 
@@ -92,14 +92,18 @@ M23 ──→ M33(P5)
 
 ### Phase 1: 基础设施
 
-#### M41: 事务 ID AtomicU64 无锁分配
+#### M41: 事务 ID AtomicU64 无锁分配 ✅ 已完成 (2026-06-03)
 
 - **问题**：`next_tx_id()` 用 `Mutex<u64>`，每次事务开始等锁
 - **任务**：
-  - [ ] T1: `TransactionId::counter` 改为 `AtomicU64`
-  - [ ] T2: `next_tx_id()` 改用 `fetch_add(1, SeqCst)`
-  - [ ] T3: 事务开始时间戳同理改为 `AtomicU64`
-  - [ ] T4: 微基准测试（Mutex vs AtomicU64）
+  - [x] T1: `TransactionId::counter` 改为 `AtomicU64`（main 已有：tx_id.rs:4）
+  - [x] T2: `next_tx_id()` 改用 `fetch_add(1, SeqCst)`（main 已有：tx_id.rs:15）
+  - [x] T3: 事务开始时间戳同理改为 `AtomicU64`（begin() 复用 allocate，tx_id 即时间戳）
+  - [x] T4: 微基准测试（Mutex vs AtomicU64）→ `benches/tx_id_bench.rs` 4 场景
+- **结果**：单线程 5.1 ns/op（2.1x），10 线程 18.6 ns/op（4.6x），100 线程 22.5 ns/op（4.5x）
+- **Commits**：`634764d` (feat) + `ee9ceee` (chore archive) — 已在 origin/master
+- **ADR**：`architecture/spec.md` ADR-009
+- **下一步**：Phase 1 可启动 M30（连接并发）+ M38（网络 BufWriter）
 
 ---
 
