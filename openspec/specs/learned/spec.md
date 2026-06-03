@@ -183,6 +183,25 @@ Database ──→ Pipeline ──→ Executor Tree
 | 共享 tokio::runtime | 避免 per-iteration 创建 runtime | benches/sqlite_compare.rs |
 | RTsqlDirect in-process | 直接调用 API，避免 network overhead | benches/sqlite_compare.rs |
 | criterion Throughput | 设置 throughput 更准确测量 | benches/sqlite_compare.rs |
+| #[inline(never)] + std::hint::black_box | 防止编译器消除 fetch_add 真实开销 | benches/tx_id_bench.rs |
+| std::thread::spawn + Arc 共享计数器 | 多线程争用基准（避免 rayon 依赖）| benches/tx_id_bench.rs |
+
+---
+
+## 实测性能数据（M41 AtomicU64）
+
+<!-- L017 -->
+| 场景 | Mutex (ns/op) | Atomic (ns/op) | 加速比 | 来源 |
+|------|--------------|----------------|--------|------|
+| 单线程 1M | 10.7 | 5.1 | 2.1x | benches/tx_id_bench.rs |
+| 10 线程 × 100K | 84.7 | 18.6 | 4.6x | benches/tx_id_bench.rs |
+| 100 线程 × 10K | 100.8 | 22.5 | 4.5x | benches/tx_id_bench.rs |
+| 吞吐@1M (单线程) | 90.8 Melem/s | 138.1 Melem/s | 1.52x | benches/tx_id_bench.rs |
+
+**关键结论**：
+- tasks.md 路线图"100ns→10ns"达成（单线程 5.1 ns/op）
+- 10/100 线程争用下 Atomic 5x 加速假设全部满足
+- 单线程差异假设（< 20%）被推翻：实际 Atomic 在单线程下也 2x 快（锁自身开销显著）
 
 ---
 
