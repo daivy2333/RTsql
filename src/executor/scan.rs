@@ -52,9 +52,8 @@ impl Executor for ScanExecutor {
                     let values_opt = self
                         .buffer_pool
                         .find_visible_version(row_id, snapshot, |bytes| {
-                            deserialize_value_refs(bytes, &self.schema).map(|vrs| {
-                                vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>()
-                            })
+                            deserialize_value_refs(bytes, &self.schema)
+                                .map(|vrs| vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>())
                         })
                         .await?;
 
@@ -64,16 +63,12 @@ impl Executor for ScanExecutor {
                     }
                 } else {
                     // M36: closure-based zero-copy
-                    let values = read_tuple_from_data_page(
-                        &self.buffer_pool,
-                        row_id,
-                        |_vh, bytes| {
-                            deserialize_value_refs(bytes, &self.schema).map(|vrs| {
-                                vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>()
-                            })
-                        },
-                    )
-                    .await?;
+                    let values =
+                        read_tuple_from_data_page(&self.buffer_pool, row_id, |_vh, bytes| {
+                            deserialize_value_refs(bytes, &self.schema)
+                                .map(|vrs| vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>())
+                        })
+                        .await?;
                     self.results.push(values);
                 }
             }
