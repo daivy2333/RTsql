@@ -1,5 +1,6 @@
 //! SQL value types for physical plan execution
 
+use super::ValueRef;
 use crate::storage::page_format::Key;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -247,6 +248,18 @@ impl Value {
             (Value::Int(a), Value::Float(b)) if *b != 0.0 => Value::Float(*a as f64 / b),
             (Value::Float(a), Value::Int(b)) if *b != 0 => Value::Float(a / *b as f64),
             _ => Value::Null,
+        }
+    }
+
+    /// Borrowed view — `String(s)` → `Text(s.as_str())` borrows s's heap.
+    /// Other variants are zero-allocation conversions.
+    pub fn as_value_ref(&self) -> ValueRef<'_> {
+        match self {
+            Value::Int(n) => ValueRef::Int(*n),
+            Value::String(s) => ValueRef::Text(s.as_str()),
+            Value::Null => ValueRef::Null,
+            Value::Float(f) => ValueRef::Float(*f),
+            Value::Bool(b) => ValueRef::Bool(*b),
         }
     }
 }
