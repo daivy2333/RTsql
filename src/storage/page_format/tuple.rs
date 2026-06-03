@@ -7,9 +7,9 @@
 //!   Float  = [0x04][8 bytes f64 LE]
 //!   Bool   = [0x05][1 byte 0/1]
 
+use crate::executor::ValueRef;
 use crate::storage::{Result, StorageError};
 use crate::Value;
-use crate::executor::ValueRef;
 use std::io;
 
 /// Tag bytes embedded in the serialized tuple stream.
@@ -236,8 +236,14 @@ pub fn deserialize_value_refs<'a>(
                     return Err(eof("expected 8 bytes for i64"));
                 }
                 let bytes = [
-                    data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                    data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
                 ];
                 values.push(ValueRef::Int(i64::from_le_bytes(bytes)));
                 pos += 8;
@@ -251,9 +257,8 @@ pub fn deserialize_value_refs<'a>(
                 if pos + len > data.len() {
                     return Err(eof("expected string payload"));
                 }
-                let s = std::str::from_utf8(&data[pos..pos + len]).map_err(|e| {
-                    StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, e))
-                })?;
+                let s = std::str::from_utf8(&data[pos..pos + len])
+                    .map_err(|e| StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
                 values.push(ValueRef::Text(s));
                 pos += len;
             }
@@ -265,8 +270,14 @@ pub fn deserialize_value_refs<'a>(
                     return Err(eof("expected 8 bytes for f64"));
                 }
                 let bytes = [
-                    data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                    data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
                 ];
                 values.push(ValueRef::Float(f64::from_le_bytes(bytes)));
                 pos += 8;
@@ -412,7 +423,7 @@ mod tests {
     fn deserialize_value_refs_string_borrows() {
         // Verify Text variant borrows from data slice, not allocates
         let data = vec![
-            0x02, 0x05, 0x00,  // TAG_STRING, len=5
+            0x02, 0x05, 0x00, // TAG_STRING, len=5
             b'h', b'e', b'l', b'l', b'o',
         ];
         let schema = [ColumnType::String(100)];
@@ -424,8 +435,14 @@ mod tests {
                 // Critical assertion: the str must point into data
                 let s_ptr = s.as_ptr();
                 let data_ptr = data.as_ptr();
-                assert!(s_ptr >= data_ptr, "Text must borrow from data, not allocate");
-                assert!(s_ptr < unsafe { data_ptr.add(data.len()) }, "Text must point inside data");
+                assert!(
+                    s_ptr >= data_ptr,
+                    "Text must borrow from data, not allocate"
+                );
+                assert!(
+                    s_ptr < unsafe { data_ptr.add(data.len()) },
+                    "Text must point inside data"
+                );
             }
             _ => panic!("expected Text"),
         }
@@ -433,7 +450,7 @@ mod tests {
 
     #[test]
     fn deserialize_value_refs_int_roundtrip() {
-        let data = [0x01, 42, 0, 0, 0, 0, 0, 0, 0];  // TAG_INT + i64=42 LE
+        let data = [0x01, 42, 0, 0, 0, 0, 0, 0, 0]; // TAG_INT + i64=42 LE
         let schema = [ColumnType::Int];
         let refs = deserialize_value_refs(&data, &schema).unwrap();
         assert_eq!(refs, vec![ValueRef::Int(42)]);
@@ -441,7 +458,7 @@ mod tests {
 
     #[test]
     fn deserialize_value_refs_truncated() {
-        let data = [0x01];  // TAG_INT but no payload
+        let data = [0x01]; // TAG_INT but no payload
         let schema = [ColumnType::Int];
         assert!(deserialize_value_refs(&data, &schema).is_err());
     }
@@ -449,8 +466,8 @@ mod tests {
     #[test]
     fn deserialize_value_refs_invalid_utf8() {
         let data = vec![
-            0x02, 0x02, 0x00,  // TAG_STRING, len=2
-            0xFF, 0xFE,         // invalid UTF-8
+            0x02, 0x02, 0x00, // TAG_STRING, len=2
+            0xFF, 0xFE, // invalid UTF-8
         ];
         let schema = [ColumnType::String(100)];
         assert!(deserialize_value_refs(&data, &schema).is_err());
@@ -460,16 +477,20 @@ mod tests {
     fn deserialize_value_refs_mixed_types() {
         // [Int(42), Float(1.5), Bool(true), Text("hi"), Null, Bool(false)]
         let data = vec![
-            0x01, 42, 0, 0, 0, 0, 0, 0, 0,  // Int
-            0x04, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f,  // Float 1.5 LE (0x3FF8000000000000)
-            0x05, 0x01,  // Bool true
-            0x02, 0x02, 0x00, b'h', b'i',  // String "hi"
-            0x03,  // Null
-            0x05, 0x00,  // Bool false
+            0x01, 42, 0, 0, 0, 0, 0, 0, 0, // Int
+            0x04, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f, // Float 1.5 LE (0x3FF8000000000000)
+            0x05, 0x01, // Bool true
+            0x02, 0x02, 0x00, b'h', b'i', // String "hi"
+            0x03, // Null
+            0x05, 0x00, // Bool false
         ];
         let schema = [
-            ColumnType::Int, ColumnType::Float, ColumnType::Bool,
-            ColumnType::String(50), ColumnType::Int, ColumnType::Bool,
+            ColumnType::Int,
+            ColumnType::Float,
+            ColumnType::Bool,
+            ColumnType::String(50),
+            ColumnType::Int,
+            ColumnType::Bool,
         ];
         let refs = deserialize_value_refs(&data, &schema).unwrap();
         assert_eq!(refs.len(), 6);
