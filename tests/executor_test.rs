@@ -2,11 +2,12 @@
 
 use rtsql::executor::{
     ColumnDef, CreateTableExecutor, DeleteExecutor, ExecResult, Executor, IndexScanAllExecutor,
-    IndexScanExecutor, InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value,
+    IndexScanExecutor, InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value, ValueRef,
 };
 use rtsql::storage::{
-    data::TableManager, page_format::ColumnType, read_tuple_from_data_page, BufferPool,
-    FileStorage, Result, StorageError,
+    data::TableManager,
+    page_format::{deserialize_value_refs, ColumnType},
+    read_tuple_from_data_page, BufferPool, FileStorage, Result, StorageError,
 };
 use rtsql::transaction::TransactionManager;
 use std::sync::{Arc, Mutex};
@@ -1239,4 +1240,32 @@ async fn test_index_scan_all_executor_single() -> Result<()> {
     assert_eq!(result, None);
 
     Ok(())
+}
+
+/// M36: Verify Value::as_value_ref borrows from String
+#[tokio::test]
+async fn test_m36_value_as_value_ref() {
+    let v = Value::String("hello".to_string());
+    let vr = v.as_value_ref();
+    assert_eq!(vr, ValueRef::Text("hello"));
+}
+
+/// M36: Verify deserialize_value_refs borrows from input data
+#[tokio::test]
+async fn test_m36_deserialize_value_refs_borrow() {
+    let data = vec![0x02, 0x05, 0x00, b'h', b'e', b'l', b'l', b'o'];
+    let schema = [ColumnType::String(100)];
+    let refs = deserialize_value_refs(&data, &schema).unwrap();
+    match &refs[0] {
+        ValueRef::Text(s) => {
+            let s_ptr = s.as_ptr();
+            let data_ptr = data.as_ptr();
+            assert!(s_ptr >= data_ptr, "Text must borrow from data");
+            assert!(
+                s_ptr < unsafe { data_ptr.add(data.len()) },
+                "Text must point inside data"
+            );
+        }
+        _ => panic!("expected Text"),
+    }
 }
