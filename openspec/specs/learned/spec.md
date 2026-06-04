@@ -424,6 +424,86 @@ Database ──→ Pipeline ──→ Executor Tree
 
 ---
 
+## L027: Rust 测试运行过长的诊断指南
+
+<!-- L027 -->
+
+**核心断言**：Rust 测试或 bench 在 RTsql 项目**正常应在秒级完成**。超过 30s 几乎都是配置或 bug 引起，不是合理的性能开销。
+
+**M19 实测反例**：第一次跑 `data_scan_bench` 卡了 7+ 分钟没有任何输出（用户："卡在测试很久了，rust 的测试一般不需要这么久"）。
+
+**症状分类 + 诊断路径**：
+
+| 症状 | 诊断命令 | 根因 | 修复 |
+|------|----------|------|------|
+| 跑很久无输出，`stdout` 0 字节 | `ps aux \| grep <test_or_bench>` 看 CPU% | (a) 无输出空转 (b) 真的死锁 | 加 `eprintln!` + `cargo test -- --nocapture` |
+| 单个 test 跑 > 30s | `cargo test <name> -- --nocapture` 看 panic / print | 死锁/无限循环/setup 卡死 | 拆测试 + 检查锁 + 检查 `for` 条件 |
+| bench criterion 报 "Unable to complete 100 samples in Xs" | 看 X（target time）| setup 混进 `iter` 闭包 | 一次构建 dataset 在 `bench_with_input` 之前 |
+| bench 警告 "increase target time to 1456s" | criterion 自动算的目标时间 | 100 samples × 1.5s/iter = 150s/规模，3 档 = 450s+ | `--sample-size 10 --measurement-time 2` 快速验证 |
+| `cargo test` 全绿但慢 | `cargo test --release` 看加速比 | debug 模式无优化 | 日常 debug 跑，生产 release 验证 |
+
+**为什么 Rust 测试默认不长**：
+- `#[tokio::test]` 单进程跑测试（除非显式多线程 `#[tokio::test(flavor = "multi_thread")]`)
+- `cargo test` 不带 `--release`，但 unit test 本身开销小（毫秒级）
+- 没有 I/O 等待的纯逻辑测试应该 < 100ms
+- 大数据集测试用 tempfile 隔离，无全局状态竞争
+
+**三类空转的区分**：
+
+1. **死锁（CPU ~0%）**：锁循环等待，进程几乎不耗 CPU
+   - 查 `ps aux`：CPU% < 5% 持续 → 死锁
+   - 常见原因：`std::sync::Mutex` 跨 `.await`、递归 BufferPool 调用
+   - 解决：检查 BufferPool::with_page_data 闭包内不调用其他 BufferPool 方法（learned L022）
+
+2. **无限循环（CPU 100%）**：条件永不满足
+   - 查 `ps aux`：CPU% ~100% 持续 → 无限循环
+   - 常见原因：分页/链表遍历 next_id 写错（自身指向）
+   - 解决：加 `eprintln!` 输出中间状态 + 跑 `-- --nocapture`
+
+3. **Setup 过重（CPU 中高但每步慢）**：每个测试都在重建
+   - 查输出：但输出 0 字节 → setup 在后台，print 没出来
+   - 常见原因：`iter` 闭包内 `db.execute_sql` 串行 1K 次
+   - 解决：dataset 一次构建 + batch INSERT
+
+**预防检查清单**（提交新 test/bench 前）：
+
+```
+[ ] 单个 test 跑 < 5s（无 I/O 的纯逻辑 < 100ms）
+[ ] 大数据集 bench 先用 --sample-size 10 --measurement-time 2 验证 setup
+[ ] 怀疑死锁时 ps aux 看 CPU%，加 eprintln! + -- --nocapture
+[ ] 数据规模从 1K 起步，不要 100K 起跑（避免雪崩）
+[ ] 复用 tempfile 不持锁到测试结束
+```
+
+**关键 cargo 命令**：
+
+```bash
+# 诊断 hang：
+cargo test <name> -- --nocapture 2>&1 | tee /tmp/test.log &
+ps aux | grep cargo    # 看 CPU%
+kill -9 <pid>          # 必要时 kill
+
+# 诊断 bench 过慢：
+cargo bench <name> -- --sample-size 10 --measurement-time 2
+# 如果还是慢 → setup 问题；快 → 调大 sample-size
+
+# 性能 baseline：
+cargo bench --save-baseline before-X
+```
+
+**L026 vs L027 关系**：
+- L026：具体 M19 bench setup 教训（dataset 一次构建 + batch INSERT）
+- L027：**通用** Rust 测试/bench 运行过长的诊断框架（症状→命令→根因→修复）
+- 两者互补：L027 是方法论，L026 是案例
+
+**How to apply**：
+- 用户报告 "测试很久" / "卡住" → 先查 ps aux CPU% 区分三类空转
+- 写新 bench：先 `--sample-size 10 --measurement-time 2` 验证 setup 不卡
+- 写新 test：单 test < 5s 强制约束（超 5s 必有性能问题）
+- 调试 hang 的 test：`-- --nocapture` 必加（默认输出被吞）
+
+---
+
 ## 待探索
 
 <!-- L016 -->
