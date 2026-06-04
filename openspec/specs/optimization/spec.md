@@ -43,61 +43,22 @@
 
 ## 待优化（Phase 1: 基础设施）
 
-<!-- O001 --> - **M41: 事务 ID AtomicU64 无锁分配** ✅ 已完成 (2026-06-03)
-  - 问题：`next_tx_id()` 用 `Mutex<u64>`，每次事务开始等锁
-  - 方案：改为 `AtomicU64` + `fetch_add(1, SeqCst)`（主代码已在 main，commit `634764d` 补微基准）
-  - 预期：分配延迟 100ns→10ns
-  - 实际：单线程 5.1 ns/op，10 线程争用 18.6 ns/op（4.6x 加速），100 线程 22.5 ns/op（4.5x 加速）
-  - 详见：`architecture/spec.md` ADR-009 + `learned/spec.md` L017
-  - 状态：✅ P1 完成（见下方"已完成"区）
+<!-- tombstone: O001 --> Archived in 已完成 section — M41 事务 ID AtomicU64 ✅ (2026-06-03)
+<!-- tombstone: O002 --> Archived in 已完成 section — M30 连接并发上限 ✅ (2026-06-03)
+<!-- tombstone: O003 --> Archived in 已完成 section — M38 网络 BufWriter ✅ (2026-06-03)
 
-<!-- O002 --> - **M30: 连接并发上限** ✅ 已完成 (2026-06-03)
-  - 问题：PG 连接无限 `tokio::spawn`，连接风暴压垮系统
-  - 方案：`Server` 新增 `Arc<Semaphore>` 字段，`max_connections` 默认 64；accept 循环 `acquire_owned()` in spawn；`_permit` 随 handler 生命周期释放
-  - 实测：3 个并发压测全部通过（within-limit / over-limit queued / permit-release）
-  - 详见：`learned/spec.md` L018 + L019
-  - 状态：✅ P1 完成（见下方"已完成"区）
-
-<!-- O003 --> - **M38: 网络 BufWriter + TCP_NODELAY** ✅ 已完成 (2026-06-03)
-  - 问题：DataRow 逐行 `write_all()` + `flush()`，每行一次 syscall
-  - 方案：PgProtocol 内嵌 `write_buf`（8KB）+ `TCP_NODELAY`，所有响应一次性 write+flush
-  - 预期：write 调用 -99%
-  - 实际：N 行查询从 N+2+ syscall 降为 2 次（1 write + 1 flush）
-  - 测试：100 行大结果批写 + 4 批次缓冲复用，11 tests 全通过
-  - 状态：✅ P1 完成（见下方"已完成"区）
+Phase 1 全部完成（M41/30/38），详见"已完成"区域。
 
 ---
 
 ## 待优化（Phase 2: 存储引擎核心）
 
-<!-- O004 --> - **M20: 零拷贝 SlottedPageRef** ✅ 已完成 (2026-06-03)
-  - 问题：`SlottedPage::get()` 返回 `Vec<u8>` 拷贝
-  - 方案：纯闭包 API `with_page_data` + `VisibilityResult<R>` 辅助枚举
-  - 实际：read 路径 -2.46%~-8.33%，write 路径 +3.99%（< 5% 阈值）
-  - 状态：✅ 完成
+<!-- tombstone: O004 --> Archived in 已完成 section — M20 零拷贝 SlottedPageRef ✅ (2026-06-03)
+<!-- tombstone: O005 --> Archived in 已完成 section — M19 DataScan 路径 ✅ (2026-06-04)
+<!-- tombstone: O006 --> Archived in 已完成 section — M21 页面级 MVCC ✅ (2026-06-04)
+<!-- tombstone: O007 --> Archived in 已完成 section — M36 零拷贝 ValueRef ✅ (2026-06-03)
 
-<!-- O005 --> - **M19: DataScan 路径** ✅ 已完成 (2026-06-04)
-  - 问题：Index→RowId→Data 每行两次页访问
-  - 方案：`DataScanExecutor` 顺序扫描数据页，跳过索引层
-  - 实际：1K 1.81x / 10K 2.44x 提速（达到预期 ~2x 目标）
-  - 状态：✅ 完成
-
-<!-- O006 --> - **M21: 页面级 MVCC** ✅ 全部完成 (2026-06-04)
-  - 问题：每行 22B VersionHeader，逐行检查可见性
-  - 方案：`PageVisibilityInfo`（9B/page 内存摘要）+ `DashMap` 快速路径
-  - 已完成：T1 数据结构 + BufferPool 集成、T2 扫描快速路径、T3 四写路径更新（含 COMMIT 缺口补充）
-  - 延后项完成：
-    - T2.3 惰性 `set_all_visible`：`check_page_all_visible` 三条件验证 + DataScan 惰性设置
-    - T4 benchmark：`benches/visibility_bench.rs`（no_snapshot / cold / warm）
-    - DELETE mark_deleted：`VersionHeader::mark_deleted()` + DataScan 跳过已删除行
-  - 改动：~12 文件（详见 tasks.md M21）
-  - 状态：✅ 完成
-
-<!-- O007 --> - **M36: 零拷贝 ValueRef** ✅ 已完成 (2026-06-03)
-  - 问题：`Expression::evaluate()` 每行每列返回 `Value` 枚举，String/Vec 分配
-  - 方案：`ValueRef<'a>` 枚举（Text→`&'a str`）+ `deserialize_value_refs` 零拷贝
-  - 实际：堆分配 30万→0（详见 learned/spec.md L025）
-  - 状态：✅ 完成
+Phase 2 全部完成（M20/36/19/21），详见"已完成"区域。
 
 ---
 
@@ -241,13 +202,25 @@
 
 <!-- 完成后移到此处，标注完成日期 -->
 > M1-M18 核心开发已完成（2026-05-24 归档）
-> ~430 tests pass, INSERT 332x faster, PK lookup 5.6x faster than SQLite
+> 475 tests pass (2026-06-04), INSERT 332x faster, PK lookup 5.6x faster than SQLite
 
 <!-- O003 已完成（2026-06-03）-->
 **M38: 网络 BufWriter + TCP_NODELAY** — PgProtocol `write_buf` 累积响应，N→2 syscalls + `set_nodelay`
 
 <!-- O002 已完成（2026-06-03）-->
 **M30: 连接并发上限** — `Server::new(addr, db, max_connections)` + `Arc<Semaphore>` + 3 并发压测通过
+
+<!-- O007 已完成（2026-06-03）-->
+**M36: 零拷贝 ValueRef** — `ValueRef<'a>` 枚举 + `deserialize_value_refs` 零拷贝，堆分配 30万→0
+
+<!-- O006 已完成（2026-06-04）-->
+**M21: 页面级 MVCC** — `PageVisibilityInfo` + `DashMap` 快速路径 + DELETE mark_deleted + 惰性 set_all_visible + benchmark
+
+<!-- O005 已完成（2026-06-04）-->
+**M19: DataScan 路径** — `DataScanExecutor` 数据页链表遍历，1K 1.81x / 10K 2.44x 提速
+
+<!-- O004 已完成（2026-06-03）-->
+**M20: 零拷贝 SlottedPageRef** — 纯闭包 API `with_page_data`，read 路径 -2.46%~-8.33%
 
 <!-- O001 已完成（2026-06-03）-->
 **M41: 事务 ID AtomicU64 无锁分配**（commit `634764d` + `ee9ceee`）

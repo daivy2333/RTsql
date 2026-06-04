@@ -272,8 +272,10 @@ DELETE → delete_from_page
 
 | 节点 | 输入 | 用途 |
 |------|------|------|
-| Scan | - | 全表扫描 |
+| Scan | - | 全表扫描（索引路径） |
+| DataScan | - | 数据页链表遍历（M19，跳过索引层） |
 | IndexScan | - | 主键索引扫描 |
+| IndexScanAll | - | 非唯一索引扫描（ADR-006） |
 | Filter | 1 | WHERE 过滤 |
 | Join | 2 | 哈希连接 |
 | Aggregate | 1 | 聚合 + GROUP BY |
