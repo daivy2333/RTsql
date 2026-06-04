@@ -50,6 +50,11 @@ impl Snapshot {
     pub fn is_visible_self(&self, create_tx_id: u64, commit_tx_id: Option<u64>) -> bool {
         create_tx_id == self.tx_id && commit_tx_id.is_none()
     }
+
+    /// Check if a transaction ID is in the active set (used by page-level visibility)
+    pub fn contains_active_tx(&self, tx_id: u64) -> bool {
+        self.active_tx_ids.contains(&tx_id)
+    }
 }
 
 #[cfg(test)]

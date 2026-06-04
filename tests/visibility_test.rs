@@ -130,11 +130,12 @@ async fn test_visibility_delete_clears_all_visible() {
             assert!(count >= 1, "DELETE should affect at least 1 row");
             let resp = db.execute_sql("SELECT * FROM t3 WHERE id = 3").await;
             assert_row_count(resp, 0);
+            // DataScan should not return deleted rows (mark_deleted on version header)
             let resp = db.execute_sql("SELECT * FROM t3").await;
-            assert_row_count(resp, 5);
+            assert_row_count(resp, 4);
             let resp = db.execute_sql("SELECT COUNT(*) FROM t3").await;
             let r = rows(resp);
-            assert_eq!(r[0][0].as_i64().unwrap(), 5);
+            assert_eq!(r[0][0].as_i64().unwrap(), 4);
         }
         Response::Error { .. } => {
             // DELETE not yet supported via SQL API — this is expected pre-TDD

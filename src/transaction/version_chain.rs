@@ -2,6 +2,9 @@ use crate::storage::RowId;
 
 /// Constants for unset values
 const UNSET_TX_ID: u64 = 0xFFFFFFFFFFFFFFFF;
+/// Sentinel for deleted rows: commit_tx_id = DELETED_TX_ID means the row
+/// was deleted (committed delete). Distinguished from UNSET_TX_ID (uncommitted).
+const DELETED_TX_ID: u64 = 0xFFFFFFFFFFFFFFFE;
 const UNSET_ROW_ID: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
 /// VersionHeader stores metadata for MVCC version chain
@@ -53,6 +56,18 @@ impl VersionHeader {
     pub fn commit(mut self, commit_tx_id: u64) -> Self {
         self.commit_tx_id = commit_tx_id;
         self
+    }
+
+    /// Mark this version as deleted (committed delete).
+    /// Sets commit_tx_id to DELETED_TX_ID sentinel.
+    pub fn mark_deleted(mut self) -> Self {
+        self.commit_tx_id = DELETED_TX_ID;
+        self
+    }
+
+    /// Check if this version is marked as deleted.
+    pub fn is_deleted(&self) -> bool {
+        self.commit_tx_id == DELETED_TX_ID
     }
 
     /// Serialize to bytes (22 bytes)
@@ -133,5 +148,30 @@ mod tests {
     #[test]
     fn test_version_header_size() {
         assert_eq!(VersionHeader::SIZE, 22);
+    }
+
+    #[test]
+    fn test_version_header_mark_deleted() {
+        let header = VersionHeader::new(1, Some(5));
+        assert!(!header.is_deleted());
+        assert_eq!(header.commit_tx_id(), Some(5));
+
+        let deleted = header.mark_deleted();
+        assert!(deleted.is_deleted());
+        // commit_tx_id returns Some(DELETED_TX_ID), not None
+        assert_eq!(deleted.commit_tx_id(), Some(DELETED_TX_ID));
+    }
+
+    #[test]
+    fn test_version_header_deleted_uncommitted_distinct() {
+        // Uncommitted: commit_tx_id = UNSET_TX_ID
+        let uncommitted = VersionHeader::new(1, None);
+        assert!(!uncommitted.is_deleted());
+        assert_eq!(uncommitted.commit_tx_id(), None);
+
+        // Deleted: commit_tx_id = DELETED_TX_ID
+        let deleted = VersionHeader::new(1, None).mark_deleted();
+        assert!(deleted.is_deleted());
+        assert_eq!(deleted.commit_tx_id(), Some(DELETED_TX_ID));
     }
 }

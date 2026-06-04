@@ -181,6 +181,11 @@ impl Executor for DataScanExecutor {
                         })?;
                     let tuple_bytes = &slot_data[VersionHeader::SIZE..];
 
+                    // Skip deleted rows (commit_tx_id = DELETED_TX_ID sentinel)
+                    if vh.is_deleted() {
+                        return Ok(PageAction::NeedVersionChain(None));
+                    }
+
                     // M21: Skip per-row MVCC visibility check when the whole page
                     // is known to be all-visible (every slot committed).
                     if !page_all_visible {
@@ -200,6 +205,26 @@ impl Executor for DataScanExecutor {
 
             // Commit slot index back regardless of action.
             self.current_slot_index = slot_index;
+
+            // M21: Lazy set_all_visible — after scanning all slots on a page,
+            // check if the entire page is visible to this snapshot and cache the result.
+            // Condition: snapshot exists, all_visible not already set, page not all-invisible,
+            // and action is JumpToPage/Done (page exhausted, not a per-row yield/chain).
+            if self.snapshot.is_some()
+                && !page_all_visible
+                && !page_all_invisible
+                && matches!(action, PageAction::JumpToPage(_) | PageAction::Done)
+            {
+                if let Some(snapshot) = self.snapshot.as_ref() {
+                    if self
+                        .buffer_pool
+                        .check_page_all_visible(page_id, snapshot)
+                        .await
+                    {
+                        self.buffer_pool.set_all_visible(page_id);
+                    }
+                }
+            }
 
             match action {
                 PageAction::YieldValue(values) => {

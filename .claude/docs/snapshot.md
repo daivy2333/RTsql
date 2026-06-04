@@ -1,6 +1,6 @@
 # 项目快照
 
-> 最后更新：2026-06-04（M21 页面级 MVCC 完成 — Phase 2 全部完成 M20/36/19/21）
+> 最后更新：2026-06-04（M21 遗留项完成：DELETE mark_deleted + 惰性 set_all_visible + benchmark）
 
 ## 文档体系变更
 
