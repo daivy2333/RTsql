@@ -140,6 +140,8 @@ pub async fn delete_tuple_from_data_page(buffer_pool: &BufferPool, row_id: RowId
     });
 
     result.map_err(|_| StorageError::SlotNotFound(row_id))?;
+    // M21: Clear page visibility summary after DELETE
+    buffer_pool.clear_all_visible(page_id);
     Ok(())
 }
 

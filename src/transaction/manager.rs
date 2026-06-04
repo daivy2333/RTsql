@@ -1,4 +1,4 @@
-use crate::storage::{BufferPool, Result, RowId, TableMeta};
+use crate::storage::{BufferPool, PageId, Result, RowId, TableMeta};
 use crate::transaction::{Snapshot, TransactionError, TransactionId};
 use crate::wal::{WALBuffer, WalRecord};
 use std::collections::{HashMap, HashSet};
@@ -214,6 +214,9 @@ impl TransactionManager {
 
         for row_id in tx_versions {
             buffer_pool.write_commit_tx_id(row_id, tx_id).await?;
+            // M21: Clear page visibility summary after COMMIT mark
+            let page_id = PageId(row_id.page_id as u64);
+            buffer_pool.clear_all_visible(page_id);
         }
 
         Ok(())

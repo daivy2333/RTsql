@@ -5,7 +5,7 @@ use crate::storage::page_format::{
     compute_tuple_size, deserialize_tuple, serialize_tuple, ColumnType,
 };
 use crate::storage::{
-    read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, Result, StorageError,
+    read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, PageId, Result, StorageError,
     TableMeta,
 };
 use crate::transaction::{TransactionManager, VersionHeader};
@@ -106,6 +106,12 @@ impl Executor for UpdateExecutor {
         let new_row_id =
             write_tuple_to_data_page(&self.buffer_pool, &self.table_meta, &version_header, &buf)
                 .await?;
+
+        // M21: Clear page visibility summary after UPDATE (new version page + old version page)
+        let new_page_id = PageId(new_row_id.page_id as u64);
+        self.buffer_pool.clear_all_visible(new_page_id);
+        let old_page_id = PageId(old_row_id.page_id as u64);
+        self.buffer_pool.clear_all_visible(old_page_id);
 
         // WAL: Update + CommitTxn
         if let Some(wal) = &self.wal_buffer {

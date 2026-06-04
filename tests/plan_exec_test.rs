@@ -54,6 +54,7 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
 
     let mut delete_executor = DeleteExecutor::new(
         index_manager.clone(),
+        buffer_pool.clone(),
         "test".to_string(),
         key_bytes.to_vec(),
         0,
@@ -234,8 +235,14 @@ async fn test_multiple_operations_sequence() -> Result<()> {
     }
 
     let key_2 = 2i64.to_be_bytes().to_vec();
-    let mut delete_executor =
-        DeleteExecutor::new(index_manager.clone(), "test".to_string(), key_2, 0, None);
+    let mut delete_executor = DeleteExecutor::new(
+        index_manager.clone(),
+        buffer_pool.clone(),
+        "test".to_string(),
+        key_2,
+        0,
+        None,
+    );
     let result = delete_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 

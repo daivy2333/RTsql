@@ -121,6 +121,19 @@ impl Executor for DataScanExecutor {
             // in, mutate it, then write it back to `self` after the await.
             let schema = self.schema.clone();
             let mut slot_index = self.current_slot_index;
+
+            // M21: Page-level visibility fast-path.
+            // Query the visibility summary map before entering the page-data closure
+            // (the closure is synchronous FnOnce so it cannot access self.buffer_pool).
+            let page_vis = self.buffer_pool.get_visibility(page_id);
+            let page_all_visible = page_vis.map(|v| v.all_visible).unwrap_or(false);
+            let page_all_invisible = self
+                .snapshot
+                .as_ref()
+                .zip(page_vis)
+                .map(|(s, v)| v.all_invisible_for(s.tx_id()))
+                .unwrap_or(false);
+
             let snapshot_ref = self.snapshot.as_ref();
 
             let action: PageAction = self
@@ -128,6 +141,16 @@ impl Executor for DataScanExecutor {
                 .with_page_data(page_id, |data| -> Result<PageAction> {
                     let slotted = SlottedPageRef::new(data);
                     let slot_count = slotted.slot_count();
+
+                    // M21: All-invisible fast-path — skip the entire page.
+                    if page_all_invisible {
+                        let next = slotted.header().next_page_id;
+                        return Ok(if next == 0 {
+                            PageAction::Done
+                        } else {
+                            PageAction::JumpToPage(next as u64)
+                        });
+                    }
 
                     if slot_index >= slot_count {
                         // Page exhausted → follow the linked list.
@@ -158,12 +181,13 @@ impl Executor for DataScanExecutor {
                         })?;
                     let tuple_bytes = &slot_data[VersionHeader::SIZE..];
 
-                    // MVCC visibility check (T2).
-                    if let Some(snapshot) = snapshot_ref {
-                        if !snapshot.is_visible(vh.create_tx_id(), vh.commit_tx_id()) {
-                            // Current version invisible — start of chain (if any)
-                            // is `vh.next_version()`.
-                            return Ok(PageAction::NeedVersionChain(vh.next_version()));
+                    // M21: Skip per-row MVCC visibility check when the whole page
+                    // is known to be all-visible (every slot committed).
+                    if !page_all_visible {
+                        if let Some(snapshot) = snapshot_ref {
+                            if !snapshot.is_visible(vh.create_tx_id(), vh.commit_tx_id()) {
+                                return Ok(PageAction::NeedVersionChain(vh.next_version()));
+                            }
                         }
                     }
 
