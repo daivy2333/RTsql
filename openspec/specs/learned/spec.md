@@ -1,6 +1,6 @@
 # Learned — 学习记忆
 
-> 版本：v1.3 | 最后更新：2026-06-03（M38 网络优化 L018-L021）
+> 版本：v1.4 | 最后更新：2026-06-04（M21 页面级 MVCC L028）
 > 由 openspec-init 从 `.claude/docs/learned.md` 迁移。
 > 条目格式: <!-- L{编号} --> 标记开头，支持 grep 精确定位。
 
@@ -501,6 +501,38 @@ cargo bench --save-baseline before-X
 - 写新 bench：先 `--sample-size 10 --measurement-time 2` 验证 setup 不卡
 - 写新 test：单 test < 5s 强制约束（超 5s 必有性能问题）
 - 调试 hang 的 test：`-- --nocapture` 必加（默认输出被吞）
+
+---
+
+<!-- L028 -->
+
+### [M21 页面级 MVCC 可见性摘要 — 架构与踩坑]
+
+**新增 API 路径**：
+
+| 名称 | 路径 | 用途 |
+|------|------|------|
+| `PageVisibilityInfo` | `src/storage/page_visibility.rs` | 页面级可见性摘要（min_create_tx_id + all_visible） |
+| `BufferPool::get_visibility` | `src/storage/buffer_pool.rs` | 查询页的 visibility map 条目 |
+| `BufferPool::update_visibility_on_insert` | `src/storage/buffer_pool.rs` | INSERT 后更新 min_create_tx_id + 清 all_visible |
+| `BufferPool::clear_all_visible` | `src/storage/buffer_pool.rs` | INSERT/DELETE/UPDATE/COMMIT 后清标志 |
+| `BufferPool::set_all_visible` | `src/storage/buffer_pool.rs` | 惰性设置（零调用者，待实现） |
+| `DataScanExecutor` 快速路径 | `src/executor/data_scan.rs` | 闭包外查询 visibility_map，闭包内 skip/skip-page |
+
+**关键设计决策**：
+- 存储位置：`DashMap<PageId, PageVisibilityInfo>` in BufferPool（纯内存，崩溃降级）
+- `min_create_tx_id`：页上所有行的最小 create_tx_id，用于 `all_invisible_for` 判断
+- `all_visible`：惰性设置延后（Plan Agent 建议避免竞态条件，先保正确性）
+- COMMIT 路径缺口（Plan Agent 发现）：`commit_mark_versions` 需清 `all_visible`
+
+**踩坑记录**：
+1. **DELETE 仅删索引不删数据页** — DELETE executor 移除 B-tree key 但不更新 version header，导致全表扫描（DataScan）仍返回已删除行。需后续实现 version header 标记。
+2. **`set_all_visible` 零调用者** — 快速路径代码就位但不触发，等惰性设置实现后才生效。
+3. **闭包外查询可见性** — DataScanExecutor 在 `with_page_data` 闭包外查 `get_visibility`，因闭包是同步 `FnOnce` 无法访问 `self.buffer_pool`。
+
+**延后项**（记录到 optimization/spec.md O006）：
+- T4 benchmark：需等 `set_all_visible` 有调用者后测量
+- T2.3 惰性设置：需处理扫描发现全可见快并发 INSERT 的竞态
 
 ---
 

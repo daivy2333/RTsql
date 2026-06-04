@@ -246,18 +246,23 @@ M23 ──→ M33(P5)
   - cargo clippy 无新 warning
   - criterion bench 输出：1K 1.81x / 10K 2.44x
 
-- **下一步**：Phase 2 启动 M21 (页面级 MVCC)
+- **下一步**：Phase 2 启动 M21 (页面级 MVCC) — ✅ 已完成（2026-06-04）；惰性设置 + 基准测试延后；下一步启动 M37 或 M31
 
 ---
 
-#### M21: 页面级 MVCC
+#### M21: 页面级 MVCC ✅ 已完成 (2026-06-04)
 
-- **问题**：每行 16B VersionHeader，逐行检查可见性
+- **问题**：每行 22B VersionHeader，逐行检查可见性
+- **方案**：`PageVisibilityInfo`（9B/page 内存摘要）+ `DashMap` 快速路径，写路径自动清标志
 - **任务**：
-  - [ ] T1: `PageVisibilityMap` 每页 4B 摘要（min_tx_id / 全可见标志）
-  - [ ] T2: 快照 tx_id < min_tx_id → 跳过整页检查
-  - [ ] T3: INSERT/DELETE 时更新页面摘要
-  - [ ] T4: 可见性检查基准测试
+  - [x] T1: `PageVisibilityInfo` 结构体（`src/storage/page_visibility.rs`）+ BufferPool 集成（`DashMap` + 4 公开方法）+ 4 单元测试
+  - [x] T2: `find_visible_version` + `DataScanExecutor` 页面级快速路径（`all_visible` 跳过逐行检查 / `all_invisible_for` 跳过整页）
+  - [x] T3: INSERT/DELETE/UPDATE/COMMIT 四路径均调用 `clear_all_visible` 更新摘要
+  - [ ] T4: 可见性检查基准测试 — ⏸️ 延后（需先实现惰性 `all_visible` 设置）
+- **改动**（~10 文件）：`Cargo.toml` (dashmap), `page_visibility.rs` (新), `buffer_pool.rs`, `data_scan.rs`, `insert.rs`, `data_page.rs`, `update.rs`, `manager.rs`, `visibility_test.rs` (新 5 测试)
+- **验证**：129 lib + 全量集成测试 0 failures, clippy 仅 2 pre-existing warnings
+- **设计决策**：ADR-011（`DashMap` 纯内存 / 惰性设置延后 / COMMIT 路径清标志）
+- **下一步**：Phase 2 启动 M21 惰性设置（T2.3）+ 基准测试（T4），然后 M37 或 M31
 
 ---
 

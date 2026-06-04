@@ -82,11 +82,13 @@
   - 预期：全表扫描 ~2x
   - 状态：📋 P2
 
-<!-- O006 --> - **M21: 页面级 MVCC**
-  - 问题：每行 16B VersionHeader，逐行检查可见性
-  - 方案：`PageVisibilityMap` 每页 4B 摘要
-  - 预期：~10-15% 提速
-  - 状态：📋 P2
+<!-- O006 --> - **M21: 页面级 MVCC** ✅ 核心完成 (2026-06-04) + ⏸️ 延后项
+  - 问题：每行 22B VersionHeader，逐行检查可见性
+  - 方案：`PageVisibilityInfo`（9B/page 内存摘要）+ `DashMap` 快速路径
+  - 已完成：T1 数据结构 + BufferPool 集成、T2 扫描快速路径、T3 四写路径更新
+  - ⏸️ 延后：T2.3 惰性 `set_all_visible`（避免竞态）、T4 benchmark（需惰性设置先实现）
+  - 改动：~10 文件（含新 `page_visibility.rs` + `visibility_test.rs`）
+  - 状态：📋 P2（核心完成，惰性设置 + benchmark 延后）
 
 <!-- O007 --> - **M36: 零拷贝 ValueRef**
   - 问题：`Expression::evaluate()` 每行每列返回 `Value` 枚举，String/Vec 分配

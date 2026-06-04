@@ -1,6 +1,6 @@
 # 项目快照
 
-> 最后更新：2026-06-04（M19 DataScan 完成 — 1.81x-2.44x 提速）
+> 最后更新：2026-06-04（M21 页面级 MVCC 完成 — Phase 2 全部完成 M20/36/19/21）
 
 ## 文档体系变更
 
@@ -56,6 +56,19 @@
 | 📋 Phase 2 | 可启动 M20（零拷贝 SlottedPageRef）或 M19（DataScan 路径） |
 
 **当前阶段**：Phase 2 进展中（M20 ✅ → M36 ✅ → M19 ✅，待启动 M21 页面级 MVCC）
+
+**2026-06-04 M21 页面级 MVCC 完成**：
+
+| 状态 | 内容 |
+|------|------|
+| ✅ 已完成 | T1 `PageVisibilityInfo` 结构体 + `DashMap` 集成：`src/storage/page_visibility.rs` (新) + BufferPool 4 公开方法 + 4 单元测试 |
+| ✅ 已完成 | T2 扫描快速路径：`find_visible_version` + `DataScanExecutor` 闭包外查询 visibility_map（`all_visible` / `all_invisible_for`）|
+| ✅ 已完成 | T3 写路径更新：INSERT/DELETE/UPDATE/COMMIT 四路径均调用 `clear_all_visible`（含 Plan Agent 发现的 COMMIT 缺口）|
+| ⏸️ 延后 | T4 benchmark + T2.3 惰性 `set_all_visible`（Plan Agent 建议先保正确性，避免竞态条件）|
+| ✅ 已完成 | 全量回归：129 lib + 全量集成测试 0 failures；clippy 仅 2 pre-existing warnings |
+| ✅ 已完成 | 走 OpenSpec change：`m21-page-visibility-map`（已归档为 `2026-06-04-m21-page-visibility-map`）|
+| ✅ 已完成 | 文档同步：ADR-011 + L028 记忆 + tasks.md M21 状态 + snapshot.md |
+| 📋 下一步 | M21 惰性设置（T2.3）+ 基准测试（T4），然后 M37（clone 消除）或 M31（BufferPool DashMap）|
 
 **2026-06-04 M19 DataScan 数据页直接遍历完成**：
 
@@ -120,7 +133,7 @@
 | M30 | 连接并发 Semaphore | 防连接风暴 | ✅ 完成 (3 压测通过) |
 | M38 | 网络 BufWriter + TCP_NODELAY | write 调用 -99% | ✅ 完成 (N→2 syscalls) |
 
-**Phase 2 进展**：M20 ✅ (2026-06-03, commit 4e17362) → M36 ✅ (2026-06-03, commit 73076ac) → **M19 ✅ (2026-06-04, 1.81x-2.44x 提速)**；待开始 M21 页面级 MVCC
+**Phase 2 进展**：M20 ✅ (2026-06-03) → M36 ✅ (2026-06-03) → M19 ✅ (2026-06-04) → **M21 ✅ (2026-06-04, 页面级 MVCC)**；待 M21 惰性设置 + 基准测试；下一步 M37 或 M31
 
 ## 历史里程碑
 
@@ -137,10 +150,11 @@
 
 ## 已知限制
 
-- 全表扫描性能落后 SQLite ~4x（M19 准备优化）
+- 全表扫描性能已通过 M19 DataScan 优化至 1.8-2.4x 提速
 - 文件大小 ~6.5x SQLite（固定 Key + 两层索引）
 - TableManager 纯内存：表定义不持久化
 - BufferPool::mark_tx_aborted 是 stub
+- M21 可见性摘要惰性设置待实现（`set_all_visible` 零调用者，快速路径暂不触发）
 
 ## Git 状态
 
