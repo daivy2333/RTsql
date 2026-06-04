@@ -210,6 +210,25 @@ DELETE → delete_from_page
   - A: tokio BufWriter 包裹 TcpStream — 需改 Protocol trait 签名，影响 JsonProtocol
   - B: bytes::BytesMut — 功能丰富但不必要，增加外部依赖
 
+<!-- A011 --> ### ADR-011: 页面级 MVCC 可见性摘要 (2026-06-04)
+
+- **决策**：引入 `PageVisibilityInfo`（`min_create_tx_id: u64 + all_visible: bool`），存储在 `BufferPool` 的 `DashMap<PageId, PageVisibilityInfo>` 中。读路径在逐行 VersionHeader 检查前先查 summary 快速判断；写路径（INSERT/DELETE/UPDATE/COMMIT）均清 `all_visible` 标志。
+- **原因**：
+  - 每行 22B VersionHeader 解析 + `is_visible` 调用约 50-100ns/行，30-100 行/页 → 1.5-10µs/page 可跳过
+  - `DashMap` 分片无锁读，读路径几乎无额外开销
+  - 纯内存优化，崩溃安全（丢失后自动降级为逐行检查）
+  - 不持久化、不入 WAL
+- **关键子决策**：
+  1. 惰性设置 `all_visible` 延后 — 避免扫描设置 + 并发 INSERT 的竞态条件
+  2. COMMIT 路径必须清标志 — `write_commit_tx_id` 后 commit_tx_id 从 None→Some，可见性变化
+  3. `min_create_tx_id` 用于 `all_invisible_for`：`snapshot.tx_id < min_create_tx_id` → 整页不可见
+  4. DELETE 仅删 B-tree 索引不更新数据页 version header → 全表扫描仍可见已删除行（后续修复）
+- **代价**：`DashMap` entry 开销 ~50B/page，10K 页 ≈ 500KB 内存；`set_all_visible` 零调用者，快速路径暂不生效
+- **替代方案**：
+  - A: `RwLock<HashMap<>>` — 更简单但读互斥，10 线程争用瓶颈
+  - B: 字节存在 `SlottedPageHeader` 内 — 改页格式影响所有读写，崩溃后数据可能过期
+  - C: PostgreSQL 风格 VMB（visibility map fork）— 额外文件 + 持久化，过于复杂
+
 
 **原因**：
 - 旧 `Mutex<u64>` 实现：每次事务开始需等锁，在高并发下争用明显
