@@ -1,6 +1,6 @@
 # References — 外部参考与依赖
 
-> 版本：v1.0 | 最后更新：2026-06-02
+> 版本：v1.1 | 最后更新：2026-06-04（R004 测试统计更新 + R008 状态更新）
 > 由 openspec-init 从 `.claude/docs/references.md` 迁移。
 > 条目格式: <!-- R{编号} --> 标记开头，支持 grep 精确定位。
 
@@ -88,11 +88,12 @@
 ## 项目测试统计
 
 <!-- R004 -->
-- 总测试数: ~430 tests pass, 0 failures（M18 全部完成）
-- Executor 测试: executor_test.rs（27 tests，含 IndexScanAllExecutor 3 tests）
+- 总测试数: 475 tests pass, 0 failures（2026-06-04 统计）
+- Executor 测试: executor_test.rs（29 tests，含 M19 DataScan 8 tests）
 - 聚合测试: aggregate_test.rs（19 tests）
 - B-Tree 测试: btree_test.rs + btree_split_test.rs + btree_merge_test.rs（22 tests）
-- 基准测试: 6 套（micro/concurrent/scale/sqlite_compare/single/precise_compare）
+- Visibility 测试: visibility_test.rs（5 tests，含 M21 页面级 MVCC）
+- 基准测试: 8 套（micro/concurrent/scale/sqlite_compare/single/precise_compare/data_scan/visibility）
 
 ---
 
@@ -111,4 +112,4 @@
 > 添加时格式: <!-- R{编号} --> | 主题 | 路径 | 内容概要 |
 
 <!-- R007 --> | M19 DataScan 路径 | .claude/analysis/m19-datascan-path.md | 数据页链表遍历优化方案，跳过索引层，~2x 全表扫描提速 |
-<!-- R008 --> | M21 页面级 MVCC 未完成事项 | .claude/analysis/m21-page-visibility-incomplete.md | T2.3 惰性设置 + T4 benchmark 延后项 + DELETE 不更新数据页问题分析 |
+<!-- R008 --> | M21 页面级 MVCC 遗留项分析（✅ 已解决） | .claude/analysis/m21-page-visibility-incomplete.md | DELETE mark_deleted + 惰性 set_all_visible + benchmark，全部完成 |

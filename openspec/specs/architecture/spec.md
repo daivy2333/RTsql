@@ -1,6 +1,6 @@
 # Architecture — 架构决策记录
 
-> 版本：v1.2 | 最后更新：2026-06-03（M38 ADR-010 追加）
+> 版本：v1.3 | 最后更新：2026-06-04（A011 M21 延后项完成更新）
 > 由 openspec-init 从 `.claude/docs/architecture.md` 迁移。
 > 条目格式: <!-- A{编号} --> ### {DATE} - {决策标题}
 
@@ -222,8 +222,9 @@ DELETE → delete_from_page
   1. 惰性设置 `all_visible` 延后 — 避免扫描设置 + 并发 INSERT 的竞态条件
   2. COMMIT 路径必须清标志 — `write_commit_tx_id` 后 commit_tx_id 从 None→Some，可见性变化
   3. `min_create_tx_id` 用于 `all_invisible_for`：`snapshot.tx_id < min_create_tx_id` → 整页不可见
-  4. DELETE 仅删 B-tree 索引不更新数据页 version header → 全表扫描仍可见已删除行（后续修复）
-- **代价**：`DashMap` entry 开销 ~50B/page，10K 页 ≈ 500KB 内存；`set_all_visible` 零调用者，快速路径暂不生效
+  4. DELETE 通过 `mark_deleted()` 标记 version header（`DELETED_TX_ID` 哨兵值），DataScan 跳过已删除行
+  5. 惰性 `set_all_visible`：`check_page_all_visible()` 三条件验证后设置，页面扫描结束时触发
+- **代价**：`DashMap` entry 开销 ~50B/page，10K 页 ≈ 500KB 内存
 - **替代方案**：
   - A: `RwLock<HashMap<>>` — 更简单但读互斥，10 线程争用瓶颈
   - B: 字节存在 `SlottedPageHeader` 内 — 改页格式影响所有读写，崩溃后数据可能过期
