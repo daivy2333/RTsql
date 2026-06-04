@@ -1,6 +1,6 @@
 # 项目快照
 
-> 最后更新：2026-06-03（M38 完成 — Phase 1 全部完成）
+> 最后更新：2026-06-04（M19 DataScan 完成 — 1.81x-2.44x 提速）
 
 ## 文档体系变更
 
@@ -55,7 +55,21 @@
 | ✅ 已完成 | 全量回归 0 失败 |
 | 📋 Phase 2 | 可启动 M20（零拷贝 SlottedPageRef）或 M19（DataScan 路径） |
 
-**当前阶段**：Phase 1 全部完成！进入 Phase 2 存储引擎核心优化。
+**当前阶段**：Phase 2 进展中（M20 ✅ → M36 ✅ → M19 ✅，待启动 M21 页面级 MVCC）
+
+**2026-06-04 M19 DataScan 数据页直接遍历完成**：
+
+| 状态 | 内容 |
+|------|------|
+| ✅ 已完成 | T1 `DataScanExecutor` 纯顺序扫描：流式 `next()`，无 `Vec<Vec<Value>>` 预加载 |
+| ✅ 已完成 | T2 MVCC 可见性：`with_page_data` 闭包内解析 VersionHeader + 不可见时 `find_visible_in_chain` 异步跨页查链 |
+| ✅ 已完成 | T3 Planner 无 WHERE 路由：新增 `PhysicalPlan::DataScan` 变体 + `DataScanNode` + `pipeline.rs` dispatch + `correlated.rs` + `get_subquery_first_column` + `aggregate input_schema` 全部支持 |
+| ✅ 已完成 | T4 Planner 非 PK WHERE 路由：新增 `has_pk_equality` 递归检查 AND 组合 → `Filter(DataScan)`，PK 等值路径（IndexScan / `Filter(Scan)`）保持不变 |
+| ✅ 已完成 | T5 criterion bench：`benches/data_scan_bench.rs` + Cargo.toml 入口，**1K 1.81x / 10K 2.44x 提速**（达到预期 ~2x 目标） |
+| ✅ 已完成 | 全量回归 464/464 测试通过（8 M19 测试 + 原有 456） |
+| ✅ 已完成 | 走 OpenSpec change：`m19-datascan-path`（已归档为 `2026-06-04-m19-datascan-path`）|
+| ✅ 已完成 | 文档同步：增量 spec → `openspec/specs/data-scan-path/spec.md` + L026 实测教训 + tasks.md M19 状态 |
+| 📋 下一步 | Phase 2 启动 M21（页面级 MVCC）|
 
 **2026-06-03 M20 零拷贝 SlottedPageRef 完成**：
 
@@ -106,7 +120,7 @@
 | M30 | 连接并发 Semaphore | 防连接风暴 | ✅ 完成 (3 压测通过) |
 | M38 | 网络 BufWriter + TCP_NODELAY | write 调用 -99% | ✅ 完成 (N→2 syscalls) |
 
-**Phase 2 进展**：M20 ✅ (2026-06-03, commit 4e17362) → M36 ✅ (2026-06-03, commit 73076ac)；待开始 M19 DataScan → M21 页面级 MVCC
+**Phase 2 进展**：M20 ✅ (2026-06-03, commit 4e17362) → M36 ✅ (2026-06-03, commit 73076ac) → **M19 ✅ (2026-06-04, 1.81x-2.44x 提速)**；待开始 M21 页面级 MVCC
 
 ## 历史里程碑
 
@@ -132,10 +146,14 @@
 
 - **当前分支**: master
 - **最新 tag**: v0.1.0（M18 完成）
-- **最近 3 commits**（2026-06-03）：
-  - `e644a19` style: apply rustfmt --all to clean up workspace formatting（25 文件，196/139）
-  - `ee9ceee` chore(openspec): archive consolidate-m41-tx-id-atomic（归档 + 增量 spec 同步）
-  - `634764d` feat(m41): add tx_id allocation micro-benchmark（M41 主变更）
+- **最近 commits**（2026-06-04 待推送）：
+  - M19 T1-T5 多 commit（feat(executor): DataScan + planner routing + bench）
+  - docs(openspec): archive m19-datascan-path
+  - docs(snapshot/tasks): M19 状态同步
+  - 提交前最近 3 commits（2026-06-03）：
+    - `e644a19` style: apply rustfmt --all to clean up workspace formatting（25 文件，196/139）
+    - `ee9ceee` chore(openspec): archive consolidate-m41-tx-id-atomic（归档 + 增量 spec 同步）
+    - `634764d` feat(m41): add tx_id allocation micro-benchmark（M41 主变更）
 
 ## 待办与清理
 

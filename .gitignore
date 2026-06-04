@@ -3,6 +3,9 @@
 **/*.rs.bk
 *.pdb
 
+# CodeGraph runtime data (SQLite index + daemon files)
+/.codegraph/
+
 # Added by cargo
 # already existing elements were commented out
 
