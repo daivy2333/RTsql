@@ -46,6 +46,10 @@ name = "sqlite_compare"
 harness = false
 
 [[bench]]
+name = "data_scan_bench"
+harness = false
+
+[[bench]]
 name = "wal_group_commit_bench"
 harness = false
 
