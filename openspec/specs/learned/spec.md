@@ -124,8 +124,7 @@
 <!-- L010 --> ### [inner_column_index 设计失误]
 **症状→根因→解决**: CorrelatedParam 用 usize 索引匹配 → 改为 param_name: String 按列名匹配
 
-<!-- L011 --> ### [gc_test SlottedPage SlotID 失效（详细）]
-**症状→根因→解决**: GC delete_slot + compacting 后物理 SlotID 变化 → 引入 logical_id 解耦，header 修改后必须 serialize
+<!-- tombstone: L011 --> Merged into L005 — L011 是 L005 的详细版，L006 已覆盖 serialize 部分。2026-06-04
 
 ---
 
@@ -147,7 +146,6 @@
 | 惰性初始化 | search_all 在首次 next() 调用时执行 | IndexScanAll |
 | 连接并发 Semaphore | `Arc<Semaphore>` + `acquire_owned()` in spawn | 限流并发连接、防连接风暴 |
 | 数据页链表遍历 | SlottedPageHeader.next_page_id + TableMeta.data_page_head | 全表扫描跳过索引层（M19） |
-| 连接并发 Semaphore | `Arc<Semaphore>` + `acquire_owned()` in spawn | 限流并发连接、防连接风暴 |
 
 ---
 
@@ -526,17 +524,19 @@ cargo bench --save-baseline before-X
 - COMMIT 路径缺口（Plan Agent 发现）：`commit_mark_versions` 需清 `all_visible`
 
 **踩坑记录**：
-1. **DELETE 仅删索引不删数据页** — DELETE executor 移除 B-tree key 但不更新 version header，导致全表扫描（DataScan）仍返回已删除行。需后续实现 version header 标记。
-2. **`set_all_visible` 零调用者** — 快速路径代码就位但不触发，等惰性设置实现后才生效。
+1. **DELETE 仅删索引不删数据页** — ✅ 已修复（L030）：`mark_deleted()` 标记 version header，DataScan 跳过已删除行。
+2. **`set_all_visible` 零调用者** — ✅ 已修复（L030）：`check_page_all_visible()` 三条件验证后惰性设置。
 3. **闭包外查询可见性** — DataScanExecutor 在 `with_page_data` 闭包外查 `get_visibility`，因闭包是同步 `FnOnce` 无法访问 `self.buffer_pool`。
 
-**延后项**（记录到 optimization/spec.md O006）：
-- T4 benchmark：需等 `set_all_visible` 有调用者后测量
-- T2.3 惰性设置：需处理扫描发现全可见快并发 INSERT 的竞态
+**延后项**（已全部完成，详见 L030）：
+- T4 benchmark：`benches/visibility_bench.rs`（3 场景）
+- T2.3 惰性设置：`check_page_all_visible` 三条件验证
 
 ---
 
 <!-- L029 -->
+
+<!-- tombstone: L029 --> Archived — 竞态条件分析已被 L030 解决（方案 D → 实际实现 check_page_all_visible 三条件验证）。2026-06-04
 
 ---
 
@@ -570,32 +570,7 @@ cargo bench --save-baseline before-X
 
 ---
 
-### [M21 惰性 set_all_visible 竞态条件 — 2026-06-04]
-
-**问题**：`set_all_visible` 零调用者，需惰性设置但存在竞态条件。
-
-**竞态时序**：
-```
-T1: 扫描器发现页上所有行已提交 → 准备 set_all_visible
-T2: 并发 INSERT 在同一页写入新行（uncommitted）
-T3: 扫描器 set_all_visible(true)
-T4: 另一个扫描器看到 all_visible=true → 跳过逐行检查 → 返回未提交行！
-```
-
-**解决方案选项**：
-| 方案 | 描述 | 复杂度 |
-|------|------|--------|
-| A: 扫描结束时设置 | if all_committed then set_all_visible | 低，有竞态 |
-| B: 页级锁保护 | 扫描持读锁，INSERT 持写锁 | 中，引入锁争用 |
-| C: 版本号校验 | set 时检查 slot_count 未变 | 低，需额外存储 |
-| D: 延后实现 | 等更多使用数据 | 当前选择 |
-
-**How to apply**：
-- 正确性优先，延后惰性设置是合理选择
-- 快速路径代码就位但不生效，fallback 到逐行检查仍正确
-- 未来实现时优先考虑方案 C（版本号校验）
-
----
+## 待探索
 
 ## 待探索
 

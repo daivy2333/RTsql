@@ -52,6 +52,7 @@
 | rand | 0.8 | https://docs.rs/rand | 随机数 |
 | lru | 0.12 | https://docs.rs/lru | LRU 缓存（PlanCache） |
 | crc32fast | 1.4 | https://docs.rs/crc32fast | WAL CRC32 校验 |
+| dashmap | 6 | https://docs.rs/dashmap | 并发 HashMap（BufferPool vis_map） |
 | criterion | 0.5 | https://bheisler.github.io/criterion.rs | 基准测试 |
 | rusqlite | 0.31 | https://docs.rs/rusqlite | SQLite 对比测试 |
 | tempfile | 3.x | https://docs.rs/tempfile | 测试临时目录 |
