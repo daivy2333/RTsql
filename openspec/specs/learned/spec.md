@@ -1,6 +1,6 @@
 # Learned — 学习记忆
 
-> 版本：v1.4 | 最后更新：2026-06-04（M21 页面级 MVCC L028）
+> 版本：v1.6 | 最后更新：2026-06-04（M21 遗留项完成 L030）
 > 由 openspec-init 从 `.claude/docs/learned.md` 迁移。
 > 条目格式: <!-- L{编号} --> 标记开头，支持 grep 精确定位。
 
@@ -533,6 +533,67 @@ cargo bench --save-baseline before-X
 **延后项**（记录到 optimization/spec.md O006）：
 - T4 benchmark：需等 `set_all_visible` 有调用者后测量
 - T2.3 惰性设置：需处理扫描发现全可见快并发 INSERT 的竞态
+
+---
+
+<!-- L029 -->
+
+---
+
+<!-- L030 -->
+
+### [M21 遗留项完成 — DELETE mark_deleted + 惰性 set_all_visible — 2026-06-04]
+
+**问题**：(1) DELETE 只删 B-tree 索引不更新数据页 → DataScan 返回已删除行；(2) `set_all_visible` 零调用者；(3) 无 visibility benchmark。
+
+**解决方案**：
+
+1. **DELETE mark_deleted**：
+   - `VersionHeader` 新增 `DELETED_TX_ID = 0xFFFFFFFFFFFFFFFE` 哨兵值
+   - `mark_deleted()` 设置 `commit_tx_id = DELETED_TX_ID`，`is_deleted()` 检查
+   - DeleteExecutor 在删索引前标记 version header（容错 slot 不存在）
+   - DataScan 跳过 `is_deleted()` 行
+
+2. **惰性 set_all_visible**：
+   - `check_page_all_visible(page_id, snapshot)` 扫描所有 version header 验证三条件：
+     - `commit_tx_id().is_some() && !is_deleted()` — 已提交且未删除
+     - `create_tx_id < snapshot.tx_id` — 快照前创建
+     - `!snapshot.contains_active_tx(create_tx_id)` — 非活跃事务
+   - DataScan 页面扫描完毕后（`JumpToPage/Done` + 非 all_invisible）惰性设置
+
+3. **Visibility benchmark**：`benches/visibility_bench.rs`（3 场景：no_snapshot / cold / warm）
+
+**How to apply**：
+- DELETE 正确性依赖 `mark_deleted`，未来 GC 需识别 `DELETED_TX_ID`
+- `check_page_all_visible` 是 async 方法（需 `with_page_data`），仅在页面扫描结束时调用
+- Benchmark 中 snapshot 场景不 assert count（auto-commit tx_id 与 snapshot tx_id 交互问题）
+
+---
+
+### [M21 惰性 set_all_visible 竞态条件 — 2026-06-04]
+
+**问题**：`set_all_visible` 零调用者，需惰性设置但存在竞态条件。
+
+**竞态时序**：
+```
+T1: 扫描器发现页上所有行已提交 → 准备 set_all_visible
+T2: 并发 INSERT 在同一页写入新行（uncommitted）
+T3: 扫描器 set_all_visible(true)
+T4: 另一个扫描器看到 all_visible=true → 跳过逐行检查 → 返回未提交行！
+```
+
+**解决方案选项**：
+| 方案 | 描述 | 复杂度 |
+|------|------|--------|
+| A: 扫描结束时设置 | if all_committed then set_all_visible | 低，有竞态 |
+| B: 页级锁保护 | 扫描持读锁，INSERT 持写锁 | 中，引入锁争用 |
+| C: 版本号校验 | set 时检查 slot_count 未变 | 低，需额外存储 |
+| D: 延后实现 | 等更多使用数据 | 当前选择 |
+
+**How to apply**：
+- 正确性优先，延后惰性设置是合理选择
+- 快速路径代码就位但不生效，fallback 到逐行检查仍正确
+- 未来实现时优先考虑方案 C（版本号校验）
 
 ---
 

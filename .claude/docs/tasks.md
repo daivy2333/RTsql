@@ -258,11 +258,15 @@ M23 ──→ M33(P5)
   - [x] T1: `PageVisibilityInfo` 结构体（`src/storage/page_visibility.rs`）+ BufferPool 集成（`DashMap` + 4 公开方法）+ 4 单元测试
   - [x] T2: `find_visible_version` + `DataScanExecutor` 页面级快速路径（`all_visible` 跳过逐行检查 / `all_invisible_for` 跳过整页）
   - [x] T3: INSERT/DELETE/UPDATE/COMMIT 四路径均调用 `clear_all_visible` 更新摘要
-  - [ ] T4: 可见性检查基准测试 — ⏸️ 延后（需先实现惰性 `all_visible` 设置）
-- **改动**（~10 文件）：`Cargo.toml` (dashmap), `page_visibility.rs` (新), `buffer_pool.rs`, `data_scan.rs`, `insert.rs`, `data_page.rs`, `update.rs`, `manager.rs`, `visibility_test.rs` (新 5 测试)
-- **验证**：129 lib + 全量集成测试 0 failures, clippy 仅 2 pre-existing warnings
-- **设计决策**：ADR-011（`DashMap` 纯内存 / 惰性设置延后 / COMMIT 路径清标志）
-- **下一步**：Phase 2 启动 M21 惰性设置（T2.3）+ 基准测试（T4），然后 M37 或 M31
+  - [x] T4: 可见性检查基准测试（`benches/visibility_bench.rs`，3 场景：no_snapshot / cold / warm）
+- **延后项完成**（2026-06-04）：
+  - [x] DELETE mark_deleted：`VersionHeader::mark_deleted()` + `is_deleted()` + DeleteExecutor 标记 + DataScan 跳过
+  - [x] 惰性 set_all_visible：`check_page_all_visible()` 三条件验证 + DataScan 页面扫描后惰性设置
+  - [x] DELETE 测试修复：visibility_test 期望 5→4
+- **改动**（~12 文件）：`version_chain.rs` (+mark_deleted/is_deleted), `snapshot.rs` (+contains_active_tx), `delete.rs` (mark_deleted), `data_scan.rs` (skip deleted + lazy set_all_visible), `buffer_pool.rs` (+check_page_all_visible), `visibility_test.rs`, `visibility_bench.rs` (新)
+- **验证**：全量测试 0 failures, clippy 仅 2 pre-existing warnings, benchmark 运行成功
+- **设计决策**：ADR-011（`DashMap` 纯内存 / 惰性设置三条件验证 / COMMIT 路径清标志）
+- **下一步**：M37 或 M31
 
 ---
 

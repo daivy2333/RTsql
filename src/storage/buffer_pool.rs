@@ -374,4 +374,47 @@ impl BufferPool {
                 all_visible: false,
             });
     }
+
+    /// Check if all rows on a page are visible to the given snapshot.
+    ///
+    /// Returns true if every slot satisfies three conditions:
+    /// 1. Committed (commit_tx_id is Some and not a delete sentinel)
+    /// 2. Created before the snapshot (create_tx_id < snapshot.tx_id)
+    /// 3. Not from an active transaction at snapshot time
+    ///
+    /// Used by DataScan to lazily set `all_visible` after scanning a page.
+    pub async fn check_page_all_visible(&self, page_id: PageId, snapshot: &Snapshot) -> bool {
+        self.with_page_data(page_id, |data| -> Result<bool> {
+            let slotted = SlottedPageRef::new(data);
+            for i in 0..slotted.slot_count() {
+                let slot = match slotted.get_slot(i) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let slot_data = slotted.get_slot_data(&slot);
+                if slot_data.len() < VersionHeader::SIZE {
+                    return Ok(false);
+                }
+                let vh = match VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE]) {
+                    Some(v) => v,
+                    None => return Ok(false),
+                };
+                // Condition 1: must be committed (not uncommitted, not deleted)
+                if vh.commit_tx_id().is_none() || vh.is_deleted() {
+                    return Ok(false);
+                }
+                // Condition 2: created before snapshot
+                if vh.create_tx_id() >= snapshot.tx_id() {
+                    return Ok(false);
+                }
+                // Condition 3: not from an active transaction
+                if snapshot.contains_active_tx(vh.create_tx_id()) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+        .await
+        .unwrap_or(false)
+    }
 }

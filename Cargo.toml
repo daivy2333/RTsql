@@ -58,6 +58,10 @@ harness = false
 name = "tx_id_bench"
 harness = false
 
+[[bench]]
+name = "visibility_bench"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

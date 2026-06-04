@@ -1,6 +1,6 @@
 # Optimization — 优化记录
 
-> 版本：v1.2 | 最后更新：2026-06-03（O003 → 已完成，Phase 1 全部完成）
+> 版本：v1.4 | 最后更新：2026-06-04（O006 M21 全部完成）
 > 由 openspec-init 从 `.claude/docs/optimization.md` 迁移。
 > 条目格式: <!-- O{编号} --> - {问题描述}
 > 每条含当前影响、建议方案。
@@ -82,13 +82,16 @@
   - 预期：全表扫描 ~2x
   - 状态：📋 P2
 
-<!-- O006 --> - **M21: 页面级 MVCC** ✅ 核心完成 (2026-06-04) + ⏸️ 延后项
+<!-- O006 --> - **M21: 页面级 MVCC** ✅ 全部完成 (2026-06-04)
   - 问题：每行 22B VersionHeader，逐行检查可见性
   - 方案：`PageVisibilityInfo`（9B/page 内存摘要）+ `DashMap` 快速路径
-  - 已完成：T1 数据结构 + BufferPool 集成、T2 扫描快速路径、T3 四写路径更新
-  - ⏸️ 延后：T2.3 惰性 `set_all_visible`（避免竞态）、T4 benchmark（需惰性设置先实现）
-  - 改动：~10 文件（含新 `page_visibility.rs` + `visibility_test.rs`）
-  - 状态：📋 P2（核心完成，惰性设置 + benchmark 延后）
+  - 已完成：T1 数据结构 + BufferPool 集成、T2 扫描快速路径、T3 四写路径更新（含 COMMIT 缺口补充）
+  - 延后项完成：
+    - T2.3 惰性 `set_all_visible`：`check_page_all_visible` 三条件验证 + DataScan 惰性设置
+    - T4 benchmark：`benches/visibility_bench.rs`（no_snapshot / cold / warm）
+    - DELETE mark_deleted：`VersionHeader::mark_deleted()` + DataScan 跳过已删除行
+  - 改动：~12 文件（详见 tasks.md M21）
+  - 状态：✅ 完成
 
 <!-- O007 --> - **M36: 零拷贝 ValueRef**
   - 问题：`Expression::evaluate()` 每行每列返回 `Value` 枚举，String/Vec 分配
