@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use dashmap::DashMap;
+
 use crate::storage::{
     page_format::SlottedPageRef,
     page_frame::{PageFrame, PageGuard},
-    AsyncStorage, Page, PageId, Result, RowId, StorageError,
+    AsyncStorage, Page, PageId, PageVisibilityInfo, Result, RowId, StorageError,
 };
 use crate::transaction::{Snapshot, VersionHeader};
 
@@ -16,6 +18,10 @@ pub struct BufferPool {
     /// 2. All Mutex lock/unlock operations are in sync code (no .await between lock and unlock)
     /// 3. The RwLock on the HashMap itself is tokio::sync::RwLock (async-safe)
     pages: RwLock<HashMap<PageId, Arc<std::sync::Mutex<PageFrame>>>>,
+    /// Per-page MVCC visibility map for fast-path skipping.
+    /// DashMap provides lock-free concurrent access — no deadlock risk
+    /// with existing page cache locks.
+    vis_map: DashMap<PageId, PageVisibilityInfo>,
     clock_hand: RwLock<Vec<PageId>>,
     capacity: usize,
     storage: Arc<dyn AsyncStorage>,
@@ -29,6 +35,7 @@ impl BufferPool {
 
         Ok(Self {
             pages: RwLock::new(HashMap::new()),
+            vis_map: DashMap::new(),
             clock_hand: RwLock::new(Vec::new()),
             capacity,
             storage,
@@ -233,6 +240,37 @@ impl BufferPool {
         let mut f_opt = Some(f);
         let mut current_row_id = Some(row_id);
 
+        // M21: Page-level visibility fast-path.
+        // Check the visibility map before entering per-row version chain traversal.
+        // If the page is all-visible (every row committed), skip per-row checks entirely.
+        // If the page is all-invisible for this snapshot, return None immediately.
+        if let Some(vis_info) = self.get_visibility(PageId(row_id.page_id as u64)) {
+            if vis_info.all_visible {
+                // All rows on this page are committed — skip per-row visibility checks.
+                return self
+                    .with_page_data(PageId(row_id.page_id as u64), |data| {
+                        let slotted = SlottedPageRef::new(data);
+                        let (slot, _) = match slotted.get_slot_by_logical_id(row_id.slot_id) {
+                            Some(s) => s,
+                            None => return Ok(None),
+                        };
+                        let slot_data = slotted.get_slot_data(&slot);
+                        if slot_data.len() < VersionHeader::SIZE {
+                            return Ok(None);
+                        }
+                        let tuple_bytes = &slot_data[VersionHeader::SIZE..];
+                        let f = f_opt.take().expect("closure should be available");
+                        let result = f(tuple_bytes)?;
+                        Ok(Some(result))
+                    })
+                    .await;
+            }
+
+            if vis_info.all_invisible_for(snapshot.tx_id()) {
+                return Ok(None);
+            }
+        }
+
         while let Some(current) = current_row_id {
             let visibility_result: VisibilityResult<R> = self
                 .with_page_data(PageId(current.page_id as u64), |data| {
@@ -293,5 +331,47 @@ impl BufferPool {
         let mut hand = self.clock_hand.write().await;
         hand.retain(|id| *id != page_id);
         self.storage.free_page(page_id).await
+    }
+
+    /// Get the current visibility info for a page. Returns None if no entry exists
+    /// (meaning: no optimization hint available — fall back to per-row checks).
+    pub fn get_visibility(&self, page_id: PageId) -> Option<PageVisibilityInfo> {
+        self.vis_map.get(&page_id).map(|r| *r)
+    }
+
+    /// Mark a page as all-visible (all rows committed).
+    /// Called lazily by scan paths when they discover every row is committed.
+    pub fn set_all_visible(&self, page_id: PageId) {
+        self.vis_map
+            .entry(page_id)
+            .and_modify(|info| info.all_visible = true)
+            .or_insert(PageVisibilityInfo {
+                all_visible: true,
+                min_create_tx_id: u64::MAX,
+            });
+    }
+
+    /// Clear the all_visible flag for a page.
+    /// Called by INSERT/DELETE/UPDATE/COMMIT paths.
+    pub fn clear_all_visible(&self, page_id: PageId) {
+        self.vis_map
+            .entry(page_id)
+            .and_modify(|info| info.all_visible = false)
+            .or_default();
+    }
+
+    /// Update visibility info after a new row is inserted on this page.
+    /// Update min_create_tx_id and clear all_visible (new row is uncommitted).
+    pub fn update_visibility_on_insert(&self, page_id: PageId, create_tx_id: u64) {
+        self.vis_map
+            .entry(page_id)
+            .and_modify(|info| {
+                info.min_create_tx_id = info.min_create_tx_id.min(create_tx_id);
+                info.all_visible = false;
+            })
+            .or_insert(PageVisibilityInfo {
+                min_create_tx_id: create_tx_id,
+                all_visible: false,
+            });
     }
 }

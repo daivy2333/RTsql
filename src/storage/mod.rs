@@ -9,6 +9,7 @@ mod page;
 pub mod page_format;
 mod page_frame;
 mod page_id;
+pub mod page_visibility;
 
 pub use async_storage::AsyncStorage;
 pub use btree::{
@@ -26,3 +27,4 @@ pub use page::Page;
 pub use page_format::{ColumnType, Key, RowId, MAX_KEY_LEN};
 pub use page_frame::PageGuard;
 pub use page_id::PageId;
+pub use page_visibility::PageVisibilityInfo;

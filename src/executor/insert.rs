@@ -2,7 +2,9 @@
 
 use crate::executor::{ExecResult, Executor, Value};
 use crate::storage::page_format::{compute_tuple_size, serialize_tuple, ColumnType};
-use crate::storage::{write_tuple_to_data_page, BufferPool, Result, StorageError, TableMeta};
+use crate::storage::{
+    write_tuple_to_data_page, BufferPool, PageId, Result, StorageError, TableMeta,
+};
 use crate::transaction::{TransactionManager, VersionHeader};
 use crate::wal::{WALBuffer, WalRecord};
 use std::sync::Arc;
@@ -94,6 +96,12 @@ impl Executor for InsertExecutor {
                 &buf,
             )
             .await?;
+
+            // M21: Update page visibility summary after INSERT
+            let page_id = PageId(row_id.page_id as u64);
+            self.buffer_pool.clear_all_visible(page_id);
+            self.buffer_pool
+                .update_visibility_on_insert(page_id, self.tx_id);
 
             // WAL: Insert record
             if let Some(wal) = &self.wal_buffer {

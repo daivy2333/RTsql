@@ -1,12 +1,13 @@
 //! Delete executor - delete by key
 
 use crate::executor::{ExecResult, Executor};
-use crate::storage::{btree::IndexManager, Result};
+use crate::storage::{btree::IndexManager, BufferPool, PageId, Result};
 use crate::wal::{WALBuffer, WalRecord};
 use std::sync::Arc;
 
 pub struct DeleteExecutor {
     index_manager: Arc<IndexManager>,
+    buffer_pool: Arc<BufferPool>,
     table_name: String,
     key: Vec<u8>,
     tx_id: u64,
@@ -17,6 +18,7 @@ pub struct DeleteExecutor {
 impl DeleteExecutor {
     pub fn new(
         index_manager: Arc<IndexManager>,
+        buffer_pool: Arc<BufferPool>,
         table_name: String,
         key: Vec<u8>,
         tx_id: u64,
@@ -24,6 +26,7 @@ impl DeleteExecutor {
     ) -> Self {
         Self {
             index_manager,
+            buffer_pool,
             table_name,
             key,
             tx_id,
@@ -49,6 +52,13 @@ impl Executor for DeleteExecutor {
 
         // Search for row_id before deleting
         let row_id = self.index_manager.search(&self.key).await?;
+
+        // M21: Clear page visibility before delete so all-visible fast-path
+        // doesn't return stale data.
+        if let Some(rid) = &row_id {
+            self.buffer_pool
+                .clear_all_visible(PageId(rid.page_id as u64));
+        }
 
         self.index_manager.delete(&self.key).await?;
 

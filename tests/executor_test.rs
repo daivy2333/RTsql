@@ -281,6 +281,7 @@ async fn test_delete_executor() -> Result<()> {
 
     let mut executor = DeleteExecutor::new(
         index_manager.clone(),
+        buffer_pool.clone(),
         "test".to_string(),
         key.to_vec(),
         0,
