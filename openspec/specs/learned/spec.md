@@ -70,6 +70,9 @@
 | FileStorage.free_pages | src/storage/file_storage.rs | Mutex<Vec<u64>> free-list | 2026-05 |
 | Server::new | src/network/server.rs | 创建服务器（addr, db, max_connections） | 2026-06 |
 | Server::shutdown_token | src/network/server.rs | 获取 CancellationToken 用于优雅关闭 | 2026-06 |
+| TableMeta.data_page_head | src/storage/data/table_manager.rs:51 | 数据页链表头（M19 用） | 2026-06 |
+| SlottedPageHeader.next_page_id | src/storage/page_format/slotted_page.rs:21 | 数据页链表指针（M19 用） | 2026-06 |
+| IndexManager.scan_all | src/storage/btree/index_manager.rs:204 | BTree 全遍历（当前 ScanExecutor） | 2026-05 |
 
 ---
 
@@ -90,6 +93,8 @@
 | correlated.rs | src/executor/correlated.rs | inject_correlated_values | 2026-05 |
 | predicate.rs | src/executor/predicate.rs | Predicate/Expression + ParameterExpression | 2026-05 |
 | planner.rs | src/parser/planner.rs | PlanBuilder（含子查询/关联检测） | 2026-05 |
+| data_page.rs | src/storage/data_page.rs | 数据页读写 + VersionHeader | 2026-05 |
+| table_manager.rs | src/storage/data/table_manager.rs | TableMeta（data_page_head/tail） | 2026-06 |
 
 ---
 
@@ -140,6 +145,8 @@
 | 批量删除从后向前 | delete_by_key 从后向前删除 slot | 批量删除同页多个 slot |
 | 两次加载页模式 | 先 page_data() 读找，再 modify_page() 删除 | 页面读写分离 |
 | 惰性初始化 | search_all 在首次 next() 调用时执行 | IndexScanAll |
+| 连接并发 Semaphore | `Arc<Semaphore>` + `acquire_owned()` in spawn | 限流并发连接、防连接风暴 |
+| 数据页链表遍历 | SlottedPageHeader.next_page_id + TableMeta.data_page_head | 全表扫描跳过索引层（M19） |
 | 连接并发 Semaphore | `Arc<Semaphore>` + `acquire_owned()` in spawn | 限流并发连接、防连接风暴 |
 
 ---
@@ -370,6 +377,50 @@ Database ──→ Pipeline ──→ Executor Tree
 **How to apply**：
 - M19/M36 等后续零拷贝里程碑遇到类似借用链问题，**首选闭包方案**
 - `with_page_data` 可作为 BufferPool 的通用零拷贝访问原语
+
+---
+
+## L026: M19 实测性能 — DataScan 1.81x-2.44x 提速
+
+<!-- L026 -->
+
+**结论**：`DataScanExecutor` 实测 **1.81x-2.44x 提速**（vs `ScanExecutor`），10K 行场景 **2.44x**，达到预期 ~2x 目标。
+
+**测试条件**（`benches/data_scan_bench.rs`）：
+- 表 schema: `(id INT PK, name STRING, value INT)`
+- 数据规模: 1K 行（100B/行）、10K 行
+- criterion sample-size=20, warm-up=1s, measurement=2s
+- 1次构建 dataset，每次 iter 只测 scan 阶段（不混 insert 开销）
+
+**实测数据**：
+| Rows | ScanExecutor (index) | DataScanExecutor | Speedup |
+|------|----------------------|-------------------|---------|
+| 1K   | 257.79 µs            | 142.39 µs         | 1.81x   |
+| 10K  | 17.719 ms            | 7.273 ms          | 2.44x   |
+
+**为什么能提速**：
+- IndexManager.scan_all 需遍历 BTree 全部页（内部 + 叶节点）+ 累积 `(key, RowId)` 到 Vec
+- DataScan 沿 `next_page_id` 链表直接读数据页，每行 **1 次页访问**（旧路径 2 次：索引页 + 数据页）
+- 流式 `next()` 无 `results: Vec<Vec<Value>>` 预加载
+
+**踩坑：bench 第一次卡死**（教训）
+
+第一次写 `data_scan_bench.rs` 时把 setup 放在 `iter` 闭包里，setup 用 `db.execute_sql("INSERT...")` 串行 1K 次，每 iter 1.5s。100 samples × 3 档 = 450s+，10K 警告 1434s。
+
+**修复**：
+- 一次构建 dataset（在 `c.bench_with_input` 之前 `block_on` 执行 `setup_table_with_rows`）
+- 用 batch INSERT 1000 行/次 而非单行 INSERT
+- iter 闭包只做 executor 构造 + drain
+
+**为什么重要**：
+- criterion 默认 100 samples，每 sample 多 iter 几次取中位数
+- setup 混进 iter = benchmark 测错东西（setup + scan 而非纯 scan）
+- 实际收益会随 dataset 增大放大（10K 比 1K 提速更多），符合预期
+
+**How to apply**：
+- 写新 bench 时：dataset 构建在 `bench_with_input` **之前**完成（`block_on` 同步 setup）
+- 串行 `execute_sql` 跑大数据集极慢，**必须**用 batch INSERT 或直接 executor API
+- 第一次跑 bench 设 `--sample-size 10 --measurement-time 2` 快速验证 setup 不卡
 
 ---
 

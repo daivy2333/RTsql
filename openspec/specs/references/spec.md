@@ -109,3 +109,5 @@
 <!-- R006 -->
 > 由 openspec-explorer 写入，由 openspec-assistant 日常维护，由 openspec-archivist 周期清理。
 > 添加时格式: <!-- R{编号} --> | 主题 | 路径 | 内容概要 |
+
+<!-- R007 --> | M19 DataScan 路径 | .claude/analysis/m19-datascan-path.md | 数据页链表遍历优化方案，跳过索引层，~2x 全表扫描提速 |

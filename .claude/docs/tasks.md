@@ -183,7 +183,7 @@ M23 ──→ M33(P5)
   - `tests/version_chain_test.rs` (+13 -5) — 6 find_visible_version 闭包适配
   - `tests/mvcc_commit_test.rs` (+6 -3) — 3 find_visible_version 闭包适配
 - **验证**：cargo test --lib --tests 0 失败（110 lib + 全部集成测试 ok）
-- **下一步**：Phase 2 启动 M19 (DataScan) 或 M21 (页面级 MVCC)
+- **下一步**：Phase 2 启动 M19 (DataScan) — ✅ 已完成（2026-06-04）；M21 (页面级 MVCC) 待启动
 
 #### M36: 零拷贝 ValueRef ✅ 已完成 (2026-06-03)
 
@@ -199,18 +199,54 @@ M23 ──→ M33(P5)
 - **验收**：详见 learned/spec.md L025（双标准：30万→0 AND ≥ 5%）
 - **改动文件**：6 个（新建 value_ref.rs + 改 value.rs / tuple.rs / predicate.rs / 3 个 Scan + 2 个 mod.rs + 集成测试）
 - **Commits**：ed81610 (T1) / 4f9a8e8 (T2) / 03c2deb (T3) / 3ce2672 (T4) / 9bc8d28 (T5) / 75199d6 (T6) / b75d307 (T8) / 95bb3f9 (T9+T10 docs) / 73076ac (T10 archive + push)
-- **下一步**：Phase 2 启动 M19 (DataScan) 或 M21 (页面级 MVCC)
+- **下一步**：Phase 2 启动 M19 (DataScan) — ✅ 已完成（2026-06-04）；M21 (页面级 MVCC) 待启动
 
 ---
 
-#### M19: DataScan 路径
+#### M19: DataScan 路径 ✅ 已完成 (2026-06-04, L026)
 
-- **问题**：Index→RowId→Data 每行两次页访问
+- **问题**：Index→RowId→Data 每行两次页访问，全表扫描落后 SQLite ~4x
 - **任务**：
-  - [ ] T1: `DataScanExecutor` 顺序扫描数据页，跳过索引层
-  - [ ] T2: 无 WHERE 条件时 Planner 自动选 DataScan
-  - [ ] T3: 有 WHERE 但无索引覆盖时也走 DataScan + 过滤
-  - [ ] T4: 全表扫描基准测试对比
+  - [x] T1: `DataScanExecutor` 顺序扫描数据页，跳过索引层
+    - 新增 `src/executor/data_scan.rs`（~155 行）
+    - 流式 `next()` 沿 `data_page_head` → `next_page_id` 链表遍历
+    - 无 `Vec<Vec<Value>>` 预加载，每行 1 次页访问
+    - 单元测试 4 个：单数据页 / 空表 / 多页 / 流式顺序
+  - [x] T2: MVCC 可见性检查（在 T1 基础上加入）
+    - `with_page_data` 闭包内解析 VersionHeader（22B）
+    - 不可见时 `find_visible_in_chain` 异步跨页查链（MAX 64 深度保护）
+    - 单元测试 2 个：未提交不可见 / 已提交可见
+  - [x] T3: 无 WHERE 条件时 Planner 自动选 DataScan
+    - `PhysicalPlan::DataScan(DataScanNode)` 枚举变体
+    - `planner.rs::build_query` 无 WHERE 分支返回 DataScan
+    - `pipeline.rs::create_executor_from_plan` + `extract_column_indices` + `correlated.rs` + `aggregate input_schema` + `get_subquery_first_column` 全部支持 DataScan
+    - 集成测试：`test_planner_no_where_routes_to_data_scan` + `test_planner_with_pk_equality_keeps_index_scan`
+  - [x] T4: 有 WHERE 但无索引覆盖时也走 DataScan + 过滤
+    - 新增 `has_pk_equality` 递归检查 AND 组合（含 PK → 保持 `Filter(Scan)` 兜底；不含 → `Filter(DataScan)`）
+    - 集成测试：`test_planner_non_pk_where_routes_to_filter_data_scan` + `test_planner_pk_and_other_keeps_filter_scan`
+  - [x] T5: 全表扫描基准测试对比
+    - 新增 `benches/data_scan_bench.rs`（4 场景，1K/10K 行）
+    - **实测：1K 1.81x / 10K 2.44x 提速**（达到预期 ~2x 目标）
+    - 走 OpenSpec change：`m19-datascan-path`（已归档为 `2026-06-04-m19-datascan-path`）
+
+- **改动文件**（共 8 个）：
+  - `src/executor/data_scan.rs` (新增 ~155 行) — DataScanExecutor + PageAction 状态机
+  - `src/executor/plan.rs` (+24 行) — DataScan 变体 + DataScanNode
+  - `src/executor/mod.rs` (+2 行) — 导出
+  - `src/pipeline.rs` (+12 行) — dispatch + extract_column_indices
+  - `src/parser/planner.rs` (+60 行) — build_query 路由 + has_pk_equality + get_subquery_first_column
+  - `tests/executor_test.rs` (+200 行) — 8 个 M19 测试
+  - `tests/planner_test.rs` (2 行) — test_select_scan 期望 DataScan
+  - `benches/data_scan_bench.rs` (新增 ~80 行) — criterion 对比
+  - `Cargo.toml` (+3 行) — bench 入口
+
+- **验证**：
+  - 全量回归 464/464 测试通过（含 8 M19 测试）
+  - cargo fmt 0 diff
+  - cargo clippy 无新 warning
+  - criterion bench 输出：1K 1.81x / 10K 2.44x
+
+- **下一步**：Phase 2 启动 M21 (页面级 MVCC)
 
 ---
 
