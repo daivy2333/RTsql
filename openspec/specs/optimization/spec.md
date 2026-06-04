@@ -70,17 +70,17 @@
 
 ## 待优化（Phase 2: 存储引擎核心）
 
-<!-- O004 --> - **M20: 零拷贝 SlottedPageRef**
+<!-- O004 --> - **M20: 零拷贝 SlottedPageRef** ✅ 已完成 (2026-06-03)
   - 问题：`SlottedPage::get()` 返回 `Vec<u8>` 拷贝
-  - 方案：`SlottedPageRef<'_>` 只读视图借用页缓冲区
-  - 预期：I/O ~20-30% 提速
-  - 状态：📋 P2
+  - 方案：纯闭包 API `with_page_data` + `VisibilityResult<R>` 辅助枚举
+  - 实际：read 路径 -2.46%~-8.33%，write 路径 +3.99%（< 5% 阈值）
+  - 状态：✅ 完成
 
-<!-- O005 --> - **M19: DataScan 路径**
+<!-- O005 --> - **M19: DataScan 路径** ✅ 已完成 (2026-06-04)
   - 问题：Index→RowId→Data 每行两次页访问
   - 方案：`DataScanExecutor` 顺序扫描数据页，跳过索引层
-  - 预期：全表扫描 ~2x
-  - 状态：📋 P2
+  - 实际：1K 1.81x / 10K 2.44x 提速（达到预期 ~2x 目标）
+  - 状态：✅ 完成
 
 <!-- O006 --> - **M21: 页面级 MVCC** ✅ 全部完成 (2026-06-04)
   - 问题：每行 22B VersionHeader，逐行检查可见性
@@ -93,11 +93,11 @@
   - 改动：~12 文件（详见 tasks.md M21）
   - 状态：✅ 完成
 
-<!-- O007 --> - **M36: 零拷贝 ValueRef**
+<!-- O007 --> - **M36: 零拷贝 ValueRef** ✅ 已完成 (2026-06-03)
   - 问题：`Expression::evaluate()` 每行每列返回 `Value` 枚举，String/Vec 分配
-  - 方案：`ValueRef<'a>` 枚举（Text→`&'a str`）
-  - 预期：堆分配 30万→0
-  - 状态：📋 P2
+  - 方案：`ValueRef<'a>` 枚举（Text→`&'a str`）+ `deserialize_value_refs` 零拷贝
+  - 实际：堆分配 30万→0（详见 learned/spec.md L025）
+  - 状态：✅ 完成
 
 ---
 
