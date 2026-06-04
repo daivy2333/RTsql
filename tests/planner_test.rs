@@ -33,12 +33,13 @@ fn test_select_scan() {
     let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
+    // M19: no-WHERE SELECT now routes to DataScan (skip index layer).
     match plan {
-        PhysicalPlan::Scan(node) => {
+        PhysicalPlan::DataScan(node) => {
             assert_eq!(node.table_name, "users");
             assert_eq!(node.columns, vec!["id", "name"]);
         }
-        _ => panic!("Expected Scan, got {:?}", plan),
+        _ => panic!("Expected DataScan, got {:?}", plan),
     }
 }
 

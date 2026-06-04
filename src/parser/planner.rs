@@ -5,8 +5,8 @@
 use crate::executor::{
     AggregateFunc, AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, ColumnType,
     ComparisonOp, ComparisonPredicate, ConstantExpression, CorrelatedParam, CreateTableNode,
-    DeleteNode, DerivedScanNode, DropTableNode, ExpressionRef, FilterNode, HavingNode,
-    IndexScanNode, InsertNode, JoinCondition, LimitNode, LogicalOp, LogicalPredicate,
+    DataScanNode, DeleteNode, DerivedScanNode, DropTableNode, ExpressionRef, FilterNode,
+    HavingNode, IndexScanNode, InsertNode, JoinCondition, LimitNode, LogicalOp, LogicalPredicate,
     OrderByColumn, OutputColumn, ParameterExpression, PhysicalPlan, PredicateRef, ScanNode,
     SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode, Value,
 };
@@ -220,6 +220,7 @@ impl PlanBuilder {
     fn get_plan_output_columns(&self, plan: &PhysicalPlan) -> Vec<String> {
         match plan {
             PhysicalPlan::Scan(node) => node.columns.clone(),
+            PhysicalPlan::DataScan(node) => node.columns.clone(),
             PhysicalPlan::DerivedScan(node) => node.columns.clone(),
             PhysicalPlan::Filter(node) => self.get_plan_output_columns(&node.input),
             PhysicalPlan::Sort(node) => self.get_plan_output_columns(&node.input),
@@ -500,17 +501,40 @@ impl PlanBuilder {
                     })
                 }
             } else {
-                // Non-PK WHERE - use Filter over Scan
+                // Non-PK WHERE — M19: route Filter input through DataScan when
+                // the WHERE doesn't include a PK equality anywhere (even under AND).
                 let predicate = self.build_where(&table_name, where_expr)?;
+                let has_pk_eq = self.has_pk_equality(&table_name, where_expr)?;
+                let input = if has_pk_eq {
+                    // PK equality present but in a non-simple form (e.g. AND-combined
+                    // with another predicate). Keep base_plan as-is.
+                    base_plan
+                } else {
+                    // No PK equality → swap base_plan's Scan for DataScan.
+                    match base_plan {
+                        PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
+                            table_name: scan_node.table_name,
+                            columns: scan_node.columns,
+                        }),
+                        other => other,
+                    }
+                };
                 PhysicalPlan::Filter(FilterNode {
-                    input: Box::new(base_plan),
+                    input: Box::new(input),
                     predicate,
                     table_name: table_name.clone(),
                 })
             }
         } else {
-            // No WHERE clause - full table scan
-            base_plan
+            // No WHERE clause — M19: route to DataScan (skip index layer).
+            // Subqueries / derived scans keep their original plan.
+            match base_plan {
+                PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
+                    table_name: scan_node.table_name,
+                    columns: scan_node.columns,
+                }),
+                _ => base_plan,
+            }
         };
 
         // === Aggregate function detection ===
@@ -585,10 +609,12 @@ impl PlanBuilder {
             // Build column index mapping from input plan
             let input_schema = match &plan_with_where {
                 PhysicalPlan::Scan(node) => node.columns.clone(),
+                PhysicalPlan::DataScan(node) => node.columns.clone(),
                 PhysicalPlan::Filter(node) => {
                     // Get schema from input of filter
                     match node.input.as_ref() {
                         PhysicalPlan::Scan(scan) => scan.columns.clone(),
+                        PhysicalPlan::DataScan(scan) => scan.columns.clone(),
                         _ => vec![],
                     }
                 }
@@ -722,6 +748,39 @@ impl PlanBuilder {
                 }
                 Ok(false)
             }
+            _ => Ok(false),
+        }
+    }
+
+    /// M19: Check if WHERE clause contains a PK equality somewhere in the tree
+    /// (recursively through AND combinations). Used to decide whether the
+    /// query should still go to `IndexScan` (M19 does not change that path)
+    /// or can be served by `Filter(DataScan)`.
+    ///
+    /// Conservative: OR-branches return `false` (we don't optimize OR→IndexScan
+    /// here — that is M21 / Phase 5 work).
+    fn has_pk_equality(&self, table_name: &str, expr: &Expr) -> Result<bool, PlanError> {
+        let pk_column = match self.primary_keys.get(table_name) {
+            Some(pk) => pk.clone(),
+            None => return Ok(false),
+        };
+
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: sqlparser::ast::BinaryOperator::Eq,
+                right,
+            } => {
+                let left_is_pk = matches!(left.as_ref(), Expr::Identifier(i) if i.value.to_lowercase() == pk_column);
+                let right_is_pk = matches!(right.as_ref(), Expr::Identifier(i) if i.value.to_lowercase() == pk_column);
+                Ok(left_is_pk || right_is_pk)
+            }
+            Expr::BinaryOp {
+                left,
+                op: sqlparser::ast::BinaryOperator::And,
+                right,
+            } => Ok(self.has_pk_equality(table_name, left)?
+                || self.has_pk_equality(table_name, right)?),
             _ => Ok(false),
         }
     }
@@ -1451,6 +1510,16 @@ impl PlanBuilder {
                     column: node.columns[0].clone(),
                 })
             }
+            PhysicalPlan::DataScan(node) => {
+                // M19: subquery's no-WHERE plan is DataScan — same column layout.
+                if node.columns.is_empty() {
+                    return Err(PlanError::SubqueryReturnsMultipleColumns);
+                }
+                Ok(ColumnRef {
+                    table: Some(node.table_name.clone()),
+                    column: node.columns[0].clone(),
+                })
+            }
             PhysicalPlan::Filter(node) => self.get_subquery_first_column(&node.input),
             PhysicalPlan::Aggregate(node) => {
                 if node.output_columns.is_empty() {
@@ -2031,12 +2100,13 @@ mod tests {
         let stmts = parse_sql(sql).unwrap();
         let plan = builder.build_plan(&stmts[0]).unwrap();
 
+        // M19: no-WHERE SELECT now routes to DataScan (skip index layer).
         match plan {
-            PhysicalPlan::Scan(node) => {
+            PhysicalPlan::DataScan(node) => {
                 assert_eq!(node.table_name, "users");
                 assert_eq!(node.columns, vec!["id", "name"]);
             }
-            _ => panic!("Expected Scan plan"),
+            _ => panic!("Expected DataScan plan (M19 default for no-WHERE)"),
         }
     }
 

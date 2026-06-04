@@ -1,10 +1,10 @@
 use crate::database::Database;
 use crate::executor::{
-    AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DeleteExecutor,
-    DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor, HavingExecutor,
-    IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig, JoinExecutor,
-    JoinRelatedConfig, LimitExecutor, PhysicalPlan, ScanExecutor, SemiJoinExecutorV2, SortExecutor,
-    SubqueryEvalExecutor, UpdateExecutor, Value,
+    AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DataScanExecutor,
+    DeleteExecutor, DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
+    HavingExecutor, IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig,
+    JoinExecutor, JoinRelatedConfig, LimitExecutor, PhysicalPlan, ScanExecutor, SemiJoinExecutorV2,
+    SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
@@ -297,6 +297,15 @@ pub(crate) fn create_executor_from_plan(
                 )) as Box<dyn Executor + Send>)
             }
 
+            PhysicalPlan::DataScan(node) => {
+                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                Ok(Box::new(DataScanExecutor::new(
+                    table_meta,
+                    database.buffer_pool.clone(),
+                    None,
+                )) as Box<dyn Executor + Send>)
+            }
+
             PhysicalPlan::IndexScan(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
                 Ok(Box::new(IndexScanExecutor::new(
@@ -542,6 +551,16 @@ fn value_to_json(value: Value) -> serde_json::Value {
 fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>, String)> {
     match plan {
         PhysicalPlan::Scan(scan_node) => {
+            let indices: HashMap<String, usize> = scan_node
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, scan_node.table_name.clone()))
+        }
+        PhysicalPlan::DataScan(scan_node) => {
+            // M19: same column index layout as Scan.
             let indices: HashMap<String, usize> = scan_node
                 .columns
                 .iter()

@@ -16,8 +16,10 @@ pub struct OrderByColumn {
 /// 物理计划节点（同步结构，M5 异步执行）
 #[derive(Debug, Clone)]
 pub enum PhysicalPlan {
-    /// 全表扫描
+    /// 全表扫描（via IndexManager.scan_all — M36 保留路径）
     Scan(ScanNode),
+    /// 数据页直接扫描（M19 — 跳过索引层，每行 1 次页访问）
+    DataScan(DataScanNode),
     /// 主键索引扫描
     IndexScan(IndexScanNode),
     /// 非唯一索引扫描（返回所有匹配行）
@@ -57,6 +59,19 @@ pub enum PhysicalPlan {
 /// 全表扫描节点
 #[derive(Debug, Clone)]
 pub struct ScanNode {
+    /// 表名
+    pub table_name: String,
+    /// 输出列名列表
+    pub columns: Vec<String>,
+}
+
+/// 数据页直接扫描节点（M19）
+///
+/// Planner 在无 WHERE 或非 PK 等值 WHERE 场景下生成此节点，
+/// 执行器直接遍历 `data_page_head` → `next_page_id` 链表，
+/// 跳过 `IndexManager.scan_all` 索引层。
+#[derive(Debug, Clone)]
+pub struct DataScanNode {
     /// 表名
     pub table_name: String,
     /// 输出列名列表
