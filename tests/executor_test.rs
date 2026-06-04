@@ -1,8 +1,9 @@
 //! Executor unit tests
 
 use rtsql::executor::{
-    ColumnDef, CreateTableExecutor, DeleteExecutor, ExecResult, Executor, IndexScanAllExecutor,
-    IndexScanExecutor, InsertExecutor, PhysicalPlan, ScanExecutor, UpdateExecutor, Value, ValueRef,
+    ColumnDef, CreateTableExecutor, DataScanExecutor, DataScanNode, DeleteExecutor, ExecResult,
+    Executor, IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, PhysicalPlan, ScanExecutor,
+    UpdateExecutor, Value, ValueRef,
 };
 use rtsql::storage::{
     data::TableManager,
@@ -1268,4 +1269,409 @@ async fn test_m36_deserialize_value_refs_borrow() {
         }
         _ => panic!("expected Text"),
     }
+}
+
+// =====================================================================
+// M19: DataScan 路径 - 全表扫描直接遍历数据页链表
+// =====================================================================
+
+/// M19 T1: DataScanExecutor 全表扫描（单数据页，3 行）
+#[tokio::test]
+async fn test_data_scan_executor_full_table() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+
+    let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
+
+    let values = vec![
+        vec![Value::Int(1)],
+        vec![Value::Int(2)],
+        vec![Value::Int(3)],
+    ];
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager,
+        values,
+        0,
+        None,
+    );
+    let result = insert_executor.next().await?;
+    assert_eq!(result, Some(ExecResult::AffectedRows(3)));
+
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None);
+
+    let mut row_count = 0;
+    let mut collected_ids: Vec<i64> = Vec::new();
+    while let Some(result) = executor.next().await? {
+        match result {
+            ExecResult::Row(values) => {
+                row_count += 1;
+                if let Value::Int(id) = &values[0] {
+                    collected_ids.push(*id);
+                }
+            }
+            _ => panic!("Expected ExecResult::Row"),
+        }
+    }
+    assert_eq!(row_count, 3);
+    collected_ids.sort();
+    assert_eq!(collected_ids, vec![1, 2, 3]);
+
+    Ok(())
+}
+
+/// M19 T1: 空表（data_page_head 指向未分配页）应返回 None
+#[tokio::test]
+async fn test_data_scan_executor_empty_table() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+
+    let table_meta = table_mgr.get_table("test").await?;
+
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None);
+
+    // 第一次 next() 应返回 Ok(None) — 空表无数据
+    let result = executor.next().await?;
+    assert_eq!(result, None, "Empty table should return None immediately");
+
+    Ok(())
+}
+
+/// M19 T1: 多数据页链表扫描（>1 页 4KB 数据）
+#[tokio::test]
+async fn test_data_scan_executor_multi_page() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table(
+            "test",
+            vec![
+                ("id".to_string(), ColumnType::Int),
+                ("name".to_string(), ColumnType::String(50)),
+            ],
+            "id",
+        )
+        .await?;
+
+    let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
+
+    // 插入 200 行，强制数据页链表
+    let values: Vec<Vec<Value>> = (0..200)
+        .map(|i| vec![Value::Int(i), Value::String(format!("row_{:03}", i))])
+        .collect();
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager,
+        values,
+        0,
+        None,
+    );
+    let result = insert_executor.next().await?;
+    assert_eq!(result, Some(ExecResult::AffectedRows(200)));
+
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None);
+
+    let mut row_count = 0;
+    while let Some(result) = executor.next().await? {
+        if let ExecResult::Row(_) = result {
+            row_count += 1;
+        } else {
+            panic!("Expected ExecResult::Row");
+        }
+    }
+    assert_eq!(
+        row_count, 200,
+        "Should scan all 200 rows across multiple pages"
+    );
+
+    Ok(())
+}
+
+/// M19 T1: 流式 next() — 每次调用返回一行（不预加载）
+#[tokio::test]
+async fn test_data_scan_executor_streaming() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+
+    let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
+
+    let values: Vec<Vec<Value>> = (1..=5).map(|i| vec![Value::Int(i)]).collect();
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager,
+        values,
+        0,
+        None,
+    );
+    insert_executor.next().await?;
+
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None);
+
+    // 流式验证：连续 5 次 next() 各返回 1 行，第 6 次返回 None
+    for i in 1..=5 {
+        let result = executor.next().await?;
+        match result {
+            Some(ExecResult::Row(row)) => {
+                assert_eq!(row.len(), 1, "Row should have 1 column");
+                if let Value::Int(id) = &row[0] {
+                    assert!(*id >= 1 && *id <= 5, "id should be in 1..=5, got {}", id);
+                } else {
+                    panic!("Expected Value::Int");
+                }
+            }
+            _ => panic!("Expected ExecResult::Row at iteration {}", i),
+        }
+    }
+    // 第 6 次应返回 None
+    let result = executor.next().await?;
+    assert_eq!(result, None, "6th next() should return None after 5 rows");
+
+    Ok(())
+}
+
+/// M19 T2: 未提交 tuple 对 snapshot 不可见 — scan 应跳过
+#[tokio::test]
+async fn test_data_scan_mvcc_uncommitted_invisible() -> Result<()> {
+    use rtsql::transaction::Snapshot;
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+    let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
+
+    // Insert with tx_id=1 (uncommitted — InsertExecutor doesn't commit by default)
+    let values = vec![vec![Value::Int(1)], vec![Value::Int(2)]];
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager,
+        values,
+        1, // tx_id=1, no commit → commit_tx_id=None
+        None,
+    );
+    insert_executor.next().await?;
+
+    // Snapshot at tx_id=2, tx1 still active → uncommitted rows invisible
+    let snapshot = Snapshot::new(2, vec![1]);
+
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot));
+
+    let mut row_count = 0;
+    while let Some(result) = executor.next().await? {
+        if let ExecResult::Row(_) = result {
+            row_count += 1;
+        }
+    }
+    assert_eq!(
+        row_count, 0,
+        "Uncommitted rows should be invisible to active snapshot"
+    );
+
+    Ok(())
+}
+
+/// M19 T2: 已提交 tuple 对 snapshot 可见 — scan 返回所有行
+#[tokio::test]
+async fn test_data_scan_mvcc_committed_visible() -> Result<()> {
+    use rtsql::storage::write_tuple_to_data_page;
+    use rtsql::transaction::{Snapshot, VersionHeader};
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+
+    let table_mgr = TableManager::new(buffer_pool.clone());
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+    let table_meta = table_mgr.get_table("test").await?;
+    let tx_manager = Arc::new(TransactionManager::new());
+
+    // Insert with tx_id=1, uncommitted initially
+    let values = vec![vec![Value::Int(10)], vec![Value::Int(20)]];
+    let mut insert_executor = InsertExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        tx_manager,
+        values,
+        1, // tx_id=1
+        None,
+    );
+    insert_executor.next().await?;
+
+    // Manually commit: rewrite each slot's VersionHeader with commit_tx_id=2
+    let keys = vec![10i64.to_be_bytes(), 20i64.to_be_bytes()];
+    for key in &keys {
+        let old_rid = table_meta
+            .index_manager
+            .search(key)
+            .await?
+            .expect("row should exist");
+        let (_vh, tuple_bytes) =
+            read_tuple_from_data_page(&buffer_pool, old_rid, |vh, bytes| Ok((vh, bytes.to_vec())))
+                .await?;
+        // Rewrite slot with committed header
+        let committed_header = VersionHeader::new(1, Some(2));
+        let new_rid =
+            write_tuple_to_data_page(&buffer_pool, &table_meta, &committed_header, &tuple_bytes)
+                .await?;
+        // Update index to point to new committed slot
+        table_meta.index_manager.update(key, new_rid).await?;
+    }
+
+    // Snapshot at tx_id=3, no active tx → committed rows visible
+    let snapshot = Snapshot::new(3, vec![]);
+
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot));
+
+    let mut row_count = 0;
+    let mut collected_ids: Vec<i64> = Vec::new();
+    while let Some(result) = executor.next().await? {
+        if let ExecResult::Row(row) = result {
+            row_count += 1;
+            if let Value::Int(id) = &row[0] {
+                collected_ids.push(*id);
+            }
+        }
+    }
+    collected_ids.sort();
+    assert_eq!(row_count, 2, "Committed rows should be visible");
+    assert_eq!(collected_ids, vec![10, 20]);
+
+    Ok(())
+}
+
+/// M19 T3: Planner 路由 — `SELECT *` (无 WHERE) 生成 `PhysicalPlan::DataScan`
+#[tokio::test]
+async fn test_planner_no_where_routes_to_data_scan() -> Result<()> {
+    use rtsql::parser::{parse_sql, PlanBuilder};
+
+    let mut builder = PlanBuilder::new();
+    builder.register_table("test", vec!["id".to_string(), "name".to_string()], "id");
+
+    let sql = "SELECT id, name FROM test";
+    let stmts = parse_sql(sql).unwrap();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::DataScan(DataScanNode {
+            table_name,
+            columns,
+        }) => {
+            assert_eq!(table_name, "test");
+            assert_eq!(columns, vec!["id", "name"]);
+        }
+        other => panic!("Expected DataScan, got {:?}", other),
+    }
+    Ok(())
+}
+
+/// M19 T3: Planner 路由 — PK 等值 WHERE 仍走 IndexScan (M19 不改变这条路径)
+#[tokio::test]
+async fn test_planner_with_pk_equality_keeps_index_scan() -> Result<()> {
+    use rtsql::parser::{parse_sql, PlanBuilder};
+
+    let mut builder = PlanBuilder::new();
+    builder.register_table("test", vec!["id".to_string(), "name".to_string()], "id");
+
+    let sql = "SELECT * FROM test WHERE id = 1";
+    let stmts = parse_sql(sql).unwrap();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::IndexScan(node) => {
+            assert_eq!(node.table_name, "test");
+        }
+        other => panic!("Expected IndexScan for PK equality, got {:?}", other),
+    }
+    Ok(())
+}
+
+/// M19 T4: Planner 路由 — 非 PK WHERE → `Filter(DataScan)`
+#[tokio::test]
+async fn test_planner_non_pk_where_routes_to_filter_data_scan() -> Result<()> {
+    use rtsql::executor::FilterNode;
+    use rtsql::parser::{parse_sql, PlanBuilder};
+
+    let mut builder = PlanBuilder::new();
+    builder.register_table("test", vec!["id".to_string(), "name".to_string()], "id");
+
+    let sql = "SELECT * FROM test WHERE name = 'foo'";
+    let stmts = parse_sql(sql).unwrap();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Filter(FilterNode {
+            input, table_name, ..
+        }) => {
+            assert_eq!(table_name, "test");
+            match *input {
+                PhysicalPlan::DataScan(node) => {
+                    assert_eq!(node.table_name, "test");
+                }
+                other => panic!("Expected Filter over DataScan, got Filter over {:?}", other),
+            }
+        }
+        other => panic!("Expected Filter, got {:?}", other),
+    }
+    Ok(())
+}
+
+/// M19 T4: Planner 路由 — `WHERE id = 1 AND name = 'x'` 含 PK 等值 → 保持 `Filter(Scan)` (兜底)
+#[tokio::test]
+async fn test_planner_pk_and_other_keeps_filter_scan() -> Result<()> {
+    use rtsql::executor::FilterNode;
+    use rtsql::parser::{parse_sql, PlanBuilder};
+
+    let mut builder = PlanBuilder::new();
+    builder.register_table("test", vec!["id".to_string(), "name".to_string()], "id");
+
+    let sql = "SELECT * FROM test WHERE id = 1 AND name = 'foo'";
+    let stmts = parse_sql(sql).unwrap();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    // has_pk_equality returns true for `id = 1 AND name = 'foo'`, so the
+    // planner keeps the original Scan inside Filter. (A more sophisticated
+    // optimizer would push down the name filter; not M19's scope.)
+    match plan {
+        PhysicalPlan::Filter(FilterNode { input, .. }) => match *input {
+            PhysicalPlan::Scan(_) => { /* expected */ }
+            other => panic!("Expected Filter over Scan, got {:?}", other),
+        },
+        other => panic!("Expected Filter, got {:?}", other),
+    }
+    Ok(())
 }

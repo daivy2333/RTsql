@@ -9,6 +9,7 @@ mod aggregate;
 mod anti_join;
 mod correlated;
 mod create_table;
+mod data_scan;
 mod delete;
 mod derived_scan;
 mod drop_table;
@@ -38,6 +39,7 @@ pub use aggregate::{AggregateExecutor, AggregateFunc, AggregateState};
 pub use anti_join::AntiJoinExecutor;
 pub use correlated::inject_correlated_values;
 pub use create_table::CreateTableExecutor;
+pub use data_scan::DataScanExecutor;
 pub use delete::DeleteExecutor;
 pub use derived_scan::DerivedScanExecutor;
 pub use drop_table::DropTableExecutor;
@@ -51,9 +53,10 @@ pub use join::JoinExecutor;
 pub use limit::LimitExecutor;
 pub use plan::{
     AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, CorrelatedParam,
-    CreateTableNode, DeleteNode, DerivedScanNode, DropTableNode, FilterNode, HavingNode,
-    IndexScanAllNode, IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode, OrderByColumn,
-    OutputColumn, PhysicalPlan, ScanNode, SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode,
+    CreateTableNode, DataScanNode, DeleteNode, DerivedScanNode, DropTableNode, FilterNode,
+    HavingNode, IndexScanAllNode, IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode,
+    OrderByColumn, OutputColumn, PhysicalPlan, ScanNode, SemiJoinNode, SortNode, SubqueryEvalNode,
+    UpdateNode,
 };
 pub use predicate::{
     ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,

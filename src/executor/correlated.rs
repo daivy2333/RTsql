@@ -32,6 +32,9 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
             inject_correlated_values(&node.input, param_values);
             inject_correlated_values(&node.subquery, param_values);
         }
+        PhysicalPlan::DataScan(_) => {
+            // Leaf node — no correlated subqueries to inject.
+        }
         PhysicalPlan::Sort(node) => {
             inject_correlated_values(&node.input, param_values);
         }
