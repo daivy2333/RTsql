@@ -43,22 +43,13 @@
 
 ## 待优化（Phase 1: 基础设施）
 
-<!-- tombstone: O001 --> Archived in 已完成 section — M41 事务 ID AtomicU64 ✅ (2026-06-03)
-<!-- tombstone: O002 --> Archived in 已完成 section — M30 连接并发上限 ✅ (2026-06-03)
-<!-- tombstone: O003 --> Archived in 已完成 section — M38 网络 BufWriter ✅ (2026-06-03)
-
-Phase 1 全部完成（M41/30/38），详见"已完成"区域。
+✅ **Phase 1 全部完成**（M41/30/38），详见"已完成"区域。
 
 ---
 
 ## 待优化（Phase 2: 存储引擎核心）
 
-<!-- tombstone: O004 --> Archived in 已完成 section — M20 零拷贝 SlottedPageRef ✅ (2026-06-03)
-<!-- tombstone: O005 --> Archived in 已完成 section — M19 DataScan 路径 ✅ (2026-06-04)
-<!-- tombstone: O006 --> Archived in 已完成 section — M21 页面级 MVCC ✅ (2026-06-04)
-<!-- tombstone: O007 --> Archived in 已完成 section — M36 零拷贝 ValueRef ✅ (2026-06-03)
-
-Phase 2 全部完成（M20/36/19/21），详见"已完成"区域。
+✅ **Phase 2 全部完成**（M20/36/19/21），详见"已完成"区域。
 
 ---
 

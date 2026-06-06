@@ -124,8 +124,6 @@
 <!-- L010 --> ### [inner_column_index 设计失误]
 **症状→根因→解决**: CorrelatedParam 用 usize 索引匹配 → 改为 param_name: String 按列名匹配
 
-<!-- tombstone: L011 --> Merged into L005 — L011 是 L005 的详细版，L006 已覆盖 serialize 部分。2026-06-04
-
 ---
 
 ## 技巧模式
@@ -534,12 +532,6 @@ cargo bench --save-baseline before-X
 
 ---
 
-<!-- L029 -->
-
-<!-- tombstone: L029 --> Archived — 竞态条件分析已被 L030 解决（方案 D → 实际实现 check_page_all_visible 三条件验证）。2026-06-04
-
----
-
 <!-- L030 -->
 
 ### [M21 遗留项完成 — DELETE mark_deleted + 惰性 set_all_visible — 2026-06-04]
@@ -569,8 +561,6 @@ cargo bench --save-baseline before-X
 - Benchmark 中 snapshot 场景不 assert count（auto-commit tx_id 与 snapshot tx_id 交互问题）
 
 ---
-
-## 待探索
 
 ## 待探索
 

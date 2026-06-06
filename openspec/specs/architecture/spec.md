@@ -196,6 +196,18 @@ DELETE → delete_from_page
   - Rust `AtomicU64` 在 x86-64 上硬件保证正确性，`SeqCst` 比 `Relaxed` 更安全且几乎无开销
 - **代价**：无 — 最终代码改动仅 1 行（`counter.fetch_add(1, SeqCst)`），因 main 已有 2yo 前缀的 AtomicU64 计数器
 - **替代方案**：`Relaxed` 排序（更弱保证）+ `thread_local` 批量分配（更复杂，不必要）
+- **实测验证**（4 场景 ns/op，详见 `specs/learned/spec.md` L017）：
+| 场景 | Mutex | Atomic | 加速比 |
+|------|-------|--------|--------|
+| 单线程 1M | 10.7 | 5.1 | 2.1x |
+| 10 线程争用 | 84.7 | 18.6 | 4.6x |
+| 100 线程高争用 | 100.8 | 22.5 | 4.5x |
+| 吞吐@1M (单线程) | 90.8 Melem/s | 138.1 Melem/s | 1.52x |
+- **影响**：
+  - 0 行为变化（仍是单调递增）
+  - 0 API 变化（公开方法签名不变）
+  - 微基准 `benches/tx_id_bench.rs` 建立 4 场景持续监控
+  - 单线程下 Atomic 也快 2.1x（推翻 spec "单线程差异 < 20%" 假设 — 锁自身开销不可忽略）
 
 <!-- A010 --> ### ADR-010: 网络响应批写缓冲 (2026-06-03)
 
@@ -229,31 +241,6 @@ DELETE → delete_from_page
   - A: `RwLock<HashMap<>>` — 更简单但读互斥，10 线程争用瓶颈
   - B: 字节存在 `SlottedPageHeader` 内 — 改页格式影响所有读写，崩溃后数据可能过期
   - C: PostgreSQL 风格 VMB（visibility map fork）— 额外文件 + 持久化，过于复杂
-
-
-**原因**：
-- 旧 `Mutex<u64>` 实现：每次事务开始需等锁，在高并发下争用明显
-- 任务 ID 分配是单计数器原子操作，天然适合 `AtomicU64`
-- Snapshot 不需要独立时间戳——tx_id 自身就是 MVCC 可见性判断依据（`<= self.tx_id` 规则）
-
-**实测验证**（4 场景 ns/op，详见 `specs/learned/spec.md` L017）：
-| 场景 | Mutex | Atomic | 加速比 |
-|------|-------|--------|--------|
-| 单线程 1M | 10.7 | 5.1 | 2.1x |
-| 10 线程争用 | 84.7 | 18.6 | 4.6x |
-| 100 线程高争用 | 100.8 | 22.5 | 4.5x |
-| 吞吐@1M (单线程) | 90.8 Melem/s | 138.1 Melem/s | 1.52x |
-
-**替代方案**：
-- `Arc<Mutex<u64>>`：保留原状（性能基线，但争用明显）
-- `crossbeam::utils::AtomicCell`：可移植原子类型，但 fetch_add 路径相同无明显收益
-- 引入独立时间戳计数器（如 `Instant::now()`）：不必要，TxId 即时间戳
-
-**影响**：
-- 0 行为变化（仍是单调递增）
-- 0 API 变化（公开方法签名不变）
-- 微基准 `benches/tx_id_bench.rs` 建立 4 场景持续监控
-- 单线程下 Atomic 也快 2.1x（推翻 spec "单线程差异 < 20%" 假设 — 锁自身开销不可忽略）
 
 ---
 
