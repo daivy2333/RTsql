@@ -1,6 +1,6 @@
 # 项目快照
 
-> 最后更新：2026-06-04（M21 遗留项完成：DELETE mark_deleted + 惰性 set_all_visible + benchmark）
+> 最后更新：2026-06-06（snapshot.md stale 修复 — 9 项过期信息，详见本 commit）
 
 ## 文档体系变更
 
@@ -23,7 +23,7 @@
 | 📋 保留 | `snapshot.md` / `tasks.md` / `archive.md` / `superpowers/` 不迁移 |
 
 **新文档结构**（v2.0，2026-06-03）：
-- `openspec/specs/{architecture,learned,references,optimization}/spec.md` — 规范文档（4 个 + tx-id-allocation-benchmark 新增）
+- `openspec/specs/{architecture,learned,references,optimization,data-scan-path,tx-id-allocation-benchmark,zero-copy-page-access,zero-copy-value-ref}/spec.md` — 规范文档（8 个）
 - `openspec/changes/` — 变更提案（含 active + archive）
 - `.claude/docs/snapshot.md` — 项目快照（本文件）
 - `.claude/docs/tasks.md` — 任务追踪
@@ -56,12 +56,12 @@
 | M30 | 连接并发 Semaphore | 防连接风暴 | ✅ 完成 (3 压测通过) |
 | M38 | 网络 BufWriter + TCP_NODELAY | write 调用 -99% | ✅ 完成 (N→2 syscalls) |
 
-**Phase 2 进展**：M20 ✅ (2026-06-03) → M36 ✅ (2026-06-03) → M19 ✅ (2026-06-04) → **M21 ✅ (2026-06-04, 页面级 MVCC)**；待 M21 惰性设置 + 基准测试；下一步 M37 或 M31
+**Phase 2 进展**：M20 ✅ (2026-06-03) → M36 ✅ (2026-06-03) → M19 ✅ (2026-06-04) → **M21 ✅ (2026-06-04, 页面级 MVCC + 延后项：DELETE mark_deleted + 惰性 set_all_visible + bench)**；下一步 M37 或 M31
 
 ## 历史里程碑
 
 **M1-M18 核心开发完成**（2026-05-24 归档）：
-- ~430 tests pass, Clippy 0 warnings
+- ~464 tests pass, Clippy 0 warnings（M19 +8 测试）
 - INSERT 332x faster, PK lookup 5.6x faster than SQLite
 - 完整 SQL + WAL + Group Commit + 崩溃恢复 + B-Tree Split & Merge
 
@@ -76,24 +76,22 @@
 - 全表扫描性能已通过 M19 DataScan 优化至 1.8-2.4x 提速
 - 文件大小 ~6.5x SQLite（固定 Key + 两层索引）
 - TableManager 纯内存：表定义不持久化
-- BufferPool::mark_tx_aborted 是 stub
-- M21 可见性摘要惰性设置待实现（`set_all_visible` 零调用者，快速路径暂不触发）
+- `BufferPool::mark_tx_aborted` 通过 `active_tx_ids` set 实现（WAL 持久化保留，无需额外动作，见 `buffer_pool.rs:323-326`）
+- `M21` 页面级 MVCC 可见性摘要已完整实现：INSERT/DELETE/UPDATE/COMMIT 4 写路径清标志 + 惰性 `set_all_visible`（三条件验证，见 L030 + commit `78a3b01`）
 
 ## Git 状态
 
 - **当前分支**: master
-- **最新 tag**: v0.1.0（M18 完成）
-- **最近 commits**（2026-06-04 待推送）：
-  - M19 T1-T5 多 commit（feat(executor): DataScan + planner routing + bench）
-  - docs(openspec): archive m19-datascan-path
-  - docs(snapshot/tasks): M19 状态同步
-  - 提交前最近 3 commits（2026-06-03）：
-    - `e644a19` style: apply rustfmt --all to clean up workspace formatting（25 文件，196/139）
-    - `ee9ceee` chore(openspec): archive consolidate-m41-tx-id-atomic（归档 + 增量 spec 同步）
-    - `634764d` feat(m41): add tx_id allocation micro-benchmark（M41 主变更）
+- **最新 tag**: M11（M18 v0.1.0 tag 未在 git 中找到；M11 是唯一现存 tag）
+- **最近 commits**（2026-06-06 待推送，master ahead origin by 1）：
+  - `ad90379` docs: dedupe spec docs (consolidate milestones, remove resolved tombstones)
+  - `532d3d5` docs: archive completed milestones + fix stale info
+  - `7a706d3` docs: fix outdated info across spec documents
+  - `78a3b01` feat(m21): DELETE mark_deleted + lazy set_all_visible + visibility benchmark
+  - `2343bfc` docs: sync M21 page-visibility-map completion + OpenSpec archive
+  - `3da8479` feat(storage): add page-level MVCC visibility fast-path (M21)
 
 ## 待办与清理
 
 - ⚠️ `git stash list` 有 `stash@{0}: Pre-merge stash: local docs updates`，是已过时的 OpenSpec 迁移前文档 stash（已被覆盖）。可手动 `git stash drop` 清理。
-- 📋 Phase 1 下一步：M38（网络 BufWriter）
-- 📋 Phase 2 下一步：M19（DataScan 路径）或 M20（零拷贝 SlottedPageRef）
+- 📋 Phase 1 + Phase 2 已全部完成；下一步 M37（clone 消除）或 M31（BufferPool DashMap）
