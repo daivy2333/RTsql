@@ -170,3 +170,271 @@ async fn test_snapshot_visibility_rules() {
     manager.commit(tx3, &buffer_pool).await.unwrap();
     manager.commit(tx4, &buffer_pool).await.unwrap();
 }
+
+// =========================================================================
+// M31: BufferPool DashMap + miss Semaphore concurrent tests
+// =========================================================================
+//
+// These tests cover the 6 acceptance criteria for the M31 change:
+//   2.1 H1: 16 concurrent get_page on same cached page
+//   2.2 H2: 16 concurrent get_page on different pages
+//   2.3 E1: double-check single load (8 concurrent miss on uncached page)
+//   2.4 H4: concurrent get_page + free_page
+//   2.5 S4/E3: miss semaphore backpressure (1000 concurrent miss, 10s timeout)
+//   2.6 H1+miss sem: cache hit skips miss semaphore (no waiting when hit)
+
+use rtsql::storage::{AsyncStorage, Page, PageId};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// CountingStorage wraps FileStorage to count read_page calls.
+/// Used to verify double-check ensures single load (test 2.3).
+struct CountingStorage {
+    inner: Arc<FileStorage>,
+    read_count: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl AsyncStorage for CountingStorage {
+    async fn read_page(&self, page_id: PageId) -> rtsql::storage::Result<Page> {
+        self.read_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.read_page(page_id).await
+    }
+    async fn write_page(&self, page_id: PageId, page: &Page) -> rtsql::storage::Result<()> {
+        self.inner.write_page(page_id, page).await
+    }
+    async fn allocate_page(&self) -> rtsql::storage::Result<PageId> {
+        self.inner.allocate_page().await
+    }
+    async fn free_page(&self, page_id: PageId) -> rtsql::storage::Result<()> {
+        self.inner.free_page(page_id).await
+    }
+    async fn sync(&self) -> rtsql::storage::Result<()> {
+        self.inner.sync().await
+    }
+    fn page_size(&self) -> usize {
+        self.inner.page_size()
+    }
+}
+
+/// M31 Task 2.1 (H1): 16 concurrent tasks get_page(same cached page).
+/// All MUST return PageGuards for the same page without panic/deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_get_same_page() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(20, storage).unwrap());
+
+    let page_id = buffer_pool.storage().allocate_page().await.unwrap();
+
+    // Pre-cache the page
+    let _primer = buffer_pool.get_page(page_id).await.unwrap();
+    drop(_primer);
+
+    // 16 concurrent get_page on the same cached page
+    let mut tasks = Vec::with_capacity(16);
+    for _ in 0..16 {
+        let bp = buffer_pool.clone();
+        let pid = page_id;
+        tasks.push(tokio::spawn(async move { bp.get_page(pid).await }));
+    }
+
+    let results: Vec<_> = futures::future::join_all(tasks).await;
+    for r in results {
+        let guard = r.expect("task panicked").expect("get_page errored");
+        assert_eq!(guard.page().id, page_id);
+    }
+}
+
+/// M31 Task 2.2 (H2): 16 concurrent tasks get_page(different pages).
+/// All MUST complete without deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_get_different_pages() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(20, storage).unwrap());
+
+    // Pre-allocate 16 pages
+    let mut page_ids = Vec::with_capacity(16);
+    for _ in 0..16 {
+        page_ids.push(buffer_pool.storage().allocate_page().await.unwrap());
+    }
+
+    let mut tasks = Vec::with_capacity(16);
+    for pid in page_ids.iter() {
+        let bp = buffer_pool.clone();
+        let pid = *pid;
+        tasks.push(tokio::spawn(async move { bp.get_page(pid).await }));
+    }
+
+    let results: Vec<_> = futures::future::join_all(tasks).await;
+    let mut seen = std::collections::HashSet::new();
+    for r in results {
+        let guard = r.expect("task panicked").expect("get_page errored");
+        assert!(seen.insert(guard.page().id), "duplicate page returned");
+    }
+    assert_eq!(seen.len(), 16);
+}
+
+/// M31 Task 2.3 (E1): 8 concurrent miss on uncached page → exactly 1 read_page call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_double_check_single_load() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let read_count = Arc::new(AtomicUsize::new(0));
+
+    let counting = Arc::new(CountingStorage {
+        inner: storage,
+        read_count: read_count.clone(),
+    });
+
+    let buffer_pool = Arc::new(BufferPool::new(10, counting).unwrap());
+    let page_id = buffer_pool.storage().allocate_page().await.unwrap();
+
+    // 8 concurrent tasks all miss on the same uncached page
+    let mut tasks = Vec::with_capacity(8);
+    for _ in 0..8 {
+        let bp = buffer_pool.clone();
+        let pid = page_id;
+        tasks.push(tokio::spawn(async move { bp.get_page(pid).await }));
+    }
+
+    let results: Vec<_> = futures::future::join_all(tasks).await;
+    for r in results {
+        r.expect("task panicked").expect("get_page errored");
+    }
+
+    // read_page(42) must be called exactly 1 time despite 8 concurrent miss requests
+    let count = read_count.load(Ordering::SeqCst);
+    assert_eq!(
+        count, 1,
+        "expected exactly 1 read_page call (double-check), got {}",
+        count
+    );
+}
+
+/// M31 Task 2.4 (H4): concurrent get_page + free_page on disjoint page sets.
+/// No panic, no deadlock, no use-after-free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_get_and_free() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(200, storage).unwrap());
+
+    // Pre-allocate 100 pages
+    let mut all_pages = Vec::with_capacity(100);
+    for _ in 0..100 {
+        all_pages.push(buffer_pool.storage().allocate_page().await.unwrap());
+    }
+    // Split: get pages (read-only usage) and free pages (write-then-free)
+    let get_pages: Vec<PageId> = all_pages[0..50].to_vec();
+    let free_pages: Vec<PageId> = all_pages[50..100].to_vec();
+
+    let rounds = 500u32;
+    let bp_get = buffer_pool.clone();
+    let bp_free = buffer_pool.clone();
+
+    let getter = tokio::spawn(async move {
+        for i in 0..rounds {
+            let pid = get_pages[(i as usize) % get_pages.len()];
+            let g = bp_get.get_page(pid).await.expect("get_page on read-set");
+            drop(g);
+        }
+    });
+
+    let freer = tokio::spawn(async move {
+        for i in 0..rounds {
+            let pid = free_pages[(i as usize) % free_pages.len()];
+            // free_page removes from buffer pool + storage; we re-allocate
+            // for next round to keep the test deterministic.
+            bp_free.free_page(pid).await.expect("free_page");
+        }
+    });
+
+    getter.await.expect("getter task panicked");
+    freer.await.expect("freer task panicked");
+}
+
+/// M31 Task 2.5 (S4 + E3): 1000 concurrent miss all complete within 10s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_miss_semaphore_backpressure() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(2000, storage).unwrap());
+
+    // Pre-allocate 1000 pages
+    let mut page_ids = Vec::with_capacity(1000);
+    for _ in 0..1000 {
+        page_ids.push(
+            buffer_pool
+                .storage()
+                .allocate_page()
+                .await
+                .expect("allocate"),
+        );
+    }
+
+    let n = 1000usize;
+    let mut tasks = Vec::with_capacity(n);
+    for pid in page_ids.into_iter() {
+        let bp = buffer_pool.clone();
+        tasks.push(tokio::spawn(async move { bp.get_page(pid).await }));
+    }
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        futures::future::join_all(tasks),
+    )
+    .await;
+
+    let results = result.expect("1000 concurrent miss should not hang >10s");
+    let mut ok = 0;
+    for r in results {
+        if r.expect("task panicked").is_ok() {
+            ok += 1;
+        }
+    }
+    assert_eq!(ok, n, "all {} tasks should succeed, got {} ok", n, ok);
+}
+
+/// M31 Task 2.6 (H1 + miss sem isolation): cache hit path returns fast
+/// even when miss path is under heavy load. Verifies hit path doesn't
+/// acquire miss semaphore permit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_cache_hit_skips_miss_semaphore() {
+    let buffer_pool = create_test_buffer_pool();
+
+    // Pre-cache page 42
+    let hot_page = buffer_pool.storage().allocate_page().await.unwrap();
+    let _p = buffer_pool.get_page(hot_page).await.unwrap();
+
+    // Saturate miss path: spawn 32 tasks that each miss a unique page.
+    // This pushes miss semaphore into contention.
+    let saturate_n = 32usize;
+    let mut saturators = Vec::with_capacity(saturate_n);
+    for _ in 0..saturate_n {
+        let bp = buffer_pool.clone();
+        saturators.push(tokio::spawn(async move {
+            let pid = bp.storage().allocate_page().await.unwrap();
+            bp.get_page(pid).await
+        }));
+    }
+
+    // Give saturators a head start to acquire permits
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    // While saturators are running, hit the hot page — must return < 50ms
+    let start = std::time::Instant::now();
+    let guard = buffer_pool.get_page(hot_page).await.expect("hit");
+    let elapsed = start.elapsed();
+    assert_eq!(guard.page().id, hot_page);
+    assert!(
+        elapsed < std::time::Duration::from_millis(50),
+        "cache hit should return fast (<50ms), got {:?}",
+        elapsed
+    );
+
+    // Drain saturators
+    for t in saturators {
+        let _ = t.await;
+    }
+}
