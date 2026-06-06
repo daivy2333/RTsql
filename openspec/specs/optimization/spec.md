@@ -1,6 +1,6 @@
 # Optimization — 优化记录
 
-> 版本：v1.4 | 最后更新：2026-06-04（O006 M21 全部完成）
+> 版本：v1.5 | 最后更新：2026-06-06（O008 M31 全部完成）
 > 由 openspec-init 从 `.claude/docs/optimization.md` 迁移。
 > 条目格式: <!-- O{编号} --> - {问题描述}
 > 每条含当前影响、建议方案。
@@ -55,10 +55,9 @@
 
 ## 待优化（Phase 3: 并发控制）
 
-<!-- O008 --> - **M31: BufferPool DashMap + Semaphore**
-  - 问题：`Arc<Mutex<HashMap>>` 读写都互斥
-  - 方案：`DashMap` 分片无锁读 + `Semaphore` 限制 pin 页数
-  - 状态：📋 P3
+<!-- O008 --> - **M31: BufferPool DashMap + Semaphore** ✅ 已完成（2026-06-06）
+  - 详情：pages 字段迁移 DashMap + miss Sem(16) + per-page loading_locks，cache hit 100ns→0
+  - 详见：ADR-012 + L031 + `openspec/changes/archive/2026-06-06-m31-bufferpool-dashmap-semaphore/`
 
 <!-- O009 --> - **M40: RowLockTable DashMap**
   - 问题：`Arc<Mutex<HashMap>>` 行锁获取/释放串行化
@@ -193,7 +192,7 @@
 
 <!-- 完成后移到此处，标注完成日期 -->
 > M1-M18 核心开发已完成（2026-05-24 归档）
-> 475 tests pass (2026-06-04), INSERT 332x faster, PK lookup 5.6x faster than SQLite
+> 481 tests pass (2026-06-06), INSERT 332x faster, PK lookup 5.6x faster than SQLite
 
 <!-- O003 已完成（2026-06-03）-->
 **M38: 网络 BufWriter + TCP_NODELAY** — PgProtocol `write_buf` 累积响应，N→2 syscalls + `set_nodelay`
@@ -203,6 +202,9 @@
 
 <!-- O007 已完成（2026-06-03）-->
 **M36: 零拷贝 ValueRef** — `ValueRef<'a>` 枚举 + `deserialize_value_refs` 零拷贝，堆分配 30万→0
+
+<!-- O008 已完成（2026-06-06）-->
+**M31: BufferPool DashMap + Miss Semaphore** — pages 字段迁 DashMap（lock-free hit）+ miss Sem(16) bound IO + per-page loading_locks（double-check 正确性），481 tests pass
 
 <!-- O006 已完成（2026-06-04）-->
 **M21: 页面级 MVCC** — `PageVisibilityInfo` + `DashMap` 快速路径 + DELETE mark_deleted + 惰性 set_all_visible + benchmark

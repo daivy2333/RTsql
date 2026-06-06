@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-> 项目文档入口 + 规则唯一事实来源 | 最后更新：2026-06-03（规则整合升级 v2.0）
-> 上次更新：2026-06-02（OpenSpec 初始化）
+> 项目文档入口 + 规则唯一事实来源 | 最后更新：2026-06-06（M31 完成 + 文档全同步）
+> 上次更新：2026-06-03（规则整合升级 v2.0）
 
 ## 项目简介
 
@@ -28,6 +28,7 @@
 | `openspec/specs/learned/` | 学习记忆与踩坑档案 | `grep "关键词" openspec/specs/learned/spec.md` |
 | `openspec/specs/references/` | 外部参考与依赖文档 | `grep "关键词" openspec/specs/references/spec.md` |
 | `openspec/specs/optimization/` | 优化方向与技术债 | `grep "关键词" openspec/specs/optimization/spec.md` |
+| `openspec/specs/{delta}/` | 增量规范（按需 M19/M20/M21/M31/M36/M41） | `ls openspec/specs/` |
 | `openspec/changes/` | 变更提案 | `openspec list` |
 
 > 注：原 `openspec/specs/rules/` 已废弃（2026-06-03）。规则全文已整合到本文"规则（唯一事实来源）"章节。
