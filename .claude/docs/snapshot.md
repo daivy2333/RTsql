@@ -1,6 +1,6 @@
 # 项目快照
 
-> 最后更新：2026-06-06（snapshot.md stale 修复 — 9 项过期信息，详见本 commit）
+> 最后更新：2026-06-06（M31 完成 + 文档全同步 + 6 次 commit 待推送）
 
 ## 文档体系变更
 
@@ -22,8 +22,8 @@
 | ✅ 已完成 | `CLAUDE.md` 更新为索引入口，指向 `openspec/specs/` + `.claude/docs/` 状态文档 |
 | 📋 保留 | `snapshot.md` / `tasks.md` / `archive.md` / `superpowers/` 不迁移 |
 
-**新文档结构**（v2.0，2026-06-03）：
-- `openspec/specs/{architecture,learned,references,optimization,data-scan-path,tx-id-allocation-benchmark,zero-copy-page-access,zero-copy-value-ref}/spec.md` — 规范文档（8 个）
+**新文档结构**（v2.0，2026-06-03；M31 增量 v2.1，2026-06-06）：
+- `openspec/specs/{architecture,learned,references,optimization,data-scan-path,tx-id-allocation-benchmark,zero-copy-page-access,zero-copy-value-ref,buffer-pool-concurrency}/spec.md` — 规范文档（9 个）
 - `openspec/changes/` — 变更提案（含 active + archive）
 - `.claude/docs/snapshot.md` — 项目快照（本文件）
 - `.claude/docs/tasks.md` — 任务追踪
@@ -34,7 +34,7 @@
 
 **2026-06-03 M38 网络 BufWriter + TCP_NODELAY**：N+1 syscalls→2 syscalls（write+flush），11 pg_protocol tests 全过。
 
-**当前阶段**：Phase 2 全部完成（M20 ✅ → M36 ✅ → M19 ✅ → M21 ✅），下一步 M37 / M31。
+**当前阶段**：Phase 1 + Phase 2 全部完成；Phase 3 启动 M31 ✅。下一步 M40 (RowLockTable DashMap)。
 
 **2026-06-04 M21 页面级 MVCC**：DashMap visibility_map + 4 写路径清标志 + 延后项已完成（DELETE mark_deleted + 惰性 set_all_visible + bench）。详见 ADR-011 + L028/L030。
 
@@ -85,15 +85,16 @@
 
 - **当前分支**: master
 - **最新 tag**: M11（M18 v0.1.0 tag 未在 git 中找到；M11 是唯一现存 tag）
-- **最近 commits**（2026-06-06 待推送，master ahead origin by 1）：
+- **最近 commits**（2026-06-06，master ahead origin by 6）：
+  - `f64c874` docs(m31): ADR-012 + learned L031 + snapshot/tasks sync
+  - `b55a9a1` bench(m31): add buffer pool concurrency benchmark
+  - `5fc5494` test(m31): add concurrent buffer pool tests
+  - `fcaeb7c` feat(m31): migrate pages to DashMap + add miss Semaphore
+  - `faa87a4` docs(snapshot): fix 9 stale claims in project snapshot
   - `ad90379` docs: dedupe spec docs (consolidate milestones, remove resolved tombstones)
-  - `532d3d5` docs: archive completed milestones + fix stale info
-  - `7a706d3` docs: fix outdated info across spec documents
-  - `78a3b01` feat(m21): DELETE mark_deleted + lazy set_all_visible + visibility benchmark
-  - `2343bfc` docs: sync M21 page-visibility-map completion + OpenSpec archive
-  - `3da8479` feat(storage): add page-level MVCC visibility fast-path (M21)
 
 ## 待办与清理
 
 - ⚠️ `git stash list` 有 `stash@{0}: Pre-merge stash: local docs updates`，是已过时的 OpenSpec 迁移前文档 stash（已被覆盖）。可手动 `git stash drop` 清理。
-- 📋 Phase 1 + Phase 2 已全部完成；下一步 M37（clone 消除）或 M31（BufferPool DashMap）
+- 📋 Phase 1 + Phase 2 + M31（Phase 3 入口）已全部完成；下一步 M40 (RowLockTable DashMap) → M34 → M32 → M42
+- 🆕 OpenSpec 已归档变更：`2026-06-06-m31-bufferpool-dashmap-semaphore`（5 commits）

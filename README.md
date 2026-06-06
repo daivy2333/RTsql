@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](https://opensource.org/licenses/)
-[![Tests](https://img.shields.io/badge/tests-~430%20pass-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-481%20pass-brightgreen.svg)]()
 
 ---
 
@@ -34,7 +34,7 @@ RTsql 采用异步协程驱动的现代数据库架构：
 | I/O 模型 | 同步阻塞 I/O | Tokio 异步协程 |
 | 并发模型 | 线程池 + 互斥锁 | MVCC 无锁读 + AtomicPageId |
 | 页访问 | 每次克隆 4KB | 零拷贝 PageDataGuard |
-| 缓冲池 | 单锁争用 | 两阶段锁（读锁检查→释放→I/O→写锁插入） |
+| 缓冲池 | 单锁争用 | DashMap 分片 + miss Semaphore(16) + per-page loading_locks |
 | 索引访问 | RwLock\<BTree\> | AtomicPageId + async search |
 | 索引维护 | 手动/无 | B-Tree split/merge 自动 |
 | 崩溃恢复 | WAL | WAL + Group Commit + CRC32 |
@@ -106,7 +106,7 @@ RTsql INSERT 332x faster 的核心原因：
 | **数据文件（10K rows）** | 1.4 MB | 217 KB | 6.5x larger |
 | **二进制大小** | 3.7 MB | 1.6 MB | 2.3x larger |
 | **内存（启动）** | ~5 MB | ~1 MB | Tokio runtime 开销 |
-| **测试覆盖** | ~430 tests | — | 全面 |
+| **测试覆盖** | 481 tests | — | 全面 |
 
 #### 文件大小差异分析
 
@@ -153,7 +153,7 @@ async fn main() {
 ### 运行测试
 
 ```bash
-cargo test                           # ~430 tests
+cargo test                           # 481 tests
 cargo bench                          # 完整 benchmark 套件
 cargo bench --bench sqlite_compare   # SQLite 对比
 ```
@@ -183,7 +183,7 @@ SQL Text → Parser (sqlparser) → PlanBuilder → PhysicalPlan (19 节点)
   → Storage (BufferPool + BTree + SlottedPage + WAL)
 ```
 
-完整架构决策记录见 `.claude/docs/architecture.md`（8 个 ADR）。
+完整架构决策记录见 `openspec/specs/architecture/spec.md`（12 个 ADR）。
 
 ---
 
@@ -191,11 +191,12 @@ SQL Text → Parser (sqlparser) → PlanBuilder → PhysicalPlan (19 节点)
 
 | 文档 | 用途 |
 |------|------|
-| [architecture.md](.claude/docs/architecture.md) | 8 个架构决策记录 |
-| [snapshot.md](.claude/docs/snapshot.md) | 项目状态快照 |
-| [learned.md](.claude/docs/learned.md) | API 速查 + 踩坑经验 |
-| [optimization.md](.claude/docs/optimization.md) | 性能基准 + 优化方向 |
-| [archive.md](.claude/docs/archive.md) | 已归档历史条目 |
+| [openspec/specs/architecture/spec.md](openspec/specs/architecture/spec.md) | 12 个架构决策记录（ADR） |
+| [openspec/specs/learned/spec.md](openspec/specs/learned/spec.md) | API 速查 + 踩坑经验 |
+| [openspec/specs/optimization/spec.md](openspec/specs/optimization/spec.md) | 性能基准 + 优化方向 |
+| [.claude/docs/snapshot.md](.claude/docs/snapshot.md) | 项目状态快照 |
+| [.claude/docs/tasks.md](.claude/docs/tasks.md) | 任务追踪与里程碑规划 |
+| [.claude/docs/archive.md](.claude/docs/archive.md) | 已归档历史条目 |
 
 ---
 
@@ -214,7 +215,15 @@ SQL Text → Parser (sqlparser) → PlanBuilder → PhysicalPlan (19 节点)
 | M18-Phase1 | 架构 Warnings 清理 | ✅ |
 | M18-Phase2 | Executor 层非唯一索引 | ✅ |
 | M18-Phase3 | WAL + Group Commit + 崩溃恢复 | ✅ |
-| **M18-Phase4** | **B-Tree Merge + free-list 页复用** | **✅** |
+| M18-Phase4 | B-Tree Merge + free-list 页复用 | ✅ |
+| M19 | DataScan 路径（数据页链表，跳过索引） | ✅ |
+| M20 | 零拷贝 SlottedPageRef（with_page_data 闭包） | ✅ |
+| M21 | 页面级 MVCC 可见性摘要（DashMap vis_map） | ✅ |
+| M30 | 连接并发 Semaphore | ✅ |
+| M31 | BufferPool DashMap + Miss Semaphore + per-page loading_locks | ✅ |
+| M36 | 零拷贝 ValueRef（消除 30 万次 String 分配） | ✅ |
+| M38 | 网络 BufWriter + TCP_NODELAY | ✅ |
+| M41 | 事务 ID AtomicU64 无锁分配 | ✅ |
 
 ---
 
