@@ -15,6 +15,9 @@ pub enum StorageError {
     #[error("Buffer pool full, no evictable page")]
     BufferPoolFull,
 
+    #[error("Buffer pool miss semaphore closed")]
+    SemaphoreClosed,
+
     #[error("Invalid page id: {0}")]
     InvalidPageId(u64),
 

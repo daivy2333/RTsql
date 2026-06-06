@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 use dashmap::DashMap;
 
@@ -11,17 +10,36 @@ use crate::storage::{
 };
 use crate::transaction::{Snapshot, VersionHeader};
 
+/// Maximum number of in-flight cache miss loads.
+/// Covers typical NVMe SSD QD (16-32) without wasting permit memory.
+/// See `design.md` 决策 2 for the selection rationale.
+const MISS_SEMAPHORE_PERMITS: usize = 16;
+
 pub struct BufferPool {
     /// Page cache: PageId → Arc<Mutex<PageFrame>>
+    ///
+    /// M31: Migrated from `RwLock<HashMap<...>>` to `DashMap<...>` for lock-free
+    /// concurrent reads. Each shard is independently RwLocked, so cache hit
+    /// path (`pages.get`) is fully lock-free. Writes (`pages.insert`/`remove`)
+    /// lock only the affected shard.
+    ///
     /// SAFETY: Each PageFrame uses std::sync::Mutex. This is safe because:
     /// 1. PageGuard/PageDataGuard are never held across .await points
     /// 2. All Mutex lock/unlock operations are in sync code (no .await between lock and unlock)
-    /// 3. The RwLock on the HashMap itself is tokio::sync::RwLock (async-safe)
-    pages: RwLock<HashMap<PageId, Arc<std::sync::Mutex<PageFrame>>>>,
+    pages: DashMap<PageId, Arc<std::sync::Mutex<PageFrame>>>,
     /// Per-page MVCC visibility map for fast-path skipping.
     /// DashMap provides lock-free concurrent access — no deadlock risk
     /// with existing page cache locks.
     vis_map: DashMap<PageId, PageVisibilityInfo>,
+    /// M31: Bounded concurrency for in-flight cache miss loads.
+    /// Held in `Arc` so we can use `Semaphore::acquire_owned()` (the permit
+    /// returned by `acquire()` is not `Send` across .await points).
+    miss_sem: Arc<Semaphore>,
+    /// M31: Per-page load locks to serialize concurrent loads of the same
+    /// page. Ensures the double-check pattern in `get_page` is correct
+    /// (R1: "Double-checked single loading per page"): only one thread
+    /// can be in the load path for a given page at a time.
+    loading_locks: DashMap<PageId, Arc<tokio::sync::Mutex<()>>>,
     clock_hand: RwLock<Vec<PageId>>,
     capacity: usize,
     storage: Arc<dyn AsyncStorage>,
@@ -34,8 +52,10 @@ impl BufferPool {
         }
 
         Ok(Self {
-            pages: RwLock::new(HashMap::new()),
+            pages: DashMap::new(),
             vis_map: DashMap::new(),
+            miss_sem: Arc::new(Semaphore::new(MISS_SEMAPHORE_PERMITS)),
+            loading_locks: DashMap::new(),
             clock_hand: RwLock::new(Vec::new()),
             capacity,
             storage,
@@ -52,33 +72,55 @@ impl BufferPool {
     }
 
     pub async fn get_page(&self, page_id: PageId) -> Result<PageGuard> {
-        // 1. 读锁检查缓存
-        {
-            let pages = self.pages.read().await;
-            if let Some(frame) = pages.get(&page_id) {
-                return Ok(PageGuard::new(frame.clone()));
-            }
-        }
-
-        // 2. 写锁加载页
-        let mut pages = self.pages.write().await;
-
-        // Double check
-        if let Some(frame) = pages.get(&page_id) {
+        // 1. Lock-free cache hit check
+        if let Some(frame) = self.pages.get(&page_id) {
             return Ok(PageGuard::new(frame.clone()));
         }
 
-        // 3. 缓存满则淘汰
-        if pages.len() >= self.capacity {
-            self.evict_one(&mut pages).await?;
+        // 2. Cache miss path: acquire miss permit to bound in-flight IO loads.
+        // The permit is held for the entire miss path (including eviction)
+        // and released at scope end (success or error).
+        let permit = self
+            .miss_sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| StorageError::SemaphoreClosed)?;
+
+        // 3. Per-page load serialization. DashMap doesn't provide a global
+        // write lock, so multiple threads can pass the double-check below and
+        // all call storage.read_page. We need a per-page mutex to ensure
+        // exactly one thread loads each page (correctness for R1/E1).
+        //
+        // Acquire ordering: miss_sem → loading_lock → pages → clock_hand.
+        // loading_lock is per-page, so different pages load in parallel.
+        let loading_lock = self
+            .loading_locks
+            .entry(page_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _load_guard = loading_lock.lock().await;
+
+        // 4. Double-check under per-page lock — another thread may have
+        // loaded the page in the gap between step 1 and the load lock.
+        if let Some(frame) = self.pages.get(&page_id) {
+            return Ok(PageGuard::new(frame.clone()));
         }
 
-        // 4. 从存储加载页
+        // 5. Capacity check + eviction
+        if self.pages.len() >= self.capacity {
+            self.evict_one().await?;
+        }
+
+        // 6. Load from storage (storage errors propagate; permit still released by Drop)
         let page = self.storage.read_page(page_id).await?;
         let frame = Arc::new(std::sync::Mutex::new(PageFrame::new(page)));
 
-        pages.insert(page_id, frame.clone());
+        // 7. Insert into cache (DashMap shard-locked; no global lock)
+        self.pages.insert(page_id, frame.clone());
         self.clock_hand.write().await.push(page_id);
+
+        drop(permit);
 
         Ok(PageGuard::new(frame))
     }
@@ -110,10 +152,7 @@ impl BufferPool {
         f(&data_guard)
     }
 
-    async fn evict_one(
-        &self,
-        pages: &mut HashMap<PageId, Arc<std::sync::Mutex<PageFrame>>>,
-    ) -> Result<()> {
+    async fn evict_one(&self) -> Result<()> {
         let mut clock_hand = self.clock_hand.write().await;
         let mut attempts = 0;
         let max_attempts = clock_hand.len() * 2;
@@ -126,7 +165,8 @@ impl BufferPool {
             let candidate_id = clock_hand.remove(0);
             attempts += 1;
 
-            let frame = match pages.get(&candidate_id) {
+            // Lock-free lookup on DashMap (per-shard RwLock).
+            let frame = match self.pages.get(&candidate_id) {
                 Some(f) => f.clone(),
                 None => continue,
             };
@@ -156,32 +196,36 @@ impl BufferPool {
                 self.storage.write_page(candidate_id, &page_copy).await?;
             }
 
-            pages.remove(&candidate_id);
+            // Atomic remove from DashMap. If another thread already removed
+            // the entry, treat as success (someone else evicted it).
+            self.pages.remove(&candidate_id);
             return Ok(());
         }
 
         Err(StorageError::BufferPoolFull)
     }
 
-    /// Flush all dirty pages to storage
+    /// Flush all dirty pages to storage.
     ///
-    /// Note: MutexGuard held during clone, then explicitly dropped before .await
-    /// - frame_guard is held only during synchronous clone + dirty flag reset
-    /// - Explicit drop(frame_guard) releases lock before async I/O
-    /// - No lock contention during storage.write_page().await
-    #[allow(clippy::await_holding_lock)]
+    /// M31: DashMap iteration holds a per-shard read lock (not a global lock).
+    /// We collect dirty pages into a Vec first, drop all DashMap shard locks
+    /// (iteration scope ends), then issue async writes without holding any
+    /// page lock. This avoids `await_holding_lock` and allows concurrent
+    /// `get_page` from other shards.
     pub async fn flush_all(&self) -> Result<()> {
-        let pages = self.pages.read().await;
-
-        for (page_id, frame) in pages.iter() {
-            let mut frame_guard = frame.lock().unwrap();
-
+        // Phase 1: collect dirty pages while holding per-shard locks briefly.
+        let mut to_write: Vec<(PageId, Page)> = Vec::new();
+        for entry in self.pages.iter() {
+            let mut frame_guard = entry.value().lock().unwrap();
             if frame_guard.dirty {
-                let page = frame_guard.page.clone();
                 frame_guard.dirty = false;
-                drop(frame_guard);
-                self.storage.write_page(*page_id, &page).await?;
+                to_write.push((*entry.key(), frame_guard.page.clone()));
             }
+        }
+
+        // Phase 2: write to storage (no locks held).
+        for (page_id, page) in to_write {
+            self.storage.write_page(page_id, &page).await?;
         }
 
         Ok(())
@@ -327,7 +371,8 @@ impl BufferPool {
     }
 
     pub async fn free_page(&self, page_id: PageId) -> Result<()> {
-        self.pages.write().await.remove(&page_id);
+        // M31: DashMap atomic remove (per-shard lock, not global).
+        self.pages.remove(&page_id);
         let mut hand = self.clock_hand.write().await;
         hand.retain(|id| *id != page_id);
         self.storage.free_page(page_id).await
