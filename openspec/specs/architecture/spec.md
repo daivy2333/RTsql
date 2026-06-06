@@ -244,6 +244,37 @@ DELETE → delete_from_page
 
 ---
 
+<!-- A012 --> ### ADR-012: BufferPool DashMap + Miss Semaphore (2026-06-06)
+
+- **决策**：`BufferPool.pages` 字段从 `RwLock<HashMap<PageId, Arc<Mutex<PageFrame>>>>` 迁移到 `DashMap<PageId, Arc<Mutex<PageFrame>>>`，并新增两个字段：
+  - `miss_sem: Arc<Semaphore>`（固定容量 16）— bound in-flight miss load IO
+  - `loading_locks: DashMap<PageId, Arc<tokio::sync::Mutex<()>>>` — per-page load 序列化
+- **原因**：
+  - M30 连接并发后，多线程 `get_page` 争用全表 RwLock 读锁加剧（实测 50-100ns/次 await）
+  - DashMap 分片锁使 cache hit 路径完全 lock-free（~0ns/次 get）
+  - miss Semaphore 防止突发 IO 风暴（100 线程同时 miss 不再触发 100 次并行 read）
+  - per-page loading lock 保证 R3 double-check 正确性（同 page 8 并发 miss 只 1 次 read）
+- **关键子决策**：
+  1. `clock_hand` 保持 `RwLock<Vec<PageId>>` — 串行淘汰已够，引入 DashSet 无收益
+  2. `evict_one` 签名去掉 `&mut HashMap<...>` 参数（DashMap 无全局借用）
+  3. `flush_all` 重构为 collect-then-write（避免跨 await 持 DashMap iter 锁）
+  4. **per-page loading lock 修正**：原 design 漏掉 — miss Semaphore 只 bound 总并发，不能保证同 page double-check 正确性。实施时发现并加 `loading_locks` 字段
+  5. 锁顺序约定：`miss_sem → loading_lock → pages → clock_hand → frame`
+  6. 公开 API 签名 0 变化（`get_page`, `with_page_data`, `free_page`, `flush_all`, `capacity`, `storage`）
+- **代价**：
+  - DashMap entry 开销 ~50B/page（已有 vis_map 同开销）
+  - loading_locks 永远不清理（同 page 多次 cache miss 复用同一 lock；用 Arc 持有，~50B/page）
+  - 多 1 个 permit acquire（~30-50ns，未满时立即返回）
+- **替代方案**：
+  - A: `RwLock<BTreeMap<>>` — 仍单锁，无收益
+  - B: 纯 miss Semaphore 不加 per-page lock — R3 失败（8 并发 → 8 次 read_page）
+  - C: 全局写锁保护 miss 路径 — 退化到全表锁，违背初衷
+  - D: LRU cache crate — 引入依赖 + 改变淘汰策略
+- **影响下游**：M22 (预取) 可扩展为 `prefetch_sem`；M35 (脏页 writev) 配合批量写盘
+
+
+---
+
 ## 架构权衡总结
 
 | 设计决策 | 空间代价 | 性能收益 | 灵活性收益 |

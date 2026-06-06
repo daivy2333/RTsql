@@ -38,6 +38,8 @@
 
 **2026-06-04 M21 页面级 MVCC**：DashMap visibility_map + 4 写路径清标志 + 延后项已完成（DELETE mark_deleted + 惰性 set_all_visible + bench）。详见 ADR-011 + L028/L030。
 
+**2026-06-06 M31 BufferPool DashMap + Miss Semaphore**：pages 字段迁移 DashMap（lock-free hit）+ miss Semaphore(16) bound IO + per-page loading_locks 保证 double-check。全量测试 0 failures + 6 新并发测试。详见 ADR-012 + L031。
+
 **2026-06-04 M19 DataScan**：数据页链表遍历，1K 1.81x / 10K 2.44x 提速（464/464 tests pass）。详见 L026。
 
 **2026-06-03 M20 零拷贝 SlottedPageRef**：with_page_data 闭包 API，read 路径 -2.46%~-8.33%（≥15% 目标未达，详见 L024）。
@@ -56,7 +58,7 @@
 | M30 | 连接并发 Semaphore | 防连接风暴 | ✅ 完成 (3 压测通过) |
 | M38 | 网络 BufWriter + TCP_NODELAY | write 调用 -99% | ✅ 完成 (N→2 syscalls) |
 
-**Phase 2 进展**：M20 ✅ (2026-06-03) → M36 ✅ (2026-06-03) → M19 ✅ (2026-06-04) → **M21 ✅ (2026-06-04, 页面级 MVCC + 延后项：DELETE mark_deleted + 惰性 set_all_visible + bench)**；下一步 M37 或 M31
+**Phase 2 进展**：M20 ✅ (2026-06-03) → M36 ✅ (2026-06-03) → M19 ✅ (2026-06-04) → **M21 ✅ (2026-06-04, 页面级 MVCC + 延后项：DELETE mark_deleted + 惰性 set_all_visible + bench)**；下一步 M37 或 M31 → **M31 ✅ (2026-06-06, BufferPool DashMap + miss Sem + per-page loading_locks)**
 
 ## 历史里程碑
 

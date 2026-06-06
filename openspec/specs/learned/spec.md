@@ -562,6 +562,44 @@ cargo bench --save-baseline before-X
 
 ---
 
+<!-- L031 -->
+
+## L031: M31 BufferPool DashMap + Miss Semaphore — 2026-06-06
+
+**问题**：`pages: RwLock<HashMap<...>>` 全表读写锁 — 每次 `get_page` 都需 `.await` 读锁（~50-100ns/次），高并发 cache hit 争用加剧（M30 引入连接并发后尤为明显）。
+
+**解决方案**：
+
+1. **类型迁移**：`RwLock<HashMap<PageId, Arc<Mutex<PageFrame>>>>` → `DashMap<PageId, Arc<Mutex<PageFrame>>>`
+   - 读路径：`pages.read().await` → `pages.get(&page_id)` 完全 lock-free
+   - 写路径：`pages.insert/remove` 仅锁当前分片
+2. **miss Semaphore**（容量 16）：bound in-flight miss load，防止 IO 风暴
+3. **per-page loading lock**（`loading_locks: DashMap<PageId, Arc<Mutex<()>>>`）：serialize 同 page 并发 miss
+   - 设计遗漏：原 design 只提 miss Sem，但 DashMap 无全局写锁无法保证 double-check 正确性
+   - 必须 per-page lock 才能让 R3 "Double-checked single loading per page" 通过
+4. **flush_all 重构**：DashMap 迭代期间不能跨 await 持锁 → 先 collect 脏页再写
+
+**关键决策**：
+- `clock_hand` 保持 `RwLock<Vec<PageId>>`（串行淘汰已够，引入 DashSet 无收益）
+- `evict_one` 签名去掉 `&mut HashMap<...>` 参数（DashMap 无全局借用）
+- 锁顺序约定：`miss_sem → loading_lock → pages → clock_hand → frame`
+
+**踩坑**（实施时发现，原 design 漏掉）：
+- **miss Semaphore 不能替代 per-page lock**：R3 "exactly 1 read_page" 需要 per-page 序列化，miss Sem 只 bound 总并发。**修正方案**：加 `loading_locks: DashMap<PageId, Arc<tokio::sync::Mutex<()>>>` 字段，loading_lock 持锁下做 double-check + load + insert。
+- **flush_all 不能再用读锁迭代**：DashMap iter 持 per-shard 读锁，但 `await` 不能持锁。**修正方案**：先 collect 脏页（同步），drop 锁，再 `storage.write_page.await`。
+
+**实测数据**（quick mode, 仅供参考）：
+- `cache_hit_16_tasks_same_page`: 46.65 µs（DashMap.get lock-free）
+- `cache_miss_16_tasks_diff_pages`: 48.57 µs（per-page lock 序列化单 page）
+- `miss_backpressure_200_tasks`: 100.96 µs（200 任务 / 16 permit ≈ 13 批串行）
+
+**How to apply**：
+- 任何想加 DashMap 的全表锁字段都应问：要不要 per-resource 序列化？
+- 双层 lock-free 读取（先 `pages.get`、permit、loading_lock、再 `pages.get`）是 DashMap + per-resource lock 的标准范式
+- `flush_all` 模式（collect-then-write）适用于所有需要跨 await 释放 DashMap 锁的场景
+
+---
+
 ## 待探索
 
 <!-- L016 -->

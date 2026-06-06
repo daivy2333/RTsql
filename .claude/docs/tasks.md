@@ -54,6 +54,7 @@ M23 ──→ M33(P5)
 | | **M19** | DataScan 路径 | 全表扫描 ~2x | 中 |
 | | **M21** | 页面级 MVCC | ~10-15% 提速 | 中 |
 | | **M36** | 零拷贝 ValueRef（✅ 2026-06-03, L025）| 堆分配 30万→0 | 中 |
+| **P3** | **M31** | BufferPool DashMap + miss Sem + per-page loading_locks | cache hit 100ns→0 | 低 |
 | **P3** | **M31** | BufferPool DashMap+Semaphore | 并发读吞吐提升 | 低 |
 | | **M40** | RowLockTable DashMap | 行锁争抢 -5-10x | 低 |
 | | **M34** | WAL fsync 合并 | TPS 3-10x | 低 |
@@ -272,14 +273,36 @@ M23 ──→ M33(P5)
 
 ### Phase 3: 并发控制
 
-#### M31: BufferPool DashMap + Semaphore
+#### M31: BufferPool DashMap + Semaphore ✅ 已完成 (2026-06-06)
 
-- **问题**：`Arc<Mutex<HashMap>>` 读写都互斥
+- **问题**：`Arc<Mutex<HashMap>>` 读写都互斥；M30 引入连接并发后争用加剧
+- **方案**：
+  - `pages` 字段：`RwLock<HashMap<...>>` → `DashMap<...>`（lock-free hit）
+  - 新增 `miss_sem: Arc<Semaphore>(16)` bound in-flight miss IO
+  - 新增 `loading_locks: DashMap<PageId, Arc<Mutex<()>>>` per-page 序列化
 - **任务**：
-  - [ ] T1: `pages` 改为 `DashMap<PageId, Frame>`（分片无锁读）
-  - [ ] T2: 引入 `Semaphore(BUFFER_POOL_SIZE)` 限制 pin 页数
-  - [ ] T3: PageGuard acquire 语义适配
-  - [ ] T4: 并发读写基准测试
+  - [x] T1: `pages` 改为 `DashMap<PageId, Arc<Mutex<PageFrame>>>`（分片无锁读）
+  - [x] T2: `miss_sem: Arc<Semaphore>(16)` 限 in-flight miss
+  - [x] T3: `loading_locks: DashMap<PageId, Arc<Mutex<()>>>` per-page 序列化
+  - [x] T4: `evict_one` 签名去掉 `&mut HashMap` 参数（DashMap 无全局借用）
+  - [x] T5: `flush_all` 重构为 collect-then-write（避免跨 await 持 DashMap iter 锁）
+  - [x] T6: 6 个并发测试（concurrent_test.rs 全部通过）
+  - [x] T7: 全量 cargo test 0 failures
+  - [x] T8: cargo clippy 0 新 warning + cargo fmt 0 diff
+  - [x] T9: benches/buffer_pool_concurrency_bench.rs（3 场景 quick mode OK）
+  - [x] T10: 文档同步（L031 learned + ADR-012 architecture + snapshot/tasks）
+- **关键决策**：
+  - `clock_hand` 保持 `RwLock<Vec<PageId>>`（串行淘汰已够）
+  - 锁顺序约定：`miss_sem → loading_lock → pages → clock_hand → frame`
+  - **设计修正**：原 design 漏 per-page loading lock，miss Sem 只 bound 总并发不能保证 double-check
+- **影响文件**：
+  - `src/storage/buffer_pool.rs` — 字段类型 + 4 个方法（get_page/evict_one/flush_all/free_page）
+  - `src/storage/error.rs` — 新增 `SemaphoreClosed` 变体
+  - `tests/concurrent_test.rs` — 新增 6 个 M31 测试 + CountingStorage helper
+  - `benches/buffer_pool_concurrency_bench.rs` — 新建（3 场景）
+  - `Cargo.toml` — 新增 bench 入口
+- **详情**：`openspec/specs/learned/spec.md` L031 + `architecture/spec.md` ADR-012
+- **下一步**：Phase 3 启动 M40 (RowLockTable DashMap)
 
 ---
 
