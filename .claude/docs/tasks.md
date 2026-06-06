@@ -270,13 +270,6 @@ M23 ──→ M33(P5)
 
 ---
 
-#### M36: 零拷贝 ValueRef
-
-> ✅ **已迁移到上方 line 188 "M36: 零拷贝 ValueRef ✅ 已完成" 段。**
-> 本段为 brainstorming 阶段占位，现已过时，删除。
-
----
-
 ### Phase 3: 并发控制
 
 #### M31: BufferPool DashMap + Semaphore
