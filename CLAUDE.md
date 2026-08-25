@@ -1,357 +1,316 @@
 # CLAUDE.md
 
-> 项目文档入口 + 规则唯一事实来源 | 最后更新：2026-06-06（M31 完成 + 文档全同步）
-> 上次更新：2026-06-03（规则整合升级 v2.0）
+## 文档地图
 
-## 项目简介
-
-异步协程驱动的高性能嵌入式关系型数据库 - 以 Tokio 无栈协程为调度核心，实现轻量、便捷、高效的现代数据库系统。
-
-## 技术栈
-
-- **语言**: Rust (最新稳定版)
-- **构建工具**: Cargo
-- **异步运行时**: Tokio (多线程 scheduler)
-- **SQL 解析**: sqlparser-rs
-- **测试框架**: criterion.rs + tempfile + rusqlite
-- **基准测试**: criterion.rs (6 套: micro/concurrent/scale/sqlite_compare/single/precise_compare)
-- **代码格式化**: rustfmt
-- **Lint**: clippy
-
-## 文档体系
-
-### OpenSpec（需求规范管理）
-
-| 目录 | 用途 | 查询方式 |
-|------|------|----------|
-| `openspec/specs/architecture/` | 架构决策记录（ADR） | `grep "关键词" openspec/specs/architecture/spec.md` |
-| `openspec/specs/learned/` | 学习记忆与踩坑档案 | `grep "关键词" openspec/specs/learned/spec.md` |
-| `openspec/specs/references/` | 外部参考与依赖文档 | `grep "关键词" openspec/specs/references/spec.md` |
-| `openspec/specs/optimization/` | 优化方向与技术债 | `grep "关键词" openspec/specs/optimization/spec.md` |
-| `openspec/specs/{delta}/` | 增量规范（按需 M19/M20/M21/M31/M36/M41） | `ls openspec/specs/` |
-| `openspec/changes/` | 变更提案 | `openspec list` |
-
-> 注：原 `openspec/specs/rules/` 已废弃（2026-06-03）。规则全文已整合到本文"规则（唯一事实来源）"章节。
-
-### 项目状态（日常维护）
-
-| 文档 | 用途 | 查询方式 |
-|------|------|----------|
-| `.claude/docs/snapshot.md` | 项目状态快照 | `grep "关键词" .claude/docs/snapshot.md` |
-| `.claude/docs/tasks.md` | 任务追踪与里程碑规划 | `grep "关键词" .claude/docs/tasks.md` |
-| `.claude/docs/archive.md` | 历史归档 | `grep "关键词" .claude/docs/archive.md` |
+| 内容 | 路径 | 写入者 |
+|---|---|---|
+| 公共规则 | `CLAUDE.md` | 人工或 `openspec-init` |
+| 当前项目描述 | `.claude/docs/SNAPSHOT.md` | `openspec-docs-maintainer` |
+| Milestone roadmap | `.claude/docs/tasks.md` | `openspec-milestone-planner` |
+| 全局任务和状态 | `.claude/docs/tasks.md` | `openspec-docs-maintainer` |
+| Cycle 模板 | `.claude/docs/templates/change-cycle.md` | `openspec-init` |
+| 项目模型 | `openspec/specs/project-model/spec.md` | `openspec-docs-maintainer` |
+| 决策 | `openspec/specs/decisions/spec.md` | `openspec-docs-maintainer` |
+| 知识 | `openspec/specs/knowledge/spec.md` | `openspec-docs-maintainer` |
+| 参考 | `openspec/specs/references/spec.md` | `openspec-docs-maintainer` |
+| 改进 | `openspec/specs/improvements/spec.md` | `openspec-docs-maintainer` |
+| 活跃变更 | `openspec/changes/` | OpenSpec、plan、act |
+| Change Evidence | `openspec/changes/<change>/evidence/` | `openspec-act` |
+| 分析文档 | `.claude/analysis/` | `openspec-explorer` |
+| Runbook | `.claude/runbooks/` | `openspec-experience-recorder` |
+| Incident | `.claude/incidents/` | `openspec-experience-recorder` |
+| Legacy migration carrier | `.claude/legacy/` | `openspec-archivist` |
 
 ## 读取顺序
 
-| 场景 | 读取 | 写入 |
-|------|------|------|
-| 开始新会话 | CLAUDE.md → snapshot.md → tasks.md | — |
-| 写新功能 | 编码规范（本文 § 二）+ architecture + learned | tasks.md, learned |
-| 修复 Bug | 编码规范（本文 § 二）+ snapshot.md + learned | tasks.md, learned（踩坑） |
-| 重构 | architecture + optimization + 编码规范（本文 § 二） | architecture |
-| 记录决策 | architecture | architecture |
-| 创建变更 | /opsx:explore 或 /opsx:propose | openspec/changes/ |
+- 新会话：assistant 读取 CLAUDE → SNAPSHOT → tasks → active changes，并按问题补充相关 M/D/K/R/I 和持久化产物。
+- 当前会话中来源明确、细节仍可用且读取后未变化的信息直接复用；Skill 切换本身不触发重复读取。
+- 后续 Skill 只补读当前任务缺失的信息和实际操作对象。只有概括而缺少所需细节、来源可能变化或需要新鲜运行证据时，才重新读取对应权威来源。
+- Assistant 只恢复 OpenSpec 体系文档上下文，不替代 Explorer 的代码调查、Plan 的实现调查或各 Skill 对实际操作对象的检查。
+- 探索：复用体系上下文 → 读取目标代码和测试 → 形成即时结论或 Analysis。
+- 计划：复用 Explorer 的当前会话结论或 Analysis → 只补查缺失或失效的实现事实 → 形成自包含 Plan Context。
+- 实施：当前 Iteration 的最新 Cycle → 目标代码和测试 → 按需 Evidence → act；不回读 Assistant 或 Explorer 来重建计划基线。
+- 实现 Review：当前 Cycle → 实际代码、Act Response 和要求的 Evidence → plan。
+- 操作任务：相关 Runbook。
+- 故障复盘：Incident → knowledge → decisions/model → improvements/change。
+- 查询：assistant。
+- 路线规划：milestone-planner。
+- 日常文档写入：docs-maintainer。
+
+## Skill 职责
+
+- `openspec-assistant`：只读。
+- `openspec-milestone-planner`：规划 `MSxx` 路线，平衡工作量、验证边界和诊断边界；不创建 change。
+- `openspec-plan`：需求、BDD、实现调查、逻辑 Iteration 规划、Cycle 创建和实施 Review。
+- `openspec-act`：TDD、实施、任务自检、全量 diff Review、验证、按需 Evidence、经验候选和 Act Response。
+- `openspec-experience-recorder`：根据已发生且有证据的过程创建、更新或恢复 Runbook、Incident。
+- `openspec-docs-maintainer`：显式维护状态、M/D/K/R/I，同步指定 change 结果，收尾最终 Review Result 为 `accepted` 的 change，并处理限定 R 登记。
+- `openspec-explorer`：宏观或微观探索；输出即时回答或 `.claude/analysis/`。
+- `openspec-compressor`：原地压缩，不改变状态。
+- `openspec-archivist`：清理无法满足正常收尾条件的 change，并处理其他生命周期清理和 carrier 归档。
+
+## 阶段边界
+
+- Skill 完成不构成下一阶段授权。
+- Milestone Planner 写入 roadmap 后终止，不调用 Explorer、Plan、Act 或 Maintainer。
+- Plan 完成后终止，等待用户审计和 Act 指令。
+- Act 写入反馈和 Experience Candidates 后终止，不创建经验产物、不归档、不维护全局状态。
+- Plan Review 后终止，不自动调用 Act 或 Maintainer。
+- Explorer 即时回答后终止，不调用 Maintainer。
+- Explorer 生成分析文档后，可自动调用 Maintainer 登记对应 R 引用。
+- Recorder 生成、更新或恢复 Runbook、Incident 后，可自动调用 Maintainer 创建或更新对应 R。
+- 上述自动授权只覆盖对应 R，不覆盖 M/D/K/I、tasks 或 change。
+- Maintainer 由用户直接调用时刷新 SNAPSHOT；Explorer、Recorder 的限定 R 登记不刷新 SNAPSHOT。
+- Maintainer 直接调用时除 SNAPSHOT 外只修改用户点名内容；限定 R 登记只修改 references。
+- Act 完成不构成 Recorder 授权；只有用户单独请求或预先明确授权串联时才执行 Recorder。
+- 除上述例外，用户明确授权串联时才可继续下一阶段。
+- Explorer 的结论是 Plan 可复用的调查输入。Plan 负责检查适用性、补齐缺口并把必要事实写入当前 Cycle；Act 不沿引用链回读 Explorer Analysis。
+
+## 通用能力
+
+流程描述使用能力语义：
+
+| 语义 | 要求 |
+|---|---|
+| 任务追踪 | 记录 Phase、Task、Gate、状态和非迁移步骤的跳过原因 |
+| 用户决策 | 对需求、风险和不可逆动作取得明确选择 |
+| 文件读取 | 完整读取所选规则和引用 |
+| 精准编辑 | 只修改相关片段 |
+| 命令执行 | 保留命令、输出和退出码 |
+| 并行委托 | 仅在环境支持且任务可独立时使用 |
+| OpenSpec 集成 | 按当前职责创建、应用、验证或归档 change |
+
+平台工具名只是适配，不改变上述语义。
+
+## 信息路由
+
+- SNAPSHOT 只描述项目现在是什么：项目身份、组成、支持范围和仓库现场。
+- SNAPSHOT 不保存工作状态、操作流程、约束、原因或历史记录。
+- 其他文档只引用 SNAPSHOT，不复制当前项目描述。
+- 项目路线、稳定基线和阶段边界写 tasks，编号 `MSxx`。
+- 已承诺工作写 tasks 或 OpenSpec change。
+- 当前跨模块约束写 project-model，编号 `Mxx`。
+- 有替代方案的长期选择写 decisions，编号 `Dxx`。
+- 已验证、非显然且可复用的结论写 knowledge，编号 `Kxx`。
+- 指针和检索元数据写 references，编号 `Rxx`。
+- 有证据但未承诺实施的问题写 improvements，编号 `Ixx`。
+- 可复用的构建、测试和其他命令行操作流程写入 Runbook。
+- 已验证且可重复或高风险的操作由 Recorder 写入 Runbook，并登记 R。
+- 已发生的重要故障由 Recorder 写入 Incident，并登记 R。
+- 详细调查、实验和评估写 analysis，并登记 R。
+- Cycle 的持久化日志和数据按 Iteration/Cycle 层级写入 change 内 Evidence，不登记 R。
+
+一项信息只有一个权威位置。其他文档使用编号或路径引用，不复制正文。
+
+Analysis、Iteration、Cycle、Act Response、Evidence 和 Incident 可以保留采集时的 revision、分支、环境和命令。这些字段属于历史现场，不是当前项目描述。
+
+## 旧体系迁移
+
+- 升级必须沿文档地图、引用、归档指引和历史 carrier 发现来源，读取全文，按已有编号、可独立路由的同级标题或短文档整体迁移。
+- 重复和过时信息仍要建立来源映射，并保留独有信息、状态和时间边界。
+- 已归档 legacy carrier 保持不可变，但其中的信息也要迁移和验证。
+- CLAUDE 和 SNAPSHOT 按新体系重建，不进入迁移清单或 carrier。
+- 覆盖率达到 100%，且 `unmapped = 0`、`skipped = 0` 后才能归档旧文档。
+- 迁移期间旧来源保持只读，不生成内容哈希。migration carrier 保存语义条目覆盖清单、编号映射、验证摘要和每份旧文档的一份完整原文，不保存核对过程日志。
+- 旧体系文档只允许完整 Archive，不允许 Delete 或 Compress-Archive。
+
+## 记录边界
+
+- Model 只保存当前有效约束，不保存选择历史。
+- Decision 被替代后保留，并标记 `superseded`。
+- Knowledge 不保存单纯路径、API 签名、链接或未验证猜测。
+- Reference 不复制目标正文。
+- Improvement 只保存未承诺工作；批准后创建 change 并标记 `promoted`。
+- Milestone Planner 创建和调整 `planned`、`ready` 的 `MSxx`；Maintainer 只同步运行状态和 change 引用。
+- Tasks 不保存未批准想法。
+- 普通测试失败不创建 Incident。
+- 一次性命令不创建 Runbook。
+- Runbook 和 Incident 不由 Compressor 改写。
+- 普通验证结果写 Act Response；没有持久化要求时不创建 Evidence 占位目录。
 
-## OpenSpec 命令
+## 行为约束
 
-| 命令 | 用途 | 何时用 |
-|------|------|--------|
-| `/opsx:propose` | 一步创建修改+所有规划产物 | 快速默认路径 |
-| `/opsx:explore` | 探索想法，不创建产物 | 需求不明确时 |
-| `/opsx:apply` | 按任务清单实施 | 准备写代码 |
-| `/opsx:archive` | 归档完成的修改 | 全部工作完成 |
+**Think Before Coding**
 
-## 快速开始
+- 陈述影响实现的假设。
+- 多种解释会改变结果时请求用户决定。
+- 不隐藏不确定性。
 
-- **开始编码前**: 阅读本文"规则"章节（特别是一~四）
-- **接手任务时**: 阅读 `.claude/docs/tasks.md` + `.claude/docs/snapshot.md`
-- **回忆项目知识**: 阅读 `openspec/specs/learned/spec.md`（API路径、技巧、踩坑）
-- **做技术决策后**: 更新 `openspec/specs/architecture/spec.md`
-- **发现可优化点**: 记录到 `openspec/specs/optimization/spec.md`
-- **探索发现新知识**: 记录到 `openspec/specs/learned/spec.md`
-- **任务完成/受阻**: 更新 `.claude/docs/tasks.md` 和 `.claude/docs/snapshot.md`
+**Scope Control**
 
-## 核心特性
+- 审查、查询和监控任务默认只读；没有明确的修改授权，不改变文件或外部状态。
+- 修改任务只包含用户明确要求和完成结果不可缺少的必要后果。候选工作无法关联到用户目标、已批准 requirement、Acceptance 或可达代码和数据时，不实施。
+- 增加用户未点名的工作前依次确认：用户是否要求；是否是完成结果的必要条件；哪些可达代码、数据、用户决定、法律、平台或验收证据证明必要；省略后是否会导致当前任务失败。任一项无法成立时停止扩展。
+- 必要后果可以包含调用者、夹具、测试、可访问性、安全、兼容性和迁移，但必须有当前任务的可达证据。目标是最小正确结果，不是最少文件或最少代码。
+- 默认禁止新增哈希、校验和或内容指纹。只有用户明确要求，或产品数据格式、外部兼容性、安全、完整性要求及 Acceptance 直接证明必要时才允许；本工作流自身不得成为引入理由，也不得把哈希用于无依据的变更检测、缓存、身份、去重或未来扩展。
+- 对已确认需要实施的工作，在同样满足 Acceptance 的方案中，依次优先复用项目已有实现、使用语言或平台原生能力、使用已有依赖，最后才新增最小必要代码或依赖；不为尚未发生的需求扩大当前实现。
+- 证据足以支持当前结论后停止搜索、测试和 Review。可选改进仅在有助于用户决策时报告，不纳入当前实现。
 
-- **轻量**: 单库静态链接，无外部服务依赖，运行时仅需少量线程
-- **便捷**: API 简洁（`open`, `execute`, `query`），支持内存模式与持久化单文件
-- **高效**: 基于协程的异步 I/O、MVCC 无锁读、零拷贝页访问、两阶段锁缓冲池
+**Surgical Changes**
 
----
+- 只修改需求需要的内容。
+- 不清理无关代码。
+- 清理由本次改动产生的孤儿。
 
-# 规则（唯一事实来源）
+**Requirements Integrity**
 
-> **本节是项目规则的唯一事实来源**（取代了已废弃的 `openspec/specs/rules/`）。所有 agent 必须遵守。
+- 用户明确要求必须全部覆盖。
+- 实现简单不能成为裁剪需求的理由。
+- 任何简化先写入 RTM 并取得批准。
 
-## 一、Karpathy Guidelines（行为约束）
+## 执行约束
 
-### 1. Think Before Coding
+1. 不探索清楚不实现。
+2. 不计划清楚不实现。
+3. 不完整覆盖需求不实现。
+4. 不测试通过不提交。
+5. 不验证成功不声明。
+6. 三次失败必须反思。
+7. 不见测试见证不变更。
+8. 不见场景缺口扫描不进设计。
+
+## BDD
+
+需求设计前扫描：
+
+- Happy Path。
+- Sad Path。
+- Edge Case。
+- 错误、超时、取消和兼容性。
 
-**不假设。不隐藏困惑。暴露权衡。**
+输出场景草图：前置状态、动作、结果和失败边界。用户显式接受的缺口写入 proposal。
 
-实现前：
-- 明确陈述假设，不确定就问
-- 多种解读存在时，全部呈现 - 不 silently 选择
-- 更简单的方法存在时，说出来。必要时 push back
-- 不清楚时，STOP。命名困惑点。问。
+## Plan 调查
+
+Plan 在制定任务前读取实际代码并记录：
 
-### 2. Simplicity First
+- 入口、目标符号、调用者和被调用者。
+- 数据流、状态变化、错误和并发边界。
+- 现有测试、验证命令和基线结果。
+- 当前行为、目标行为和影响范围。
 
-**最小代码解决问题。无投机性功能。**
+影响行为、接口或错误语义、状态所有权、架构、范围、测试策略或 Acceptance 的问题属于实质问题；局部命名、辅助函数拆分、等价控制流、可直接定位的路径变化和非阻塞 Minor finding 不属于实质问题。Plan 通过 Gate 2 阻塞实质未知项，非实质选择可留给 Act。
 
-- 不添加未被要求的功能
-- 单次使用代码不抽象
-- 未要求的"灵活性"或"可配置性"不加
-- 不可能场景的错误处理不加
-- 200 行能减到 50 行，重写
+## TDD
 
-问自己："资深工程师会说这过度复杂吗？" 是 → 简化
+铁律：`NO CHANGE WITHOUT TEST WITNESS`。
 
-### 3. Surgical Changes
+- 新功能：测试定义期望，观察 RED，再实现 GREEN。
+- Bug：测试复现问题，观察 RED，再修复 GREEN。
+- 重构：先观察 GREEN，重构后保持 GREEN。
 
-**只改必须改。只清理自己的烂摊子。**
+每次变更执行：
 
-编辑现有代码：
-- 不"改进"相邻代码、注释、格式
-- 不重构没坏的东西
-- 匹配现有风格，即使你做法不同
-- 注意到无关死代码，提及 - 不删除
+1. 定位范围。
+2. 建立测试。
+3. 验证当前状态。
+4. 修改。
+5. 验证新状态。
+6. Review。
 
-改动创建孤儿时：
-- 删除 YOUR 改动导致未用的 import/变量/函数
-- 不删除先前存在的死代码（除非被要求）
+## Gate
 
-测试：每行改动应直接追溯到用户请求
+- Gate 1：需求、BDD、场景、范围和 change 获批。
+- Gate 2：调查、设计、任务分轮、追踪和当前轮验证均达到执行就绪；非实质未知项不阻塞。
+- Gate 3：每个任务在修改前有测试见证。
+- Gate 4：每个任务先 spec review，后 code review。
+- Gate 5：完成声明有新鲜证据。
+- Gate 6：阻塞即停；三次失败后反思。
 
-### 4. Goal-Driven Execution
+Gate BLOCK 必须记录原因。用户显式豁免必须保留原话和风险。
 
-**定义成功标准。循环直到验证。**
+## 任务批次与续跑边界
 
-将任务转化为可验证目标：
-- "添加验证" → "写无效输入测试，然后让它们通过"
-- "修复 bug" → "写复现它的测试，然后让它通过"
-- "重构 X" → "确保前后测试都通过"
+- 每个 Phase 和可验证 Step 有状态。
+- 任务列表只保存当前已授权且可执行的工作；完整状态以 OpenSpec 产物为准。
+- 非迁移步骤的跳过项标记 `SKIPPED: <reason>`；旧体系语义条目不得跳过。
+- 只有验证通过后才能标记完成。
+- 最终报告前检查全部任务状态。
 
-多步任务，简述计划：
-1. [步骤] → verify: [检查]
-2. [步骤] → verify: [检查]
-3. [步骤] → verify: [检查]
+按当前 skill 识别三类边界：
 
-强成功标准 → 可独立循环。弱标准需要不断澄清。
+- 授权边界：下一步需要用户批准、选择或接受风险。
+- 能力边界：下一步由用户或外部环境执行，或 agent 无法安全执行。
+- 停止边界：当前 skill 要求停止、交接、阻塞或终止。
 
-### 5. Requirements Integrity
+每批任务只覆盖当前位置到最近边界之前的工作。边界和等待事项不作为可执行任务。等待原因、证据要求和恢复条件写入权威产物；没有持久化产物时保留在当前对话。
 
-**不裁剪用户需求。未经 approval 不得放弃。**
+没有后续任务不表示 change、Iteration、Cycle 或当前阶段已经完成。恢复执行时重新检查最近边界。用户或外部环境提交结果后，只有审核结果为 `PASS`，才能生成下一批任务。
 
-- 用户明确要求的所有功能必须实现
-- 简化实现 ≠ 裁剪功能
-- 任何裁剪必须先报告，获 approval 后才执行
-- 缺依赖、缺时间不是裁剪理由
-
----
-
-## 二、务实编码原则（代码质量）
-
-### 十大铁律
-
-1. **命名即文档** — 精准、可读、可搜索的名称
-2. **函数单一职责** — < 20行，只做一件事，无副作用
-3. **DRY & 正交性** — 三次法则，模块独立
-4. **显式胜于隐式** — 依赖注入，常量命名
-5. **健壮边界** — 依赖抽象，核心与框架解耦
-6. **可测试设计** — 纯函数优先，依赖可注入
-7. **尽早重构** — 小步重构，每次提交更好
-8. **务实破窗** — 看到问题立即修，不留给以后
-9. **自动化检查** — 格式化、静态分析、测试覆盖
-10. **注释解释意图** — 注释"为什么"，不注释"做什么"
-
-### 项目特定规范
-
-**命名规范**：
-- 模块名：snake_case（`buffer_pool`、`slotted_page`）
-- 类型名：PascalCase（`PageGuard`、`WalRecord`）
-- 常量：SCREAMING_SNAKE_CASE（`MAX_RETRY_COUNT`）
-- 布尔值：`is_`/`has_`/`can_`/`should_` 前缀
-- 集合：复数形式（`pages`、`slots`）
-
-**代码结构**：
-- 源码目录：`src/`
-- 测试目录：`tests/`（集成测试）+ 文件内 `#[cfg(test)]`（单元测试）
-- 基准测试：`benches/`（criterion）
-- 存储层：`src/storage/`（buffer_pool、btree、page_format、file_storage）
-- 执行器：`src/executor/`（每个执行器独立文件）
-- 解析器：`src/parser/`（planner、ast）
-
-**测试规范**：
-- 单元测试：`#[cfg(test)] mod tests` 在每个模块内
-- 集成测试：`tests/` 目录，端到端验证
-- 基准测试：criterion，6 套（micro/concurrent/scale/sqlite_compare/single/precise_compare）
-- 测试命名：描述行为，非 `test1`、`test2`
-- 测试覆盖：核心逻辑必须有测试
-
-**提交规范**：
-- 格式：`feat(scope): description` 或 `fix(scope): description`
-- 提交前：`cargo fmt` + `cargo clippy` + `cargo test`
-- 不在 git 提交中列 Claude 为共同创作者（禁 co-author）
-
----
-
-## 三、Workflow Designer（流程框架）
-
-### 核心概念
-
-- **Phase** — 逻辑分组的工作容器（进入/退出条件明确）
-- **Gate** — 检查点（PASS 或 BLOCK，BLOCK 必须记录原因）
-- **Task** — 最小执行单元（可独立验证，完成必须展示证据）
-- **Loop** — 重复处理（clarification / review-fix / iteration / retry）
-
-### 执行铁律
-
-```
-1. Phase 进入前必须 Gate PASS
-2. Task 开始前必须 Gate PASS
-3. Task 完成必须展示证据
-4. Loop 退出必须条件 PASS
-5. Gate BLOCK 必须记录原因
-6. 声明完成必须验证证据
-```
-
-### 工具映射
-
-| 概念 | 工具 |
-|------|------|
-| Phase/Task 状态 | TaskCreate / TaskUpdate |
-| Gate 检查 | AskUserQuestion + 逐项验证 |
-| Loop 控制 | 条件判断 |
-| 并行执行 | Agent (subagent) |
-| 验证证据 | Bash + 输出展示 |
-
----
-
-## 四、核心执行约束（8 条铁律）
-
-```
-1. 不探索清楚不实现（Gate 1 / BDD）
-2. 不计划清楚不实现（Gate 2）
-3. 不完整覆盖需求不实现（Gate 2 / Requirements Integrity）
-4. 不测试通过不提交（Gate 5）
-5. 不验证成功不声明（Gate 5）
-6. 三次失败必须反思（Gate 6）
-7. 不见证据不变更（TDD Iron Law / Gate 3）
-8. 不见场景缺口不进设计（BDD 智能缺口 / Gate 1）
-```
-
----
-
-## 五、技能执行规则（强制）
-
-> **本节规则专门防止"步骤可跳过"和"完成无证据"类失误。**
-
-### 1. 强制任务化（TaskCreate）
-
-调用任何 skill 时，**第一步必须是 TaskCreate 任务化所有 Phase 步骤**：
-
-```
-1. 读取 skill 文档所有 Phase/Step 标题
-2. 每个 Phase/Step 创建一条 TaskCreate
-3. 开始 Phase X 前 → TaskUpdate mark in_progress
-4. 完成 Phase X 后 → TaskUpdate mark completed（带证据）
-5. 跳过任何步骤 → TaskUpdate 状态 "SKIPPED: {原因}"（不允许静默跳过）
-6. 最终报告前 → TaskList 检查所有任务有 completed 或 SKIPPED 状态
-```
-
-### 2. 显式记录跳过（无静默跳过）
-
-```
-❌ 禁止：跳过步骤不在报告里说明
-✅ 必须：跳过任何 step 必须在最终报告里显式列出（含 N/A 原因）
-✅ 必须：用户询问"完成了？"时，主动列出未做的步骤
-```
-
-### 3. 完成后自审（5 问）
-
-完成所有 Phase 后，**声明完成前必须回答 5 问**：
-
-```
-1. 我执行了技能里的每一步吗？
-2. 跳过的步骤有显式记录原因吗？
-3. 关键 Gate/Loop 都通过了吗？
-4. 有输出证据（命令、文件、片段）吗？
-5. 报告前我读过 TaskList 确认状态吗？
-
-任一为 NO → 不允许声明完成
-```
-
-### 4. 禁止强假设推断
-
-```
-❌ 看到部分证据就推断整体完成（如：看到目录存在就推断整个初始化做完）
-✅ 必须逐项打勾，每条 step 有输出或显式记录 "N/A（原因）"
-✅ 不确定时 STOP 问，不确定时倾向于"漏做"而非"早收尾"
-```
-
-### 5. CodeGraph 优先
-
-```
-CodeGraph 可用时：
-  ⭐ 优先用 codegraph_explore 替代 Read + Grep
-  ⭐ 一次 codegraph_explore 顶一组 search + node
-  ⭐ 不要开 Explore 子 agent 读文件（浪费）
-  ⭐ 看到 ⚠️ stale banner 时，对那一个文件直接 Read，其它继续信任
-```
-
-### 6. OpenSpec 集成
-
-```
-- 变更必须用 /opsx:propose 创建，不用手动操作 changes/
-- 验证用 openspec validate --specs
-- 归档用 openspec archive <name>
-- 与 openspec-assistant 双向同步：changes/ ↔ tasks.md
-```
-
-### 7. 文件编辑铁律
-
-```
-- 更新已有文档用 Edit（精准替换），不用 Write（全量覆盖）
-- 创建全新文件才用 Write
-- 禁止全量覆盖导致内容丢失
-```
-
----
-
-## 六、检查清单
-
-每次提交前确认：
-
-- [ ] 命名清晰，揭示意图
-- [ ] 函数 < 20 行，单一职责
-- [ ] 无重复代码
-- [ ] 无魔法数字/字符串
-- [ ] 依赖显式注入
-- [ ] 核心逻辑有测试覆盖
-- [ ] 注释解释"为什么"
-- [ ] 已运行格式化和静态分析（`cargo fmt` + `cargo clippy` + `cargo test`）
-- [ ] 代码比来时更干净
-- [ ] 只改必须改的代码
-- [ ] 不添加未要求的功能
-- [ ] 不在 commit 中列 Claude 为 co-author
-
----
-
-## Red Flags
-
-```
-❌ 假设不明确 → STOP，问
-❌ 过度复杂 → 简化
-❌ 改动超出请求 → 回滚
-❌ 无测试变更代码 → Iron Law 违规
-❌ 顺手添加功能 → Karpathy 违规
-❌ Gate BLOCK 不记录 → Workflow 违规
-❌ 用"实现简单"偷换"需求满足" → Requirements Integrity 违规
-❌ 需求裁剪未经用户 approval → Requirements Integrity 违规
-❌ 继续第 4 次相同修复尝试 → 3-Failure 违规
-❌ 跳过 Verify 直接声明完成 → Verification 违规
-❌ 使用"应该/大概/似乎" → Verification 违规
-❌ 静默跳过 skill 步骤 → 技能执行违规
-❌ 强假设推断（看到部分就推断完成）→ 自审违规
-```
+agent 可执行的测试和 Review 不形成边界。验证失败时保留当前任务，不执行下游任务；重试和阻塞遵守当前 skill 的规则。
+
+## Iteration 与 Cycle 线程
+
+- Iteration 是 change Map 中的逻辑工作单元；Cycle 是该 Iteration 内的一次 Plan、Act、Review 执行闭环。
+- Plan 在 change `tasks.md` 中把全部任务分配到工作量适中、可独立验证和诊断的 Iteration，只展开当前 Iteration 目录和当前 Cycle。
+- 每个 change 从 `iterations/000-initial/000-initial.md` 开始；每个后续 Iteration 也从本目录的 `000-initial.md` 开始。
+- 每个任务只归属一个 Iteration；首个与后续 Iteration 使用相同的聚合、拆分标准。
+- Rework Cycle 使用 `001-rework.md` 等本地编号完成既有 Acceptance，不修改 Iteration Map；Replan Cycle 使用同一目录的后继编号执行修订后的计划。两者都不占用全局 Iteration 编号。
+- Plan 只写 Cycle 的 `Plan Context` 和 `Plan Review`。
+- Plan Context 包含所属 Iteration、Cycle 类型、Current-State Evidence、行为变化、变更面、任务或 repair item 契约和停止条件；状态在创建时为 `draft`，Gate 2 通过或明确豁免且计划获批后才改为 `ready`。
+- Plan Context 必须自包含 Act 所需的实现事实和契约，不以 Assistant、Explorer、Analysis 或前序 Cycle 的引用代替必要正文。
+- Task Contract 是 Act 的任务级执行依据；背景和调查证据不得给出与契约冲突的重复指令。
+- Plan 把 Persisted Evidence 明确设为 `none` 或 `required`；`required` 项映射到 Gate 和通过条件。
+- Act 只写当前 Cycle 的 `Act Response`。
+- Act 每个 task 或 repair item 完成后执行 Gate 4，并在 Response 前重新审查完整 diff。
+- Act 不建立或复核 Plan 基线；直接按 ready 的 Plan Context 建立测试见证并实施。
+- Act 可处理非实质局部差异并在 Response 记录；实质问题返回 Plan。
+- Act 修复当前 Cycle 计划范围内的问题；新设计或范围问题返回 Plan。
+- Act Response 记录 Self-Review、已修复发现和遗留 Minor 问题。
+- Act Response 记录有证据的 Runbook、Incident 候选；没有则写 `None`。
+- Act Response 状态允许 `pending → reported`、`pending → blocked` 和用户解决阻塞后的 `blocked → pending`。
+- 计划偏差或 `required` Evidence 不再满足白名单、必要性、预算或可采集性时，Act 写 Blocker Handoff，将 Response 改为 `blocked`，并按需保存 `act-added / BLOCKED` Evidence。
+- 用户解决阻塞并要求继续时，Act 追加 Blocker Resolution，保留原 Blocker Handoff，再恢复当前 Cycle。
+- 已创建后继 Cycle 或 `Review Result` 不再为 `pending` 时，不再恢复旧 Cycle。
+- Act 只在用户明确要求、结果无法低成本复现、一次性环境即将消失、Incident/Blocker 需要保留现场，或摘要会丢失决定性结构时创建 `evidence/<iteration>/<cycle>/`。
+- Evidence 目录与 Iteration/Cycle 层级一致，随 change 归档，不登记 R。
+- 交接后的 Plan Context 不得改写。
+- Act 不得创建下一 Cycle 或下一 Iteration。
+- Plan Review 必须检查代码和证据，不以 Act Self-Review 代替独立检查。
+- Plan Review 把偏差分类为 Plan 遗漏、Plan 错误、Act 偏离、基线变化或新证据，并区分阻塞 Acceptance 与非阻塞 Minor finding。
+- Review Result 使用 `pending → accepted | rework-required | replan-required`；Plan 写完 Review 和后继产物后最后更新终态。
+- `rework-required` 在同一 Iteration 创建 rework Cycle，且不修改 Map；`replan-required` 调整目标、范围、依赖、验证契约、验收边界和未完成 Iteration Plan，并在同一 Iteration 创建 replan Cycle。
+- 连续两个 rework Cycle 未缩小同一 Acceptance gap 时重新检查 Plan、设计和需求假设；同一问题三次失败后不得创建第四次同类 Cycle。
+- 当前 Iteration 只有在 Review Result 为 `accepted` 后才能完成并展开 Map 中的下一 Iteration。
+
+## 验证
+
+完成声明必须包含：
+
+- 验证命令或操作。
+- 每项不超过 20 行的决定性输出；输出更长时只保留能判断结果的片段。
+- 退出码或明确结果。
+- 证据支持的结论。
+
+Gate 必须有新鲜验证结果，但不要求原始输出文件。验证按影响范围递增：直接目标测试 → 受影响边界 → 必要的集成或全量 Gate；现有结果足以判断 Acceptance 后停止。
+
+Persisted Evidence 默认 `none`。设为 `required` 前必须说明它支持哪个 Acceptance、为什么 Act Response 不够、为什么无法低成本重跑，以及缺少它会阻止哪个决定；任一项无法回答时保持 `none`。
+
+每个 Cycle 的 Evidence 目录最多 5 个文件（含 README），整个 change 最多 20 个 Evidence 文件；单个文本文件最多 500 行且不超过 256 KiB。禁止保存完整日志目录、源码副本或完整测试套件输出，禁止通过增加 Cycle、拆分、压缩或改格式绕过限制。确有必要超出时，收集前取得用户明确批准；超限本身不阻塞实现或 Acceptance。
+
+禁止使用"应该、大概、基本完成"替代证据。
+
+## 三次失败
+
+同一问题连续失败 3 次：
+
+1. 停止当前修复。
+2. 记录三次尝试和症状。
+3. 检查共享状态、耦合和需求假设。
+4. 返回设计或需求阶段。
+5. 不开始第四次同类盲试。
+
+## 文件编辑
+
+- 已有文件只做精准修改。
+- 新文件才允许整体创建。
+- 不覆盖用户无关改动。
+- 移动或删除前检查引用。
+
+## 完成前五问
+
+1. 每一步是否有状态？
+2. 跳过项是否有原因？
+3. Gate 是否逐项通过或阻塞？
+4. 完成声明是否有新鲜证据？
+5. 最终报告前是否检查任务状态？
