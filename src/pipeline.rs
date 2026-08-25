@@ -11,7 +11,7 @@ use crate::parser::{parse_sql, PlanBuilder};
 use crate::profiling::{
     init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope,
 };
-use crate::storage::Result;
+use crate::storage::{Result, TableMeta};
 use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -75,7 +75,7 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
         } else {
             None
         };
-        let executor = match create_executor_from_plan(plan, database).await {
+        let executor = match create_executor_from_plan(plan, database, None).await {
             Ok(e) => e,
             Err(e) => {
                 return Response::Error {
@@ -207,17 +207,50 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
                     cache.put(sql.to_string(), plan.clone());
                 }
 
+                // DML paths (Insert/Update/Delete) must run inside a real
+                // transaction so MVCC visibility, commit_tx_id, and abort
+                // cleanup all see a real tx_id. SELECT paths do not need a tx.
+                let is_dml = matches!(
+                    &plan,
+                    PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_)
+                );
+                let tx = if is_dml {
+                    Some(database.transaction_manager.begin().await)
+                } else {
+                    None
+                };
+                let tx_id = tx.as_ref().map(|t| t.id());
+
+                // Pre-fetch table_meta for the abort path (only needed for DML).
+                let table_meta_for_abort: Option<Arc<TableMeta>> = if is_dml {
+                    let table_name = match &plan {
+                        PhysicalPlan::Insert(n) => &n.table_name,
+                        PhysicalPlan::Update(n) => &n.table_name,
+                        PhysicalPlan::Delete(n) => &n.table_name,
+                        _ => unreachable!("is_dml guarantees a DML plan"),
+                    };
+                    database.table_manager.get_table(table_name).await.ok()
+                } else {
+                    None
+                };
+
                 let executor_start = if profiling {
                     Some(Instant::now())
                 } else {
                     None
                 };
-                let executor = match create_executor_from_plan(plan, database).await {
+                let executor = match create_executor_from_plan(plan, database, tx_id).await {
                     Ok(e) => e,
                     Err(e) => {
+                        if let (Some(tx), Some(tm)) = (tx, table_meta_for_abort) {
+                            let _ = database
+                                .transaction_manager
+                                .abort(tx, &database.buffer_pool, &tm)
+                                .await;
+                        }
                         return Response::Error {
                             message: e.to_string(),
-                        }
+                        };
                     }
                 };
                 if profiling {
@@ -232,6 +265,49 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
                 let response = execute_executor(executor).await;
                 if profiling {
                     record_time("executor_execution", exec_start.unwrap().elapsed());
+                }
+
+                // Commit or abort the DML transaction based on executor outcome.
+                if let Some(tx) = tx {
+                    let outcome = match &response {
+                        Response::Error { .. } => Err(()),
+                        _ => Ok(()),
+                    };
+                    match outcome {
+                        Ok(()) => {
+                            if let Err(commit_err) = database
+                                .transaction_manager
+                                .commit(tx, &database.buffer_pool)
+                                .await
+                            {
+                                if profiling {
+                                    print_timings(total_start.unwrap().elapsed());
+                                }
+                                return Response::Error {
+                                    message: format!("Commit failed: {}", commit_err),
+                                };
+                            }
+                        }
+                        Err(()) => {
+                            if let Some(tm) = table_meta_for_abort {
+                                if let Err(abort_err) = database
+                                    .transaction_manager
+                                    .abort(tx, &database.buffer_pool, &tm)
+                                    .await
+                                {
+                                    if profiling {
+                                        print_timings(total_start.unwrap().elapsed());
+                                    }
+                                    return Response::Error {
+                                        message: format!("Abort failed: {}", abort_err),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if profiling {
                     print_timings(total_start.unwrap().elapsed());
                 }
                 return response;
@@ -275,15 +351,20 @@ async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
 }
 
 /// Create executor from physical plan (recursive for Filter)
+///
+/// `tx_id` is `Some(real_tx_id)` for DML nodes (Insert/Update/Delete) and `None`
+/// for SELECT-side nodes (Scan/Filter/Join/Aggregate/...). Callers must wrap DML
+/// in a real `Transaction` from `TransactionManager::begin()`; see `execute_inner`.
 pub(crate) fn create_executor_from_plan(
     plan: PhysicalPlan,
     database: &Database,
+    tx_id: Option<u64>,
 ) -> CreateExecutorFuture<'_> {
     Box::pin(async move {
         match plan {
             PhysicalPlan::Filter(node) => {
                 // Recursively create input executor
-                let input = create_executor_from_plan(*node.input, database).await?;
+                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
                 Ok(Box::new(FilterExecutor::new(input, node.predicate))
                     as Box<dyn Executor + Send>)
             }
@@ -333,7 +414,7 @@ pub(crate) fn create_executor_from_plan(
                     database.buffer_pool.clone(),
                     database.transaction_manager.clone(),
                     node.values,
-                    0, // placeholder, will be set by execute_inner
+                    tx_id.expect("DML Insert requires a transaction id"),
                     Some(database.wal_buffer.clone()),
                 )) as Box<dyn Executor + Send>)
             }
@@ -347,7 +428,7 @@ pub(crate) fn create_executor_from_plan(
                     node.key.as_bytes().to_vec(),
                     node.column,
                     node.new_value,
-                    0, // placeholder, will be set by execute_inner
+                    tx_id.expect("DML Update requires a transaction id"),
                     Some(database.wal_buffer.clone()),
                 )) as Box<dyn Executor + Send>)
             }
@@ -358,9 +439,10 @@ pub(crate) fn create_executor_from_plan(
                 Ok(Box::new(DeleteExecutor::new(
                     index_manager,
                     database.buffer_pool.clone(),
+                    database.transaction_manager.clone(),
                     table_meta.name.clone(),
                     node.key.as_bytes().to_vec(),
-                    0, // placeholder, will be set by execute_inner
+                    tx_id.expect("DML Delete requires a transaction id"),
                     Some(database.wal_buffer.clone()),
                 )) as Box<dyn Executor + Send>)
             }
@@ -378,7 +460,7 @@ pub(crate) fn create_executor_from_plan(
                     table_name: _,
                     column_indices,
                 } = node;
-                let input_executor = create_executor_from_plan(*input, database).await?;
+                let input_executor = create_executor_from_plan(*input, database, tx_id).await?;
                 Ok(Box::new(AggregateExecutor::new(
                     input_executor,
                     group_by,
@@ -389,14 +471,14 @@ pub(crate) fn create_executor_from_plan(
             }
 
             PhysicalPlan::Having(node) => {
-                let input = create_executor_from_plan(*node.input, database).await?;
+                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
                 Ok(Box::new(HavingExecutor::new(input, node.predicate))
                     as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Sort(node) => {
                 // Recursively create input executor
-                let input = create_executor_from_plan(*node.input, database).await?;
+                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
                 Ok(
                     Box::new(SortExecutor::new(input, node.order_by, node.columns))
                         as Box<dyn Executor + Send>,
@@ -405,7 +487,7 @@ pub(crate) fn create_executor_from_plan(
 
             PhysicalPlan::Limit(node) => {
                 // Recursively create input executor
-                let input = create_executor_from_plan(*node.input, database).await?;
+                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
                 Ok(Box::new(LimitExecutor::new(input, node.limit, node.offset))
                     as Box<dyn Executor + Send>)
             }
@@ -418,10 +500,12 @@ pub(crate) fn create_executor_from_plan(
                     extract_column_indices(&join_node.right)?;
 
                 // Build left executor recursively
-                let left_executor = create_executor_from_plan(*join_node.left, database).await?;
+                let left_executor =
+                    create_executor_from_plan(*join_node.left, database, tx_id).await?;
 
                 // Build right executor recursively
-                let right_executor = create_executor_from_plan(*join_node.right, database).await?;
+                let right_executor =
+                    create_executor_from_plan(*join_node.right, database, tx_id).await?;
 
                 Ok(Box::new(JoinExecutor::new(JoinConfig {
                     left_executor,
@@ -450,8 +534,9 @@ pub(crate) fn create_executor_from_plan(
                 };
 
                 // Build left and right executors recursively
-                let left_executor = create_executor_from_plan(*node.left, database).await?;
-                let right_executor = create_executor_from_plan(*node.right, database).await?;
+                let left_executor = create_executor_from_plan(*node.left, database, tx_id).await?;
+                let right_executor =
+                    create_executor_from_plan(*node.right, database, tx_id).await?;
 
                 Ok(Box::new(SemiJoinExecutorV2::new(JoinRelatedConfig {
                     left: left_executor,
@@ -480,8 +565,9 @@ pub(crate) fn create_executor_from_plan(
                     None
                 };
                 // Build left and right executors recursively
-                let left_executor = create_executor_from_plan(*node.left, database).await?;
-                let right_executor = create_executor_from_plan(*node.right, database).await?;
+                let left_executor = create_executor_from_plan(*node.left, database, tx_id).await?;
+                let right_executor =
+                    create_executor_from_plan(*node.right, database, tx_id).await?;
 
                 Ok(Box::new(AntiJoinExecutor::new(JoinRelatedConfig {
                     left: left_executor,
@@ -498,7 +584,8 @@ pub(crate) fn create_executor_from_plan(
 
             PhysicalPlan::SubqueryEval(node) => {
                 let (outer_column_indices, _) = extract_column_indices(&node.input)?;
-                let input_executor = create_executor_from_plan(*node.input, database).await?;
+                let input_executor =
+                    create_executor_from_plan(*node.input, database, tx_id).await?;
                 Ok(Box::new(SubqueryEvalExecutor::new(
                     input_executor,
                     *node.subquery,
@@ -513,7 +600,7 @@ pub(crate) fn create_executor_from_plan(
             PhysicalPlan::DerivedScan(node) => {
                 // Materialize subquery results into memory
                 let mut subquery_executor =
-                    create_executor_from_plan(*node.subquery, database).await?;
+                    create_executor_from_plan(*node.subquery, database, tx_id).await?;
                 let mut rows = Vec::new();
                 loop {
                     match subquery_executor.next().await? {

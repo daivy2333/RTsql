@@ -94,11 +94,6 @@ impl Executor for UpdateExecutor {
         let mut buf = vec![0u8; size];
         serialize_tuple(&values, &self.schema, &mut buf)?;
 
-        // WAL: BeginTxn (implicit transaction per statement)
-        if let Some(wal) = &self.wal_buffer {
-            wal.append(WalRecord::BeginTxn { tx_id: self.tx_id }).await;
-        }
-
         // Step 5: Create new VersionHeader with next_version → old RowId
         let version_header = VersionHeader::new(self.tx_id, None).with_next_version(old_row_id);
 
@@ -113,7 +108,8 @@ impl Executor for UpdateExecutor {
         let old_page_id = PageId(old_row_id.page_id as u64);
         self.buffer_pool.clear_all_visible(old_page_id);
 
-        // WAL: Update + CommitTxn
+        // WAL: Update record only. BeginTxn/CommitTxn are written by
+        // TransactionManager::begin()/commit() (the single source of truth).
         if let Some(wal) = &self.wal_buffer {
             wal.append(WalRecord::Update {
                 tx_id: self.tx_id,
@@ -123,16 +119,6 @@ impl Executor for UpdateExecutor {
                 new_tuple: buf.clone(),
             })
             .await;
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            wal.append(WalRecord::CommitTxn {
-                tx_id: self.tx_id,
-                timestamp,
-            })
-            .await;
-            let _ = wal.append_commit_and_wait(self.tx_id).await;
         }
 
         // Step 6.1: Record version in tx_versions (M10)

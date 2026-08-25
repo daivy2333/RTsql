@@ -202,8 +202,12 @@ impl Executor for SemiJoinExecutorV2 {
                                         &param_values,
                                     );
                                     let mut right_exec =
-                                        crate::pipeline::create_executor_from_plan(cloned_plan, db)
-                                            .await?;
+                                        crate::pipeline::create_executor_from_plan(
+                                            cloned_plan,
+                                            db,
+                                            None,
+                                        )
+                                        .await?;
                                     let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
                                         HashMap::new();
                                     let mut has_rows = false;

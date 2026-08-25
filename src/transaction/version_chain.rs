@@ -54,7 +54,15 @@ impl VersionHeader {
     }
 
     pub fn commit(mut self, commit_tx_id: u64) -> Self {
-        self.commit_tx_id = commit_tx_id;
+        // Preserve the tombstone (DELETED_TX_ID) marker. DeleteExecutor
+        // marks the row as deleted BEFORE tx_manager.commit() runs, and
+        // commit() then propagates the real tx_id to all versions in
+        // tx_versions. Without this guard, commit() would silently
+        // overwrite the delete sentinel and DataScan would resurrect the
+        // row.
+        if self.commit_tx_id != DELETED_TX_ID {
+            self.commit_tx_id = commit_tx_id;
+        }
         self
     }
 
