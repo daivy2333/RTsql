@@ -31,7 +31,7 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
     let mut insert_executor = InsertExecutor::new(
         table_meta.clone(),
         buffer_pool.clone(),
-        tx_manager,
+        tx_manager.clone(),
         values,
         0,
         None,
@@ -55,6 +55,7 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
     let mut delete_executor = DeleteExecutor::new(
         index_manager.clone(),
         buffer_pool.clone(),
+        tx_manager.clone(),
         "test".to_string(),
         key_bytes.to_vec(),
         0,
@@ -238,6 +239,7 @@ async fn test_multiple_operations_sequence() -> Result<()> {
     let mut delete_executor = DeleteExecutor::new(
         index_manager.clone(),
         buffer_pool.clone(),
+        tx_manager.clone(),
         "test".to_string(),
         key_2,
         0,

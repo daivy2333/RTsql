@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-08-25（OpenSpec v1.6.0 初始化 + 旧体系迁移完成）
+> 最后更新：2026-08-25（MS06-T01 归档后增量刷新）
 > 同步状态：current
 
 ## 项目身份
@@ -30,7 +30,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 主要模块边界
 
 - `src/database.rs` — Database 协调器
-- `src/pipeline.rs` — SQL 执行管道入口
+- `src/pipeline.rs` — SQL 执行管道入口（含 DML 事务包裹，MS06-T01 落地）
 - `src/parser/` — SQL 解析 + PlanBuilder
 - `src/executor/` — 24 个执行器（Scan / DataScan / IndexScan / IndexScanAll / Filter / Join / Aggregate / Sort / Limit / SemiJoin / AntiJoin / SubqueryEval / Correlated / Insert / Update / Delete / CreateTable / DropTable / DerivedScan / Having / Predicate / ValueRef / Result 等）
 - `src/storage/` — BufferPool（DashMap + Miss Semaphore + Per-Page Loading Locks）、AsyncStorage、FileStorage、DataPage
@@ -38,7 +38,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - `src/storage/data/` — TableManager（data_page_head 链表）
 - `src/storage/page_format/` — SlottedPage（6B logical_id slot）
 - `src/storage/page_visibility.rs` — PageVisibilityInfo（页面级 MVCC 摘要）
-- `src/transaction/` — TransactionId（AtomicU64）、TransactionManager、Snapshot、VersionChain、RowLock
+- `src/transaction/` — TransactionId（AtomicU64）、TransactionManager（begin/commit/abort 唯一 WAL 源）、Snapshot、VersionChain（含 DELETED_TX_ID 墓碑守卫，MS06-T01）、RowLock
 - `src/wal/` — WalWriter / Reader / Buffer / Checkpoint / Recovery
 - `src/network/` — Server（Semaphore 并发限流）、PgProtocol（write_buf 批写 + TCP_NODELAY）、JsonProtocol
 
@@ -67,12 +67,12 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - **最新 revision**: 936ec0f797993f7b17b3307efa1577063cba929d
 - **M31 commits**: 6 commits ahead of origin
 - **最新 tag**: M11
-- **测试**: 481 tests pass, 0 failures（2026-06-06 M31 完成后统计）
-- **OpenSpec**: 13 specs validate PASS（2026-08-25 迁移后）
+- **测试**: 487 tests pass, 0 failures（2026-08-25 MS06-T01 完成后；含 6 个新 dml_tx_id_test）
+- **OpenSpec**: 6 capability specs validate PASS（decisions / dml-transaction-lifecycle / improvements / knowledge / project-model / references，2026-08-25 增量后）
 
 ## 同步状态
 
-- `current` — 文档与代码一致（M31 完成后状态保持）
+- `current` — 文档与代码一致（MS06-T01 归档后增量刷新）
 
 ## 权威文档
 
@@ -83,5 +83,6 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 参考: `openspec/specs/references/spec.md` (Rxx)
 - 改进: `openspec/specs/improvements/spec.md` (Ixx)
 - 任务与路线: `.claude/docs/tasks.md`
-- 变更: `openspec/changes/`
+- 变更: `openspec/changes/`（当前无活跃 change；归档目录含 MS06-T01 carrier）
 - Legacy migration carrier: `.claude/legacy/2026-08-25-openspec-init-migration/`
+- 新增能力 spec: `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）

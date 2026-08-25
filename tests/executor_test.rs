@@ -279,9 +279,11 @@ async fn test_delete_executor() -> Result<()> {
     let row_id = RowId::new(0, 1);
     index_manager.insert(&key, row_id).await.unwrap();
 
+    let tx_manager = Arc::new(TransactionManager::new());
     let mut executor = DeleteExecutor::new(
         index_manager.clone(),
         buffer_pool.clone(),
+        tx_manager,
         "test".to_string(),
         key.to_vec(),
         0,

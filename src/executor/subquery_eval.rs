@@ -56,9 +56,12 @@ impl SubqueryEvalExecutor {
     /// Returns Null if the subquery produces no rows.
     /// Returns an error if the subquery returns more than one row.
     async fn eval_subquery(&mut self) -> Result<Value> {
-        let mut executor =
-            crate::pipeline::create_executor_from_plan(self.subquery_plan.clone(), &self.database)
-                .await?;
+        let mut executor = crate::pipeline::create_executor_from_plan(
+            self.subquery_plan.clone(),
+            &self.database,
+            None,
+        )
+        .await?;
 
         let mut result_value: Option<Value> = None;
         let mut row_count = 0;
@@ -115,9 +118,12 @@ impl Executor for SubqueryEvalExecutor {
                         let cloned_plan = self.subquery_plan.clone();
                         let param_values = self.extract_param_values(&row);
                         crate::executor::inject_correlated_values(&cloned_plan, &param_values);
-                        let mut executor =
-                            crate::pipeline::create_executor_from_plan(cloned_plan, &self.database)
-                                .await?;
+                        let mut executor = crate::pipeline::create_executor_from_plan(
+                            cloned_plan,
+                            &self.database,
+                            None,
+                        )
+                        .await?;
                         let mut result_value: Option<Value> = None;
                         let mut row_count = 0;
                         while let Some(result) = executor.next().await? {

@@ -198,7 +198,7 @@ impl Executor for AntiJoinExecutor {
                                         );
                                         let mut right_exec =
                                             crate::pipeline::create_executor_from_plan(
-                                                plan, database,
+                                                plan, database, None,
                                             )
                                             .await?;
                                         let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
