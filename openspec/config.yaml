@@ -4,7 +4,7 @@ context: |
   Tech stack: Rust (latest stable), Tokio async runtime, sqlparser-rs, criterion.rs
   Project: RTsql — 异步协程驱动的高性能嵌入式关系型数据库
   Language: Rust 2021 edition
-  Testing: cargo test + criterion benchmarks (micro/concurrent/scale/sqlite_compare)
+  Testing: cargo test + criterion benchmarks (8 suites: micro/concurrent/scale/sqlite_compare/single/precise_compare/data_scan/visibility)
   Formatting: rustfmt + clippy
   所有产出物必须用简体中文撰写。
   技术术语如 API、WAL、MVCC、B-Tree 保持英文原样。
@@ -14,11 +14,14 @@ rules:
     - 包含回滚方案
     - 说明为什么做、做什么、不做什么
     - 标注影响范围
-    - 引用相关 ADR 编号
+    - 引用相关 M/D/K/R/I 编号
   specs:
-    - 使用 Given/When/Then 格式描述行为
-    - 每个 spec.md 包含版本号和最后更新日期
-    - 变更时使用 Delta Specs（ADDED/MODIFIED/REMOVED）
+    - 使用 Given/When/Then 或 WHEN/THEN 格式描述行为
+    - 跨模块约束写 project-model（Mxx）
+    - 长期选择写 decisions（Dxx）
+    - 已验证知识写 knowledge（Kxx）
+    - 索引元数据写 references（Rxx）
+    - 未承诺改进写 improvements（Ixx）
   design:
     - 复杂流程需包含序列图
     - 标注关键依赖关系
