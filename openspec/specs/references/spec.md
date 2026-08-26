@@ -181,3 +181,12 @@
 - **内容**: M21 页面级 MVCC 实施
 - **关联决策**: D11
 - **关联知识**: K08, K09, K10, K12, K13
+
+## R14: 2026-08-26-2026-08-25-ms06-t02-plancache-dashmap
+
+- **类型**: change-archive
+- **路径**: `openspec/changes/archive/2026-08-26-2026-08-25-ms06-t02-plancache-dashmap/`
+- **状态**: archived
+- **内容**: MS06-T02 PlanCache DashMap + SQL 规范化（`HashMap + &mut self` → `DashMap + &self`；`normalize_sql_key` 公开函数：ASCII 折叠 + 空白折叠 + trim + 单引号 toggle 状态机；`Database.plan_cache: Arc<Mutex<PlanCache>>` → `Arc<PlanCache>`；`tests/plan_cache_test.rs` 7 集成测试 + 10 单测；T0 基线 clippy 归零 + 36 处表外 mechanical 修复）
+- **关联能力 spec**: `plancache-key-normalization`（R1-R4）
+- **基线**: 504 tests pass（487 基线 + 10 单测 + 7 集成测试）

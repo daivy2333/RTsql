@@ -74,7 +74,7 @@ async fn test_recovery_classifies_committed_transactions() {
     let db_path = PathBuf::from(dir.path()).join("test");
     let (committed, aborted) = RecoveryManager::recover(&db_path).unwrap();
 
-    assert!(committed.len() > 0, "Should detect committed transactions");
+    assert!(!committed.is_empty(), "Should detect committed transactions");
     assert!(aborted.is_empty(), "No aborted transactions expected");
 }
 
@@ -117,7 +117,7 @@ async fn test_data_pages_survive_restart() {
     match resp2 {
         Response::QueryResult { rows } => {
             // At least the new insert should be visible
-            assert!(rows.len() >= 1, "Should see at least newly inserted row");
+            assert!(!rows.is_empty(), "Should see at least newly inserted row");
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }

@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use rtsql::storage::{AsyncStorage, BufferPool, FileStorage, Page, PageId, RowId};
-    use rtsql::transaction::Snapshot;
+    use rtsql::storage::{AsyncStorage, BufferPool, FileStorage, Page, PageId};
     use std::sync::Arc;
     use tempfile::NamedTempFile;
 
@@ -45,6 +44,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)] // test intent: compile-check trait impl shape, not construct it
     fn test_async_storage_trait_signature() {
         struct MockStorage;
         impl MockStorage {

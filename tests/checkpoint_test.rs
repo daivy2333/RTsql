@@ -50,7 +50,7 @@ async fn test_checkpoint_flow() {
     let manager = CheckpointManager::new(db_path, wal_writer.clone(), buffer_pool);
 
     // 执行 checkpoint
-    let lsn = manager.checkpoint().await.unwrap();
+    let _lsn = manager.checkpoint().await.unwrap();
 
     // 读位点验证
     let (checkpoint_lsn, _) = manager.read_checkpoint_site().unwrap().unwrap();

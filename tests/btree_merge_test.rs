@@ -449,7 +449,7 @@ async fn test_scan_all_after_merge() {
         assert!(btree.search(&make_key(299)).unwrap().is_some());
 
         for i in 0..300u32 {
-            if i >= 100 && i < 200 {
+            if (100..200).contains(&i) {
                 assert!(btree.search(&make_key(i)).unwrap().is_none());
             } else {
                 let result = btree.search(&make_key(i)).unwrap();

@@ -67,7 +67,7 @@ async fn cache_perf_measurement() {
     for _ in 0..100 {
         db.execute_sql("SELECT * FROM bench").await;
     }
-    let scan_us = start.elapsed().as_micros() / 100 as u128;
+    let scan_us = start.elapsed().as_micros() / 100;
     println!("  Full scan: {} µs/call", scan_us);
 
     std::mem::forget(dir);

@@ -11,7 +11,7 @@ use rtsql::storage::{
     read_tuple_from_data_page, BufferPool, FileStorage, Result, StorageError,
 };
 use rtsql::transaction::TransactionManager;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -702,7 +702,7 @@ async fn test_create_table_executor_success() -> Result<()> {
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
+        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
 
     let plan = PhysicalPlan::CreateTable(rtsql::executor::CreateTableNode {
@@ -742,7 +742,7 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
+        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
 
     // Create table first time (using storage::ColumnType)
@@ -793,7 +793,7 @@ async fn test_drop_table_executor_success() -> Result<()> {
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
+        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
 
     // Create table first
@@ -839,7 +839,7 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
+        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
 
     // Try to drop a non-existent table without IF EXISTS
@@ -876,7 +876,7 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(Mutex::new(rtsql::plan_cache::PlanCache::new())),
+        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
 
     // Drop a non-existent table with IF EXISTS - should succeed without error
@@ -900,7 +900,7 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
 async fn test_filter_executor_gt() -> Result<()> {
     use rtsql::executor::{ColumnExpression, ConstantExpression, ExpressionRef};
     use rtsql::executor::{ComparisonOp, ComparisonPredicate, FilterExecutor, PredicateRef};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
@@ -972,7 +972,7 @@ async fn test_filter_executor_and() -> Result<()> {
         ComparisonOp, ComparisonPredicate, FilterExecutor, LogicalOp, LogicalPredicate,
         PredicateRef,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
@@ -1059,7 +1059,7 @@ async fn test_filter_executor_and() -> Result<()> {
 async fn test_filter_executor_empty_result() -> Result<()> {
     use rtsql::executor::{ColumnExpression, ConstantExpression, ExpressionRef};
     use rtsql::executor::{ComparisonOp, ComparisonPredicate, FilterExecutor, PredicateRef};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
@@ -1125,7 +1125,6 @@ async fn test_filter_executor_empty_result() -> Result<()> {
 
 #[tokio::test]
 async fn test_index_scan_all_executor_basic() -> Result<()> {
-    use rtsql::storage::page_format::RowId;
     use rtsql::storage::write_tuple_to_data_page;
     use rtsql::transaction::VersionHeader;
 

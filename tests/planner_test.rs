@@ -229,7 +229,7 @@ fn test_build_drop_table() {
     match plan {
         PhysicalPlan::DropTable(node) => {
             assert_eq!(node.table_name, "users");
-            assert_eq!(node.if_exists, false);
+            assert!(!node.if_exists);
         }
         _ => panic!("Expected DropTable, got {:?}", plan),
     }
@@ -245,7 +245,7 @@ fn test_build_drop_table_if_exists() {
     match plan {
         PhysicalPlan::DropTable(node) => {
             assert_eq!(node.table_name, "users");
-            assert_eq!(node.if_exists, true);
+            assert!(node.if_exists);
         }
         _ => panic!("Expected DropTable, got {:?}", plan),
     }
@@ -391,7 +391,7 @@ fn test_parse_order_by_single_column_asc() {
         PhysicalPlan::Sort(node) => {
             assert_eq!(node.order_by.len(), 1);
             assert_eq!(node.order_by[0].column, "age");
-            assert_eq!(node.order_by[0].asc, true);
+            assert!(node.order_by[0].asc);
         }
         _ => panic!("Expected Sort plan"),
     }
@@ -414,9 +414,9 @@ fn test_parse_order_by_multi_column() {
         PhysicalPlan::Sort(node) => {
             assert_eq!(node.order_by.len(), 2);
             assert_eq!(node.order_by[0].column, "age");
-            assert_eq!(node.order_by[0].asc, false);
+            assert!(!node.order_by[0].asc);
             assert_eq!(node.order_by[1].column, "name");
-            assert_eq!(node.order_by[1].asc, true);
+            assert!(node.order_by[1].asc);
         }
         _ => panic!("Expected Sort plan"),
     }
@@ -480,7 +480,7 @@ fn test_parse_order_by_with_limit() {
             match *limit_node.input {
                 PhysicalPlan::Sort(sort_node) => {
                     assert_eq!(sort_node.order_by[0].column, "age");
-                    assert_eq!(sort_node.order_by[0].asc, false);
+                    assert!(!sort_node.order_by[0].asc);
                 }
                 _ => panic!("Expected Sort inside Limit"),
             }
