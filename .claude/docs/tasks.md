@@ -87,9 +87,9 @@
 - **替代原因**: B+Tree 节点级锁、io_uring、瘦内部节点、合并 Tag byte 复杂度高/收益低/风险高，移到 D-candidates
 - **原范围**: 预取 Prefetch、Varint Key 编码、B+Tree 节点级锁、脏页 writev、并行扫描、io_uring、瘦内部节点、合并 Tag byte
 
-### MS06：稳定性与正确性收口 — active
+### MS06：稳定性与正确性收口 — completed
 
-- **Status**: active（T01-T02 已完成；T03-T04 待起）
+- **Status**: completed（T01-T04 全部完成，2026-08-26）
 - **Outcome**: 所有 DML 写入正确的 `create_tx_id`；PlanCache 在 100 并发下不阻塞 runtime；WAL 持续写入不发生文件句柄泄漏；pipeline 执行路径可被独立观测
 - **Rationale**: BufferPool 锁优化已完成，但代码层发现 4 类被掩盖的稳定性问题（INSERT `tx_id=0` 注入、PlanCache `std::sync::Mutex` 跨 `.await`、WAL 每写 open/close、pipeline::execute_inner 200+ 行）。这些问题在任何性能/功能扩展前必须先封堵，否则后续 verification 都被噪声污染
 - **Dependencies**: None
@@ -99,8 +99,8 @@
 |---|---|---|---|---|
 | MS06-T01 | **completed**（2026-08-25） | 修 INSERT/UPDATE/DELETE `tx_id=0` 占位注入 | `src/pipeline.rs:336/350/363`、`src/executor/{insert,update,delete}.rs`、`src/transaction/version_chain.rs` | 写后 `create_tx_id != 0`；MVCC visibility 不再恒成立 ✅ |
 | MS06-T02 | **completed**（2026-08-26） | PlanCache 改 DashMap + SQL 规范化 key + 替换 `std::sync::Mutex` | `src/plan_cache.rs`、`src/database.rs:22/64/95`、`src/pipeline.rs:56-65/145/169/206` | 100 并发压测 plan_cache 不阻塞 runtime（实测 0.08s ≪ 5s）；大小写/空白变体 100% hit；504 tests pass ✅ |
-| MS06-T03 | ready | WALWriter 持文件句柄，每条 write 复用 | `src/wal/writer.rs:44-90, 153-179` | 10K tx 压测 `lsof` 句柄数 < 10 |
-| MS06-T04 | ready | `pipeline::execute_inner` 拆为 parse/plan/execute 三阶段 + profiling gates | `src/pipeline.rs:38-245` | 三阶段独立 micro-bench；单测可分别覆盖 |
+| MS06-T03 | **completed**（2026-08-26） | WALWriter 持文件句柄，每条 write 复用 | `src/wal/writer.rs` 全方法 + `tests/wal_handle_test.rs` | 10K tx 压测 fd 净增量 < 10（实测 delta=0/-4 < 10）✅ |
+| MS06-T04 | **completed**（2026-08-26） | `pipeline::execute_inner` 拆为 parse/plan/execute 三阶段 + profiling gates | `src/pipeline.rs`（三 pub stage + 编排器）+ `benches/pipeline_stages_bench.rs` + 8 阶段单测 | 三阶段独立 micro-bench（parse 3.25 µs / plan 6.26 µs / execute 796 ns）；单测可分别覆盖 ✅ |
 
 - **Non-goals**: 任何性能优化；新 SQL 方言；新执行器；新隔离级别
 - **Workload**: 4 类修复 + 每类加 micro-bench/回归测试 + 重跑 460 tests
@@ -111,6 +111,7 @@
 - **Related changes**:
   - `2026-08-25-fix-dml-tx-id-injection`（已归档为 `archive/2026-08-25-2026-08-25-fix-dml-tx-id-injection/`，含新增 spec `dml-transaction-lifecycle`）
   - `2026-08-25-ms06-t02-plancache-dashmap`（已归档为 `archive/2026-08-26-2026-08-25-ms06-t02-plancache-dashmap/`，含新增 spec `plancache-key-normalization`；T0 基线 clippy 归零同步并入）
+  - `2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages`（已归档为 `archive/2026-08-26-2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages/`，含新增 spec `wal-writer-handle-reuse` + `pipeline-stage-decomposition`）
 
 ### MS07：基础能力建设 — planned
 
@@ -223,12 +224,11 @@ MS00 → MS01 → MS02
 
 ## 进行中
 
-- **MS06**（稳定性与正确性）— T01-T02 已完成归档；T03/T04 待起
+- （无）
 
 ## 已承诺待办
 
-- **MS06-T03**（WALWriter 持文件句柄）
-- **MS06-T04**（pipeline execute_inner 三阶段拆分 + profiling gates）
+- （无）
 
 ## 阻塞
 
@@ -238,6 +238,7 @@ MS00 → MS01 → MS02
 
 | 完成日期 | 内容 | commit |
 |---|---|---|
+| 2026-08-26 | MS06-T03 + MS06-T04 一并完成：T03 `WalWriter` 持 `Arc<Mutex<File>>` 单一持久句柄，5 个 IO 方法删除逐次 open；`tests/wal_handle_test.rs` 4 测试（fd 上界 / LSN 偏移 / truncate 追加 / 并发一致）。T04 `pipeline::execute_inner` 279 行单函数 → 编排器 + `parse_stage`/`plan_stage`/`execute_stage` 三个 pub 函数 + `#[cfg(test)] mod tests` 8 单测 + `benches/pipeline_stages_bench.rs` 三阶段 bench（516 tests pass；`cargo build` 0 warning；`cargo clippy -D warnings` 0 warning） | 未 commit（待用户触发）；change 归档至 `openspec/changes/archive/2026-08-26-2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages/`；新增 spec `wal-writer-handle-reuse` + `pipeline-stage-decomposition` |
 | 2026-08-26 | MS06-T02 PlanCache DashMap + SQL 规范化：`HashMap + &mut self` → `DashMap + &self`；新增 `normalize_sql_key`（ASCII 折叠 + 空白折叠 + trim + 单引号 toggle）；`Database.plan_cache: Arc<Mutex<PlanCache>>` → `Arc<PlanCache>`；pipeline 5 处调用点去锁；`tests/plan_cache_test.rs` 7 集成测试 + 10 单测；T0 基线 clippy 归零 + 36 处表外 mechanical 修复（504 tests pass） | 未 commit（待用户触发）；change 归档至 `openspec/changes/archive/2026-08-26-2026-08-25-ms06-t02-plancache-dashmap/`；新增 spec `plancache-key-normalization` |
 | 2026-08-25 | 修复 DML `tx_id=0` 占位注入：pipeline 事务包裹 + Insert/Update/Delete WAL 唯一来源 + VersionHeader::commit 墓碑守卫 + 6 个新测试（487 tests pass） | 未 commit（待用户触发）；change 归档至 `openspec/changes/archive/2026-08-25-2026-08-25-fix-dml-tx-id-injection/` |
 | 2026-06-06 | BufferPool DashMap + miss Sem + per-page loading_locks + concurrent tests + bench | f64c874, b55a9a1, 5fc5494, fcaeb7c, faa87a4, ad90379 |

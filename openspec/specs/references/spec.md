@@ -190,3 +190,16 @@
 - **内容**: MS06-T02 PlanCache DashMap + SQL 规范化（`HashMap + &mut self` → `DashMap + &self`；`normalize_sql_key` 公开函数：ASCII 折叠 + 空白折叠 + trim + 单引号 toggle 状态机；`Database.plan_cache: Arc<Mutex<PlanCache>>` → `Arc<PlanCache>`；`tests/plan_cache_test.rs` 7 集成测试 + 10 单测；T0 基线 clippy 归零 + 36 处表外 mechanical 修复）
 - **关联能力 spec**: `plancache-key-normalization`（R1-R4）
 - **基线**: 504 tests pass（487 基线 + 10 单测 + 7 集成测试）
+
+## R15: 2026-08-26-2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages
+
+- **类型**: change-archive
+- **路径**: `openspec/changes/archive/2026-08-26-2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages/`
+- **状态**: archived
+- **内容**: MS06-T03 + MS06-T04 一并实施
+  - **T03 (WAL 句柄复用)**: `WalWriter` 持 `Arc<std::sync::Mutex<std::fs::File>>` 单一持久句柄；5 个 IO 方法（`write_record` / `fsync` / `truncate_to` / `get_current_lsn` / `write_batch`）全部删除逐次 `OpenOptions::open`，改为 clone Arc → `spawn_blocking` → lock 内完成；错误语义与 LSN 文件位置语义保持；`tests/wal_handle_test.rs` 新增 4 测试（10K tx fd 净增量 < 10、LSN 偏移、truncate 后同句柄追加、4 任务并发一致）
+  - **T04 (Pipeline 三阶段拆分)**: `pipeline::execute_inner` 279 行单函数 → 编排器 + `pub async fn parse_stage` / `pub async fn plan_stage` / `pub async fn execute_stage`；cache-hit 早退重复块删除；profiling 三段顶层计时（parse/plan/execute）替代旧 `parse_and_plan` 合并计时，子指标 `table_metadata_lookup` / `executor_creation` / `executor_execution` 由 `profiling: bool` 守卫；`#[cfg(test)] mod tests` 8 阶段单测；`benches/pipeline_stages_bench.rs` 三阶段独立 criterion bench
+- **关联能力 spec**:
+  - `wal-writer-handle-reuse`（R1-R4：句柄复用 / 错误语义 / LSN 语义 / fd 上界可验证）
+  - `pipeline-stage-decomposition`（R1-R8：parse 终止 / plan 终止 / execute 终止 / cache-hit 跳过 / DML 事务包裹 / DDL 缓存失效 / 阶段级可测 / 三段顶层计时 / 独立 bench）
+- **基线**: 516 tests pass（504 基线 + wal_handle 4 + pipeline 8 阶段单测）
