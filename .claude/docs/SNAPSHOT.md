@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-08-26（MS07-T01 提交并增量刷新；commit `3984b26`）
+> 最后更新：2026-08-26（MS07-T01 提交并增量刷新；commit `4307a0e`）
 > 同步状态：current
 
 ## 项目身份
@@ -65,15 +65,15 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **最新 revision**: 3984b26（HEAD = MS07-T01 commit；领先 origin 3 commits）
-- **ahead of origin**: 3 commits（7d37827 MS06-T03+T04 → 8884e0b MS07-T01 → 本地 f392c73 之上 1 个 `repo(_)`）
+- **最新 revision**: 4307a0e（HEAD = MS07-T01 commit；领先 origin 3 commits）
+- **ahead of origin**: 3 commits（7d37827 MS06-T03+T04 → 4307a0e MS07-T01）
 - **最新 tag**: M11
 - **测试**: 534 tests pass, 0 failures（2026-08-26 MS07-T01 提交后；含 10 个新 catalog 单元测试 + 8 个新 schema persistence 集成测试；baseline 516 + 18 新增 = 534）
 - **OpenSpec**: 10 capability specs validate PASS（decisions / dml-transaction-lifecycle / improvements / knowledge / pipeline-stage-decomposition / plancache-key-normalization / project-model / references / schema-persistence / wal-writer-handle-reuse，2026-08-26 MS07-T01 提交后）
 
 ## 同步状态
 
-- `current` — 文档与代码一致（MS07-T01 提交后增量刷新；commit `3984b26`）
+- `current` — 文档与代码一致（MS07-T01 提交后增量刷新；commit `4307a0e`）
 
 ## 权威文档
 
