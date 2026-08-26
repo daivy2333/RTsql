@@ -119,7 +119,12 @@ async fn test_truncate_then_append_same_handle() {
     // 写 3 条，记录各条 LSN
     let mut lsns = Vec::new();
     for i in 0..3u64 {
-        lsns.push(writer.write_record(mk_insert(i + 1, (i as u8) + 1, 16)).await.unwrap());
+        lsns.push(
+            writer
+                .write_record(mk_insert(i + 1, (i as u8) + 1, 16))
+                .await
+                .unwrap(),
+        );
     }
     assert_eq!(lsns[0], 0);
 
@@ -143,7 +148,11 @@ async fn test_truncate_then_append_same_handle() {
     // 读回验证：恰好 3 条完整记录且无解析错误（第 1、2 条 + 新追加的第 4 条）
     let mut reader = WalReader::open(&wal_path).unwrap();
     let records = reader.read_all().unwrap();
-    assert_eq!(records.len(), 3, "expected exactly 3 valid records after truncate+append");
+    assert_eq!(
+        records.len(),
+        3,
+        "expected exactly 3 valid records after truncate+append"
+    );
 }
 
 #[tokio::test]

@@ -156,8 +156,8 @@ mod tests {
     async fn setup() -> (Arc<BufferPool>, Arc<TableMeta>, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-        let pool = Arc::new(BufferPool::new(10, storage).unwrap());
-        let tm = TableManager::new(pool.clone());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool.clone(), storage).await.unwrap();
         tm.create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
             .await
             .unwrap();

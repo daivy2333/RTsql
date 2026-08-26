@@ -23,6 +23,11 @@ pub struct IndexManager {
 }
 
 impl IndexManager {
+    /// Get the root page-id of this BTree (zero if uninitialized).
+    pub fn root_page_id(&self) -> PageId {
+        PageId(self.root_page_id.load(Ordering::Acquire))
+    }
+
     pub fn new(buffer_pool: Arc<BufferPool>) -> Result<Self> {
         let sync_loader = Arc::new(SyncPageLoader::new(buffer_pool.clone()));
         let async_loader = AsyncPageLoader::new(buffer_pool.clone());
@@ -33,6 +38,22 @@ impl IndexManager {
 
         Ok(Self {
             root_page_id: AtomicU64::new(root_page_id),
+            sync_loader,
+            async_loader,
+            row_to_key: RwLock::new(HashMap::new()),
+        })
+    }
+
+    /// MS07-T01: bind an existing BTree root page without allocating a new
+    /// one. Used by `Catalog::recover` to reattach `IndexManager` instances
+    /// to index roots that were allocated in a previous process and are
+    /// recorded in the `__tables` SlottedPage.
+    pub fn from_root(buffer_pool: Arc<BufferPool>, root_page_id: PageId) -> Result<Self> {
+        let sync_loader = Arc::new(SyncPageLoader::new(buffer_pool.clone()));
+        let async_loader = AsyncPageLoader::new(buffer_pool.clone());
+
+        Ok(Self {
+            root_page_id: AtomicU64::new(root_page_id.0),
             sync_loader,
             async_loader,
             row_to_key: RwLock::new(HashMap::new()),

@@ -1,6 +1,7 @@
 mod async_storage;
 pub mod btree;
 mod buffer_pool;
+pub mod catalog;
 pub mod data;
 mod data_page;
 mod error;
@@ -16,6 +17,10 @@ pub use btree::{
     BTree, IndexManager, InternalNode, LeafNode, Node, SyncPageLoader, INTERNAL_NODE, LEAF_NODE,
 };
 pub use buffer_pool::BufferPool;
+pub use catalog::{
+    Catalog, CatalogColumnRow, CatalogRow, COLUMNS_PAGE_ID, COLUMNS_SYSTEM_NAME, TABLES_PAGE_ID,
+    TABLES_SYSTEM_NAME,
+};
 pub use data::{TableManager, TableMeta};
 pub use data_page::{
     delete_tuple_from_data_page, read_tuple_from_data_page, update_version_header_in_data_page,

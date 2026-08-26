@@ -26,8 +26,12 @@ impl Database {
     pub async fn open(path: &Path) -> Result<Self> {
         // 1. Initialize storage
         let storage: Arc<dyn crate::storage::AsyncStorage> = Arc::new(FileStorage::open(path)?);
-        let buffer_pool = Arc::new(BufferPool::new(100, storage)?);
-        let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+        let buffer_pool = Arc::new(BufferPool::new(100, storage.clone())?);
+        // MS07-T01: TableManager is async + takes storage. It bootstraps
+        // or opens the catalog, then `open_or_init` rebuilds the in-memory
+        // cache from the catalog for an existing file.
+        let table_manager = TableManager::new(buffer_pool.clone(), storage).await?;
+        table_manager.open_or_init().await?;
         let transaction_manager = Arc::new(TransactionManager::new());
 
         // 2. Initialize WAL
@@ -93,5 +97,15 @@ impl Database {
     /// Get plan cache size (for testing)
     pub fn plan_cache_len(&self) -> usize {
         self.plan_cache.len()
+    }
+
+    /// Flush all dirty buffer-pool pages and the WAL to disk.
+    ///
+    /// MS07-T01: callers that drop the `Database` and immediately re-open
+    /// the file must call `close()` first, otherwise the in-memory
+    /// catalog pages (or any other dirty pages) never reach the on-disk
+    /// file and the re-opened database sees an empty schema.
+    pub async fn close(&self) -> Result<()> {
+        self.buffer_pool.flush_all().await
     }
 }

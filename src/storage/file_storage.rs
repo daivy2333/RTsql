@@ -126,4 +126,8 @@ impl AsyncStorage for FileStorage {
         })
         .await?
     }
+
+    fn page_count(&self) -> u64 {
+        self.file_len.load(Ordering::SeqCst)
+    }
 }

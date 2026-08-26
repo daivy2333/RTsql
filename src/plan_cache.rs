@@ -146,10 +146,7 @@ mod tests {
 
     #[test]
     fn normalize_whitespace_collapse() {
-        assert_eq!(
-            normalize_sql_key("SELECT   *\nFROM\t t"),
-            "select * from t"
-        );
+        assert_eq!(normalize_sql_key("SELECT   *\nFROM\t t"), "select * from t");
     }
 
     #[test]

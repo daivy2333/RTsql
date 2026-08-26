@@ -276,7 +276,10 @@ mod tests {
 
     /// Create a test table for abort tests
     async fn create_test_table(buffer_pool: Arc<BufferPool>) -> Arc<TableMeta> {
-        let table_manager = TableManager::new(buffer_pool.clone());
+        let storage = buffer_pool.storage().clone();
+        let table_manager = TableManager::new(buffer_pool.clone(), storage)
+            .await
+            .unwrap();
         table_manager
             .create_table(
                 "test_table",

@@ -26,9 +26,11 @@ use tempfile::tempdir;
 async fn test_gc_removes_old_versions() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -168,9 +170,11 @@ async fn test_gc_removes_old_versions() -> Result<()> {
 async fn test_gc_preserves_uncommitted_versions() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -263,9 +267,11 @@ async fn test_gc_preserves_uncommitted_versions() -> Result<()> {
 async fn test_gc_multiple_keys() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;

@@ -27,9 +27,11 @@ use tempfile::tempdir;
 async fn test_version_chain_traversal() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -240,9 +242,11 @@ async fn test_version_chain_traversal() -> Result<()> {
 async fn test_version_chain_skips_invisible() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -342,9 +346,11 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
 async fn test_all_versions_invisible() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;

@@ -3,17 +3,19 @@ use rtsql::storage::{BufferPool, FileStorage, TableManager};
 use std::sync::Arc;
 use tempfile::tempdir;
 
-fn setup() -> (Arc<TableManager>, Arc<BufferPool>, tempfile::TempDir) {
+async fn setup() -> (Arc<TableManager>, Arc<BufferPool>, tempfile::TempDir) {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
-    let table_mgr = Arc::new(TableManager::new(buffer_pool.clone()));
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     (table_mgr, buffer_pool, dir)
 }
 
 #[tokio::test]
 async fn create_and_get_table() {
-    let (table_mgr, _bp, _dir) = setup();
+    let (table_mgr, _bp, _dir) = setup().await;
 
     table_mgr
         .create_table(
@@ -37,7 +39,7 @@ async fn create_and_get_table() {
 
 #[tokio::test]
 async fn duplicate_table_error() {
-    let (table_mgr, _bp, _dir) = setup();
+    let (table_mgr, _bp, _dir) = setup().await;
 
     table_mgr
         .create_table("users", vec![("id".to_string(), ColumnType::Int)], "id")
@@ -52,7 +54,7 @@ async fn duplicate_table_error() {
 
 #[tokio::test]
 async fn table_not_found() {
-    let (table_mgr, _bp, _dir) = setup();
+    let (table_mgr, _bp, _dir) = setup().await;
 
     let result = table_mgr.get_table("nonexistent").await;
     assert!(result.is_err());
@@ -60,7 +62,7 @@ async fn table_not_found() {
 
 #[tokio::test]
 async fn create_table_allocates_data_page() {
-    let (table_mgr, bp, _dir) = setup();
+    let (table_mgr, bp, _dir) = setup().await;
 
     table_mgr
         .create_table("users", vec![("id".to_string(), ColumnType::Int)], "id")
@@ -76,7 +78,7 @@ async fn create_table_allocates_data_page() {
 
 #[tokio::test]
 async fn pk_column_validation() {
-    let (table_mgr, _bp, _dir) = setup();
+    let (table_mgr, _bp, _dir) = setup().await;
 
     table_mgr
         .create_table(
@@ -107,7 +109,7 @@ async fn pk_column_validation() {
 
 #[tokio::test]
 async fn table_exists_check() {
-    let (table_mgr, _bp, _dir) = setup();
+    let (table_mgr, _bp, _dir) = setup().await;
 
     assert!(!table_mgr.table_exists("users"));
 

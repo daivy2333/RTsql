@@ -15,9 +15,11 @@ use tempfile::tempdir;
 async fn test_full_flow_insert_find_delete() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -85,9 +87,11 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
 async fn test_insert_then_index_scan() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -146,9 +150,11 @@ async fn test_insert_update_scan_flow() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -198,9 +204,11 @@ async fn test_insert_update_scan_flow() -> Result<()> {
 async fn test_multiple_operations_sequence() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;

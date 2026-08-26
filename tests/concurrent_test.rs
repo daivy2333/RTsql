@@ -14,12 +14,14 @@ use tempfile::tempdir;
 fn create_test_buffer_pool() -> Arc<BufferPool> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    Arc::new(BufferPool::new(10, storage).unwrap())
+    Arc::new(BufferPool::new(10, storage.clone()).unwrap())
 }
 
 /// Create a test table for abort tests
 async fn create_test_table(buffer_pool: Arc<BufferPool>) -> Arc<rtsql::storage::TableMeta> {
-    let table_manager = TableManager::new(buffer_pool.clone());
+    let table_manager = TableManager::new(buffer_pool.clone(), buffer_pool.storage().clone())
+        .await
+        .unwrap();
     table_manager
         .create_table(
             "test_table",
@@ -213,6 +215,9 @@ impl AsyncStorage for CountingStorage {
     }
     fn page_size(&self) -> usize {
         self.inner.page_size()
+    }
+    fn page_count(&self) -> u64 {
+        self.inner.page_count()
     }
 }
 
