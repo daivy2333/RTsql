@@ -203,3 +203,50 @@
   - `wal-writer-handle-reuse`（R1-R4：句柄复用 / 错误语义 / LSN 语义 / fd 上界可验证）
   - `pipeline-stage-decomposition`（R1-R8：parse 终止 / plan 终止 / execute 终止 / cache-hit 跳过 / DML 事务包裹 / DDL 缓存失效 / 阶段级可测 / 三段顶层计时 / 独立 bench）
 - **基线**: 516 tests pass（504 基线 + wal_handle 4 + pipeline 8 阶段单测）
+
+## R16: 2026-08-26-2026-08-26-ms07-t01-schema-persistence
+
+- **类型**: change-archive
+- **路径**: `openspec/changes/archive/2026-08-26-2026-08-26-ms07-t01-schema-persistence/`
+- **状态**: archived
+- **关联里程碑**: MS07-T01（基础能力建设 / 系统表 `__tables` / `__columns` + Schema 页；最大单点）
+- **Plan Review**: `accepted`（openspec-plan / 2026-08-26 18:58；RTM A1–A10 全部满足；11 项偏差 0 阻塞）
+- **内容**:
+  - 新增 `src/storage/catalog.rs`（~908 行）— `Catalog` 结构 + `bootstrap` / `open` / `insert_table` / `delete_table` / `scan_tables` / `scan_columns` / `update_table_tail` 7 方法 + 二进制行序列化 / 反序列化 + 链式 SlottedPage（`next_page_id` header 偏移 5..9） + 10 单元测试
+  - `src/storage/btree/index_manager.rs` — 新增 `pub fn root_page_id()` 访问器 + `pub fn from_root(buffer_pool, root_page_id)` 路径（直接 `AtomicU64::new(root_page_id.0)`，不调 `BTree::new`）
+  - `src/storage/data/table_manager.rs`（重写 ~345 行）— `new(buffer_pool, storage) -> Result<Arc<Self>>` async；`catalog: Arc<Catalog>` 字段 + `catalog()` 访问器 + `open_or_init()` 重建方法；`create_table` 末尾调 `catalog.insert_table`（失败时回滚 in-memory） + 保留名检查（`__tables` / `__columns` → `ReservedTableName`）；`drop_table` 同；新增 `write_tuple` 跨页同步 `data_page_tail`
+  - `src/database.rs` — `TableManager::new(buffer_pool, storage).await?` + `open_or_init().await?`；新增 `pub async fn close()` 调 `buffer_pool.flush_all()`（schema 持久化必须显式落盘）
+  - `src/executor/insert.rs` — `table_manager: Option<Arc<TableManager>>` + `with_table_manager(...)`；新路径走 `tm.write_tuple`，旧测试走 `write_tuple_to_data_page` fallback
+  - `src/storage/error.rs` — 新增 `StorageError::ReservedTableName(String)` 变体
+  - `src/storage/async_storage.rs` — 新增 `fn page_count(&self) -> u64` 方法（`TableManager::new` 据此分支 bootstrap/open）
+  - `src/storage/page_format/tuple.rs` — `ColumnType` 加 `#[derive(Eq)]`
+  - `src/storage/{mod,file_storage,data_page}.rs` — 适配签名
+  - `src/transaction/manager.rs` — 适配签名
+  - `src/{plan_cache.rs}` — 适配签名
+  - `tests/table_manager_test.rs` — 6 个测试 `setup()` 加 `storage` + `.await`（API 兼容）
+  - `tests/schema_persistence_test.rs`（新增 237 行 / 8 测试）— `test_create_table_writes_to_tables_page0` / `test_restart_recovers_table` / `test_restart_dml_works` / `test_drop_table_removes_from_catalog` / `test_restart_after_drop_table_gone` / `test_index_root_persists_across_restart` / `test_tables_is_reserved` / `test_data_page_tail_persists`
+  - 14 个其他 test 文件批量改 `TableManager::new` 签名（plan_exec / executor / gc / mvcc_* / version_chain / concurrent / join / wal_* / btree_test / index_manager_test / pg_messages_test / plan_cache_test 等）
+- **关联能力 spec**:
+  - `schema-persistence`（7 个 Requirement / 14 个 Scenario）
+    - R1: 系统表持久化 schema（New db bootstrap / Restart preserves DML / drop_table removes & persists）
+    - R2: IndexManager::from_root path（from_root binds / from_root does not allocate）
+    - R3: Reserved system table names（CREATE TABLE __tables rejected / DROP TABLE __tables rejected）
+    - R4: data_page_tail persistence（Cross-page INSERT persists tail）
+    - R5: page 0 / page 1 reservation（Fresh db allocates / Existing db recognizes）
+    - R6: Catalog operations under write lock（Concurrent CREATE TABLE serialized / Catalog write failure leaves HashMap consistent）
+    - R7: System tables bypass MVCC and WAL（Reads independent of transaction / DDL no WAL records）
+- **基线**: 534 tests pass（516 基线 + 10 catalog 单测 + 8 schema 集成测试）
+- **关键偏差**（已记录于 Act Response，0 阻塞）:
+  - `InsertExecutor` `Option<Arc<TableManager>>` + fallback（~40 处旧调用零修改通过）
+  - `update_table_tail` 用 append+delete 而非 in-place（SlottedPage 无 in-place API）
+  - `Database::close()` 新增（restart 测试必需）
+  - `test_data_page_tail_persists` 200 行直写替代 300 SQL INSERT（隔离 WAL buffer 满干扰）
+  - `AsyncStorage::page_count` 新增 trait 方法（bootstrap/open 分支必需）
+- **遗留 Minor**（划归后续 change）:
+  - K05 recovery 静默吞错（`src/wal/recovery.rs:146-148/162-165/174-177`）— 下一 change 修复
+  - MS07-T02 drop_table 物理页释放 — 独立 change
+  - R-5：`IndexManager::from_root` 不验证 page 内容 — MS07-T02 处理
+  - R-4：SQL parser 层保留名拦截未做（`TableManager::create_table` 入口已覆盖）
+  - `tests/recovery_e2e_test.rs::test_data_pages_survive_restart` workaround 可去掉 — 随 K05 修复
+  - `rtsql.db` / `:memory:.wal` 旧文件不向后兼容 — pre-release 阶段可接受
+- **Persisted Evidence**: none（Plan 阶段声明；6 项验证命令均低成本可重跑；本审计已新鲜重跑）

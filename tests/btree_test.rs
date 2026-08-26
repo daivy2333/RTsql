@@ -12,7 +12,7 @@ use rtsql::storage::{
 fn create_test_btree() -> Arc<BufferPool> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    Arc::new(BufferPool::new(10, storage).unwrap())
+    Arc::new(BufferPool::new(10, storage.clone()).unwrap())
 }
 
 #[tokio::test]
@@ -226,7 +226,7 @@ async fn test_btree_persists_changes_to_disk() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
     let storage = Arc::new(FileStorage::open(&db_path).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
     let buffer_pool_clone1 = buffer_pool.clone();
     let _buffer_pool_clone2 = buffer_pool.clone();
 

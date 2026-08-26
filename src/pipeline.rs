@@ -93,11 +93,7 @@ pub async fn plan_stage(
 /// - 其余（Query 路径）：`create_executor(None) → execute`
 ///
 /// `profiling: true` 时，`executor_creation` 与 `executor_execution` 子指标在该阶段内记录。
-pub async fn execute_stage(
-    database: &Database,
-    plan: PhysicalPlan,
-    profiling: bool,
-) -> Response {
+pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: bool) -> Response {
     match &plan {
         PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
             let executor: Box<dyn Executor + Send> = match &plan {
@@ -410,8 +406,9 @@ pub(crate) fn create_executor_from_plan(
 
             PhysicalPlan::Insert(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
-                Ok(Box::new(InsertExecutor::new(
+                Ok(Box::new(InsertExecutor::with_table_manager(
                     table_meta,
+                    Some(database.table_manager.clone()),
                     database.buffer_pool.clone(),
                     database.transaction_manager.clone(),
                     node.values,
@@ -961,7 +958,9 @@ mod tests {
         let err = parse_stage("").await.expect_err("empty should fail");
         assert_eq!(err, "Empty SQL");
 
-        let err_ws = parse_stage("   \n\t  ").await.expect_err("whitespace should fail");
+        let err_ws = parse_stage("   \n\t  ")
+            .await
+            .expect_err("whitespace should fail");
         assert_eq!(err_ws, "Empty SQL");
     }
 
@@ -969,10 +968,8 @@ mod tests {
 
     #[tokio::test]
     async fn plan_stage_select_on_known_table_yields_scan_plan() {
-        let (db, _dir) = open_db_with_table(
-            "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)",
-        )
-        .await;
+        let (db, _dir) =
+            open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
         let stmts = parse_stage("SELECT * FROM t").await.unwrap();
         let stmt = stmts.first().unwrap();
         let plan = plan_stage(&db, "SELECT * FROM t", stmt, false)
@@ -981,10 +978,7 @@ mod tests {
         // SELECT on a simple table is built as either Scan or DataScan depending
         // on planner routing — both are valid "scan-class" plans.
         assert!(
-            matches!(
-                plan,
-                PhysicalPlan::Scan(_) | PhysicalPlan::DataScan(_)
-            ),
+            matches!(plan, PhysicalPlan::Scan(_) | PhysicalPlan::DataScan(_)),
             "expected Scan / DataScan plan, got: {:?}",
             std::mem::discriminant(&plan)
         );
@@ -992,10 +986,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_stage_unknown_table_returns_not_found_error() {
-        let (db, _dir) = open_db_with_table(
-            "CREATE TABLE t (id INT PRIMARY KEY)",
-        )
-        .await;
+        let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY)").await;
         let stmts = parse_stage("SELECT * FROM missing").await.unwrap();
         let stmt = stmts.first().unwrap();
         let err = plan_stage(&db, "SELECT * FROM missing", stmt, false)
@@ -1010,10 +1001,8 @@ mod tests {
 
     #[tokio::test]
     async fn plan_stage_select_writes_to_cache_but_dml_does_not() {
-        let (db, _dir) = open_db_with_table(
-            "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)",
-        )
-        .await;
+        let (db, _dir) =
+            open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
         let select_sql = "SELECT * FROM t";
         let stmts = parse_stage(select_sql).await.unwrap();
         let stmt = stmts.first().unwrap();
@@ -1040,15 +1029,15 @@ mod tests {
 
     #[tokio::test]
     async fn execute_stage_simple_query_plan_returns_rows() {
-        let (db, _dir) = open_db_with_table(
-            "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)",
-        )
-        .await;
+        let (db, _dir) =
+            open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
         db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
             .await;
         let stmts = parse_stage("SELECT * FROM t").await.unwrap();
         let stmt = stmts.first().unwrap();
-        let plan = plan_stage(&db, "SELECT * FROM t", stmt, false).await.unwrap();
+        let plan = plan_stage(&db, "SELECT * FROM t", stmt, false)
+            .await
+            .unwrap();
 
         // Drain cache to ensure execute_stage alone, not the orchestrator, is tested.
         db.plan_cache.clear();
@@ -1063,10 +1052,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_stage_ddl_plan_clears_cache_on_success() {
-        let (db, _dir) = open_db_with_table(
-            "CREATE TABLE t (id INT PRIMARY KEY)",
-        )
-        .await;
+        let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY)").await;
         // Prime the cache with a SELECT plan so we can observe clearing.
         db.execute_sql("SELECT * FROM t").await;
         assert!(
@@ -1075,7 +1061,9 @@ mod tests {
         );
 
         // Build a DDL plan directly and route through execute_stage.
-        let stmts = parse_stage("CREATE TABLE t2 (id INT PRIMARY KEY)").await.unwrap();
+        let stmts = parse_stage("CREATE TABLE t2 (id INT PRIMARY KEY)")
+            .await
+            .unwrap();
         let stmt = stmts.first().unwrap();
         let plan = plan_stage(&db, "CREATE TABLE t2 (id INT PRIMARY KEY)", stmt, false)
             .await

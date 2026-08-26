@@ -8,7 +8,7 @@ async fn test_index_manager_basic_ops() {
     // Setup: create storage and buffer pool
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create IndexManager inside spawn_blocking (BTree::new uses block_on internally)
     let buffer_pool_clone = buffer_pool.clone();
@@ -40,7 +40,7 @@ async fn test_index_manager_basic_ops() {
 async fn test_index_manager_delete() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create IndexManager inside spawn_blocking
     let buffer_pool_clone = buffer_pool.clone();
@@ -63,7 +63,7 @@ async fn test_index_manager_delete() {
 async fn test_index_manager_update() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create IndexManager inside spawn_blocking
     let buffer_pool_clone = buffer_pool.clone();

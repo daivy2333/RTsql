@@ -12,9 +12,11 @@ use tempfile::tempdir;
 async fn setup() -> (Arc<TransactionManager>, Arc<BufferPool>, Arc<TableMeta>) {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_manager = TableManager::new(buffer_pool.clone());
+    let table_manager = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_manager
         .create_table(
             "test_table",

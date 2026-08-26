@@ -12,7 +12,7 @@ async fn test_sync_page_loader_load_page() {
 
     // Allocate a page first
     let page_id = storage.allocate_page().await.unwrap();
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create SyncPageLoader inside Tokio runtime context
     let loader = Arc::new(SyncPageLoader::new(buffer_pool));
@@ -31,7 +31,7 @@ async fn test_sync_page_loader_allocate_page() {
     // Setup
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create SyncPageLoader inside Tokio runtime context
     let loader = Arc::new(SyncPageLoader::new(buffer_pool));

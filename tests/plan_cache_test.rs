@@ -79,7 +79,8 @@ async fn test_concurrent_hits_do_not_block_runtime() {
     use std::time::Instant;
     let dir = tempdir().unwrap();
     let db = Arc::new(Database::open(&dir.path().join("test.db")).await.unwrap());
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)").await;
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+        .await;
     for i in 0..50 {
         db.execute_sql(&format!("INSERT INTO t (id, v) VALUES ({}, {})", i, i))
             .await;

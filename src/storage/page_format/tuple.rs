@@ -20,7 +20,7 @@ const TAG_FLOAT: u8 = 0x04;
 const TAG_BOOL: u8 = 0x05;
 
 /// Column type descriptor used as the schema for serialization / deserialization.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
     /// Signed 64-bit integer column.
     Int,

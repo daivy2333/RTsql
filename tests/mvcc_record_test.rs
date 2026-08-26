@@ -16,9 +16,11 @@ use tempfile::tempdir;
 async fn test_insert_records_version() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -66,9 +68,11 @@ async fn test_insert_records_version() -> Result<()> {
 async fn test_update_records_version() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table(
             "test",
@@ -148,9 +152,11 @@ async fn test_update_records_version() -> Result<()> {
 async fn test_multiple_inserts_multiple_versions() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -205,9 +211,11 @@ async fn test_multiple_inserts_multiple_versions() -> Result<()> {
 async fn test_batch_insert_records_all_versions() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -250,9 +258,11 @@ async fn test_batch_insert_records_all_versions() -> Result<()> {
 async fn test_different_tx_separate_versions() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;

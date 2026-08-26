@@ -18,9 +18,11 @@ use tempfile::tempdir;
 async fn test_scan_executor_full_table() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -64,9 +66,11 @@ async fn test_scan_executor_full_table() -> Result<()> {
 async fn test_index_scan_executor_found() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -107,9 +111,11 @@ async fn test_index_scan_executor_found() -> Result<()> {
 async fn test_index_scan_executor_not_found() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -129,9 +135,11 @@ async fn test_index_scan_executor_not_found() -> Result<()> {
 async fn test_insert_executor_single_row() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -170,9 +178,11 @@ async fn test_insert_executor_single_row() -> Result<()> {
 async fn test_insert_executor_batch() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -218,9 +228,11 @@ async fn test_insert_executor_batch() -> Result<()> {
 async fn test_update_executor() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -266,7 +278,7 @@ async fn test_delete_executor() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     let buffer_pool_clone = buffer_pool.clone();
     let index_manager = tokio::task::spawn_blocking(move || {
@@ -306,9 +318,11 @@ async fn test_delete_executor() -> Result<()> {
 async fn test_insert_duplicate_key_error() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -348,9 +362,11 @@ async fn test_insert_stores_tuple_data() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_poul = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_poul = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_poul.clone());
+    let table_mgr = TableManager::new(buffer_poul.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table(
             "test",
@@ -400,9 +416,11 @@ async fn test_insert_stores_tuple_data() -> Result<()> {
 async fn test_index_scan_returns_row_data() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table(
             "test",
@@ -482,9 +500,11 @@ fn test_response_rows_serialization() {
 async fn test_insert_creates_version_header() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -526,9 +546,11 @@ async fn test_snapshot_hides_uncommitted() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -566,9 +588,11 @@ async fn test_snapshot_shows_committed() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -626,9 +650,11 @@ async fn test_snapshot_shows_committed() -> Result<()> {
 async fn test_update_creates_new_version() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table(
             "test",
@@ -689,8 +715,10 @@ async fn test_update_creates_new_version() -> Result<()> {
 async fn test_create_table_executor_success() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
-    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+    let table_manager = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
 
     use rtsql::database::Database;
     use rtsql::executor::ColumnType;
@@ -728,8 +756,10 @@ async fn test_create_table_executor_success() -> Result<()> {
 async fn test_create_table_executor_already_exists() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
-    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+    let table_manager = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
 
     use rtsql::database::Database;
     use rtsql::executor::ColumnType as ExecColumnType;
@@ -780,8 +810,10 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
 async fn test_drop_table_executor_success() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
-    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+    let table_manager = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
@@ -826,8 +858,10 @@ async fn test_drop_table_executor_success() -> Result<()> {
 async fn test_drop_table_executor_not_found() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
-    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+    let table_manager = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
@@ -863,8 +897,10 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
 async fn test_drop_table_if_exists_success() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
-    let table_manager = Arc::new(TableManager::new(buffer_pool.clone()));
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+    let table_manager = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
 
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
@@ -904,9 +940,11 @@ async fn test_filter_executor_gt() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -976,9 +1014,11 @@ async fn test_filter_executor_and() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1063,9 +1103,11 @@ async fn test_filter_executor_empty_result() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1130,9 +1172,11 @@ async fn test_index_scan_all_executor_basic() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1176,9 +1220,11 @@ async fn test_index_scan_all_executor_basic() -> Result<()> {
 async fn test_index_scan_all_executor_empty() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1199,9 +1245,11 @@ async fn test_index_scan_all_executor_empty() -> Result<()> {
 async fn test_index_scan_all_executor_single() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1282,9 +1330,11 @@ async fn test_m36_deserialize_value_refs_borrow() {
 async fn test_data_scan_executor_full_table() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1335,9 +1385,11 @@ async fn test_data_scan_executor_full_table() -> Result<()> {
 async fn test_data_scan_executor_empty_table() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1358,9 +1410,11 @@ async fn test_data_scan_executor_empty_table() -> Result<()> {
 async fn test_data_scan_executor_multi_page() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table(
             "test",
@@ -1413,9 +1467,11 @@ async fn test_data_scan_executor_multi_page() -> Result<()> {
 async fn test_data_scan_executor_streaming() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1465,9 +1521,11 @@ async fn test_data_scan_mvcc_uncommitted_invisible() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;
@@ -1513,9 +1571,11 @@ async fn test_data_scan_mvcc_committed_visible() -> Result<()> {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+        .await
+        .unwrap();
     table_mgr
         .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
         .await?;

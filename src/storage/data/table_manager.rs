@@ -4,9 +4,14 @@ use tokio::sync::RwLock;
 
 use crate::executor::Value;
 use crate::storage::btree::IndexManager;
+use crate::storage::catalog::{
+    Catalog, CatalogColumnRow, CatalogRow, COLUMNS_SYSTEM_NAME, TABLES_SYSTEM_NAME,
+};
+use crate::storage::data_page::write_tuple_to_data_page;
 use crate::storage::page_format::ColumnType;
 use crate::storage::page_id::PageId;
-use crate::storage::{delete_tuple_from_data_page, BufferPool, Result, StorageError};
+use crate::storage::{AsyncStorage, BufferPool, Result, StorageError};
+use crate::transaction::VersionHeader;
 
 /// Column schema with constraints
 #[derive(Debug, Clone)]
@@ -82,7 +87,7 @@ impl TableMeta {
 
             // Delete old versions
             for old_id in old_versions {
-                delete_tuple_from_data_page(buffer_pool, old_id).await?;
+                crate::storage::delete_tuple_from_data_page(buffer_pool, old_id).await?;
                 cleaned_count += 1;
             }
         }
@@ -93,19 +98,84 @@ impl TableMeta {
 
 /// Manages table schemas and per-table metadata.
 ///
-/// All operations are internally synchronized via a `RwLock<HashMap<...>>`.
+/// MS07-T01: schemas are now persisted to disk via `Catalog`; an
+/// in-memory `RwLock<HashMap<...>>` cache shadows the catalog for
+/// read-heavy paths. On `Database::open`, the cache is rebuilt by
+/// `open_or_init`.
 pub struct TableManager {
     tables: RwLock<HashMap<String, Arc<TableMeta>>>,
     buffer_pool: Arc<BufferPool>,
+    catalog: Arc<Catalog>,
 }
 
 impl TableManager {
-    /// Create a new `TableManager` backed by the given buffer pool.
-    pub fn new(buffer_pool: Arc<BufferPool>) -> Self {
-        Self {
+    /// Create a new `TableManager` backed by the given buffer pool and
+    /// storage. Bootstraps a fresh `Catalog` if the storage file is
+    /// empty; otherwise opens the existing catalog.
+    pub async fn new(
+        buffer_pool: Arc<BufferPool>,
+        storage: Arc<dyn AsyncStorage>,
+    ) -> Result<Arc<Self>> {
+        // If the file is empty (no pages), bootstrap the catalog pages.
+        // Otherwise open the existing catalog.
+        let catalog = if storage.page_count() == 0 {
+            Catalog::bootstrap(buffer_pool.clone(), storage.clone()).await?
+        } else {
+            Catalog::open(buffer_pool.clone(), storage.clone()).await?
+        };
+
+        Ok(Arc::new(Self {
             tables: RwLock::new(HashMap::new()),
             buffer_pool,
+            catalog,
+        }))
+    }
+
+    /// Access the underlying `Catalog` (for callers that need to read or
+    /// persist schema-level data outside the in-memory cache).
+    pub fn catalog(&self) -> &Arc<Catalog> {
+        &self.catalog
+    }
+
+    /// Rebuild the in-memory `tables` cache by scanning the catalog.
+    ///
+    /// For a freshly-bootstrapped database this is a no-op (the catalog
+    /// is empty). For a database opened from an existing file, this
+    /// restores every persisted `TableMeta` so subsequent DML works.
+    pub async fn open_or_init(&self) -> Result<()> {
+        let rows = self.catalog.scan_tables().await?;
+        if rows.is_empty() {
+            return Ok(());
         }
+
+        let mut tables = self.tables.write().await;
+        for row in rows {
+            let cols = self.catalog.scan_columns(&row.table_name).await?;
+            let columns: Vec<(String, ColumnType)> = cols
+                .iter()
+                .map(|c| (c.column_name.clone(), c.column_type.clone()))
+                .collect();
+            let pk = row.pk_column.clone();
+            let pk_index = row.pk_index as usize;
+            let data_page_head = PageId(row.data_page_head as u64);
+            let data_page_tail = PageId(row.data_page_tail as u64);
+            let root_index_page = PageId(row.index_root_page_id as u64);
+            let index_manager = Arc::new(IndexManager::from_root(
+                self.buffer_pool.clone(),
+                root_index_page,
+            )?);
+            let table_meta = Arc::new(TableMeta {
+                name: row.table_name.clone(),
+                columns,
+                pk_column: pk,
+                pk_index,
+                index_manager,
+                data_page_head,
+                data_page_tail: Mutex::new(data_page_tail),
+            });
+            tables.insert(row.table_name, table_meta);
+        }
+        Ok(())
     }
 
     /// Register a new table.
@@ -114,12 +184,19 @@ impl TableManager {
     /// - `DuplicateTable` when a table with `name` already exists.
     /// - `ColumnNotFound` when the primary-key column name is not present in
     ///   `columns`.
+    /// - `ReservedTableName` when `name` is a system table name
+    ///   (`__tables` / `__columns`).
     pub async fn create_table(
         &self,
         name: &str,
         columns: Vec<(String, ColumnType)>,
         pk: &str,
     ) -> Result<()> {
+        // --- reserved name guard (BEFORE duplicate check) ---
+        if name == TABLES_SYSTEM_NAME || name == COLUMNS_SYSTEM_NAME {
+            return Err(StorageError::ReservedTableName(name.to_string()));
+        }
+
         // --- duplicate check (read lock) ---
         {
             let tables = self.tables.read().await;
@@ -143,11 +220,12 @@ impl TableManager {
         let bp = self.buffer_pool.clone();
         let index_manager =
             Arc::new(tokio::task::spawn_blocking(move || IndexManager::new(bp)).await??);
+        let index_root_page_id = index_manager.root_page_id().0 as u32;
 
         // --- build TableMeta ---
         let table_meta = Arc::new(TableMeta {
             name: name.to_string(),
-            columns,
+            columns: columns.clone(),
             pk_column: pk.to_string(),
             pk_index,
             index_manager,
@@ -161,18 +239,42 @@ impl TableManager {
             if tables.contains_key(name) {
                 return Err(StorageError::DuplicateTable(name.to_string()));
             }
-            tables.insert(name.to_string(), table_meta);
+            tables.insert(name.to_string(), table_meta.clone());
+        }
+
+        // --- persist to catalog (after in-memory insert) ---
+        let catalog_row = CatalogRow {
+            table_name: name.to_string(),
+            data_page_head: page_id.0 as u32,
+            index_root_page_id,
+            pk_index: pk_index as u32,
+            pk_column: pk.to_string(),
+            column_count: columns.len() as u32,
+            data_page_tail: page_id.0 as u32,
+        };
+        let catalog_cols: Vec<CatalogColumnRow> = columns
+            .iter()
+            .enumerate()
+            .map(|(idx, (col_name, col_type))| CatalogColumnRow {
+                table_name: name.to_string(),
+                column_index: idx as u32,
+                column_name: col_name.clone(),
+                column_type: col_type.clone(),
+                not_null: false,
+                unique: false,
+            })
+            .collect();
+        if let Err(e) = self.catalog.insert_table(&catalog_row, &catalog_cols).await {
+            // Roll back the in-memory insert to keep state consistent.
+            let mut tables = self.tables.write().await;
+            tables.remove(name);
+            return Err(e);
         }
 
         Ok(())
     }
 
     /// Look up a table by name.
-    ///
-    /// Returns an `Arc<TableMeta>` so the caller can share ownership cheaply.
-    ///
-    /// # Errors
-    /// - `TableNotFound` when no table with `name` is registered.
     pub async fn get_table(&self, name: &str) -> Result<Arc<TableMeta>> {
         let tables = self.tables.read().await;
         tables
@@ -182,10 +284,6 @@ impl TableManager {
     }
 
     /// Check whether a table with the given name exists.
-    ///
-    /// This is a non-async convenience that uses `try_read` internally.
-    /// Under extreme contention it may return `false` for a table that is
-    /// currently being inserted, which is acceptable for this use case.
     pub fn table_exists(&self, name: &str) -> bool {
         match self.tables.try_read() {
             Ok(tables) => tables.contains_key(name),
@@ -195,25 +293,53 @@ impl TableManager {
 
     /// Drop a table by name.
     ///
-    /// # Errors
-    /// - `TableNotFound` when no table with `name` is registered.
-    ///
-    /// # Note
-    /// This is a simplified implementation that only removes the table metadata.
-    /// Physical page deletion is not implemented yet.
+    /// Removes the in-memory cache entry and the catalog rows. Physical
+    /// data pages and index pages are NOT freed (out of scope; covered
+    /// by MS07-T02).
     pub async fn drop_table(&self, name: &str) -> Result<()> {
-        let mut tables = self.tables.write().await;
+        // Reserved-name guard: never allow dropping system tables.
+        if name == TABLES_SYSTEM_NAME || name == COLUMNS_SYSTEM_NAME {
+            return Err(StorageError::ReservedTableName(name.to_string()));
+        }
 
-        // Remove table from metadata (returns None if not found)
+        // First delete from catalog (idempotent — silently succeeds if absent).
+        self.catalog.delete_table(name).await?;
+
+        // Then remove from in-memory cache.
+        let mut tables = self.tables.write().await;
         tables
             .remove(name)
             .ok_or_else(|| StorageError::TableNotFound(name.to_string()))?;
 
-        // TODO: In the future, we should also:
-        // 1. Delete all data pages associated with the table
-        // 2. Clean up the index manager
-        // 3. Deallocate pages from storage
-
         Ok(())
+    }
+
+    /// Write a tuple to a table's data pages, transparently updating the
+    /// persisted `data_page_tail` in the catalog when a new page is
+    /// auto-allocated.
+    ///
+    /// MS07-T01: this is the canonical write path for DML. The existing
+    /// `write_tuple_to_data_page` (in `data_page.rs`) updates the
+    /// in-memory `data_page_tail`; we additionally persist the new tail
+    /// to the catalog so that restart-after-write still sees a correct
+    /// tail pointer.
+    pub async fn write_tuple(
+        &self,
+        table_meta: &Arc<TableMeta>,
+        version_header: &VersionHeader,
+        tuple_bytes: &[u8],
+    ) -> Result<crate::storage::page_format::RowId> {
+        let old_tail = *table_meta.data_page_tail.lock().unwrap();
+        let row_id =
+            write_tuple_to_data_page(&self.buffer_pool, table_meta, version_header, tuple_bytes)
+                .await?;
+        let new_page_id = PageId(row_id.page_id as u64);
+        if new_page_id != old_tail {
+            // A new page was auto-allocated; persist the new tail.
+            self.catalog
+                .update_table_tail(&table_meta.name, new_page_id.0 as u32)
+                .await?;
+        }
+        Ok(row_id)
     }
 }

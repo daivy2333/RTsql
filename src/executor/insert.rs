@@ -1,6 +1,7 @@
 //! Insert executor - MVCC-aware row insert
 
 use crate::executor::{ExecResult, Executor, Value};
+use crate::storage::data::TableManager;
 use crate::storage::page_format::{compute_tuple_size, serialize_tuple, ColumnType};
 use crate::storage::{
     write_tuple_to_data_page, BufferPool, PageId, Result, StorageError, TableMeta,
@@ -11,6 +12,12 @@ use std::sync::Arc;
 
 pub struct InsertExecutor {
     table_meta: Arc<TableMeta>,
+    /// MS07-T01: When set, the executor routes writes through
+    /// `TableManager::write_tuple` so the catalog's `data_page_tail`
+    /// is kept in sync on cross-page allocation. When `None` (legacy
+    /// test paths), falls back to the standalone `write_tuple_to_data_page`
+    /// function which only updates the in-memory `TableMeta`.
+    table_manager: Option<Arc<TableManager>>,
     buffer_pool: Arc<BufferPool>,
     tx_manager: Arc<TransactionManager>,
     values: Vec<Vec<Value>>,
@@ -30,6 +37,28 @@ impl InsertExecutor {
         tx_id: u64,
         wal_buffer: Option<Arc<WALBuffer>>,
     ) -> Self {
+        Self::with_table_manager(
+            table_meta,
+            None,
+            buffer_pool,
+            tx_manager,
+            values,
+            tx_id,
+            wal_buffer,
+        )
+    }
+
+    /// MS07-T01: constructor variant that wires the executor to a
+    /// `TableManager` so writes can keep the catalog in sync.
+    pub fn with_table_manager(
+        table_meta: Arc<TableMeta>,
+        table_manager: Option<Arc<TableManager>>,
+        buffer_pool: Arc<BufferPool>,
+        tx_manager: Arc<TransactionManager>,
+        values: Vec<Vec<Value>>,
+        tx_id: u64,
+        wal_buffer: Option<Arc<WALBuffer>>,
+    ) -> Self {
         let schema: Vec<ColumnType> = table_meta
             .columns
             .iter()
@@ -38,6 +67,7 @@ impl InsertExecutor {
         let pk_index = table_meta.pk_index;
         Self {
             table_meta,
+            table_manager,
             buffer_pool,
             tx_manager,
             values,
@@ -84,13 +114,17 @@ impl Executor for InsertExecutor {
 
             let version_header = VersionHeader::new(self.tx_id, None);
 
-            let row_id = write_tuple_to_data_page(
-                &self.buffer_pool,
-                &self.table_meta,
-                &version_header,
-                &buf,
-            )
-            .await?;
+            // MS07-T01: write via TableManager when available so the
+            // catalog's `data_page_tail` is updated on cross-page
+            // allocation. Falls back to the standalone function for
+            // legacy test paths that don't construct a TableManager.
+            let row_id = if let Some(tm) = &self.table_manager {
+                tm.write_tuple(&self.table_meta, &version_header, &buf)
+                    .await?
+            } else {
+                write_tuple_to_data_page(&self.buffer_pool, &self.table_meta, &version_header, &buf)
+                    .await?
+            };
 
             // M21: Update page visibility summary after INSERT
             let page_id = PageId(row_id.page_id as u64);

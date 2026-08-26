@@ -54,6 +54,9 @@ pub enum StorageError {
     #[error("table already exists: {0}")]
     TableAlreadyExists(String),
 
+    #[error("reserved table name: {0} (cannot be used by user tables)")]
+    ReservedTableName(String),
+
     #[error("constraint violation: {0}")]
     ConstraintViolation(String),
 

@@ -12,4 +12,11 @@ pub trait AsyncStorage: Send + Sync {
     fn page_size(&self) -> usize {
         Page::PAGE_SIZE
     }
+
+    /// Total number of pages currently allocated on this storage. Returns
+    /// 0 for a freshly-opened empty file. MS07-T01: used by
+    /// `TableManager::new` to decide between catalog bootstrap (empty
+    /// file → allocate page 0,1) and catalog open (non-empty → bind to
+    /// existing page 0,1).
+    fn page_count(&self) -> u64;
 }

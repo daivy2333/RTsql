@@ -20,7 +20,9 @@ async fn create_and_populate_table(
     rows: Vec<Vec<Value>>,
     buffer_pool: Arc<BufferPool>,
 ) -> Result<Arc<rtsql::storage::data::TableMeta>> {
-    let table_mgr = TableManager::new(buffer_pool.clone());
+    let table_mgr = TableManager::new(buffer_pool.clone(), buffer_pool.storage().clone())
+        .await
+        .unwrap();
     let cols: Vec<(String, ColumnType)> = columns
         .into_iter()
         .map(|(name, t)| (name.to_string(), t))
@@ -58,7 +60,7 @@ async fn collect_rows(executor: &mut dyn Executor) -> Result<Vec<Vec<Value>>> {
 async fn test_join_basic_hash_join() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create left table: users(id, name)
     let left_table = create_and_populate_table(
@@ -178,7 +180,7 @@ async fn test_join_basic_hash_join() -> Result<()> {
 async fn test_join_null_keys_no_match() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create left table with NULL values
     let left_table = create_and_populate_table(
@@ -280,7 +282,7 @@ async fn test_join_null_keys_no_match() -> Result<()> {
 async fn test_join_empty_right_table() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create left table with data
     let left_table = create_and_populate_table(
@@ -355,7 +357,7 @@ async fn test_join_empty_right_table() -> Result<()> {
 async fn test_join_empty_left_table() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create empty left table
     let left_table = create_and_populate_table(
@@ -434,7 +436,7 @@ async fn test_join_empty_left_table() -> Result<()> {
 async fn test_join_multiple_conditions_and() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create left table: (id, dept_id, year, project_name)
     // Use 'id' as primary key to allow duplicate dept_id values
@@ -615,7 +617,7 @@ async fn test_join_multiple_conditions_and() -> Result<()> {
 async fn test_join_no_matching_keys() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create left table with keys 1, 2, 3
     let left_table = create_and_populate_table(
@@ -695,7 +697,7 @@ async fn test_join_no_matching_keys() -> Result<()> {
 async fn test_join_one_to_many() -> Result<()> {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
     // Create left table: one user
     let left_table = create_and_populate_table(

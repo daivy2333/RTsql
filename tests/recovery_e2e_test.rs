@@ -74,7 +74,10 @@ async fn test_recovery_classifies_committed_transactions() {
     let db_path = PathBuf::from(dir.path()).join("test");
     let (committed, aborted) = RecoveryManager::recover(&db_path).unwrap();
 
-    assert!(!committed.is_empty(), "Should detect committed transactions");
+    assert!(
+        !committed.is_empty(),
+        "Should detect committed transactions"
+    );
     assert!(aborted.is_empty(), "No aborted transactions expected");
 }
 
