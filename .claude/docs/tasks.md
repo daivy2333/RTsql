@@ -89,7 +89,7 @@
 
 ### MS06：稳定性与正确性收口 — active
 
-- **Status**: active（T01 已完成；T02-T04 待起）
+- **Status**: active（T01-T02 已完成；T03-T04 待起）
 - **Outcome**: 所有 DML 写入正确的 `create_tx_id`；PlanCache 在 100 并发下不阻塞 runtime；WAL 持续写入不发生文件句柄泄漏；pipeline 执行路径可被独立观测
 - **Rationale**: BufferPool 锁优化已完成，但代码层发现 4 类被掩盖的稳定性问题（INSERT `tx_id=0` 注入、PlanCache `std::sync::Mutex` 跨 `.await`、WAL 每写 open/close、pipeline::execute_inner 200+ 行）。这些问题在任何性能/功能扩展前必须先封堵，否则后续 verification 都被噪声污染
 - **Dependencies**: None
@@ -98,7 +98,7 @@
 | Task | 状态 | 目标 | 目标文件 | 验收 |
 |---|---|---|---|---|
 | MS06-T01 | **completed**（2026-08-25） | 修 INSERT/UPDATE/DELETE `tx_id=0` 占位注入 | `src/pipeline.rs:336/350/363`、`src/executor/{insert,update,delete}.rs`、`src/transaction/version_chain.rs` | 写后 `create_tx_id != 0`；MVCC visibility 不再恒成立 ✅ |
-| MS06-T02 | ready | PlanCache 改 DashMap + SQL 规范化 key + 替换 `std::sync::Mutex` | `src/plan_cache.rs`、`src/pipeline.rs:56/145/169/206` | 100 并发压测 plan_cache 不阻塞 runtime；大小写/空格变体 100% hit |
+| MS06-T02 | **completed**（2026-08-26） | PlanCache 改 DashMap + SQL 规范化 key + 替换 `std::sync::Mutex` | `src/plan_cache.rs`、`src/database.rs:22/64/95`、`src/pipeline.rs:56-65/145/169/206` | 100 并发压测 plan_cache 不阻塞 runtime（实测 0.08s ≪ 5s）；大小写/空白变体 100% hit；504 tests pass ✅ |
 | MS06-T03 | ready | WALWriter 持文件句柄，每条 write 复用 | `src/wal/writer.rs:44-90, 153-179` | 10K tx 压测 `lsof` 句柄数 < 10 |
 | MS06-T04 | ready | `pipeline::execute_inner` 拆为 parse/plan/execute 三阶段 + profiling gates | `src/pipeline.rs:38-245` | 三阶段独立 micro-bench；单测可分别覆盖 |
 
@@ -108,7 +108,9 @@
 - **Verification boundary**: 4 项独立测试套件全通过
 - **Diagnostic boundary**: 4 个具体代码位置
 - **Split signals**: 若 MS06-T02 或 MS06-T04 任一需要 2+ change 完成，拆为两个 MS
-- **Related changes**: `2026-08-25-fix-dml-tx-id-injection`（已归档为 `archive/2026-08-25-2026-08-25-fix-dml-tx-id-injection/`，含新增 spec `dml-transaction-lifecycle`）
+- **Related changes**:
+  - `2026-08-25-fix-dml-tx-id-injection`（已归档为 `archive/2026-08-25-2026-08-25-fix-dml-tx-id-injection/`，含新增 spec `dml-transaction-lifecycle`）
+  - `2026-08-25-ms06-t02-plancache-dashmap`（已归档为 `archive/2026-08-26-2026-08-25-ms06-t02-plancache-dashmap/`，含新增 spec `plancache-key-normalization`；T0 基线 clippy 归零同步并入）
 
 ### MS07：基础能力建设 — planned
 
@@ -221,11 +223,10 @@ MS00 → MS01 → MS02
 
 ## 进行中
 
-- **MS06**（稳定性与正确性）— T01 已完成归档；T02/T03/T04 待起
+- **MS06**（稳定性与正确性）— T01-T02 已完成归档；T03/T04 待起
 
 ## 已承诺待办
 
-- **MS06-T02**（PlanCache DashMap + SQL 规范化 + 替换 std::sync::Mutex）— MS06 内下一推荐
 - **MS06-T03**（WALWriter 持文件句柄）
 - **MS06-T04**（pipeline execute_inner 三阶段拆分 + profiling gates）
 
@@ -237,6 +238,7 @@ MS00 → MS01 → MS02
 
 | 完成日期 | 内容 | commit |
 |---|---|---|
+| 2026-08-26 | MS06-T02 PlanCache DashMap + SQL 规范化：`HashMap + &mut self` → `DashMap + &self`；新增 `normalize_sql_key`（ASCII 折叠 + 空白折叠 + trim + 单引号 toggle）；`Database.plan_cache: Arc<Mutex<PlanCache>>` → `Arc<PlanCache>`；pipeline 5 处调用点去锁；`tests/plan_cache_test.rs` 7 集成测试 + 10 单测；T0 基线 clippy 归零 + 36 处表外 mechanical 修复（504 tests pass） | 未 commit（待用户触发）；change 归档至 `openspec/changes/archive/2026-08-26-2026-08-25-ms06-t02-plancache-dashmap/`；新增 spec `plancache-key-normalization` |
 | 2026-08-25 | 修复 DML `tx_id=0` 占位注入：pipeline 事务包裹 + Insert/Update/Delete WAL 唯一来源 + VersionHeader::commit 墓碑守卫 + 6 个新测试（487 tests pass） | 未 commit（待用户触发）；change 归档至 `openspec/changes/archive/2026-08-25-2026-08-25-fix-dml-tx-id-injection/` |
 | 2026-06-06 | BufferPool DashMap + miss Sem + per-page loading_locks + concurrent tests + bench | f64c874, b55a9a1, 5fc5494, fcaeb7c, faa87a4, ad90379 |
 | 2026-06-04 | 页面级 MVCC DELETE mark_deleted + 惰性 set_all_visible + visibility benchmark | 78a3b01 |

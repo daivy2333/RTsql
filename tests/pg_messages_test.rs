@@ -154,7 +154,7 @@ fn test_sqlstate_mapping() {
 
     // Test Io error mapping
     let (severity, code) = pg_messages::map_error_to_sqlstate(&NetworkError::Io(
-        std::io::Error::new(std::io::ErrorKind::Other, "test"),
+        std::io::Error::other("test"),
     ));
     assert_eq!(code, "58000");
     assert_eq!(severity, "ERROR");

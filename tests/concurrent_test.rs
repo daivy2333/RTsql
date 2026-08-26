@@ -6,7 +6,7 @@
 //! - Read-write non-blocking behavior
 
 use rtsql::storage::{BufferPool, FileStorage, TableManager};
-use rtsql::transaction::{Snapshot, TransactionManager};
+use rtsql::transaction::TransactionManager;
 use std::sync::Arc;
 use tempfile::tempdir;
 

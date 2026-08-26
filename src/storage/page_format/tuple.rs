@@ -312,7 +312,7 @@ mod tests {
 
     fn roundtrip_single(value: Value, col_type: ColumnType) -> Value {
         let schema = [col_type];
-        let size = compute_tuple_size(&[value.clone()], &schema);
+        let size = compute_tuple_size(std::slice::from_ref(&value), &schema);
         let mut buf = vec![0u8; size];
         let written = serialize_tuple(&[value], &schema, &mut buf).unwrap();
         assert_eq!(written, size, "written bytes must match computed size");

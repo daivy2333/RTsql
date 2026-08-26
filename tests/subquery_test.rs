@@ -34,6 +34,7 @@ fn rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
 }
 
 /// Helper: extract error message from an Error response.
+#[allow(dead_code)] // test helper, kept for future subquery error tests
 fn error_msg(resp: Response) -> String {
     match resp {
         Response::Error { message } => message,
@@ -437,7 +438,7 @@ async fn test_correlated_empty_right() {
         );
     }
     // TODO: fix to assert_eq!(r.len(), 0) once correlated empty issue fixed
-    if r.len() != 0 {
+    if !r.is_empty() {
         eprintln!(
             "KNOWN BUG: expected 0 rows from empty-right correlated IN, got {}",
             r.len()

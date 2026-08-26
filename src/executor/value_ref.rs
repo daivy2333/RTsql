@@ -204,7 +204,6 @@ mod tests {
         let v = Value::String("borrowed".to_string());
         let vr = v.as_value_ref();
         assert_eq!(vr, ValueRef::Text("borrowed"));
-        drop(vr);
         drop(v);
     }
 

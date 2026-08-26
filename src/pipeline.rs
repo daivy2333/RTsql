@@ -52,15 +52,11 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
     let cached_plan = {
         if profiling {
             let t0 = Instant::now();
-            let result = {
-                let mut cache = database.plan_cache.lock().unwrap();
-                cache.get(sql).cloned()
-            };
+            let result = database.plan_cache.get(sql);
             record_time("cache_hit_check", t0.elapsed());
             result
         } else {
-            let mut cache = database.plan_cache.lock().unwrap();
-            cache.get(sql).cloned()
+            database.plan_cache.get(sql)
         }
     };
 
@@ -142,7 +138,7 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
                     Box::new(CreateTableExecutor::new(plan, Arc::new(database.clone())));
                 let response = execute_executor(executor).await;
 
-                database.plan_cache.lock().unwrap().clear();
+                database.plan_cache.clear();
 
                 if profiling {
                     print_timings(total_start.unwrap().elapsed());
@@ -166,7 +162,7 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
                     Box::new(DropTableExecutor::new(plan, Arc::new(database.clone())));
                 let response = execute_executor(executor).await;
 
-                database.plan_cache.lock().unwrap().clear();
+                database.plan_cache.clear();
 
                 if profiling {
                     print_timings(total_start.unwrap().elapsed());
@@ -203,8 +199,7 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
                 };
 
                 if is_cacheable(stmt) {
-                    let mut cache = database.plan_cache.lock().unwrap();
-                    cache.put(sql.to_string(), plan.clone());
+                    database.plan_cache.put(sql.to_string(), plan.clone());
                 }
 
                 // DML paths (Insert/Update/Delete) must run inside a real

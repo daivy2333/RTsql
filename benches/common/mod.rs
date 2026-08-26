@@ -38,6 +38,7 @@ pub async fn insert_rows(db: &Database, start: i64, n: i64) {
 }
 
 /// 创建 JOIN 测试表 (orders + customers)
+#[allow(dead_code)] // kept as a shared fixture for future join benchmarks
 pub async fn create_join_tables(db: &Database) {
     db.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name STRING)")
         .await;
@@ -46,6 +47,7 @@ pub async fn create_join_tables(db: &Database) {
 }
 
 /// 插入 JOIN 测试数据
+#[allow(dead_code)] // kept as a shared fixture for future join benchmarks
 pub async fn insert_join_data(db: &Database, n: i64) {
     for i in 0..n {
         db.execute_sql(&format!(

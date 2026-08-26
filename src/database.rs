@@ -9,7 +9,7 @@ use crate::storage::{BufferPool, ColumnType, FileStorage, Result, TableManager, 
 use crate::transaction::TransactionManager;
 use crate::wal::{RecoveryManager, WALBuffer, WalWriter};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Database is the central coordinator that owns all major RTsql subsystems.
 #[derive(Clone)]
@@ -19,7 +19,7 @@ pub struct Database {
     pub transaction_manager: Arc<TransactionManager>,
     pub wal_writer: Arc<WalWriter>,
     pub wal_buffer: Arc<WALBuffer>,
-    pub plan_cache: Arc<Mutex<PlanCache>>,
+    pub plan_cache: Arc<PlanCache>,
 }
 
 impl Database {
@@ -61,7 +61,7 @@ impl Database {
         // (TransactionManager's allocator starts at 1, auto-increment)
 
         // 4. Initialize plan cache
-        let plan_cache = Arc::new(Mutex::new(PlanCache::new()));
+        let plan_cache = Arc::new(PlanCache::new());
 
         Ok(Self {
             buffer_pool,
@@ -92,6 +92,6 @@ impl Database {
 
     /// Get plan cache size (for testing)
     pub fn plan_cache_len(&self) -> usize {
-        self.plan_cache.lock().unwrap().len()
+        self.plan_cache.len()
     }
 }

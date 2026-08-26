@@ -136,7 +136,7 @@ impl BufferPool {
     /// cannot be extended beyond the function call scope in safe Rust
     /// (E0505). The closure keeps the borrow scope local — a Rust async
     /// + lock standard pattern. See `learned/spec.md` L022 for the
-    /// 3 failed attempts that led to this design.
+    ///   3 failed attempts that led to this design.
     ///
     /// SAFETY:
     /// - Closure must NOT call `.await` (the page lock is `std::sync::Mutex`,

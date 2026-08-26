@@ -58,6 +58,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)] // test intent: explicitly verify the Clone impl on a Copy type
     fn test_clone_and_copy() {
         let info = PageVisibilityInfo {
             min_create_tx_id: 42,

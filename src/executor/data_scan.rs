@@ -34,7 +34,6 @@ enum PageAction {
 }
 
 pub struct DataScanExecutor {
-    table_meta: Arc<TableMeta>,
     buffer_pool: Arc<BufferPool>,
     schema: Vec<ColumnType>,
     snapshot: Option<Snapshot>,
@@ -60,7 +59,6 @@ impl DataScanExecutor {
         // inside the scan loop.
         let current_page_id = Some(table_meta.data_page_head);
         Self {
-            table_meta,
             buffer_pool,
             schema,
             snapshot,

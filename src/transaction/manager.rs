@@ -377,7 +377,7 @@ mod tests {
 
         // Start tx2 after tx1
         let tx2 = manager.begin().await;
-        let tx2_id = tx2.id();
+        let _tx2_id = tx2.id();
 
         // tx2's snapshot should include tx1 in active list
         // But our current snapshot implementation doesn't track active_ids separately from tx_id

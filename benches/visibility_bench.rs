@@ -79,7 +79,7 @@ fn bench_visibility(c: &mut Criterion) {
         {
             let snapshot = Snapshot::new(n as u64 * 10, vec![]);
             let mut warmup = DataScanExecutor::new(tm.clone(), bp.clone(), Some(snapshot));
-            rt.block_on(async { while let Some(_) = warmup.next().await.unwrap() {} });
+            rt.block_on(async { while warmup.next().await.unwrap().is_some() {} });
         }
         group.bench_with_input(BenchmarkId::new("snapshot_warm", n), &n, |b, &_n| {
             b.to_async(&rt).iter(|| async {

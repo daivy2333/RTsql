@@ -111,7 +111,6 @@ impl VersionHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::PageId;
 
     #[test]
     fn test_version_header_new() {

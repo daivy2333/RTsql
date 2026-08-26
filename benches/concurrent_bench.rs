@@ -2,7 +2,6 @@ mod common;
 
 use common::*;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rtsql::database::Database;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 static CONCURRENT_COUNTER: AtomicI64 = AtomicI64::new(0);
