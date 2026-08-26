@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-08-26（MS06-T02 归档后增量刷新）
+> 最后更新：2026-08-26（MS06-T03 + MS06-T04 归档后增量刷新；MS06 全部 completed）
 > 同步状态：current
 
 ## 项目身份
@@ -64,15 +64,15 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **最新 revision**: 56869ba2470891839694071b59515db338857d59
-- **M31 commits**: 6 commits ahead of origin
+- **最新 revision**: f392c73eb0dbfe2e15902777d2574ef892475427
+- **M31 commits**: 7 commits ahead of origin
 - **最新 tag**: M11
-- **测试**: 504 tests pass, 0 failures（2026-08-26 MS06-T02 完成后；含 10 个新 plan_cache 单测 + 7 个新 plan_cache 集成测试）
-- **OpenSpec**: 7 capability specs validate PASS（decisions / dml-transaction-lifecycle / improvements / knowledge / plancache-key-normalization / project-model / references，2026-08-26 增量后）
+- **测试**: 516 tests pass, 0 failures（2026-08-26 MS06 全部完成后；含 4 个新 wal_handle 集成测试 + 8 个新 pipeline 阶段级单测）
+- **OpenSpec**: 9 capability specs validate PASS（decisions / dml-transaction-lifecycle / improvements / knowledge / pipeline-stage-decomposition / plancache-key-normalization / project-model / references / wal-writer-handle-reuse，2026-08-26 增量后）
 
 ## 同步状态
 
-- `current` — 文档与代码一致（MS06-T02 归档后增量刷新）
+- `current` — 文档与代码一致（MS06-T03 + MS06-T04 归档后增量刷新；MS06 全部 completed）
 
 ## 权威文档
 
@@ -83,8 +83,10 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 参考: `openspec/specs/references/spec.md` (Rxx)
 - 改进: `openspec/specs/improvements/spec.md` (Ixx)
 - 任务与路线: `.claude/docs/tasks.md`
-- 变更: `openspec/changes/`（当前无活跃 change；归档目录含 MS06-T01 + MS06-T02 carrier）
+- 变更: `openspec/changes/`（当前无活跃 change；归档目录含 MS06-T01 + MS06-T02 + MS06-T03-T04 carrier）
 - Legacy migration carrier: `.claude/legacy/2026-08-25-openspec-init-migration/`
 - 新增能力 spec:
   - `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）
   - `openspec/specs/plancache-key-normalization/spec.md`（MS06-T02 落地）
+  - `openspec/specs/wal-writer-handle-reuse/spec.md`（MS06-T03 落地）
+  - `openspec/specs/pipeline-stage-decomposition/spec.md`（MS06-T04 落地）

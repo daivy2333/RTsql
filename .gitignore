@@ -6,6 +6,9 @@
 # CodeGraph runtime data (SQLite index + daemon files)
 /.codegraph/
 
+# Runtime session continuation state from Mavis/MiniMax Code skill runs
+/.omo/
+
 # Added by cargo
 # already existing elements were commented out
 

@@ -66,6 +66,10 @@ harness = false
 name = "buffer_pool_concurrency_bench"
 harness = false
 
+[[bench]]
+name = "pipeline_stages_bench"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

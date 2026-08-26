@@ -11,11 +11,11 @@ use crate::parser::{parse_sql, PlanBuilder};
 use crate::profiling::{
     init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope,
 };
-use crate::storage::{Result, TableMeta};
+use crate::storage::Result;
 use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// create_executor_from_plan 返回类型别名
 ///
@@ -35,6 +35,194 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
     execute_inner(database, sql).await
 }
 
+/// Pipeline 阶段 1：SQL 文本 → AST。
+///
+/// `parse_sql` 失败时返回 `Err("Parse error: {e}")`；解析后语句集为空时返回
+/// `Err("Empty SQL")`。编排器将 Err 文本包成 `Response::Error`。
+pub async fn parse_stage(sql: &str) -> std::result::Result<Vec<Statement>, String> {
+    let statements = parse_sql(sql).map_err(|e| format!("Parse error: {}", e))?;
+    if statements.is_empty() {
+        return Err("Empty SQL".to_string());
+    }
+    Ok(statements)
+}
+
+/// Pipeline 阶段 2：AST → PhysicalPlan。
+///
+/// DDL 变体走 `PlanBuilder::new().build_plan`（不注册表，不做 table_metadata_lookup）。
+/// 其余变体走 `register_table` → `build_plan` → 对可缓存语句（仅 SELECT）`put`。
+///
+/// `profiling: true` 时，`table_metadata_lookup` 子指标在该阶段内记录。
+pub async fn plan_stage(
+    database: &Database,
+    sql: &str,
+    stmt: &Statement,
+    profiling: bool,
+) -> std::result::Result<PhysicalPlan, String> {
+    match stmt {
+        Statement::CreateTable { .. } | Statement::Drop { .. } => PlanBuilder::new()
+            .build_plan(stmt)
+            .map_err(|e| format!("Plan error: {}", e)),
+        _ => {
+            let table_lookup_start = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let mut plan_builder = PlanBuilder::new();
+            register_table(database, &mut plan_builder, stmt).await?;
+            if let Some(start) = table_lookup_start {
+                record_time("table_metadata_lookup", start.elapsed());
+            }
+            let plan = plan_builder
+                .build_plan(stmt)
+                .map_err(|e| format!("Plan error: {}", e))?;
+            if is_cacheable(stmt) {
+                database.plan_cache.put(sql.to_string(), plan.clone());
+            }
+            Ok(plan)
+        }
+    }
+}
+
+/// Pipeline 阶段 3：PhysicalPlan → Response。
+///
+/// 路由：
+/// - DDL（CreateTable / DropTable）：直包对应 Executor，执行后 `plan_cache.clear()`
+/// - DML（Insert / Update / Delete）：`begin → prefetch abort meta → create_executor(tx_id) → execute → commit/abort`
+/// - 其余（Query 路径）：`create_executor(None) → execute`
+///
+/// `profiling: true` 时，`executor_creation` 与 `executor_execution` 子指标在该阶段内记录。
+pub async fn execute_stage(
+    database: &Database,
+    plan: PhysicalPlan,
+    profiling: bool,
+) -> Response {
+    match &plan {
+        PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
+            let executor: Box<dyn Executor + Send> = match &plan {
+                PhysicalPlan::CreateTable(_) => Box::new(CreateTableExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                PhysicalPlan::DropTable(_) => Box::new(DropTableExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                _ => unreachable!("DDL match already filtered"),
+            };
+            let response = execute_executor(executor).await;
+            // 时序保持：DDL 执行后清缓存（与原 execute_inner 行为等价——成功后与失败后都清）。
+            database.plan_cache.clear();
+            response
+        }
+        PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => {
+            // DML must run inside a real transaction (MS06-T01 spec).
+            let tx = database.transaction_manager.begin().await;
+            let tx_id = tx.id();
+
+            let table_name = match &plan {
+                PhysicalPlan::Insert(n) => &n.table_name,
+                PhysicalPlan::Update(n) => &n.table_name,
+                PhysicalPlan::Delete(n) => &n.table_name,
+                _ => unreachable!("is_dml guarantees a DML plan"),
+            };
+            let table_meta_for_abort = database.table_manager.get_table(table_name).await.ok();
+
+            let executor_creation_start = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let executor = match create_executor_from_plan(plan, database, Some(tx_id)).await {
+                Ok(e) => e,
+                Err(e) => {
+                    if let Some(tm) = table_meta_for_abort {
+                        let _ = database
+                            .transaction_manager
+                            .abort(tx, &database.buffer_pool, &tm)
+                            .await;
+                    }
+                    return Response::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            if let Some(start) = executor_creation_start {
+                record_time("executor_creation", start.elapsed());
+            }
+
+            let exec_start = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let response = execute_executor(executor).await;
+            if let Some(start) = exec_start {
+                record_time("executor_execution", start.elapsed());
+            }
+
+            match &response {
+                Response::Error { .. } => {
+                    if let Some(tm) = table_meta_for_abort {
+                        if let Err(abort_err) = database
+                            .transaction_manager
+                            .abort(tx, &database.buffer_pool, &tm)
+                            .await
+                        {
+                            return Response::Error {
+                                message: format!("Abort failed: {}", abort_err),
+                            };
+                        }
+                    }
+                }
+                _ => {
+                    if let Err(commit_err) = database
+                        .transaction_manager
+                        .commit(tx, &database.buffer_pool)
+                        .await
+                    {
+                        return Response::Error {
+                            message: format!("Commit failed: {}", commit_err),
+                        };
+                    }
+                }
+            }
+            response
+        }
+        _ => {
+            // Query path (and any non-DML/non-DDL).
+            let executor_creation_start = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let executor = match create_executor_from_plan(plan, database, None).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return Response::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            if let Some(start) = executor_creation_start {
+                record_time("executor_creation", start.elapsed());
+            }
+
+            let exec_start = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let response = execute_executor(executor).await;
+            if let Some(start) = exec_start {
+                record_time("executor_execution", start.elapsed());
+            }
+            response
+        }
+    }
+}
+
 async fn execute_inner(database: &Database, sql: &str) -> Response {
     let profiling = is_profiling_enabled();
 
@@ -48,271 +236,89 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
         None
     };
 
-    // Check plan cache first
-    let cached_plan = {
-        if profiling {
-            let t0 = Instant::now();
-            let result = database.plan_cache.get(sql);
-            record_time("cache_hit_check", t0.elapsed());
-            result
-        } else {
-            database.plan_cache.get(sql)
-        }
+    // Step 1: cache lookup (cache_hit_check 子指标保持)
+    let cache_hit_check_start = if profiling {
+        Some(Instant::now())
+    } else {
+        None
     };
+    let cached_plan = database.plan_cache.get(sql);
+    if let Some(start) = cache_hit_check_start {
+        record_time("cache_hit_check", start.elapsed());
+    }
 
     if let Some(plan) = cached_plan {
-        // Cache hit — skip parse + plan
-        if profiling {
-            record_time("parse_and_plan", Duration::ZERO);
-        }
-
-        let executor_start = if profiling {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let executor = match create_executor_from_plan(plan, database, None).await {
-            Ok(e) => e,
-            Err(e) => {
-                return Response::Error {
-                    message: e.to_string(),
-                }
-            }
-        };
-        if profiling {
-            record_time("executor_creation", executor_start.unwrap().elapsed());
-        }
-
-        let exec_start = if profiling {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let response = execute_executor(executor).await;
-        if profiling {
-            record_time("executor_execution", exec_start.unwrap().elapsed());
-            print_timings(total_start.unwrap().elapsed());
+        // Cache hit — skip parse + plan, directly execute.
+        let response = execute_stage(database, plan, profiling).await;
+        if let Some(start) = total_start {
+            print_timings(start.elapsed());
         }
         return response;
     }
 
-    // Cache miss — parse and plan
+    // Cache miss — three-stage pipeline.
+
+    // Stage 1: parse
     let parse_start = if profiling {
         Some(Instant::now())
     } else {
         None
     };
-    let statements = match parse_sql(sql) {
+    let statements = match parse_stage(sql).await {
         Ok(s) => s,
-        Err(e) => {
-            return Response::Error {
-                message: format!("Parse error: {}", e),
+        Err(message) => {
+            if let Some(start) = parse_start {
+                record_time("parse", start.elapsed());
             }
+            return Response::Error { message };
         }
     };
-    if profiling {
-        record_time("parse_and_plan", parse_start.unwrap().elapsed());
+    if let Some(start) = parse_start {
+        record_time("parse", start.elapsed());
     }
-
-    if statements.is_empty() {
-        return Response::Error {
-            message: "Empty SQL".to_string(),
-        };
-    }
-
-    // Handle the first statement
-    if let Some(stmt) = statements.first() {
-        match stmt {
-            // DDL: CREATE TABLE
-            Statement::CreateTable { .. } => {
-                let plan = match PlanBuilder::new().build_plan(stmt) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return Response::Error {
-                            message: format!("Plan error: {}", e),
-                        }
-                    }
-                };
-
-                let executor: Box<dyn Executor + Send> =
-                    Box::new(CreateTableExecutor::new(plan, Arc::new(database.clone())));
-                let response = execute_executor(executor).await;
-
-                database.plan_cache.clear();
-
-                if profiling {
-                    print_timings(total_start.unwrap().elapsed());
-                }
-
-                return response;
-            }
-
-            // DDL: DROP TABLE
-            Statement::Drop { .. } => {
-                let plan = match PlanBuilder::new().build_plan(stmt) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return Response::Error {
-                            message: format!("Plan error: {}", e),
-                        }
-                    }
-                };
-
-                let executor: Box<dyn Executor + Send> =
-                    Box::new(DropTableExecutor::new(plan, Arc::new(database.clone())));
-                let response = execute_executor(executor).await;
-
-                database.plan_cache.clear();
-
-                if profiling {
-                    print_timings(total_start.unwrap().elapsed());
-                }
-
-                return response;
-            }
-
-            // Query, Insert, Update, Delete
-            _ => {
-                let table_lookup_start = if profiling {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
-                let mut plan_builder = PlanBuilder::new();
-                if let Err(e) = register_table(database, &mut plan_builder, stmt).await {
-                    return Response::Error { message: e };
-                }
-                if profiling {
-                    record_time(
-                        "table_metadata_lookup",
-                        table_lookup_start.unwrap().elapsed(),
-                    );
-                }
-
-                let plan = match plan_builder.build_plan(stmt) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return Response::Error {
-                            message: format!("Plan error: {}", e),
-                        }
-                    }
-                };
-
-                if is_cacheable(stmt) {
-                    database.plan_cache.put(sql.to_string(), plan.clone());
-                }
-
-                // DML paths (Insert/Update/Delete) must run inside a real
-                // transaction so MVCC visibility, commit_tx_id, and abort
-                // cleanup all see a real tx_id. SELECT paths do not need a tx.
-                let is_dml = matches!(
-                    &plan,
-                    PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_)
-                );
-                let tx = if is_dml {
-                    Some(database.transaction_manager.begin().await)
-                } else {
-                    None
-                };
-                let tx_id = tx.as_ref().map(|t| t.id());
-
-                // Pre-fetch table_meta for the abort path (only needed for DML).
-                let table_meta_for_abort: Option<Arc<TableMeta>> = if is_dml {
-                    let table_name = match &plan {
-                        PhysicalPlan::Insert(n) => &n.table_name,
-                        PhysicalPlan::Update(n) => &n.table_name,
-                        PhysicalPlan::Delete(n) => &n.table_name,
-                        _ => unreachable!("is_dml guarantees a DML plan"),
-                    };
-                    database.table_manager.get_table(table_name).await.ok()
-                } else {
-                    None
-                };
-
-                let executor_start = if profiling {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
-                let executor = match create_executor_from_plan(plan, database, tx_id).await {
-                    Ok(e) => e,
-                    Err(e) => {
-                        if let (Some(tx), Some(tm)) = (tx, table_meta_for_abort) {
-                            let _ = database
-                                .transaction_manager
-                                .abort(tx, &database.buffer_pool, &tm)
-                                .await;
-                        }
-                        return Response::Error {
-                            message: e.to_string(),
-                        };
-                    }
-                };
-                if profiling {
-                    record_time("executor_creation", executor_start.unwrap().elapsed());
-                }
-
-                let exec_start = if profiling {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
-                let response = execute_executor(executor).await;
-                if profiling {
-                    record_time("executor_execution", exec_start.unwrap().elapsed());
-                }
-
-                // Commit or abort the DML transaction based on executor outcome.
-                if let Some(tx) = tx {
-                    let outcome = match &response {
-                        Response::Error { .. } => Err(()),
-                        _ => Ok(()),
-                    };
-                    match outcome {
-                        Ok(()) => {
-                            if let Err(commit_err) = database
-                                .transaction_manager
-                                .commit(tx, &database.buffer_pool)
-                                .await
-                            {
-                                if profiling {
-                                    print_timings(total_start.unwrap().elapsed());
-                                }
-                                return Response::Error {
-                                    message: format!("Commit failed: {}", commit_err),
-                                };
-                            }
-                        }
-                        Err(()) => {
-                            if let Some(tm) = table_meta_for_abort {
-                                if let Err(abort_err) = database
-                                    .transaction_manager
-                                    .abort(tx, &database.buffer_pool, &tm)
-                                    .await
-                                {
-                                    if profiling {
-                                        print_timings(total_start.unwrap().elapsed());
-                                    }
-                                    return Response::Error {
-                                        message: format!("Abort failed: {}", abort_err),
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if profiling {
-                    print_timings(total_start.unwrap().elapsed());
-                }
-                return response;
-            }
+    let stmt = match statements.first() {
+        Some(s) => s,
+        None => {
+            return Response::Error {
+                message: "No statement executed".to_string(),
+            };
         }
+    };
+
+    // Stage 2: plan
+    let plan_start = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let plan = match plan_stage(database, sql, stmt, profiling).await {
+        Ok(p) => p,
+        Err(message) => {
+            if let Some(start) = plan_start {
+                record_time("plan", start.elapsed());
+            }
+            return Response::Error { message };
+        }
+    };
+    if let Some(start) = plan_start {
+        record_time("plan", start.elapsed());
     }
 
-    Response::Error {
-        message: "No statement executed".to_string(),
+    // Stage 3: execute
+    let execute_start = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let response = execute_stage(database, plan, profiling).await;
+    if let Some(start) = execute_start {
+        record_time("execute", start.elapsed());
     }
+
+    if let Some(start) = total_start {
+        print_timings(start.elapsed());
+    }
+    response
 }
 
 /// Execute an executor and return the response
@@ -905,4 +911,185 @@ async fn register_table(
 /// Only SELECT queries are cacheable, DDL and DML statements are not
 fn is_cacheable(stmt: &Statement) -> bool {
     matches!(stmt, Statement::Query(_))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Per-stage unit tests for MS06-T04: verify each stage can be invoked
+    //! independently of the full pipeline orchestrator and produces the
+    //! expected error / output / cache side-effect.
+
+    use super::*;
+    use crate::executor::PhysicalPlan;
+    use tempfile::tempdir;
+
+    async fn open_db_with_table(create_sql: &str) -> (Database, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).await.unwrap();
+        let resp = db.execute_sql(create_sql).await;
+        assert!(
+            !matches!(resp, Response::Error { .. }),
+            "setup CREATE TABLE failed: {:?}",
+            resp
+        );
+        (db, dir)
+    }
+
+    // ---- parse_stage ----
+
+    #[tokio::test]
+    async fn parse_stage_valid_sql_yields_statements() {
+        let stmts = parse_stage("SELECT 1").await.expect("parse should succeed");
+        assert_eq!(stmts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn parse_stage_invalid_sql_returns_parse_error() {
+        // Unmatched parenthesis is unambiguously rejected by sqlparser.
+        let err = parse_stage("SELECT (1 FROM t")
+            .await
+            .expect_err("parse should fail");
+        assert!(
+            err.starts_with("Parse error:"),
+            "expected 'Parse error:' prefix, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_stage_empty_sql_returns_empty_error() {
+        let err = parse_stage("").await.expect_err("empty should fail");
+        assert_eq!(err, "Empty SQL");
+
+        let err_ws = parse_stage("   \n\t  ").await.expect_err("whitespace should fail");
+        assert_eq!(err_ws, "Empty SQL");
+    }
+
+    // ---- plan_stage ----
+
+    #[tokio::test]
+    async fn plan_stage_select_on_known_table_yields_scan_plan() {
+        let (db, _dir) = open_db_with_table(
+            "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)",
+        )
+        .await;
+        let stmts = parse_stage("SELECT * FROM t").await.unwrap();
+        let stmt = stmts.first().unwrap();
+        let plan = plan_stage(&db, "SELECT * FROM t", stmt, false)
+            .await
+            .expect("plan should succeed for known table");
+        // SELECT on a simple table is built as either Scan or DataScan depending
+        // on planner routing — both are valid "scan-class" plans.
+        assert!(
+            matches!(
+                plan,
+                PhysicalPlan::Scan(_) | PhysicalPlan::DataScan(_)
+            ),
+            "expected Scan / DataScan plan, got: {:?}",
+            std::mem::discriminant(&plan)
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_stage_unknown_table_returns_not_found_error() {
+        let (db, _dir) = open_db_with_table(
+            "CREATE TABLE t (id INT PRIMARY KEY)",
+        )
+        .await;
+        let stmts = parse_stage("SELECT * FROM missing").await.unwrap();
+        let stmt = stmts.first().unwrap();
+        let err = plan_stage(&db, "SELECT * FROM missing", stmt, false)
+            .await
+            .expect_err("plan should fail for unknown table");
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' in error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_stage_select_writes_to_cache_but_dml_does_not() {
+        let (db, _dir) = open_db_with_table(
+            "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)",
+        )
+        .await;
+        let select_sql = "SELECT * FROM t";
+        let stmts = parse_stage(select_sql).await.unwrap();
+        let stmt = stmts.first().unwrap();
+        let _ = plan_stage(&db, select_sql, stmt, false).await.unwrap();
+        assert_eq!(
+            db.plan_cache_len(),
+            1,
+            "SELECT plan should be cached after plan_stage"
+        );
+
+        // INSERT must not be cached: invoke plan_stage with a fresh DML.
+        let insert_sql = "INSERT INTO t (id, name) VALUES (1, 'a')";
+        let stmts = parse_stage(insert_sql).await.unwrap();
+        let stmt = stmts.first().unwrap();
+        let _ = plan_stage(&db, insert_sql, stmt, false).await.unwrap();
+        assert_eq!(
+            db.plan_cache_len(),
+            1,
+            "DML plan must not enlarge the plan cache"
+        );
+    }
+
+    // ---- execute_stage ----
+
+    #[tokio::test]
+    async fn execute_stage_simple_query_plan_returns_rows() {
+        let (db, _dir) = open_db_with_table(
+            "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)",
+        )
+        .await;
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
+            .await;
+        let stmts = parse_stage("SELECT * FROM t").await.unwrap();
+        let stmt = stmts.first().unwrap();
+        let plan = plan_stage(&db, "SELECT * FROM t", stmt, false).await.unwrap();
+
+        // Drain cache to ensure execute_stage alone, not the orchestrator, is tested.
+        db.plan_cache.clear();
+        assert_eq!(db.plan_cache_len(), 0);
+
+        let resp = execute_stage(&db, plan, false).await;
+        match resp {
+            Response::QueryResult { rows } => assert_eq!(rows.len(), 1),
+            other => panic!("Expected QueryResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_stage_ddl_plan_clears_cache_on_success() {
+        let (db, _dir) = open_db_with_table(
+            "CREATE TABLE t (id INT PRIMARY KEY)",
+        )
+        .await;
+        // Prime the cache with a SELECT plan so we can observe clearing.
+        db.execute_sql("SELECT * FROM t").await;
+        assert!(
+            db.plan_cache_len() > 0,
+            "Cache should have an entry after SELECT"
+        );
+
+        // Build a DDL plan directly and route through execute_stage.
+        let stmts = parse_stage("CREATE TABLE t2 (id INT PRIMARY KEY)").await.unwrap();
+        let stmt = stmts.first().unwrap();
+        let plan = plan_stage(&db, "CREATE TABLE t2 (id INT PRIMARY KEY)", stmt, false)
+            .await
+            .unwrap();
+        let resp = execute_stage(&db, plan, false).await;
+        assert!(
+            !matches!(resp, Response::Error { .. }),
+            "DDL execution should succeed: {:?}",
+            resp
+        );
+        assert_eq!(
+            db.plan_cache_len(),
+            0,
+            "DDL execute_stage should clear the plan cache"
+        );
+    }
 }
