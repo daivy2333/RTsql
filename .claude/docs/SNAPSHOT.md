@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-08-30（MS07-T02 提交并增量刷新；commit `bd038da`）
+> 最后更新：2026-08-30（MS07-T03 提交并增量刷新；commit `49a85ef`）
 > 同步状态：current
 
 ## 项目身份
@@ -31,7 +31,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 
 - `src/database.rs` — Database 协调器（含 `close()` 显式落盘，MS07-T01 落地）
 - `src/pipeline.rs` — SQL 执行管道入口（含 DML 事务包裹，MS06-T01 落地）
-- `src/parser/` — SQL 解析 + PlanBuilder
+- `src/parser/` — SQL 解析 + PlanBuilder；`planner/` 6 模块（mod/query/expression/aggregate/subquery/ddl_dml，`PlanBuilder` 三字段 pub(crate) + 公共 API 零变化，MS07-T03 落地）
 - `src/executor/` — 24 个执行器（Scan / DataScan / IndexScan / IndexScanAll / Filter / Join / Aggregate / Sort / Limit / SemiJoin / AntiJoin / SubqueryEval / Correlated / Insert / Update / Delete / CreateTable / DropTable / DerivedScan / Having / Predicate / ValueRef / Result 等；InsertExecutor 持有 `Option<Arc<TableManager>>` 走 `write_tuple` 路径，MS07-T01 落地）
 - `src/storage/` — BufferPool（DashMap + Miss Semaphore + Per-Page Loading Locks）、AsyncStorage（含 `page_count()`，MS07-T01 落地）、FileStorage、DataPage
 - `src/storage/catalog.rs` — Catalog（系统表 `__tables` / `__columns` SlottedPage 管理 + 二进制行序列化 + 链式页表 + 保留名常量，MS07-T01 落地）
@@ -65,15 +65,15 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **最新 revision**: bd038da（HEAD = MS07-T02 commit；领先 origin 2 commits）
-- **ahead of origin**: 2 commits（bd038da MS07-T02 + docs sync）
+- **最新 revision**: 49a85ef（HEAD = MS07-T03 commit；领先 origin 3 commits）
+- **ahead of origin**: 3 commits（49a85ef MS07-T03 + 2 prior docs/feature）
 - **最新 tag**: M11
-- **测试**: 542 tests pass, 0 failures（2026-08-30 MS07-T02 提交后；含 2 个新 index_manager 单元测试 + 6 个新 drop_table_free 集成测试；baseline 534 + 8 新增 = 542）
-- **OpenSpec**: 11 capability specs validate PASS（decisions / dml-transaction-lifecycle / drop-table-physical-free / improvements / knowledge / pipeline-stage-decomposition / plancache-key-normalization / project-model / references / schema-persistence / wal-writer-handle-reuse，2026-08-30 MS07-T02 提交后）
+- **测试**: 542 tests pass, 0 failures（2026-08-30 MS07-T03 提交后；12 个 planner 单测随函数迁入 `src/parser/planner/` 子模块，总数不变）
+- **OpenSpec**: 12 capability specs validate PASS（decisions / dml-transaction-lifecycle / drop-table-physical-free / improvements / knowledge / pipeline-stage-decomposition / plancache-key-normalization / planner-module-decomposition / project-model / references / schema-persistence / wal-writer-handle-reuse，2026-08-30 MS07-T03 提交后）
 
 ## 同步状态
 
-- `current` — 文档与代码一致（MS07-T02 提交后增量刷新；commit `bd038da`）
+- `current` — 文档与代码一致（MS07-T03 提交后增量刷新；commit `49a85ef`）
 
 ## 权威文档
 
@@ -84,7 +84,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 参考: `openspec/specs/references/spec.md` (Rxx)
 - 改进: `openspec/specs/improvements/spec.md` (Ixx)
 - 任务与路线: `.claude/docs/tasks.md`
-- 变更: `openspec/changes/`（当前无活跃 change；归档目录含 MS06-T01 + MS06-T02 + MS06-T03-T04 + MS07-T01 + MS07-T02 carrier）
+- 变更: `openspec/changes/`（当前无活跃 change；归档目录含 MS06-T01 + MS06-T02 + MS06-T03-T04 + MS07-T01 + MS07-T02 + MS07-T03 carrier）
 - Legacy migration carrier: `.claude/legacy/2026-08-25-openspec-init-migration/`
 - 新增能力 spec:
   - `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）
@@ -93,3 +93,4 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
   - `openspec/specs/pipeline-stage-decomposition/spec.md`（MS06-T04 落地）
   - `openspec/specs/schema-persistence/spec.md`（MS07-T01 落地，7 个 Requirement）
 - `openspec/specs/drop-table-physical-free/spec.md`（MS07-T02 落地，7 个 Requirement）
+- `openspec/specs/planner-module-decomposition/spec.md`（MS07-T03 落地，5 个 Requirement）
