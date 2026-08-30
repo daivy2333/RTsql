@@ -8,7 +8,7 @@ use crate::storage::catalog::{
     Catalog, CatalogColumnRow, CatalogRow, COLUMNS_SYSTEM_NAME, TABLES_SYSTEM_NAME,
 };
 use crate::storage::data_page::write_tuple_to_data_page;
-use crate::storage::page_format::ColumnType;
+use crate::storage::page_format::{ColumnType, SlottedPageRef};
 use crate::storage::page_id::PageId;
 use crate::storage::{AsyncStorage, BufferPool, Result, StorageError};
 use crate::transaction::VersionHeader;
@@ -293,25 +293,83 @@ impl TableManager {
 
     /// Drop a table by name.
     ///
-    /// Removes the in-memory cache entry and the catalog rows. Physical
-    /// data pages and index pages are NOT freed (out of scope; covered
-    /// by MS07-T02).
+    /// Removes the in-memory cache entry and the catalog rows, then frees
+    /// the table's data pages and BTree index pages to the storage
+    /// free-list (`FileStorage::free_pages`). Same-process `allocate_page`
+    /// prefers popping from the free-list, so `file_len` no longer grows
+    /// monotonically. The free-list itself is not persisted (MS07-T02):
+    /// after a restart the freed pages are scattered on disk but
+    /// unreachable — their catalog rows were erased first.
     pub async fn drop_table(&self, name: &str) -> Result<()> {
         // Reserved-name guard: never allow dropping system tables.
         if name == TABLES_SYSTEM_NAME || name == COLUMNS_SYSTEM_NAME {
             return Err(StorageError::ReservedTableName(name.to_string()));
         }
 
+        // Take TableMeta now (clone Arc under read lock); we need its data
+        // page head + index manager after the in-memory entry is removed.
+        let table_meta = self.get_table(name).await?;
+
         // First delete from catalog (idempotent — silently succeeds if absent).
         self.catalog.delete_table(name).await?;
 
         // Then remove from in-memory cache.
-        let mut tables = self.tables.write().await;
-        tables
-            .remove(name)
-            .ok_or_else(|| StorageError::TableNotFound(name.to_string()))?;
+        {
+            let mut tables = self.tables.write().await;
+            tables
+                .remove(name)
+                .ok_or_else(|| StorageError::TableNotFound(name.to_string()))?;
+        }
+
+        // Physical free (best effort): reduce the table's pages to the
+        // storage free-list so subsequent allocate_page can reuse them.
+        let index_pages = match table_meta.index_manager.collect_all_pages().await {
+            Ok(pages) => pages,
+            Err(e) => {
+                eprintln!("[drop_table] collect_all_pages({}) failed: {}", name, e);
+                Vec::new()
+            }
+        };
+        let data_pages = self.collect_data_pages(table_meta.data_page_head).await;
+
+        for page in index_pages.into_iter().chain(data_pages) {
+            if let Err(e) = self.buffer_pool.free_page(page).await {
+                eprintln!("[drop_table] free_page({}) failed: {}", page.0, e);
+            }
+        }
 
         Ok(())
+    }
+
+    /// Walk the table's data-page chain starting at `head`, collecting every
+    /// `PageId` reachable via the SlottedPage `next_page_id` header.
+    ///
+    /// Best effort: a read error stops the walk and returns what was
+    /// collected so far (callers treat physical free as best effort).
+    async fn collect_data_pages(&self, head: PageId) -> Vec<PageId> {
+        let mut pages = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut current = head;
+
+        while current.0 != 0 && visited.insert(current.0) {
+            pages.push(current);
+            current = match self
+                .buffer_pool
+                .with_page_data(current, |data| {
+                    let slotted = SlottedPageRef::new(data);
+                    Ok(slotted.header().next_page_id)
+                })
+                .await
+            {
+                Ok(next) => PageId(next as u64),
+                Err(e) => {
+                    eprintln!("[drop_table] read data page {:?} failed: {}", current, e);
+                    break;
+                }
+            };
+        }
+
+        pages
     }
 
     /// Write a tuple to a table's data pages, transparently updating the

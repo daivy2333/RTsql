@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::storage::{
-    btree::node::{InternalNodeRef, LeafNodeRef, LEAF_NODE},
+    btree::node::{InternalNodeRef, LeafNodeRef, INTERNAL_NODE, LEAF_NODE},
     page_format::{Key, RowId},
-    BufferPool, PageId, Result,
+    BufferPool, PageId, Result, StorageError,
 };
 use tokio::sync::RwLock;
 
@@ -280,5 +280,130 @@ impl IndexManager {
     /// Find key by RowId (M10 reverse mapping)
     pub async fn find_key_by_row_id(&self, row_id: RowId) -> Option<Vec<u8>> {
         self.row_to_key.read().await.get(&row_id).cloned()
+    }
+
+    /// Collect every `PageId` occupied by this BTree (root, internal nodes,
+    /// all leaves), using a stack-based DFS from the root with a `visited`
+    /// set to guard against cycles. Read-only — does not modify any page.
+    ///
+    /// MS07-T02: used by `TableManager::drop_table` to return the table's
+    /// index pages to the storage free-list.
+    pub async fn collect_all_pages(&self) -> Result<Vec<PageId>> {
+        let root = PageId(self.root_page_id.load(Ordering::Acquire));
+        let mut result = Vec::new();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut stack = vec![root];
+
+        while let Some(page_id) = stack.pop() {
+            if !visited.insert(page_id.0) {
+                continue;
+            }
+            result.push(page_id);
+
+            let children = {
+                let guard = self.async_loader.load_page(page_id).await?;
+                let data_guard = guard.page_data();
+
+                match data_guard[0] {
+                    LEAF_NODE => {
+                        let leaf = LeafNodeRef::new(&data_guard);
+                        let next = leaf.next_leaf_page_id();
+                        if next > 0 {
+                            vec![PageId(next as u64)]
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    INTERNAL_NODE => {
+                        let internal = InternalNodeRef::new(&data_guard);
+                        let mut pages = Vec::with_capacity(internal.key_count() + 1);
+                        pages.push(PageId(internal.leftmost_child() as u64));
+                        for i in 0..internal.key_count() {
+                            if let Some(child) = internal.get_child_page_id(i) {
+                                pages.push(PageId(child as u64));
+                            }
+                        }
+                        pages
+                    }
+                    other => {
+                        return Err(StorageError::InvalidPageType {
+                            expected: LEAF_NODE,
+                            actual: other,
+                        });
+                    }
+                }
+            };
+
+            for child in children {
+                if child.0 != 0 {
+                    stack.push(child);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::FileStorage;
+    use tempfile::tempdir;
+
+    /// Build an in-memory IndexManager backed by a temp-file storage.
+    async fn make_manager() -> (tempfile::TempDir, IndexManager) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("btree_test.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        let bp = Arc::new(BufferPool::new(10, storage).unwrap());
+        // IndexManager::new is sync but internally block_on (BTree::new), so
+        // offload to spawn_blocking to avoid blocking the tokio runtime.
+        let im = tokio::task::spawn_blocking(move || IndexManager::new(bp))
+            .await
+            .unwrap()
+            .unwrap();
+        (dir, im)
+    }
+
+    #[tokio::test]
+    async fn collect_all_pages_single_leaf_returns_root_only() {
+        let (_dir, im) = make_manager().await;
+        let root = im.root_page_id();
+
+        let pages = im.collect_all_pages().await.unwrap();
+        assert_eq!(pages, vec![root]);
+    }
+
+    #[tokio::test]
+    async fn collect_all_pages_returns_all_internal_and_leaves() {
+        let (_dir, im) = make_manager().await;
+
+        // Insert enough entries to force at least one leaf split (height >= 2).
+        for i in 0..300u64 {
+            let key = format!("key{:07}", i);
+            im.insert(key.as_bytes(), RowId::new((i % 100) as u32, i as u16))
+                .await
+                .unwrap();
+        }
+
+        let pages = im.collect_all_pages().await.unwrap();
+        assert!(
+            pages.len() >= 3,
+            "height>=2 BTree should have >= 3 pages (root + leaves), got {}",
+            pages.len()
+        );
+        assert!(
+            pages.contains(&im.root_page_id()),
+            "result must contain the current root {:?}, got {:?}",
+            im.root_page_id(),
+            pages
+        );
+
+        // No duplicates — visited set must prevent cycles / re-visits.
+        let mut seen = std::collections::HashSet::new();
+        for p in &pages {
+            assert!(seen.insert(p.0), "duplicate page id in result: {:?}", p);
+        }
     }
 }
