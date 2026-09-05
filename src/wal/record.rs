@@ -503,6 +503,8 @@ pub enum WalError {
     IoError(String),
     /// CRC32 校验不匹配
     ChecksumMismatch,
+    /// Redo 阶段失败（上下文含表名或 tx_id；K05 显式化，不再静默吞错）
+    RedoFailed(String),
 }
 
 impl std::fmt::Display for WalError {
@@ -513,6 +515,7 @@ impl std::fmt::Display for WalError {
             WalError::InvalidUtf8 => write!(f, "Invalid UTF-8 string in WAL record"),
             WalError::IoError(msg) => write!(f, "WAL IO error: {}", msg),
             WalError::ChecksumMismatch => write!(f, "WAL record CRC32 checksum mismatch"),
+            WalError::RedoFailed(msg) => write!(f, "WAL redo failed: {}", msg),
         }
     }
 }

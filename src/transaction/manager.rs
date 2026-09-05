@@ -1,4 +1,6 @@
-use crate::storage::{BufferPool, PageId, Result, RowId, TableMeta};
+use crate::storage::{
+    update_version_header_in_data_page, BufferPool, PageId, Result, RowId, StorageError, TableMeta,
+};
 use crate::transaction::{Snapshot, TransactionError, TransactionId};
 use crate::wal::{WALBuffer, WalRecord};
 use std::collections::{HashMap, HashSet};
@@ -50,8 +52,8 @@ impl Transaction {
 pub struct TransactionManager {
     tx_id_allocator: TransactionId,
     active_tx_ids: RwLock<HashSet<u64>>,
-    // M10: 跟踪每个事务的未提交版本
-    tx_versions: RwLock<HashMap<u64, HashSet<RowId>>>,
+    // M10: 跟踪每个事务的未提交版本，按表聚合以支持多表事务回滚（MS07-T04）
+    tx_versions: RwLock<HashMap<u64, HashMap<String, HashSet<RowId>>>>,
     // WAL buffer for writing transaction lifecycle records
     wal_buffer: RwLock<Option<Arc<WALBuffer>>>,
 }
@@ -128,14 +130,15 @@ impl TransactionManager {
 
     /// Abort a transaction
     ///
-    /// - Cleans up uncommitted versions (M10)
+    /// - Cleans up uncommitted versions (M10), rolling back each table's
+    ///   index entries via the resolved `TableMeta` map (MS07-T04)
     /// - Removes from active list
     /// - Clears tx_versions
     pub async fn abort(
         &self,
         tx: Transaction,
         buffer_pool: &BufferPool,
-        table_meta: &TableMeta,
+        tables: &HashMap<String, Arc<TableMeta>>,
     ) -> Result<()> {
         let tx_id = tx.id();
 
@@ -145,7 +148,7 @@ impl TransactionManager {
         }
 
         // M10: Cleanup uncommitted versions
-        self.abort_cleanup_versions(tx_id, buffer_pool, table_meta)
+        self.abort_cleanup_versions(tx_id, buffer_pool, tables)
             .await?;
 
         // Remove from active list
@@ -167,17 +170,32 @@ impl TransactionManager {
 
     /// Record a version created by this transaction (M10)
     ///
-    /// Called by InsertExecutor/UpdateExecutor when creating new versions
-    pub async fn record_version(&self, tx_id: u64, row_id: RowId) {
+    /// Called by InsertExecutor/UpdateExecutor/DeleteExecutor when creating
+    /// new versions. Versions are aggregated per table so an abort can roll
+    /// back every table the transaction touched (MS07-T04).
+    pub async fn record_version(&self, tx_id: u64, table_name: &str, row_id: RowId) {
         let mut versions = self.tx_versions.write().await;
         versions
             .entry(tx_id)
-            .or_insert_with(HashSet::new)
+            .or_default()
+            .entry(table_name.to_string())
+            .or_default()
             .insert(row_id);
     }
 
-    /// Get all versions recorded for a transaction (for testing)
+    /// Get all versions recorded for a transaction, across all its tables
+    /// (for testing)
     pub async fn get_tx_versions(&self, tx_id: u64) -> HashSet<RowId> {
+        self.tx_versions
+            .read()
+            .await
+            .get(&tx_id)
+            .map(|tables| tables.values().flatten().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get the per-table versions recorded for a transaction (for rollback)
+    pub async fn tx_version_tables(&self, tx_id: u64) -> HashMap<String, HashSet<RowId>> {
         self.tx_versions
             .read()
             .await
@@ -186,9 +204,19 @@ impl TransactionManager {
             .unwrap_or_default()
     }
 
-    /// Get tx_versions (for testing)
+    /// Get tx_versions flattened across tables (for testing)
     pub async fn tx_versions(&self) -> HashMap<u64, HashSet<RowId>> {
-        self.tx_versions.read().await.clone()
+        self.tx_versions
+            .read()
+            .await
+            .iter()
+            .map(|(tx_id, tables)| {
+                (
+                    *tx_id,
+                    tables.values().flatten().copied().collect::<HashSet<_>>(),
+                )
+            })
+            .collect()
     }
 
     /// Get current max TxId (for testing)
@@ -210,7 +238,10 @@ impl TransactionManager {
     /// Mark all versions as committed (M10)
     pub async fn commit_mark_versions(&self, tx_id: u64, buffer_pool: &BufferPool) -> Result<()> {
         let versions = self.tx_versions.read().await;
-        let tx_versions = versions.get(&tx_id).cloned().unwrap_or_default();
+        let tx_versions: HashSet<RowId> = versions
+            .get(&tx_id)
+            .map(|tables| tables.values().flatten().copied().collect())
+            .unwrap_or_default();
 
         for row_id in tx_versions {
             buffer_pool.write_commit_tx_id(row_id, tx_id).await?;
@@ -224,29 +255,49 @@ impl TransactionManager {
 
     /// Cleanup uncommitted versions on abort (M10)
     ///
-    /// For each uncommitted version created by this transaction:
+    /// For each uncommitted version created by this transaction, grouped by
+    /// table (MS07-T04):
     /// - If it has a previous version, update index to point to previous
     /// - If it has no previous version, delete from index
     pub async fn abort_cleanup_versions(
         &self,
         tx_id: u64,
         buffer_pool: &BufferPool,
-        table_meta: &TableMeta,
+        tables: &HashMap<String, Arc<TableMeta>>,
     ) -> Result<()> {
         let versions = self.tx_versions.read().await;
         let tx_versions = versions.get(&tx_id).cloned().unwrap_or_default();
+        drop(versions);
 
-        for row_id in tx_versions {
-            let header = buffer_pool.read_version_header(row_id).await?;
+        for (table_name, row_ids) in tx_versions {
+            let table_meta = tables.get(&table_name).ok_or_else(|| {
+                StorageError::ExecutionError(format!(
+                    "abort cleanup for tx {}: no table meta resolved for table '{}'",
+                    tx_id, table_name
+                ))
+            })?;
 
-            let key = table_meta.index_manager.find_key_by_row_id(row_id).await;
+            for row_id in row_ids {
+                let header = buffer_pool.read_version_header(row_id).await?;
 
-            if let Some(key) = key {
-                if let Some(prev_row_id) = header.next_version() {
-                    table_meta.index_manager.update(&key, prev_row_id).await?;
-                } else {
-                    table_meta.index_manager.delete(&key).await?;
+                let key = table_meta.index_manager.find_key_by_row_id(row_id).await;
+
+                if let Some(key) = key {
+                    if let Some(prev_row_id) = header.next_version() {
+                        table_meta.index_manager.update(&key, prev_row_id).await?;
+                    } else {
+                        table_meta.index_manager.delete(&key).await?;
+                    }
                 }
+
+                // MS07-T04: tombstone the aborted version. Index fixup alone
+                // leaves the tuple in its data-page slot, and snapshot-less
+                // scans (DataScan with `snapshot: None`) yield every slot
+                // that is not deleted — the rolled-back row would stay
+                // visible to `SELECT *`. Marking it deleted makes scans skip
+                // it, matching the "no residue after rollback" contract.
+                update_version_header_in_data_page(buffer_pool, row_id, header.mark_deleted(), &[])
+                    .await?;
             }
         }
 
@@ -263,7 +314,7 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{BufferPool, FileStorage, TableManager};
+    use crate::storage::{write_tuple_to_data_page, BufferPool, FileStorage, TableManager};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -326,7 +377,8 @@ mod tests {
         let tx = manager.begin().await;
         let tx_id = tx.id();
 
-        manager.abort(tx, &buffer_pool, &table_meta).await.unwrap();
+        let tables = HashMap::from([("test_table".to_string(), table_meta)]);
+        manager.abort(tx, &buffer_pool, &tables).await.unwrap();
 
         // Verify transaction not in active list
         let active = manager.active_transactions().await;
@@ -356,7 +408,8 @@ mod tests {
 
         // Commit tx1 and tx3, abort tx2
         manager.commit(tx1, &buffer_pool).await.unwrap();
-        manager.abort(tx2, &buffer_pool, &table_meta).await.unwrap();
+        let tables = HashMap::from([("test_table".to_string(), table_meta)]);
+        manager.abort(tx2, &buffer_pool, &tables).await.unwrap();
         manager.commit(tx3, &buffer_pool).await.unwrap();
 
         // Active list should be empty
@@ -395,7 +448,8 @@ mod tests {
         // tx2 and tx3 snapshots were taken before tx1 committed
         // They should still see tx1 as not visible (based on snapshot rules)
 
-        manager.abort(tx2, &buffer_pool, &table_meta).await.unwrap();
+        let tables = HashMap::from([("test_table".to_string(), table_meta)]);
+        manager.abort(tx2, &buffer_pool, &tables).await.unwrap();
         manager.commit(tx3, &buffer_pool).await.unwrap();
     }
 
@@ -425,7 +479,7 @@ mod tests {
     async fn test_record_version_single() {
         let manager = TransactionManager::new();
         let row_id = RowId::new(1, 0);
-        manager.record_version(1, row_id).await;
+        manager.record_version(1, "t1", row_id).await;
         let versions = manager.get_tx_versions(1).await;
         assert!(versions.contains(&row_id));
         assert_eq!(versions.len(), 1);
@@ -436,12 +490,123 @@ mod tests {
         let manager = TransactionManager::new();
         let row_id1 = RowId::new(1, 0);
         let row_id2 = RowId::new(2, 0);
-        manager.record_version(1, row_id1).await;
-        manager.record_version(1, row_id2).await;
+        manager.record_version(1, "t1", row_id1).await;
+        manager.record_version(1, "t1", row_id2).await;
         let versions = manager.get_tx_versions(1).await;
         assert!(versions.contains(&row_id1));
         assert!(versions.contains(&row_id2));
         assert_eq!(versions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_record_version_multiple_tables() {
+        let manager = TransactionManager::new();
+        manager.record_version(1, "t1", RowId::new(1, 0)).await;
+        manager.record_version(1, "t2", RowId::new(2, 0)).await;
+        manager.record_version(1, "t1", RowId::new(3, 0)).await;
+
+        // Union view keeps the legacy flat per-tx shape.
+        let versions = manager.get_tx_versions(1).await;
+        assert_eq!(versions.len(), 3);
+
+        // Per-table view separates the two tables.
+        let tables = manager.tx_version_tables(1).await;
+        assert_eq!(tables.get("t1").unwrap().len(), 2);
+        assert_eq!(tables.get("t2").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_abort_cleanup_multi_table() {
+        use crate::transaction::VersionHeader;
+
+        let manager = TransactionManager::new();
+        let buffer_pool = create_test_buffer_pool();
+        let storage = buffer_pool.storage().clone();
+        let table_manager = TableManager::new(buffer_pool.clone(), storage)
+            .await
+            .unwrap();
+        for name in ["t1", "t2"] {
+            table_manager
+                .create_table(
+                    name,
+                    vec![("id".to_string(), crate::storage::ColumnType::Int)],
+                    "id",
+                )
+                .await
+                .unwrap();
+        }
+        let t1 = table_manager.get_table("t1").await.unwrap();
+        let t2 = table_manager.get_table("t2").await.unwrap();
+
+        let tx = manager.begin().await;
+        let tx_id = tx.id();
+
+        // One uncommitted insert per table, each registered in its index.
+        let tuple = vec![0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let rid1 =
+            write_tuple_to_data_page(&buffer_pool, &t1, &VersionHeader::new(tx_id, None), &tuple)
+                .await
+                .unwrap();
+        let rid2 =
+            write_tuple_to_data_page(&buffer_pool, &t2, &VersionHeader::new(tx_id, None), &tuple)
+                .await
+                .unwrap();
+        manager.record_version(tx_id, "t1", rid1).await;
+        manager.record_version(tx_id, "t2", rid2).await;
+        t1.index_manager.insert(b"1", rid1).await.unwrap();
+        t2.index_manager.insert(b"2", rid2).await.unwrap();
+
+        let metas = HashMap::from([
+            ("t1".to_string(), t1.clone()),
+            ("t2".to_string(), t2.clone()),
+        ]);
+        manager.abort(tx, &buffer_pool, &metas).await.unwrap();
+
+        // Both index entries are rolled back; version bookkeeping is cleared.
+        assert_eq!(t1.index_manager.search(b"1").await.unwrap(), None);
+        assert_eq!(t2.index_manager.search(b"2").await.unwrap(), None);
+        assert!(manager.get_tx_versions(tx_id).await.is_empty());
+
+        // Both aborted versions are tombstoned so snapshot-less scans skip
+        // them (no residue after rollback).
+        assert!(buffer_pool
+            .read_version_header(rid1)
+            .await
+            .unwrap()
+            .is_deleted());
+        assert!(buffer_pool
+            .read_version_header(rid2)
+            .await
+            .unwrap()
+            .is_deleted());
+    }
+
+    #[tokio::test]
+    async fn test_abort_cleanup_missing_table_meta_errors() {
+        use crate::transaction::VersionHeader;
+
+        let manager = TransactionManager::new();
+        let buffer_pool = create_test_buffer_pool();
+        let table_meta = create_test_table(buffer_pool.clone()).await;
+
+        let tx = manager.begin().await;
+        let tx_id = tx.id();
+        let tuple = vec![0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let rid = write_tuple_to_data_page(
+            &buffer_pool,
+            &table_meta,
+            &VersionHeader::new(tx_id, None),
+            &tuple,
+        )
+        .await
+        .unwrap();
+        manager.record_version(tx_id, "test_table", rid).await;
+
+        // No meta resolved for the recorded table: abort must surface an
+        // error instead of silently leaving a dangling index entry.
+        let empty = HashMap::new();
+        let err = manager.abort(tx, &buffer_pool, &empty).await.unwrap_err();
+        assert!(err.to_string().contains("test_table"), "got: {}", err);
     }
 
     #[tokio::test]

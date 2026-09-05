@@ -6,8 +6,9 @@
 use crate::network::protocol::Response;
 use crate::plan_cache::PlanCache;
 use crate::storage::{BufferPool, ColumnType, FileStorage, Result, TableManager, TableMeta};
-use crate::transaction::TransactionManager;
-use crate::wal::{RecoveryManager, WALBuffer, WalWriter};
+use crate::transaction::{Transaction, TransactionManager};
+use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalWriter};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ pub struct Database {
     pub wal_writer: Arc<WalWriter>,
     pub wal_buffer: Arc<WALBuffer>,
     pub plan_cache: Arc<PlanCache>,
+    pub checkpoint_manager: Arc<CheckpointManager>,
 }
 
 impl Database {
@@ -67,6 +69,13 @@ impl Database {
         // 4. Initialize plan cache
         let plan_cache = Arc::new(PlanCache::new());
 
+        // 5. Initialize checkpoint manager (MS07-T05)
+        let checkpoint_manager = Arc::new(CheckpointManager::new(
+            path,
+            wal_writer.clone(),
+            buffer_pool.clone(),
+        ));
+
         Ok(Self {
             buffer_pool,
             table_manager,
@@ -74,6 +83,7 @@ impl Database {
             wal_writer,
             wal_buffer,
             plan_cache,
+            checkpoint_manager,
         })
     }
 
@@ -94,18 +104,87 @@ impl Database {
         crate::pipeline::execute(self, sql).await
     }
 
+    /// Begin a new explicit transaction (MS07-T04).
+    ///
+    /// Returns an owned handle; pass it to [`Database::execute_in_tx`] for
+    /// every statement that belongs to the transaction, then terminate the
+    /// transaction with [`Database::commit`] or [`Database::rollback`].
+    /// Statements issued through [`Database::execute_sql`] keep their
+    /// implicit auto-commit behavior and do not interact with this handle.
+    pub async fn begin(&self) -> Result<Transaction> {
+        Ok(self.transaction_manager.begin().await)
+    }
+
+    /// Commit an explicit transaction, making all of its writes durable and
+    /// visible (WAL commit record + version marking).
+    pub async fn commit(&self, tx: Transaction) -> Result<()> {
+        self.transaction_manager.commit(tx, &self.buffer_pool).await
+    }
+
+    /// Roll back an explicit transaction: every version the transaction
+    /// recorded is cleaned up per table (index restored to the previous
+    /// version or deleted, aborted versions tombstoned).
+    pub async fn rollback(&self, tx: Transaction) -> Result<()> {
+        let tx_id = tx.id();
+        // Resolve the TableMeta of every table this transaction touched so
+        // abort can roll back index entries across all of them. A table that
+        // can no longer be resolved (e.g. dropped afterwards) surfaces as an
+        // explicit error from `abort` instead of a silent skip.
+        let mut tables = HashMap::new();
+        for name in self
+            .transaction_manager
+            .tx_version_tables(tx_id)
+            .await
+            .keys()
+        {
+            if let Ok(meta) = self.table_manager.get_table(name).await {
+                tables.insert(name.clone(), meta);
+            }
+        }
+        self.transaction_manager
+            .abort(tx, &self.buffer_pool, &tables)
+            .await
+    }
+
+    /// Execute one SQL statement inside an existing explicit transaction
+    /// (MS07-T04).
+    ///
+    /// DML statements reuse `tx.id()` and skip the implicit
+    /// begin/commit/abort wrapping of [`Database::execute_sql`]; SELECT and
+    /// DDL behave as in the implicit path (visibility semantics unchanged).
+    /// A failed statement returns an error response without terminating the
+    /// transaction.
+    pub async fn execute_in_tx(&self, sql: &str, tx: &Transaction) -> Response {
+        crate::pipeline::execute_in_tx(self, sql, tx.id()).await
+    }
+
     /// Get plan cache size (for testing)
     pub fn plan_cache_len(&self) -> usize {
         self.plan_cache.len()
     }
 
-    /// Flush all dirty buffer-pool pages and the WAL to disk.
+    /// Flush all dirty buffer-pool pages and the WAL to disk, then record a
+    /// checkpoint site and physically truncate the WAL (MS07-T05).
     ///
     /// MS07-T01: callers that drop the `Database` and immediately re-open
     /// the file must call `close()` first, otherwise the in-memory
     /// catalog pages (or any other dirty pages) never reach the on-disk
     /// file and the re-opened database sees an empty schema.
+    ///
+    /// MS07-T05: close() now performs a full checkpoint — dirty pages are
+    /// flushed, the checkpoint site is written and the WAL is rewritten
+    /// truncated, so the next open replays (almost) nothing.
     pub async fn close(&self) -> Result<()> {
-        self.buffer_pool.flush_all().await
+        self.checkpoint().await
+    }
+
+    /// Run a checkpoint: flush dirty pages, write the checkpoint site and
+    /// rewrite-truncate the WAL so the file stays bounded (MS07-T05).
+    pub async fn checkpoint(&self) -> Result<()> {
+        self.checkpoint_manager
+            .checkpoint()
+            .await
+            .map(|_captured_lsn| ())
+            .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))
     }
 }

@@ -29,6 +29,19 @@ impl WalReader {
     /// 自动检测旧格式和新格式（带 LSN + CRC32）
     /// 返回 Ok(None) 表示已到达文件末尾
     pub fn read_next(&mut self) -> Result<Option<WalRecord>, WalError> {
+        Ok(self.read_next_with_lsn()?.map(|(_lsn, record)| record))
+    }
+
+    /// 读取下一条 WAL 记录及其记录起始字节偏移
+    ///
+    /// 新格式返回记录内嵌的 LSN（即写入时的文件偏移）；
+    /// 旧格式无内嵌 LSN，退化为读取时的文件偏移。
+    pub fn read_next_with_lsn(&mut self) -> Result<Option<(u64, WalRecord)>, WalError> {
+        let start = self
+            .file
+            .stream_position()
+            .map_err(|e| WalError::IoError(e.to_string()))?;
+
         // 先尝试读取足够多的字节来判断格式
         let mut peek_buf = [0u8; 13]; // 至少 13 字节: lsn(8) + type(1) + len(4)
         let bytes_read = self
@@ -68,8 +81,8 @@ impl WalReader {
                 .read_exact(&mut record_buf[bytes_read..])
                 .map_err(|e| WalError::IoError(e.to_string()))?;
 
-            let (_lsn, record, _consumed) = WalRecord::deserialize_with_lsn(&record_buf)?;
-            Ok(Some(record))
+            let (lsn, record, _consumed) = WalRecord::deserialize_with_lsn(&record_buf)?;
+            Ok(Some((lsn, record)))
         } else {
             // 旧格式: [type:1B][len:4B][data:variable]
             let len =
@@ -87,17 +100,26 @@ impl WalReader {
             }
 
             let (record, _) = WalRecord::deserialize(&record_buf)?;
-            Ok(Some(record))
+            Ok(Some((start, record)))
         }
+    }
+
+    /// 读取所有 WAL 记录（带记录起始字节偏移）
+    pub fn read_all_with_lsn(&mut self) -> Result<Vec<(u64, WalRecord)>, WalError> {
+        let mut records = Vec::new();
+        while let Some((lsn, record)) = self.read_next_with_lsn()? {
+            records.push((lsn, record));
+        }
+        Ok(records)
     }
 
     /// 读取所有 WAL 记录
     pub fn read_all(&mut self) -> Result<Vec<WalRecord>, WalError> {
-        let mut records = Vec::new();
-        while let Some(record) = self.read_next()? {
-            records.push(record);
-        }
-        Ok(records)
+        Ok(self
+            .read_all_with_lsn()?
+            .into_iter()
+            .map(|(_lsn, record)| record)
+            .collect())
     }
 
     /// 定位到指定 LSN（字节偏移）

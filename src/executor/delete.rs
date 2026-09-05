@@ -87,7 +87,9 @@ impl Executor for DeleteExecutor {
         // M10: Record this version in tx_versions so abort can clean up the
         // index entry. Required because the index was already mutated above.
         if let Some(rid) = row_id {
-            self.tx_manager.record_version(self.tx_id, rid).await;
+            self.tx_manager
+                .record_version(self.tx_id, &self.table_name, rid)
+                .await;
 
             // WAL: Delete record only. BeginTxn/CommitTxn are written by
             // TransactionManager::begin()/commit() (the single source of truth).

@@ -123,7 +123,12 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
                 PhysicalPlan::Delete(n) => &n.table_name,
                 _ => unreachable!("is_dml guarantees a DML plan"),
             };
-            let table_meta_for_abort = database.table_manager.get_table(table_name).await.ok();
+            let abort_tables = database
+                .table_manager
+                .get_table(table_name)
+                .await
+                .ok()
+                .map(|tm| HashMap::from([(table_name.clone(), tm)]));
 
             let executor_creation_start = if profiling {
                 Some(Instant::now())
@@ -133,10 +138,10 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
             let executor = match create_executor_from_plan(plan, database, Some(tx_id)).await {
                 Ok(e) => e,
                 Err(e) => {
-                    if let Some(tm) = table_meta_for_abort {
+                    if let Some(abort_tables) = &abort_tables {
                         let _ = database
                             .transaction_manager
-                            .abort(tx, &database.buffer_pool, &tm)
+                            .abort(tx, &database.buffer_pool, abort_tables)
                             .await;
                     }
                     return Response::Error {
@@ -160,10 +165,10 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
 
             match &response {
                 Response::Error { .. } => {
-                    if let Some(tm) = table_meta_for_abort {
+                    if let Some(abort_tables) = &abort_tables {
                         if let Err(abort_err) = database
                             .transaction_manager
-                            .abort(tx, &database.buffer_pool, &tm)
+                            .abort(tx, &database.buffer_pool, abort_tables)
                             .await
                         {
                             return Response::Error {
@@ -216,6 +221,67 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
             }
             response
         }
+    }
+}
+
+/// Execute one SQL statement inside an existing user transaction (MS07-T04).
+///
+/// Reuses the same parse/plan stages as the implicit pipeline; execution
+/// goes through `execute_stage_in_tx`, which threads the user's `tx_id`
+/// into DML executors and skips the implicit begin/commit/abort wrapping.
+pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Response {
+    let statements = match parse_stage(sql).await {
+        Ok(s) => s,
+        Err(message) => return Response::Error { message },
+    };
+    let stmt = match statements.first() {
+        Some(s) => s,
+        None => {
+            return Response::Error {
+                message: "No statement executed".to_string(),
+            }
+        }
+    };
+    let plan = match plan_stage(database, sql, stmt, false).await {
+        Ok(p) => p,
+        Err(message) => return Response::Error { message },
+    };
+    execute_stage_in_tx(database, plan, tx_id).await
+}
+
+/// Stage-3 execution for a user transaction (MS07-T04).
+///
+/// DML nodes consume the caller's `tx_id` (`create_executor_from_plan`
+/// contract from MS06-T01) and run without any implicit transaction
+/// wrapping. Query and other nodes receive `Some(tx_id)` as well but ignore
+/// it for visibility (scans stay `snapshot: None`, semantics unchanged).
+/// DDL executes immediately and clears the plan cache, mirroring the
+/// implicit path. A failed statement returns an error response and leaves
+/// the transaction alive for the caller to commit or roll back.
+pub async fn execute_stage_in_tx(database: &Database, plan: PhysicalPlan, tx_id: u64) -> Response {
+    match &plan {
+        PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
+            let executor: Box<dyn Executor + Send> = match &plan {
+                PhysicalPlan::CreateTable(_) => Box::new(CreateTableExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                PhysicalPlan::DropTable(_) => Box::new(DropTableExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                _ => unreachable!("DDL match already filtered"),
+            };
+            let response = execute_executor(executor).await;
+            database.plan_cache.clear();
+            response
+        }
+        _ => match create_executor_from_plan(plan, database, Some(tx_id)).await {
+            Ok(executor) => execute_executor(executor).await,
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
+        },
     }
 }
 

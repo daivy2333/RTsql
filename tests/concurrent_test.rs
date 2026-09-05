@@ -7,6 +7,7 @@
 
 use rtsql::storage::{BufferPool, FileStorage, TableManager};
 use rtsql::transaction::TransactionManager;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -168,7 +169,8 @@ async fn test_snapshot_visibility_rules() {
     assert!(!snap4.is_visible(tx3_id, None));
 
     // Cleanup
-    manager.abort(tx2, &buffer_pool, &table_meta).await.unwrap();
+    let tables = HashMap::from([("test_table".to_string(), table_meta)]);
+    manager.abort(tx2, &buffer_pool, &tables).await.unwrap();
     manager.commit(tx3, &buffer_pool).await.unwrap();
     manager.commit(tx4, &buffer_pool).await.unwrap();
 }
