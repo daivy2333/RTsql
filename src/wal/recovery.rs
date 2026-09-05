@@ -68,20 +68,32 @@ impl RecoveryManager {
             return Ok(RecoveryResult::default());
         }
 
+        // 消费 checkpoint 位点（16B 语义与 CheckpointManager 一致）：
+        // 位点缺失/损坏（<16B）/ LSN 超出 WAL 文件长度（代际失效）→ 全量重放（0）；
+        // 有效位点语义 = 只重放记录偏移 ≥ site 的数据记录（位点前缀已由刷脏页覆盖）
+        let site = super::checkpoint::read_site_file(&db_path.with_extension("checkpoint"))?;
+        let wal_len = std::fs::metadata(&wal_path)
+            .map_err(|e| WalError::IoError(e.to_string()))?
+            .len();
+        let redo_from = match site {
+            Some((lsn, _)) if lsn <= wal_len => lsn,
+            _ => 0,
+        };
+
         let mut reader = WalReader::open(&wal_path)?;
-        let records = reader.read_all()?;
+        let records = reader.read_all_with_lsn()?;
 
         if records.is_empty() {
             return Ok(RecoveryResult::default());
         }
 
-        // Step 1: Classify transactions
+        // Step 1: Classify transactions（分类始终覆盖全部记录，不因位点裁剪）
         let mut all_tx_ids = HashSet::new();
         let mut committed_tx_ids = HashSet::new();
         let mut aborted_tx_ids = HashSet::new();
-        let mut data_records: Vec<&WalRecord> = Vec::new();
+        let mut data_records: Vec<(u64, &WalRecord)> = Vec::new();
 
-        for record in &records {
+        for (lsn, record) in &records {
             match record {
                 WalRecord::BeginTxn { tx_id } => {
                     all_tx_ids.insert(*tx_id);
@@ -93,7 +105,7 @@ impl RecoveryManager {
                     aborted_tx_ids.insert(*tx_id);
                 }
                 WalRecord::Insert { .. } | WalRecord::Update { .. } | WalRecord::Delete { .. } => {
-                    data_records.push(record);
+                    data_records.push((*lsn, record));
                 }
                 _ => {}
             }
@@ -106,21 +118,19 @@ impl RecoveryManager {
             .cloned()
             .collect();
 
-        // Step 2: Redo committed transactions (idempotent)
+        // Step 2: Redo committed transactions after the checkpoint site
+        // （K05 显式化：任何 redo 失败立即返回 Err，不再静默吞掉）
         let mut redo_count = 0;
-        for record in &data_records {
+        for (lsn, record) in &data_records {
             let tx_id = record.tx_id();
-            if committed_tx_ids.contains(&tx_id)
-                && Self::redo_record(record, &buffer_pool, &table_manager)
-                    .await
-                    .is_ok()
-            {
+            if committed_tx_ids.contains(&tx_id) && *lsn >= redo_from {
+                Self::redo_record(record, &buffer_pool, &table_manager).await?;
                 redo_count += 1;
             }
         }
 
         // Step 3: Mark uncommitted tuples as aborted
-        Self::mark_uncommitted_aborted(&uncommitted_tx_ids, &buffer_pool).await;
+        Self::mark_uncommitted_aborted(&uncommitted_tx_ids, &buffer_pool).await?;
 
         Ok(RecoveryResult {
             committed_tx_ids,
@@ -131,11 +141,13 @@ impl RecoveryManager {
     }
 
     /// 重放单条 WAL 记录
+    ///
+    /// 表缺失或页/索引操作失败时显式报错（K05：恢复不再静默吞错）
     async fn redo_record(
         record: &WalRecord,
         buffer_pool: &Arc<BufferPool>,
         table_manager: &Arc<TableManager>,
-    ) -> crate::storage::Result<()> {
+    ) -> Result<(), WalError> {
         match record {
             WalRecord::Insert {
                 table_name,
@@ -143,13 +155,21 @@ impl RecoveryManager {
                 tuple_data,
                 tx_id,
             } => {
-                let table_meta = match table_manager.get_table(table_name).await {
-                    Ok(m) => m,
-                    Err(_) => return Ok(()),
-                };
+                let table_meta = table_manager.get_table(table_name).await.map_err(|e| {
+                    WalError::RedoFailed(format!(
+                        "table '{}' lookup failed during redo: {}",
+                        table_name, e
+                    ))
+                })?;
                 let version_header = VersionHeader::new(*tx_id, None);
                 write_tuple_to_data_page(buffer_pool, &table_meta, &version_header, tuple_data)
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "insert redo into table '{}' failed: {}",
+                            table_name, e
+                        ))
+                    })?;
                 Ok(())
             }
             WalRecord::Update {
@@ -159,24 +179,39 @@ impl RecoveryManager {
                 tx_id,
                 ..
             } => {
-                let table_meta = match table_manager.get_table(table_name).await {
-                    Ok(m) => m,
-                    Err(_) => return Ok(()),
-                };
+                let table_meta = table_manager.get_table(table_name).await.map_err(|e| {
+                    WalError::RedoFailed(format!(
+                        "table '{}' lookup failed during redo: {}",
+                        table_name, e
+                    ))
+                })?;
                 let version_header = VersionHeader::new(*tx_id, None);
                 write_tuple_to_data_page(buffer_pool, &table_meta, &version_header, new_tuple)
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "update redo into table '{}' failed: {}",
+                            table_name, e
+                        ))
+                    })?;
                 Ok(())
             }
             WalRecord::Delete {
                 table_name, row_id, ..
             } => {
-                let table_meta = match table_manager.get_table(table_name).await {
-                    Ok(m) => m,
-                    Err(_) => return Ok(()),
-                };
+                let table_meta = table_manager.get_table(table_name).await.map_err(|e| {
+                    WalError::RedoFailed(format!(
+                        "table '{}' lookup failed during redo: {}",
+                        table_name, e
+                    ))
+                })?;
                 if let Some(key) = table_meta.index_manager.find_key_by_row_id(*row_id).await {
-                    let _ = table_meta.index_manager.delete(&key).await;
+                    table_meta.index_manager.delete(&key).await.map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "delete redo of table '{}' row {:?} failed: {}",
+                            table_name, row_id, e
+                        ))
+                    })?;
                 }
                 Ok(())
             }
@@ -188,10 +223,13 @@ impl RecoveryManager {
     async fn mark_uncommitted_aborted(
         uncommitted_tx_ids: &HashSet<u64>,
         buffer_pool: &Arc<BufferPool>,
-    ) {
+    ) -> Result<(), WalError> {
         for tx_id in uncommitted_tx_ids {
-            let _ = buffer_pool.mark_tx_aborted(*tx_id).await;
+            buffer_pool.mark_tx_aborted(*tx_id).await.map_err(|e| {
+                WalError::RedoFailed(format!("mark tx {} aborted failed: {}", tx_id, e))
+            })?;
         }
+        Ok(())
     }
 
     /// 检查是否需要恢复

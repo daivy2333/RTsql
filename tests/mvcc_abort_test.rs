@@ -5,6 +5,7 @@
 
 use rtsql::storage::{write_tuple_to_data_page, BufferPool, FileStorage, TableManager, TableMeta};
 use rtsql::transaction::{TransactionManager, VersionHeader};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -50,7 +51,7 @@ async fn test_abort_insert_row_not_visible() {
         .unwrap();
 
     // Record the version
-    tx_manager.record_version(tx_id, row_id).await;
+    tx_manager.record_version(tx_id, "test_table", row_id).await;
 
     // Insert into index
     let key = b"1";
@@ -61,10 +62,8 @@ async fn test_abort_insert_row_not_visible() {
     assert!(found.is_some(), "Row should be visible before abort");
 
     // Abort the transaction
-    tx_manager
-        .abort(tx, &buffer_pool, &table_meta)
-        .await
-        .unwrap();
+    let tables = HashMap::from([("test_table".to_string(), table_meta.clone())]);
+    tx_manager.abort(tx, &buffer_pool, &tables).await.unwrap();
 
     // Verify row is NOT visible after abort (index entry should be deleted)
     let found = table_meta.index_manager.search(key).await.unwrap();
@@ -96,7 +95,9 @@ async fn test_abort_update_reverts_to_previous_version() {
     .await
     .unwrap();
 
-    tx_manager.record_version(tx1_id, row_id_v1).await;
+    tx_manager
+        .record_version(tx1_id, "test_table", row_id_v1)
+        .await;
 
     // Insert into index
     let key = b"test_key";
@@ -133,7 +134,9 @@ async fn test_abort_update_reverts_to_previous_version() {
     .await
     .unwrap();
 
-    tx_manager.record_version(tx2_id, row_id_v2).await;
+    tx_manager
+        .record_version(tx2_id, "test_table", row_id_v2)
+        .await;
 
     // Update index to point to v2
     table_meta
@@ -151,10 +154,8 @@ async fn test_abort_update_reverts_to_previous_version() {
     );
 
     // Abort tx2
-    tx_manager
-        .abort(tx2, &buffer_pool, &table_meta)
-        .await
-        .unwrap();
+    let tables = HashMap::from([("test_table".to_string(), table_meta.clone())]);
+    tx_manager.abort(tx2, &buffer_pool, &tables).await.unwrap();
 
     // After abort, should still see v1 (index should be updated to point back to v1)
     let found = table_meta.index_manager.search(key).await.unwrap();
@@ -181,7 +182,9 @@ async fn test_multiple_aborts() {
         .await
         .unwrap();
 
-    tx_manager.record_version(tx1_id, row_id).await;
+    tx_manager
+        .record_version(tx1_id, "test_table", row_id)
+        .await;
     table_meta
         .index_manager
         .insert(b"key1", row_id)
@@ -199,7 +202,9 @@ async fn test_multiple_aborts() {
             .await
             .unwrap();
 
-    tx_manager.record_version(tx2_id, row_id2).await;
+    tx_manager
+        .record_version(tx2_id, "test_table", row_id2)
+        .await;
     table_meta
         .index_manager
         .insert(b"key2", row_id2)
@@ -216,7 +221,9 @@ async fn test_multiple_aborts() {
             .await
             .unwrap();
 
-    tx_manager.record_version(tx3_id, row_id3).await;
+    tx_manager
+        .record_version(tx3_id, "test_table", row_id3)
+        .await;
     table_meta
         .index_manager
         .insert(b"key3", row_id3)
@@ -224,14 +231,9 @@ async fn test_multiple_aborts() {
         .unwrap();
 
     // Abort both tx2 and tx3
-    tx_manager
-        .abort(tx2, &buffer_pool, &table_meta)
-        .await
-        .unwrap();
-    tx_manager
-        .abort(tx3, &buffer_pool, &table_meta)
-        .await
-        .unwrap();
+    let tables = HashMap::from([("test_table".to_string(), table_meta.clone())]);
+    tx_manager.abort(tx2, &buffer_pool, &tables).await.unwrap();
+    tx_manager.abort(tx3, &buffer_pool, &tables).await.unwrap();
 
     // key1 should still exist
     assert!(

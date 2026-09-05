@@ -4,7 +4,7 @@
 
 use super::record::{WalError, WalRecord};
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,8 +14,7 @@ use tokio::task::spawn_blocking;
 ///
 /// 持有单一持久文件句柄，全部 IO 操作经 `Arc<Mutex<File>>` 串行完成
 pub struct WalWriter {
-    // 保留路径仅用于诊断；IO 一律经持久句柄完成
-    #[allow(dead_code)]
+    // 路径仅用于重写截断时打开非 append 覆写句柄
     wal_path: PathBuf,
     file: Arc<Mutex<File>>,
     write_count: AtomicU64,
@@ -96,6 +95,55 @@ impl WalWriter {
                 .map_err(|e| WalError::IoError(e.to_string()))?;
 
             Ok(())
+        })
+        .await
+        .map_err(|e| WalError::IoError(e.to_string()))?
+    }
+
+    /// 重写截断：保留 `[lsn..end)` 后缀并移到文件偏移 0，WAL 物理缩短
+    ///
+    /// 用于 checkpoint：位点之前的记录已由刷脏页覆盖，可物理丢弃；
+    /// 后缀按原字节保留（embedded LSN 语义不变）。
+    /// 全程持有 writer 文件互斥（单次临界区），防止与并发追加交错。
+    /// 覆写头部必须用独立非 append 句柄——持有句柄以 O_APPEND 打开，
+    /// write 恒定落在文件末尾，无法覆写头部；也不得 temp+rename（rename 后
+    /// 持有 FD 指向旧 inode，后续 WAL 写全部丢失）。
+    pub async fn rewrite_truncate(&self, lsn: u64) -> Result<u64, WalError> {
+        let file = Arc::clone(&self.file);
+        let wal_path = self.wal_path.clone();
+
+        spawn_blocking(move || {
+            let mut file = file.lock().unwrap();
+
+            let end = file
+                .seek(SeekFrom::End(0))
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+            let suffix_len = end.saturating_sub(lsn);
+
+            let mut suffix = vec![0u8; suffix_len as usize];
+            file.seek(SeekFrom::Start(lsn))
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+            file.read_exact(&mut suffix)
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+
+            let mut rewrite = OpenOptions::new()
+                .write(true)
+                .open(&wal_path)
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+            rewrite
+                .seek(SeekFrom::Start(0))
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+            rewrite
+                .write_all(&suffix)
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+            rewrite
+                .set_len(suffix_len)
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+            rewrite
+                .sync_all()
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+
+            Ok(suffix_len)
         })
         .await
         .map_err(|e| WalError::IoError(e.to_string()))?

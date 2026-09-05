@@ -145,7 +145,9 @@ impl Executor for InsertExecutor {
             }
 
             // Record version in tx_versions (M10)
-            self.tx_manager.record_version(self.tx_id, row_id).await;
+            self.tx_manager
+                .record_version(self.tx_id, &self.table_meta.name, row_id)
+                .await;
 
             self.table_meta
                 .index_manager

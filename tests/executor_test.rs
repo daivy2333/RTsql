@@ -729,6 +729,11 @@ async fn test_create_table_executor_success() -> Result<()> {
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
+        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
+            std::path::Path::new(":memory:"),
+            wal_writer.clone(),
+            buffer_pool.clone(),
+        )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
@@ -771,6 +776,11 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
+        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
+            std::path::Path::new(":memory:"),
+            wal_writer.clone(),
+            buffer_pool.clone(),
+        )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
@@ -824,6 +834,11 @@ async fn test_drop_table_executor_success() -> Result<()> {
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
+        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
+            std::path::Path::new(":memory:"),
+            wal_writer.clone(),
+            buffer_pool.clone(),
+        )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
@@ -872,6 +887,11 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
+        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
+            std::path::Path::new(":memory:"),
+            wal_writer.clone(),
+            buffer_pool.clone(),
+        )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });
@@ -911,6 +931,11 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
         table_manager: table_manager.clone(),
         transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
         wal_writer: wal_writer.clone(),
+        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
+            std::path::Path::new(":memory:"),
+            wal_writer.clone(),
+            buffer_pool.clone(),
+        )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
     });

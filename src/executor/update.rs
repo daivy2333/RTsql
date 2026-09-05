@@ -122,7 +122,9 @@ impl Executor for UpdateExecutor {
         }
 
         // Step 6.1: Record version in tx_versions (M10)
-        self.tx_manager.record_version(self.tx_id, new_row_id).await;
+        self.tx_manager
+            .record_version(self.tx_id, &self.table_meta.name, new_row_id)
+            .await;
 
         // Step 7: Update index → new RowId
         self.table_meta

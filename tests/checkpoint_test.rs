@@ -50,11 +50,14 @@ async fn test_checkpoint_flow() {
     let manager = CheckpointManager::new(db_path, wal_writer.clone(), buffer_pool);
 
     // 执行 checkpoint
-    let _lsn = manager.checkpoint().await.unwrap();
+    let captured_lsn = manager.checkpoint().await.unwrap();
+    assert!(captured_lsn > 0, "checkpoint 返回本次捕获的 LSN");
 
     // 读位点验证
+    // MS07-T05：重写截断后位点置 0（语义 = 对已缩短文件重放全部），
+    // 既有 `checkpoint_lsn > 0` 断言与 Critical Path 冲突，按新语义同步
     let (checkpoint_lsn, _) = manager.read_checkpoint_site().unwrap().unwrap();
-    assert!(checkpoint_lsn > 0);
+    assert_eq!(checkpoint_lsn, 0, "截断后位点必须失效为重放全部");
 }
 
 #[tokio::test]
@@ -88,6 +91,7 @@ async fn test_checkpoint_threshold_trigger() {
     }
 
     // 验证 checkpoint 位点已写入
+    // MS07-T05：重写截断后位点置 0（语义 = 对已缩短文件重放全部）
     let (lsn, _) = manager.read_checkpoint_site().unwrap().unwrap();
-    assert!(lsn > 0);
+    assert_eq!(lsn, 0, "截断后位点必须失效为重放全部");
 }

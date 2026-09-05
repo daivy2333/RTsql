@@ -102,6 +102,10 @@ async fn test_data_pages_survive_restart() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
+    // K05 显式化后，redo 遇到 catalog 中不存在的表会显式失败；
+    // 本测试模拟"页已落盘但进程崩溃"的场景，表定义必须先持久化。
+    db.buffer_pool.flush_all().await.unwrap();
+
     db.wal_buffer.shutdown().await;
     drop(db);
 
