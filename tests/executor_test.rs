@@ -1383,7 +1383,7 @@ async fn test_data_scan_executor_full_table() -> Result<()> {
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(3)));
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None);
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None);
 
     let mut row_count = 0;
     let mut collected_ids: Vec<i64> = Vec::new();
@@ -1421,7 +1421,7 @@ async fn test_data_scan_executor_empty_table() -> Result<()> {
 
     let table_meta = table_mgr.get_table("test").await?;
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None);
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None);
 
     // 第一次 next() 应返回 Ok(None) — 空表无数据
     let result = executor.next().await?;
@@ -1469,7 +1469,7 @@ async fn test_data_scan_executor_multi_page() -> Result<()> {
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(200)));
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None);
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None);
 
     let mut row_count = 0;
     while let Some(result) = executor.next().await? {
@@ -1515,7 +1515,7 @@ async fn test_data_scan_executor_streaming() -> Result<()> {
     );
     insert_executor.next().await?;
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None);
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None);
 
     // 流式验证：连续 5 次 next() 各返回 1 行，第 6 次返回 None
     for i in 1..=5 {
@@ -1572,7 +1572,7 @@ async fn test_data_scan_mvcc_uncommitted_invisible() -> Result<()> {
     // Snapshot at tx_id=2, tx1 still active → uncommitted rows invisible
     let snapshot = Snapshot::new(2, vec![1]);
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot));
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot), None, None);
 
     let mut row_count = 0;
     while let Some(result) = executor.next().await? {
@@ -1642,7 +1642,7 @@ async fn test_data_scan_mvcc_committed_visible() -> Result<()> {
     // Snapshot at tx_id=3, no active tx → committed rows visible
     let snapshot = Snapshot::new(3, vec![]);
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot));
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot), None, None);
 
     let mut row_count = 0;
     let mut collected_ids: Vec<i64> = Vec::new();
@@ -1677,9 +1677,14 @@ async fn test_planner_no_where_routes_to_data_scan() -> Result<()> {
         PhysicalPlan::DataScan(DataScanNode {
             table_name,
             columns,
+            predicate,
+            scan_cap,
         }) => {
             assert_eq!(table_name, "test");
             assert_eq!(columns, vec!["id", "name"]);
+            // MS07-T06: no WHERE / no LIMIT here — no pushed predicate or cap.
+            assert!(predicate.is_none());
+            assert_eq!(scan_cap, None);
         }
         other => panic!("Expected DataScan, got {:?}", other),
     }
@@ -1707,10 +1712,9 @@ async fn test_planner_with_pk_equality_keeps_index_scan() -> Result<()> {
     Ok(())
 }
 
-/// M19 T4: Planner 路由 — 非 PK WHERE → `Filter(DataScan)`
+/// M19 T4 + MS07-T06: Planner 路由 — 非 PK WHERE → `DataScan`（谓词行内下推，无 Filter 包裹）
 #[tokio::test]
 async fn test_planner_non_pk_where_routes_to_filter_data_scan() -> Result<()> {
-    use rtsql::executor::FilterNode;
     use rtsql::parser::{parse_sql, PlanBuilder};
 
     let mut builder = PlanBuilder::new();
@@ -1721,18 +1725,14 @@ async fn test_planner_non_pk_where_routes_to_filter_data_scan() -> Result<()> {
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
-        PhysicalPlan::Filter(FilterNode {
-            input, table_name, ..
-        }) => {
-            assert_eq!(table_name, "test");
-            match *input {
-                PhysicalPlan::DataScan(node) => {
-                    assert_eq!(node.table_name, "test");
-                }
-                other => panic!("Expected Filter over DataScan, got Filter over {:?}", other),
-            }
+        PhysicalPlan::DataScan(node) => {
+            assert_eq!(node.table_name, "test");
+            assert!(
+                node.predicate.is_some(),
+                "MS07-T06: non-PK WHERE must carry its predicate inside DataScan"
+            );
         }
-        other => panic!("Expected Filter, got {:?}", other),
+        other => panic!("Expected DataScan with pushed predicate, got {:?}", other),
     }
     Ok(())
 }

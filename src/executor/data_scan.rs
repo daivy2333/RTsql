@@ -12,7 +12,7 @@
 //! is parsed and checked. Invisible current versions follow `next_version`
 //! pointers (potentially across pages) to find a visible commit.
 
-use crate::executor::{ExecResult, Executor, Value};
+use crate::executor::{ExecResult, Executor, PredicateRef, Value};
 use crate::storage::page_format::{deserialize_value_refs, ColumnType, RowId, SlottedPageRef};
 use crate::storage::PageId;
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
@@ -37,6 +37,16 @@ pub struct DataScanExecutor {
     buffer_pool: Arc<BufferPool>,
     schema: Vec<ColumnType>,
     snapshot: Option<Snapshot>,
+    /// MS07-T06: row-level predicate pushed down from the planner. Evaluated
+    /// against the same full-schema-order row that a wrapping `FilterExecutor`
+    /// would see; `None` means no inline filtering.
+    predicate: Option<PredicateRef>,
+    /// MS07-T06: maximum number of rows to yield (pushed down from LIMIT as
+    /// `offset + limit`; `Some(0)` yields nothing). Counted after visibility
+    /// and inline-predicate passes. `None` = unbounded.
+    scan_cap: Option<usize>,
+    /// Rows yielded so far (only meaningful when `scan_cap` is set).
+    produced: usize,
     /// Current data page being scanned; `None` means scan is complete or table is empty.
     current_page_id: Option<PageId>,
     /// Next slot index to read on the current page.
@@ -48,6 +58,8 @@ impl DataScanExecutor {
         table_meta: Arc<TableMeta>,
         buffer_pool: Arc<BufferPool>,
         snapshot: Option<Snapshot>,
+        predicate: Option<PredicateRef>,
+        scan_cap: Option<usize>,
     ) -> Self {
         let schema: Vec<ColumnType> = table_meta
             .columns
@@ -62,8 +74,48 @@ impl DataScanExecutor {
             buffer_pool,
             schema,
             snapshot,
+            predicate,
+            scan_cap,
+            produced: 0,
             current_page_id,
             current_slot_index: 0,
+        }
+    }
+
+    /// Apply the pushed-down predicate to a candidate row with the exact
+    /// `FilterExecutor` semantics (same evaluation row and same error text).
+    /// `Ok(None)` = row filtered out.
+    fn filter_row(
+        predicate: Option<&PredicateRef>,
+        values: Vec<Value>,
+    ) -> Result<Option<Vec<Value>>> {
+        match predicate {
+            None => Ok(Some(values)),
+            Some(p) => match p.evaluate(&values) {
+                Ok(true) => Ok(Some(values)),
+                Ok(false) => Ok(None),
+                Err(e) => Err(crate::storage::StorageError::ExecutionError(format!(
+                    "Predicate evaluation error: {}",
+                    e
+                ))),
+            },
+        }
+    }
+
+    /// Yield a row that already passed visibility and the inline predicate,
+    /// enforcing the pushed-down scan cap. Reaching the cap ends the scan the
+    /// way `LimitExecutor` ends when its input is exhausted.
+    fn yield_capped(&mut self, values: Vec<Value>) -> Result<Option<ExecResult>> {
+        match self.scan_cap {
+            None => Ok(Some(ExecResult::Row(values))),
+            Some(cap) => {
+                if self.produced >= cap {
+                    self.current_page_id = None;
+                    return Ok(None);
+                }
+                self.produced += 1;
+                Ok(Some(ExecResult::Row(values)))
+            }
         }
     }
 
@@ -226,7 +278,10 @@ impl Executor for DataScanExecutor {
 
             match action {
                 PageAction::YieldValue(values) => {
-                    return Ok(Some(ExecResult::Row(values)));
+                    match Self::filter_row(self.predicate.as_ref(), values)? {
+                        Some(values) => return self.yield_capped(values),
+                        None => continue, // filtered out by the inline predicate
+                    }
                 }
                 PageAction::NeedVersionChain(None) => {
                     // No chain — skip this slot, continue to next.
@@ -242,7 +297,12 @@ impl Executor for DataScanExecutor {
                         )
                         .await?
                         {
-                            Some(values) => return Ok(Some(ExecResult::Row(values))),
+                            Some(values) => {
+                                match Self::filter_row(self.predicate.as_ref(), values)? {
+                                    Some(values) => return self.yield_capped(values),
+                                    None => continue, // filtered out by the inline predicate
+                                }
+                            }
                             None => continue, // no visible version in chain
                         }
                     } else {

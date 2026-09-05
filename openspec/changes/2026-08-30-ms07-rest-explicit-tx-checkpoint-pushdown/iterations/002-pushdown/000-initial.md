@@ -222,14 +222,145 @@ Limit 的输入链判定（自 Limit 向下递归）
 
 ## Act Response
 
-- Status: pending
+- Status: reported
 
 **Implemented**
 
-（待 Act 填写）
+Iteration 002 全部 3 个 Task 完成（2026-09-05，工作区未提交，待用户触发 commit；与 T04/T05 未提交变更同工作区，提交顺序由用户编排）：
+
+- **T1（谓词下推）**：`DataScanNode` 新增 `predicate: Option<PredicateRef>` 字段；planner 非 PK WHERE 分派重构为三路——`has_pk_eq` → `Filter(Scan)` 原状；`contains_or(where_expr)`（任意深度 OR，含 UnaryOp/Nested 递归）→ `Filter(DataScan{predicate: None})` 原状；否则谓词移入 `DataScan{predicate: Some}`、不再生成 Filter 节点（DerivedScan 等其他源保留 Filter 包裹）。`DataScanExecutor::next` 在两个行产出点（页内 Yield 与版本链可见版本）经 `filter_row` 行内求值：`Ok(true)` 放行、`Ok(false)` 跳过且不物化、`Err` 以与 `filter.rs` 逐字一致的 `"Predicate evaluation error: {e}"` 传播；求值发生在可见性判定之后、全列行上（与 Filter 收到的行完全同源）。`contains_or` 为 query.rs 自由函数，递归面与 `build_where` 可构建面精确对齐。
+- **T2（LIMIT 下推）**：`DataScanNode` 新增 `scan_cap: Option<usize>`；`build_query` LIMIT 分派在构造顶层 `Limit`（任何形状下保留）前，仅当输入链恰为 `DataScan` 时写入 `scan_cap = Some(offset.saturating_add(limit))`（`limit == 0` → `Some(0)`，扫描立即 Done，与 `LimitExecutor` 首分支等价）；`Sort`/`Aggregate`/`DerivedScan`/`Filter`/其他链不下推。`DataScanExecutor::yield_capped` 按通过可见性 + 谓词后的产出行计数，达到 cap 即终止扫描（`current_page_id = None`），与 LimitExecutor 的拉取次数（offset+limit）精确等价。
+- **T3（回归）**：全量验证 577 passed / 0 failed（基线 562 + 本 Iteration 新增 15）；build/clippy/fmt/`openspec validate --all` 全 0（见 Verification Evidence）。
+
+**Changed Files and Symbols**
+
+| 文件 | 变更 |
+|---|---|
+| `src/executor/plan.rs` | `DataScanNode` 新增 `predicate`/`scan_cap` 字段 |
+| `src/parser/planner/query.rs` | 非 PK WHERE 三路分派（含 `contains_or` 自由函数）；无 WHERE 分支字面量补字段；LIMIT 分派 cap 装载；内部单测 `test_unsupported_where` 断言同步 |
+| `src/executor/data_scan.rs` | `DataScanExecutor` 新增 `predicate`/`scan_cap`/`produced` 字段与 `new` 5 参签名；新增 `filter_row`/`yield_capped`；`next()` 两个行产出点接入 |
+| `src/pipeline.rs` | DataScan 构造点传递 `node.predicate`/`node.scan_cap` |
+| `src/executor/correlated.rs` | `inject_correlated_values` 新增 DataScan 臂（见 Deviations 2） |
+| `tests/pushdown_test.rs`（新增） | 15 集成测试覆盖 S3.1–S3.5（行为等价 + 计划形状 + 资格规则） |
+| `tests/planner_test.rs` | 5 处非 PK WHERE 形状断言 Filter → DataScan（OR 用例保持 Filter）；`test_build_where_comparison_operators` 增加 DataScan 合法臂 |
+| `tests/executor_test.rs` | 6 处 `DataScanExecutor::new` 签名同步；`DataScanNode` 解构补字段（强化断言无 WHERE/LIMIT 时两字段为 None）；M19 路由测试 `test_planner_non_pk_where_routes_to_filter_data_scan` 断言同步 |
+| `benches/{data_scan,visibility}_bench.rs` | 5 处 `DataScanExecutor::new` 签名同步 |
+
+**Deviations from Plan**
+
+1. **机械同步面超出 Plan 变更面**（`PLAN-OMISSION`，与 Iter 000 delete.rs 同类）：Plan 只列 `pipeline.rs` 为执行器构造同步面；实际 `DataScanExecutor::new` 签名扩展波及 `tests/executor_test.rs` 6 处、`benches/` 5 处，`DataScanNode` 新字段波及 query.rs 内部单测、`tests/planner_test.rs` 5 处形状断言、`tests/executor_test.rs` 解构与 M19 路由测试。全部为签名/形状机械同步，断言语义未弱化（executor_test 解构处反而新增两字段为 None 的强化断言）。旧形状断言（Filter for non-PK WHERE）与目标行为直接冲突，同步为 DataScan 断言——与 Iter 001 Deviation 2 同性质（Preserve 旧形状与 Required Behavior 不可兼得），以契约 Test witness (b) 的目标形状为准。
+2. **`correlated.rs` 注入臂（`PLAN-OMISSION`，机械后果，本 Cycle 唯一 Critical 发现，已在范围内修复）**：T1 全量回归首次运行时 5 个相关子查询测试失败（`subquery_test` IN/NOT IN/EXISTS/NOT EXISTS/NULL outer，0 行 ≠ 5 行）。根因：内层相关子查询 WHERE `dept.id = emp.dept` 右侧为 CompoundIdentifier，`has_pk_equality`（仅匹配 `Expr::Identifier`）返回 false → 内层计划走非 PK 分支 → 谓词（含 `ParameterExpression`）被推入 `DataScan`；而 `inject_correlated_values` 只向 Filter/Having 节点注入相关参数、把 DataScan 视为无谓词叶子 → 参数保持 Null → SemiJoin 恒无匹配。修复为 DataScan 臂注入 `node.predicate`（唯一正确实现，grep 全量核对无其他谓词遍历点）；修复后 `subquery_test` 20/20 转绿。Plan Current-State Evidence 未枚举该 walker（其记录的 DataScan 构造点/遍历面清单不含 correlated.rs），属计划调查遗漏而非设计缺陷；T1 Stop 条款（谓词构建/Filter 语义/可见性/列对齐）均未触发。
+3. **T2 资格面裁定：链上残留 `Filter(DataScan)` 不下推 cap**（解释性偏差，非阻塞）：契约 Critical Path 字面列出「DataScan | Filter(DataScan) → 写入 scan_cap」。T1 合并后，残留的 `Filter(DataScan)` 只携带不可下推的 OR 谓词——Filter 非行透明，cap 穿透其下推会截断 Filter 输入、改变行数（违反 Invariant「查询结果与改造前完全一致」）。故资格面实现为「恰为纯 `DataScan`」，与契约括注「Filter 谓词可下推时先按 T1 并入（届时链上已无 Filter）」自洽；`or_filter_limit_no_cap_under_filter` 测试见证。
+4. **新测试文件书写修正**（测试侧，非实现回归）：初版行断言按「单列投影」书写，实测单表扫描路径本就返回全 schema 行（执行器层无投影，改动前后一致，既有测试无此路径的行宽断言），修正为 `SELECT *` 全列行断言；OR 用例期望行集算术错误修正；Sort 用例因既有「`SELECT *` + ORDER BY 不排序」边界改用显式投影（见 Remaining Issues 1）。
+
+**Blocker Handoff**
+
+None（正常完成）
+
+**Blocker Resolution**
+
+None（未恢复）
+
+**Self-Review**
+
+- Plan compliance: PASS——T1/T2 契约逐项核对（Targets/Current/Required/Preserve/Forbidden/Test witness/GREEN/Stop）；Invariants 全保持（查询结果行集/行序/NULL/错误文本不变——行为测试在实现前后均绿；`Predicate::evaluate`/`expression.rs`/`FilterExecutor`/`LimitExecutor` 本体零改动；谓词求值对象为全列行同索引；简单 PK → IndexScan、复杂 PK → Filter(Scan) 零变化；顶层 Limit 任何形状保留；M19 路由与 M21 可见性零改动；扫描 `snapshot: None` 不变）；Non-goals 全未触碰（Scan/IndexScan/IndexScanAll 无新字段、无子查询谓词下推、PlanCache 语义不变）。
+- Full diff reviewed: PASS——完整 diff 逐文件复核（4 源文件 + correlated.rs + 2 既有测试 + 2 bench + 新增测试文件）；与 T04/T05 未提交变更的 `pipeline.rs` 同文件重叠已区分（本 Cycle 仅 DataScan 构造点 +2 行）。
+- Critical findings unresolved: None（Deviations 2 的相关参数注入缺失为全量回归捕获，已修复并复验）。
+- Important findings unresolved: None
+- Minor findings unresolved: None
+
+**Verification Evidence**
+
+| 验证项 | 命令 | 输出摘录 | 结论 |
+|---|---|---|---|
+| T1 见证 RED | `cargo test --test pushdown_test`（实现前） | `error[E0609]: no field 'predicate'/'scan_cap' on type 'DataScanNode'`（×3），编译失败 | 预期 RED ✅ |
+| T1 GREEN | `cargo test --test pushdown_test --test planner_test --test executor_test --test predicate_test` | `8 passed` + `29 passed` + `39 passed` + `12 passed`; 0 failed | PASS |
+| T2 行为基线（实现前 GREEN） | `cargo test --test pushdown_test` | 14 passed；仅 `limit_plan_pushes_cap_into_datascand` FAILED（cap 形状） | 预期 RED ✅ |
+| T2 GREEN | `cargo test --test pushdown_test --test limit_test` | `15 passed` + `5 passed`; 0 failed | PASS |
+| Critical 修复边界 | `cargo test --test subquery_test`（correlated.rs 修复前 → 后） | 修复前 `5 failed`（correlated 0 行）；修复后 `20 passed; 0 failed` | PASS |
+| 全量测试（终跑） | `cargo test --all` | `passed=577 failed=0`，exit 0（基线 562 + 15 新增） | PASS |
+| 格式 | `cargo fmt --check` | clean，exit 0 | PASS |
+| 构建 | `cargo build` | 0 条 rustc warning（仅 `~/.cargo/config` 弃用提示），exit 0 | PASS |
+| 静态分析 | `cargo clippy --all-targets -- -D warnings` | 0 finding（修复 pushdown_test 未用 import 后），exit 0 | PASS |
+| OpenSpec | `openspec validate --all` | `Totals: 13 passed, 0 failed (13 items)` | PASS |
+
+**Persisted Evidence**
+
+`None required`（mode: none）——全部验证可低成本本地重跑，决定性输出（退出码、通过/失败计数、RED 症状）已录入上表；计划形状与行为等价由测试断言与 diff 审查确认。
+
+**Experience Candidates**
+
+None
+
+**Remaining Issues**
+
+1. **既有「`SELECT *` + ORDER BY 不排序」边界（观察，非本 change 引入）**：`SortExecutor::compare_rows` 以投影列名（`SortNode.columns`）解析排序列索引；`SELECT *` 时投影列无具体列名可解析 → 排序静默退化为输入序（`sort.rs:46-56` 回落 `Ordering::Equal`）。与本 diff 无代码交集（构造性论证：Sort/ORDER BY 路径未触碰，DataScan 在 predicate/cap 为 None 时行输出逐字节不变；计划形状断言通过、行集与改前一致）。显式投影（`SELECT id, a, b ... ORDER BY id`）排序正常（pushdown_test sort 用例见证）。建议作为 Improvement 候选交用户决策。
+2. **既有存储层竞态 / `do_flush` base 竞态 / 语句级原子性与 DDL 非事务性 / 重写截断极端窗口**（Iteration 000/001 Review 遗留，本 Cycle 未触碰相关代码，维持待用户决策）。
+3. **下推谓词与快照可见性的求值次序**：谓词在可见性判定之后求值（不可见行不做谓词求值）。当前生产路径 `snapshot: None`，无行为差异；未来引入隔离级别（MS09）时谓词错误可见性语义需重审（记录，不在本 change 范围）。
+
+**Commit or Diff Reference**
+
+未提交（待用户触发 commit，沿用项目「未 commit（待用户触发）」惯例；与 Iteration 000/001 的 T04/T05 变更同工作区，提交编排由用户决定）。本 Cycle 变更面：4 个源文件 + `correlated.rs`（机械臂）+ `pipeline.rs` 增量 2 行 + 新增 1 测试文件 + 2 既有测试文件 + 2 bench 文件。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+- Review Date: 2026-09-05（Plan 独立审查；非 Act Self-Review 复述）
 
-（待 Plan 审查后填写）
+**审查方法**：逐文件核对未暂存 diff（`git diff src/executor/plan.rs src/parser/planner/query.rs src/executor/data_scan.rs src/executor/correlated.rs src/pipeline.rs tests/ benches/`）对照 T1–T3 Task Contract；交叉核对契约外引用面（filter.rs 错误文本、expression.rs `build_where` 变体面、predicate.rs `inject_parameters` 传播链、plan_cache.rs get/put 克隆语义、其余 `PhysicalPlan::DataScan` 匹配点、`DataScanNode` 全部构造点）；独立复跑定向测试、全量测试与四项质量命令。
+
+**代码契约核对（逐项 PASS）**
+
+- T1 谓词下推：`query.rs` 非 PK WHERE 三路分派与契约一致——`has_pk_eq` → `Filter(Scan)` 原状；`contains_or`（任意深度 OR，递归面为 `build_where` 可构建面的超集，超集方向安全：不可构建形态在分派前已被 `build_where` 拒绝）→ `Filter(DataScan{predicate: None})`；否则 `DataScan{predicate: Some}` 且不生成 Filter。非 Scan 源（DerivedScan 等）保留 Filter 包裹。`filter_row` 对两个行产出点（页内 YieldValue 与版本链可见版本）求值，错误文本与 `filter.rs:39-43` 逐字一致（`"Predicate evaluation error: {}"`，独立比对确认）；求值发生在可见性判定之后、全列行上。
+- T2 LIMIT 下推：cap 仅装载于纯 `DataScan` 输入链；`limit == 0` → `Some(0)`、溢出用 `saturating_add`；顶层 `Limit` 节点无条件保留。`yield_capped` 只统计通过可见性 + 谓词的产出行，达 cap 置 `current_page_id = None`（循环头立即返回 `Ok(None)`，与 `LimitExecutor` 拉取语义等价）。
+- Deviation 2 修复（correlated.rs 注入臂）：`PhysicalPlan::DataScan` 分支对 `node.predicate` 调 `inject_parameters`；`LogicalPredicate`/`ComparisonPredicate` 递归传播已核实（predicate.rs:99/146-148）；全库 grep 确认谓词遍历注入点仅此 walker 一处。`subquery_test` 20/20 复跑通过。
+- 移动安全：`create_executor_from_plan` 按值收 plan，但 PlanCache `get` 返回 clone（plan_cache.rs:33-36）、pipeline 调用点以 `plan.clone()` 传入（pipeline.rs:101/266）——move `node.predicate` 不污染缓存副本。
+- 边界外匹配点无遗漏：`subquery.rs:392`、`pipeline.rs:716/1049` 均为列布局提取，与谓词/cap 无关；`DataScanNode` 构造点全集为 query.rs 3 处（全部补字段）+ executor_test.rs:1677 解构。
+- Invariants 全保持：expression.rs / filter.rs / limit.rs 零改动（diff --stat 证实）；M19 路由与 M21 可见性逻辑未触碰（diff 仅包裹两个行产出点，懒 set_all_visible 触发条件不受影响——谓词过滤 continue 与 Filter 包裹时同页行为等价）；`snapshot: None` 不变。
+
+**测试见证核对（PASS）**：`tests/pushdown_test.rs` 15 用例覆盖契约全部见证点（T1 a/b/c、T2 a/b/c/d、Deviation 3 的 `or_filter_limit_no_cap_under_filter`、cap 只计通过行）。既有测试同步无断言弱化：executor_test 确解构处新增两字段为 None 的强化断言；planner_test 5 处形状断言与目标行为一致且既有 `test_build_where_logical_or`（断言 Filter）未触碰、复跑通过；bench 5 处为纯签名同步。
+
+**偏差分类**
+
+| 偏差 | 分类 | 裁定 |
+|---|---|---|
+| 1 机械同步面超出 Plan 变更面（tests/benches） | PLAN-OMISSION | 非阻塞——签名/形状机械同步，断言语义未弱化（executor_test 反而强化） |
+| 2 correlated.rs 注入臂 | PLAN-OMISSION（计划调查未枚举该 walker） | 非阻塞——全量回归捕获、唯一正确修复点、修复后复验；T1 Stop 条款未触发 |
+| 3 cap 资格收紧为「恰为纯 DataScan」 | 解释性偏差（ACT-DEVIATION，契约括注自洽） | 非阻塞——Filter 非行透明，穿 Filter 下推会截断输入改变行数，违反 Invariant；有测试见证 |
+| 4 新测试文件书写修正 | 测试侧修正 | 非阻塞 |
+
+**独立验证复跑（2026-09-05，全部与 Act Response 一致）**
+
+| 命令 | 结果 | 退出码 |
+|---|---|---|
+| `cargo test --test pushdown_test --test predicate_test --test planner_test --test executor_test --test limit_test --test subquery_test` | 15+12+29+39+5+20 全部 0 failed | 0 |
+| `cargo test --all` | **577 passed, 0 failed**（基线 562 + 新增 15） | 0 |
+| `cargo build` | 0 rustc warning（仅环境级 `~/.cargo/config` 弃用提示，逐行核实） | 0 |
+| `cargo clippy --all-targets -- -D warnings` | 0 finding | 0 |
+| `cargo fmt --check` | clean | 0 |
+| `openspec validate --all` | 13 passed, 0 failed | 0 |
+
+**Acceptance 核对**
+
+| Acceptance | 裁定 | 证据 |
+|---|---|---|
+| R3/S3.1 谓词下推结果不变 | PASS | pushdown_test T1(a) 4 用例（含 NULL/AND 边界）+ predicate_test 12/12 |
+| R3/S3.2 LIMIT 提前封顶 | PASS | T2(a)(b)（含 OFFSET 越界/LIMIT 0/cap 计通过行） |
+| R3/S3.3 Sort+Limit 不提前终止 | PASS | T2(c) Sort 保留 + 无 cap + 排序结果 |
+| R3/S3.4 PK 路径不退化 | PASS | T1(c) IndexScan + Filter(Scan) 形状断言 |
+| R3/S3.5 复杂谓词退化 | PASS | T1(b) OR 保留 Filter + 结果等价 + 既有 logical_or 测试 |
+| R5 质量门 | PASS | 四项命令独立复跑全 0 + validate 13/13 |
+
+**Acceptance Gaps**: None。**收敛状态**: N/A（无 gap）。
+
+**Findings（Minor，不阻塞，记录备查）**
+
+1. 既有「`SELECT *` + ORDER BY 不排序」边界（Act Remaining Issues 1）：审查确认与本 diff 无代码交集（Sort 路径未触碰）；属 Improvement 候选，交用户决策，不属本 Cycle 修复。
+2. 谓词在可见性判定之后求值（Act Remaining Issues 3）：当前 `snapshot: None` 无行为差异；MS09 引入隔离级别时需重审。已记录，无需当前动作。
+3. Act Deviation 3 的资格面收紧属正确解释而非契约违反——契约 Critical Path 字面与括注存在轻微张力，实际实现取括注语义且方向正确（保守不截断），记录为 Plan 表述瑕疵，不影响本 Review 结论。
+
+**Iteration Plan Update**: None。**Next Cycle**: None。**Next Iteration**: None（Iteration 002 为本 change 最后一个 Iteration；change 全部 3 个 Iteration 的 Review Result 均为 accepted）。
+
+**Follow-up Decision**: None（无当前 Cycle 修复项）。
+
+**结论**：T1/T2/T3 全部满足契约与 Invariants，R3/R5 全场景有测试见证，独立复跑全部验证与 Act Response 一致，无阻塞 finding。Iteration 002 完成；本 change 实现侧交付完毕，未提交工作区（T04/T05/T06）由用户编排 commit 后，可交 `openspec-docs-maintainer` 收尾。

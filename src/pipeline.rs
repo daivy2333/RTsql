@@ -447,6 +447,8 @@ pub(crate) fn create_executor_from_plan(
                     table_meta,
                     database.buffer_pool.clone(),
                     None,
+                    node.predicate,
+                    node.scan_cap,
                 )) as Box<dyn Executor + Send>)
             }
 
