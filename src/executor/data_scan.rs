@@ -51,6 +51,19 @@ pub struct DataScanExecutor {
     current_page_id: Option<PageId>,
     /// Next slot index to read on the current page.
     current_slot_index: usize,
+    /// MS08-T02: whether successor-page prefetching is enabled (default off
+    /// since the 2026-09-05 replan — the default path measured a 17-47%
+    /// regression from per-page task spawn in warm-cache environments;
+    /// `with_prefetch(true)` opts in, `with_prefetch(false)` stays available
+    /// as the explicit control path).
+    prefetch_enabled: bool,
+    /// MS08-T02: in-flight prefetch task handle. At most one tracked
+    /// (untaken) handle exists at any time; dropping it never aborts the
+    /// task — a running prefetch simply finishes loading its page.
+    prefetch_handle: Option<tokio::task::JoinHandle<()>>,
+    /// MS08-T02: page id already prefetched (dedups successor captures
+    /// across the slots of one page).
+    prefetched_page: Option<PageId>,
 }
 
 impl DataScanExecutor {
@@ -79,7 +92,36 @@ impl DataScanExecutor {
             produced: 0,
             current_page_id,
             current_slot_index: 0,
+            prefetch_enabled: false,
+            prefetch_handle: None,
+            prefetched_page: None,
         }
+    }
+
+    /// MS08-T02: override the prefetch switch (default `false` via `new`;
+    /// `true` opts in).
+    pub fn with_prefetch(mut self, enabled: bool) -> Self {
+        self.prefetch_enabled = enabled;
+        self
+    }
+
+    /// MS08-T02: fire a background prefetch for `next` so its cache miss
+    /// overlaps with processing the remaining rows of the current page.
+    /// Results and errors are discarded — the real read path via
+    /// `with_page_data` is authoritative and joins the same per-page load
+    /// through the BufferPool's per-page loading locks. Dedup by page id;
+    /// the chain-end sentinel `PageId(0)` is never prefetched (checked by
+    /// the caller).
+    fn trigger_prefetch(&mut self, next: PageId) {
+        if !self.prefetch_enabled || self.prefetched_page == Some(next) {
+            return;
+        }
+        let _ = self.prefetch_handle.take();
+        let buffer_pool = Arc::clone(&self.buffer_pool);
+        self.prefetch_handle = Some(tokio::spawn(async move {
+            let _ = buffer_pool.get_page(next).await;
+        }));
+        self.prefetched_page = Some(next);
     }
 
     /// Apply the pushed-down predicate to a candidate row with the exact
@@ -171,6 +213,9 @@ impl Executor for DataScanExecutor {
             // in, mutate it, then write it back to `self` after the await.
             let schema = self.schema.clone();
             let mut slot_index = self.current_slot_index;
+            // MS08-T02: the closure captures the current page's successor for
+            // the post-await prefetch trigger (header read is in-memory only).
+            let mut captured_next: u32 = 0;
 
             // M21: Page-level visibility fast-path.
             // Query the visibility summary map before entering the page-data closure
@@ -191,10 +236,13 @@ impl Executor for DataScanExecutor {
                 .with_page_data(page_id, |data| -> Result<PageAction> {
                     let slotted = SlottedPageRef::new(data);
                     let slot_count = slotted.slot_count();
+                    // MS08-T02: capture the successor once per closure entry;
+                    // reused by the all-invisible/exhausted branches below.
+                    let next = slotted.header().next_page_id;
+                    captured_next = next;
 
                     // M21: All-invisible fast-path — skip the entire page.
                     if page_all_invisible {
-                        let next = slotted.header().next_page_id;
                         return Ok(if next == 0 {
                             PageAction::Done
                         } else {
@@ -204,7 +252,6 @@ impl Executor for DataScanExecutor {
 
                     if slot_index >= slot_count {
                         // Page exhausted → follow the linked list.
-                        let next = slotted.header().next_page_id;
                         return Ok(if next == 0 {
                             PageAction::Done
                         } else {
@@ -255,6 +302,14 @@ impl Executor for DataScanExecutor {
 
             // Commit slot index back regardless of action.
             self.current_slot_index = slot_index;
+
+            // MS08-T02: the closure revealed the current page's successor —
+            // prefetch it so the next page's miss load overlaps with the
+            // remaining rows of this page. `Done`/chain-end capture 0,
+            // which never triggers.
+            if captured_next != 0 {
+                self.trigger_prefetch(PageId(captured_next as u64));
+            }
 
             // M21: Lazy set_all_visible — after scanning all slots on a page,
             // check if the entire page is visible to this snapshot and cache the result.
@@ -321,5 +376,46 @@ impl Executor for DataScanExecutor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{data::TableManager, page_format::ColumnType, FileStorage};
+
+    /// MS08-T02 replan (2026-09-05): `new` must default prefetch OFF — the
+    /// default path measured a 17-47% regression from per-page task spawn in
+    /// warm-cache environments, so prefetch is opt-in via `with_prefetch(true)`.
+    /// This guards the default switch value itself (non-vacuous: it
+    /// distinguishes the default from explicit opt-in); behavioral equivalence
+    /// in both switch states is covered by `tests/prefetch_test.rs`.
+    #[tokio::test]
+    async fn new_defaults_prefetch_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("t.db")).unwrap());
+        let buffer_pool = Arc::new(BufferPool::new(8, storage.clone()).unwrap());
+        let table_mgr = TableManager::new(buffer_pool.clone(), storage)
+            .await
+            .unwrap();
+        table_mgr
+            .create_table("t", vec![("id".to_string(), ColumnType::Int)], "id")
+            .await
+            .unwrap();
+        let table_meta = table_mgr.get_table("t").await.unwrap();
+
+        let default_executor =
+            DataScanExecutor::new(table_meta.clone(), buffer_pool.clone(), None, None, None);
+        assert!(
+            !default_executor.prefetch_enabled,
+            "new() must default to prefetch disabled"
+        );
+
+        let explicit_on =
+            DataScanExecutor::new(table_meta, buffer_pool, None, None, None).with_prefetch(true);
+        assert!(
+            explicit_on.prefetch_enabled,
+            "with_prefetch(true) must explicitly enable prefetch"
+        );
     }
 }

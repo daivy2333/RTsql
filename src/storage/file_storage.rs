@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -56,10 +56,8 @@ impl FileStorage {
         page_size: usize,
     ) -> Result<Page> {
         let offset = page_id.to_offset(page_size);
-        let mut file_ref = file.as_ref();
-        file_ref.seek(SeekFrom::Start(offset))?;
         let mut buf = vec![0u8; page_size];
-        file_ref.read_exact(&mut buf)?;
+        file.as_ref().read_exact_at(&mut buf, offset)?;
         Page::from_bytes(page_id, &buf)
     }
 
@@ -70,9 +68,7 @@ impl FileStorage {
         data: Box<[u8; Page::PAGE_SIZE]>,
     ) -> Result<()> {
         let offset = page_id.to_offset(page_size);
-        let mut file_ref = file.as_ref();
-        file_ref.seek(SeekFrom::Start(offset))?;
-        file_ref.write_all(&*data)?;
+        file.as_ref().write_all_at(&*data, offset)?;
         Ok(())
     }
 }
