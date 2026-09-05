@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-09-05（MS07-T04/T05/T06 完成并归档 ms07-rest change；commits `0df2b93` / `5d652a2`）
+> 最后更新：2026-09-05（MS08-T01/T02 完成并归档 ms08-t01-t02-pread-prefetch change；commit `dac6783`）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -142,20 +142,20 @@
 
 ### MS08：性能压测（实测驱动） — planned
 
-- **Status**: planned
+- **Status**: planned（T01/T02 已完成，2026-09-05；T03-T06 待后续 change）
 - **Dependencies**: MS07（MS08-T03 依赖 MS07-T05）
 - **Outcome**: 6 类微基准 baseline 落盘；每类优化要么量化改善、要么记录"未达预期"；建立"实施前先 `--save-baseline`"纪律
 - **Rationale**: 旧路线把性能优化按"假设收益"排列；零拷贝 ValueRef 实施教训（K18）证明未量化目标会重蹈覆辙。本 MS 强调实测驱动
 - **Scope**:
 
-| Task | 目标 | 关键前置 |
-|---|---|---|
-| MS08-T01 | `pread`/`pwrite` 替代 `seek+read` | 无（最简单 syscall 削减） |
-| MS08-T02 | Prefetch 双缓冲 | MS02-T02 (DataScan)、MS03 (BufferPool 优化) 已 done |
-| MS08-T03 | 脏页 writev 批量写回 | MS07-T05 |
-| MS08-T04 | RowLockTable DashMap | **先做 mini-bench 决定是否值得做** |
-| MS08-T05 | Varint Key 编码 | 无 |
-| MS08-T06 | WAL fsync 合并 | **做前先验证 fsync 是否真瓶颈** |
+| Task | 状态 | 目标 | 关键前置 | 关联 change |
+|---|---|---|---|---|
+| MS08-T01 | **completed**（2026-09-05） | `pread`/`pwrite` 替代 `seek+read` | 无（最简单 syscall 削减） | `archive/2026-09-05-2026-09-05-ms08-t01-t02-pread-prefetch/` |
+| MS08-T02 | **completed**（2026-09-05） | Prefetch 双缓冲（默认路径实测回退 +17~47%，replan 后默认关闭、`with_prefetch(true)` 显式启用） | MS02-T02 (DataScan)、MS03 (BufferPool 优化) 已 done | 同上 |
+| MS08-T03 | planned | 脏页 writev 批量写回 | MS07-T05 | — |
+| MS08-T04 | planned | RowLockTable DashMap | **先做 mini-bench 决定是否值得做** | — |
+| MS08-T05 | planned | Varint Key 编码 | 无 | — |
+| MS08-T06 | planned | WAL fsync 合并 | **做前先验证 fsync 是否真瓶颈** | — |
 
 - **Non-goals**: 新 SQL 方言；新执行器；多隔离级别；B+Tree 节点级锁；io_uring
 - **Workload**: 每优化 1 change（Varint Key 可能 2 个），共约 5-7 change；每 change 前置 baseline
@@ -163,7 +163,8 @@
 - **Verification boundary**: 每个 T 必须满足"前置 baseline 留档" AND "实施后某关键指标量化改善 OR 明确记录未达预期"
 - **Diagnostic boundary**: 性能问题可定位到 bench 文件 / 数据规模 / commit hash
 - **Split signals**: 若 MS08-T01 实施后 syscall 计数无显著变化，说明 syscalls 不是瓶颈，整个 MS 需重新平衡
-- **Related changes**: None
+- **Related changes**:
+  - `2026-09-05-ms08-t01-t02-pread-prefetch`（T01/T02 合并 change，已归档为 `archive/2026-09-05-2026-09-05-ms08-t01-t02-pread-prefetch/`，含新增 spec `storage-io-optimization`，3 Requirement：R1 页 I/O 位置参数化 / R2 零接口零格式变更 / R3 DataScan 预取可选能力默认关闭）
 
 ### MS09：SQL 标准与上层能力 — planned
 
@@ -239,6 +240,7 @@ MS00 → MS01 → MS02
 
 | 完成日期 | 内容 | commit |
 |---|---|---|
+| 2026-09-05 | MS08-T01+T02 页 I/O 位置参数化 + 扫描预取：T01 `FileStorage::read_page_blocking`/`write_page_blocking` 改 `FileExt::read_exact_at`/`write_all_at`（每页 2 syscall→1；strace 页路径 lseek 33→3、pread64 4→26、pwrite64 0→8；并发冷读串页损坏实测复现 RED→修复 GREEN，`tests/file_storage_io_test.rs` 4 测试）；T02 `DataScanExecutor` 后继页预取（closure 捕获 successor + spawn 丢弃结果 + 页 id 去重 + 在途 ≤1，`with_prefetch` 开关），默认路径实测回退 +40~47%/+17~18%（p<0.05，对照组不变）→ replan 默认改关、显式启用（`tests/prefetch_test.rs` 3 测试 + 默认关闭单测；Review 第三轮 bench 两档 No change p=0.24/0.73 回基线）；585 tests pass；clippy/fmt/validate 全 0；Plan Review accepted（T5.4 判读偏差裁定为环境侧 BASELINE-CHANGED 非阻塞） | dac6783；change 归档至 `openspec/changes/archive/2026-09-05-2026-09-05-ms08-t01-t02-pread-prefetch/`；新增 spec `storage-io-optimization`（3 Requirement） |
 | 2026-09-05 | MS07-T06 谓词/LIMIT 下推：`DataScanNode` 新增 `predicate`/`scan_cap`；planner 非 PK WHERE 无 OR 时谓词装入 DataScan（不再生成 Filter），OR 保留 Filter(DataScan)；Limit 输入链恰为纯 DataScan 时写入 `offset+limit` 封顶（limit=0 → Some(0) 立即 Done），顶层 Limit 任何形状保留；DataScanExecutor 两个行产出点接入 `filter_row`/`yield_capped`（语义逐字对齐 filter.rs）；`correlated.rs` 补 DataScan 相关参数注入臂（Plan 遗漏面）；新增 `tests/pushdown_test.rs` 15 测试（577 tests pass；clippy/fmt/validate 全 0；Plan Review accepted） | 5d652a2；change 归档至 `openspec/changes/archive/2026-09-05-2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown/` |
 | 2026-09-05 | MS07-T05 Checkpoint 真正工作：`full_recover` 消费 16B 位点（有效位点只重放 `≥ L`，缺失/损坏/代际失效安全退化全量；分类不裁剪）；K05 六处静默吞错显式化（`WalError::RedoFailed` 含表名/tx_id/row_id，`Database::open` 失败可见）；`WalWriter::rewrite_truncate` 单临界区原地截断（禁止 temp+rename）；`CheckpointManager::checkpoint()` 九步流程；`Database` 接线 `checkpoint_manager` + 公开 `checkpoint()` + `close()` 自动触发；新增 `tests/checkpoint_redo_reduction_test.rs` 9 测试（Plan Review accepted） | 0df2b93（与 T04 同提交） |
 | 2026-09-05 | MS07-T04 显式事务：`Database::{begin,commit,rollback,execute_in_tx}` 公开 API；`tx_versions` 按表聚合 + `abort_cleanup_versions` 多表回滚（含墓碑 `mark_deleted`，修复 snapshot 无关扫描的回滚幽灵行）；`pipeline::execute_in_tx/execute_stage_in_tx` 用户事务路径（DML 消费 tx_id、无隐式包裹、隐式路径零变化）；新增 `tests/explicit_tx_test.rs` 8 测试（Plan Review accepted） | 0df2b93 |
