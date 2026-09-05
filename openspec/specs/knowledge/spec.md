@@ -55,9 +55,9 @@
 ## K05: RecoveryManager 需要表才能 redo
 
 - **结论**: 完整 redo 恢复要求表定义持久化
-- **根因**: `get_table(name)` 失败时 redo 静默跳过（导致数据丢失）
-- **解决**: 表定义持久化（M44 计划解决）；当前 WAL 测试策略：直接读 WAL 验证而非重启验证
-- **证据**: `tests/wal_recovery_test.rs:recovery_e2e_test`, `src/wal/recovery.rs`
+- **根因**: `get_table(name)` 失败时 redo 静默跳过（导致数据丢失）——已修复（MS07-T05 显式化：`WalError::RedoFailed`，上下文含表名/tx_id/row_id，`Database::open` 失败可见）
+- **解决**: 静默吞错显式化（MS07-T05）+ 表定义持久化（MS07-T01 系统表）；当前 WAL 测试策略仍为直接读 WAL 验证而非重启验证
+- **证据**: `tests/checkpoint_redo_reduction_test.rs::missing_table_during_redo_fails_explicitly`, `src/wal/recovery.rs`
 - **Legacy**: L008, L014
 
 ## K06: get_subquery_first_column 不支持 SemiJoin/AntiJoin

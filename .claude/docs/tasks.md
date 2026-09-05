@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-08-25（MS 路线重规划：从 Phase/Mxx 旧体系升级为 MS/T 新体系）
+> 最后更新：2026-09-05（MS07-T04/T05/T06 完成并归档 ms07-rest change；commits `0df2b93` / `5d652a2`）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -115,7 +115,7 @@
 
 ### MS07：基础能力建设 — planned
 
-- **Status**: planned
+- **Status**: planned（T01-T06 已完成，2026-09-05；T07 条件性未触发——T05 的 checkpoint 重写截断未暴露 WALBuffer 并发协调需求，是否引入消息传递重构待后续评估）
 - **Dependencies**: MS06
 - **Outcome**: 表定义持久化到磁盘；restart 后 schema 完整恢复；drop_table 真正释放页；显式事务 API 可用；Checkpoint 真正工作；planner 模块可独立单测；谓词/LIMIT 可下推
 - **Rationale**: WAL redo 静默吞错（`src/wal/recovery.rs:148/165/176`）、checkpoint 无效、planner 2266 行单文件、显式事务缺失、谓词无法下推 — 都是 SQL 标准合规的"能用"前提。Schema 持久化是 drop_table、checkpoint、redo verification 的共同前置
@@ -126,9 +126,9 @@
 | MS07-T01 | **completed**（2026-08-26） | 系统表 `__tables` / `__columns` + Schema 页（最大单点） | 无 | `archive/2026-08-26-2026-08-26-ms07-t01-schema-persistence/` |
 | MS07-T02 | **completed**（2026-08-30） | drop_table 接 free-list，物理页释放 | MS07-T01 | `archive/2026-08-30-2026-08-26-ms07-t02-drop-table-physical-free/` |
 | MS07-T03 | **completed**（2026-08-30） | planner.rs 2266 → 按 build_* 拆分到 4-6 个模块 | 无 | `archive/2026-08-30-2026-08-30-ms07-t03-planner-decomposition/` |
-| MS07-T04 | planned | `Database::begin/commit/rollback` 公开 API + 隐式事务向后兼容 | 无 | — |
-| MS07-T05 | planned | Checkpoint 真正工作 | MS07-T01 | — |
-| MS07-T06 | planned | 谓词/LIMIT 下推到 scan 之上 | 无 | — |
+| MS07-T04 | **completed**（2026-09-05） | `Database::begin/commit/rollback/execute_in_tx` 公开 API + 事务内执行路径 + 版本按表聚合多表回滚 | 无 | `archive/2026-09-05-2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown/` |
+| MS07-T05 | **completed**（2026-09-05） | Checkpoint 真正工作：恢复消费位点 + WAL 重写截断（有界）+ 恢复静默吞错显式化（K05） | MS07-T01 | 同上 |
+| MS07-T06 | **completed**（2026-09-05） | 谓词/LIMIT 下推到 DataScan 行内过滤与提前封顶（OR/Sort/Aggregate 保留原路径） | 无 | 同上 |
 | MS07-T07 | planned | 视 T04/T05 需要决定是否引入消息传递重构 | MS07-T04, MS07-T05 | — |
 
 - **Non-goals**: 性能调优（除 pushdown 收益外）；新 SQL 方言；新执行器；多隔离级别
@@ -137,7 +137,8 @@
 - **Verification boundary**: 5 项独立测试套件 + restart e2e（redo 不再静默）
 - **Diagnostic boundary**: 各子项 1-2 个具体代码位置
 - **Split signals**: 若 MS07-T01 因复杂度拆 2 个 change 仍可保留；若 MS07-T03 触发 planner 大规模回归失败，拆为独立 MS
-- **Related changes**: None
+- **Related changes**:
+  - `2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown`（T04/T05/T06 合并 change，已归档为 `archive/2026-09-05-2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown/`，含新增 spec `ms07-rest-tx-checkpoint-pushdown`，3 Requirement：R1 显式事务 / R2 Checkpoint / R3 谓词-LIMIT 下推）
 
 ### MS08：性能压测（实测驱动） — planned
 
@@ -238,6 +239,9 @@ MS00 → MS01 → MS02
 
 | 完成日期 | 内容 | commit |
 |---|---|---|
+| 2026-09-05 | MS07-T06 谓词/LIMIT 下推：`DataScanNode` 新增 `predicate`/`scan_cap`；planner 非 PK WHERE 无 OR 时谓词装入 DataScan（不再生成 Filter），OR 保留 Filter(DataScan)；Limit 输入链恰为纯 DataScan 时写入 `offset+limit` 封顶（limit=0 → Some(0) 立即 Done），顶层 Limit 任何形状保留；DataScanExecutor 两个行产出点接入 `filter_row`/`yield_capped`（语义逐字对齐 filter.rs）；`correlated.rs` 补 DataScan 相关参数注入臂（Plan 遗漏面）；新增 `tests/pushdown_test.rs` 15 测试（577 tests pass；clippy/fmt/validate 全 0；Plan Review accepted） | 5d652a2；change 归档至 `openspec/changes/archive/2026-09-05-2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown/` |
+| 2026-09-05 | MS07-T05 Checkpoint 真正工作：`full_recover` 消费 16B 位点（有效位点只重放 `≥ L`，缺失/损坏/代际失效安全退化全量；分类不裁剪）；K05 六处静默吞错显式化（`WalError::RedoFailed` 含表名/tx_id/row_id，`Database::open` 失败可见）；`WalWriter::rewrite_truncate` 单临界区原地截断（禁止 temp+rename）；`CheckpointManager::checkpoint()` 九步流程；`Database` 接线 `checkpoint_manager` + 公开 `checkpoint()` + `close()` 自动触发；新增 `tests/checkpoint_redo_reduction_test.rs` 9 测试（Plan Review accepted） | 0df2b93（与 T04 同提交） |
+| 2026-09-05 | MS07-T04 显式事务：`Database::{begin,commit,rollback,execute_in_tx}` 公开 API；`tx_versions` 按表聚合 + `abort_cleanup_versions` 多表回滚（含墓碑 `mark_deleted`，修复 snapshot 无关扫描的回滚幽灵行）；`pipeline::execute_in_tx/execute_stage_in_tx` 用户事务路径（DML 消费 tx_id、无隐式包裹、隐式路径零变化）；新增 `tests/explicit_tx_test.rs` 8 测试（Plan Review accepted） | 0df2b93 |
 | 2026-08-30 | MS07-T03 planner 模块化拆分：`src/parser/planner.rs`（2266 行）按职责拆为 `src/parser/planner/` 目录 6 模块（`mod.rs` + `query`/`expression`/`aggregate`/`subquery`/`ddl_dml`）；`PlanBuilder` 三字段 `pub(crate)`；12 单测随函数迁移（mod 3 / query 5 / ddl_dml 4）；公共 API / re-export / SQL 语义零变化（`tests/planner_test.rs` 29 + `executor_test.rs` 39 零修改全绿；542 tests pass；clippy 0 warning；fmt 0 diff；openspec validate 12 passed；Plan Review accepted） | 49a85ef；change 归档至 `openspec/changes/archive/2026-08-30-2026-08-30-ms07-t03-planner-decomposition/`；新增 spec `planner-module-decomposition`（5 Requirement） |
 | 2026-08-30 | MS07-T02 drop_table 物理页释放：新增 `src/storage/btree/index_manager.rs::IndexManager::collect_all_pages`（栈式 DFS + visited 防环，pub async）；`TableManager::drop_table` 重写为「保留名→取 meta→catalog.delete→tables.remove→collect BTree→collect data→free」+ 新增私有 `collect_data_pages`（K22 链遍历）；`tests/drop_table_free_test.rs` 6 集成测试（542 tests pass；clippy 0 warning；fmt 0 diff；openspec validate 11 passed；Plan Review accepted） | bd038da；change 归档至 `openspec/changes/archive/2026-08-30-2026-08-26-ms07-t02-drop-table-physical-free/`；新增 spec `drop-table-physical-free`（7 Requirement） |
 | 2026-08-26 | MS07-T01 系统表 `__tables` / `__columns` + Schema 页：新增 `src/storage/catalog.rs`（~908 行 / 7 方法 + 10 单元测试）；`IndexManager::from_root(buffer_pool, root_page_id)` 路径（不调 `BTree::new`）；`TableManager::new(buffer_pool, storage) -> Result<Arc<Self>>` async + `open_or_init` 重建 + 保留名检查（`ReservedTableName`） + 跨页 `data_page_tail` 同步；`Database::open` 接 `open_or_init` + 新增 `close()` 显式 flush；`InsertExecutor` `Option<Arc<TableManager>>` + `with_table_manager`；`AsyncStorage::page_count` trait 方法；`StorageError::ReservedTableName` 变体；`ColumnType` 加 `Eq`；`tests/schema_persistence_test.rs` 8 集成测试；14 个其他 test 文件批量改签名（534 tests pass；clippy 0 warning；fmt 0 diff） | 4307a0e；change 归档至 `openspec/changes/archive/2026-08-26-2026-08-26-ms07-t01-schema-persistence/`；Plan Review `accepted`（R16 登记）；新增 spec `schema-persistence`（7 Requirement） |
