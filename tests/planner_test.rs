@@ -104,17 +104,19 @@ fn test_table_not_found() {
 
 #[test]
 fn test_invalid_where_not_pk() {
-    // Non-PK WHERE clause should generate Filter plan
+    // MS07-T06: non-PK WHERE without OR is pushed into DataScan
+    // (row-level predicate, no Filter node).
     let sql = "SELECT id, name FROM users WHERE name = 'Alice'";
     let stmts = parse_sql(sql).unwrap();
     let mut builder = setup_builder();
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
-        PhysicalPlan::Filter(node) => {
+        PhysicalPlan::DataScan(node) => {
             assert_eq!(node.table_name, "users");
+            assert!(node.predicate.is_some());
         }
-        _ => panic!("Expected Filter for non-PK WHERE, got {:?}", plan),
+        _ => panic!("Expected DataScan with pushed predicate, got {:?}", plan),
     }
 }
 
@@ -287,12 +289,12 @@ fn test_build_where_comparison() {
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
-        PhysicalPlan::Filter(node) => {
+        PhysicalPlan::DataScan(node) => {
             assert_eq!(node.table_name, "users");
-            // Predicate should be a ComparisonPredicate (id > 10)
-            // We'll verify the predicate evaluates correctly
+            // MS07-T06: comparison predicate is pushed into DataScan.
+            assert!(node.predicate.is_some());
         }
-        _ => panic!("Expected Filter plan for non-PK WHERE, got {:?}", plan),
+        _ => panic!("Expected DataScan plan for non-PK WHERE, got {:?}", plan),
     }
 }
 
@@ -305,11 +307,12 @@ fn test_build_where_logical_and() {
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
-        PhysicalPlan::Filter(node) => {
+        PhysicalPlan::DataScan(node) => {
             assert_eq!(node.table_name, "users");
-            // Predicate should be a LogicalPredicate (AND)
+            // MS07-T06: AND chain is pushdown-eligible.
+            assert!(node.predicate.is_some());
         }
-        _ => panic!("Expected Filter plan for complex WHERE, got {:?}", plan),
+        _ => panic!("Expected DataScan plan for complex WHERE, got {:?}", plan),
     }
 }
 
@@ -331,9 +334,13 @@ fn test_build_where_comparison_operators() {
         let plan = builder.build_plan(&stmts[0]).unwrap();
 
         match plan {
-            PhysicalPlan::Filter(_) => {}    // Expected
+            PhysicalPlan::Filter(_) => {} // OR-shaped / complex PK forms keep Filter
+            PhysicalPlan::DataScan(_) => {} // MS07-T06: pushdown-eligible WHERE
             PhysicalPlan::IndexScan(_) => {} // = might still use index scan
-            _ => panic!("Expected Filter or IndexScan for WHERE, got {:?}", plan),
+            _ => panic!(
+                "Expected Filter, DataScan or IndexScan for WHERE, got {:?}",
+                plan
+            ),
         }
     }
 }
@@ -347,10 +354,11 @@ fn test_build_where_column_comparison() {
     let plan = builder.build_plan(&stmts[0]).unwrap();
 
     match plan {
-        PhysicalPlan::Filter(node) => {
+        PhysicalPlan::DataScan(node) => {
             assert_eq!(node.table_name, "users");
+            assert!(node.predicate.is_some());
         }
-        _ => panic!("Expected Filter plan for non-PK WHERE, got {:?}", plan),
+        _ => panic!("Expected DataScan with pushed predicate, got {:?}", plan),
     }
 }
 

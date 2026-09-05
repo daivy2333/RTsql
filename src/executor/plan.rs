@@ -76,6 +76,12 @@ pub struct DataScanNode {
     pub table_name: String,
     /// 输出列名列表
     pub columns: Vec<String>,
+    /// MS07-T06: 从 WHERE 下推的行内谓词（与 FilterExecutor 相同的全列行求值）。
+    /// `None` = 无下推（无 WHERE，或谓词保留在 Filter 节点中）。
+    pub predicate: Option<PredicateRef>,
+    /// MS07-T06: 从 LIMIT 下推的扫描产出行封顶（`offset + limit`；`limit == 0`
+    /// 时为 `Some(0)`）。`None` = 不封顶。
+    pub scan_cap: Option<usize>,
 }
 
 /// 主键索引扫描节点

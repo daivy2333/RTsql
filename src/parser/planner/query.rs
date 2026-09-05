@@ -306,29 +306,57 @@ impl PlanBuilder {
                     })
                 }
             } else {
-                // Non-PK WHERE — M19: route Filter input through DataScan when
-                // the WHERE doesn't include a PK equality anywhere (even under AND).
+                // Non-PK WHERE — M19 routing + MS07-T06 pushdown:
+                // - PK equality in a non-simple form (e.g. AND-combined):
+                //   Filter over the original Scan, unchanged.
+                // - OR anywhere in the predicate: not pushdown-eligible;
+                //   keep the FilterExecutor wrapper (semantics baseline).
+                // - Otherwise: the predicate moves into the DataScan node
+                //   (row-level filtering) and no Filter node is generated.
                 let predicate = self.build_where(&table_name, where_expr)?;
                 let has_pk_eq = self.has_pk_equality(&table_name, where_expr)?;
-                let input = if has_pk_eq {
+                if has_pk_eq {
                     // PK equality present but in a non-simple form (e.g. AND-combined
                     // with another predicate). Keep base_plan as-is.
-                    base_plan
+                    PhysicalPlan::Filter(FilterNode {
+                        input: Box::new(base_plan),
+                        predicate,
+                        table_name: table_name.clone(),
+                    })
+                } else if contains_or(where_expr) {
+                    let input = match base_plan {
+                        PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
+                            table_name: scan_node.table_name,
+                            columns: scan_node.columns,
+                            predicate: None,
+                            scan_cap: None,
+                        }),
+                        other => other,
+                    };
+                    PhysicalPlan::Filter(FilterNode {
+                        input: Box::new(input),
+                        predicate,
+                        table_name: table_name.clone(),
+                    })
                 } else {
-                    // No PK equality → swap base_plan's Scan for DataScan.
+                    // Pushdown-eligible: swap the Scan for a DataScan carrying
+                    // the predicate. DerivedScan and other sources keep the
+                    // Filter wrapper (they are not the single-table scan the
+                    // predicate was built against).
                     match base_plan {
                         PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
                             table_name: scan_node.table_name,
                             columns: scan_node.columns,
+                            predicate: Some(predicate),
+                            scan_cap: None,
                         }),
-                        other => other,
+                        other => PhysicalPlan::Filter(FilterNode {
+                            input: Box::new(other),
+                            predicate,
+                            table_name: table_name.clone(),
+                        }),
                     }
-                };
-                PhysicalPlan::Filter(FilterNode {
-                    input: Box::new(input),
-                    predicate,
-                    table_name: table_name.clone(),
-                })
+                }
             }
         } else {
             // No WHERE clause — M19: route to DataScan (skip index layer).
@@ -337,6 +365,8 @@ impl PlanBuilder {
                 PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
                     table_name: scan_node.table_name,
                     columns: scan_node.columns,
+                    predicate: None,
+                    scan_cap: None,
                 }),
                 _ => base_plan,
             }
@@ -495,8 +525,28 @@ impl PlanBuilder {
                 .transpose()?
                 .unwrap_or(0);
 
+            // MS07-T06: push the row cap into a directly-wrapped DataScan so
+            // the scan can stop early. The eligible chain is exactly
+            // `DataScan`: pushable Filter(DataScan) shapes were already merged
+            // into DataScan by the WHERE pushdown above, and every remaining
+            // wrapper (Filter with a non-pushable predicate, Sort, Aggregate,
+            // DerivedScan, …) is not row-transparent, so capping below it
+            // would truncate its input. The top-level Limit node is always
+            // kept (safe cap + offset skipping for non-pushed shapes).
+            let input = match plan_with_order {
+                PhysicalPlan::DataScan(mut node) => {
+                    node.scan_cap = Some(if limit == 0 {
+                        0
+                    } else {
+                        offset.saturating_add(limit)
+                    });
+                    PhysicalPlan::DataScan(node)
+                }
+                other => other,
+            };
+
             PhysicalPlan::Limit(crate::executor::LimitNode {
-                input: Box::new(plan_with_order),
+                input: Box::new(input),
                 limit,
                 offset,
             })
@@ -665,6 +715,25 @@ impl PlanBuilder {
     }
 }
 
+/// Check whether a WHERE expression contains a logical `OR` at any depth.
+///
+/// MS07-T06 pushdown eligibility: only the planner-buildable surface matters
+/// (`build_where` accepts BinaryOp / Nested; comparisons host no OR). Other
+/// variants either cannot carry an OR into `build_where` or fail planning
+/// before pushdown is decided.
+fn contains_or(expr: &Expr) -> bool {
+    match expr {
+        Expr::BinaryOp {
+            op: sqlparser::ast::BinaryOperator::Or,
+            ..
+        } => true,
+        Expr::BinaryOp { left, right, .. } => contains_or(left) || contains_or(right),
+        Expr::UnaryOp { expr, .. } => contains_or(expr),
+        Expr::Nested(expr) => contains_or(expr),
+        _ => false,
+    }
+}
+
 /// Extract column name from ORDER BY expression
 fn extract_column_name(expr: &Expr) -> Result<String, PlanError> {
     match expr {
@@ -773,17 +842,23 @@ mod tests {
 
     #[test]
     fn test_unsupported_where() {
+        // MS07-T06: non-PK WHERE without OR is pushed into DataScan
+        // (row-level predicate, no Filter node).
         let mut builder = PlanBuilder::new();
         builder.register_table("users", vec!["id".into(), "name".into()], "id");
 
-        // Non-PK WHERE clause - should generate Filter plan
         let sql = "SELECT * FROM users WHERE name = 'Alice'";
         let stmts = parse_sql(sql).unwrap();
         let plan = builder.build_plan(&stmts[0]).unwrap();
 
         match plan {
-            PhysicalPlan::Filter(_) => {} // Expected - Filter for non-PK WHERE
-            _ => panic!("Expected Filter plan for non-PK WHERE"),
+            PhysicalPlan::DataScan(node) => {
+                assert!(
+                    node.predicate.is_some(),
+                    "non-PK WHERE must carry its predicate inside DataScan"
+                );
+            }
+            _ => panic!("Expected DataScan with pushed predicate, got {:?}", plan),
         }
     }
 }

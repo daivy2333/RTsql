@@ -1,7 +1,8 @@
 //! Correlated subquery value injection
 //!
 //! Walks a PhysicalPlan tree and injects outer row values into
-//! ParameterExpression nodes in Filter and Having predicate trees.
+//! ParameterExpression nodes in Filter, Having, and pushed-down DataScan
+//! predicate trees.
 
 use crate::executor::{PhysicalPlan, Value};
 
@@ -32,8 +33,12 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
             inject_correlated_values(&node.input, param_values);
             inject_correlated_values(&node.subquery, param_values);
         }
-        PhysicalPlan::DataScan(_) => {
-            // Leaf node — no correlated subqueries to inject.
+        PhysicalPlan::DataScan(node) => {
+            // MS07-T06: DataScan can carry a pushed-down WHERE predicate that
+            // contains ParameterExpression nodes for correlated subqueries.
+            if let Some(predicate) = &node.predicate {
+                predicate.inject_parameters(param_values);
+            }
         }
         PhysicalPlan::Sort(node) => {
             inject_correlated_values(&node.input, param_values);

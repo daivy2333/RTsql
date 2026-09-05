@@ -69,7 +69,7 @@ fn bench_data_scan_vs_scan(c: &mut Criterion) {
         // DataScanExecutor (direct data page chain) — the M19 path
         group.bench_with_input(BenchmarkId::new("data_scan", n), &n, |b, &_n| {
             b.to_async(&rt).iter(|| async {
-                let mut executor = DataScanExecutor::new(tm.clone(), bp.clone(), None);
+                let mut executor = DataScanExecutor::new(tm.clone(), bp.clone(), None, None, None);
                 let mut count = 0i64;
                 while let Some(_row) = executor.next().await.unwrap() {
                     count += 1;
