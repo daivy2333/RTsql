@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-09-05（MS08-T01/T02 完成并归档 ms08-t01-t02-pread-prefetch change；commit `dac6783`）
+> 最后更新：2026-09-06（MS10-T01 完成并增量刷新，commit `03ff1b9`；同日 roadmap 重排：MS09 重定义 + 新增 MS10-MS13 应用层轨道，依据 R18 四轮探索，用户批准）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,9 +12,11 @@
 
 ## 路线图结构
 
-10 个 Milestone：3 历史 completed + 3 旧 superseded + 4 新（MS06 ready，MS07-MS09 planned）。
+14 个 Milestone：5 completed（MS00-MS02 历史 + MS06/MS07）+ 3 旧 superseded + 6 planned（MS08 剩余、MS09 重定义、MS10-MS13 应用层新轨）。
 
-新规划理念：**先收口正确性 → 建设基础能力 → 实测驱动性能 → SQL 标准合规**。
+规划理念：**先收口正确性 → 建设基础能力 → 实测驱动性能 → 引擎能力收尾 → 应用层可用好用（非交互 CLI / 密钥 / 分析 / 分发）**（2026-09-06 依据 R18 分析扩展应用层轨道）。
+
+执行顺序（用户批准 2026-09-06）：MS10 优先于 MS08 剩余项（T03-T06 穿插进行）；MS11 与 MS12 顺序可互换（均只依赖 MS10）。
 旧优化项已重新分类：见各 superseded MS 的"原范围"段与 D-candidates 列表。
 
 ## 已完成历史
@@ -166,27 +168,117 @@
 - **Related changes**:
   - `2026-09-05-ms08-t01-t02-pread-prefetch`（T01/T02 合并 change，已归档为 `archive/2026-09-05-2026-09-05-ms08-t01-t02-pread-prefetch/`，含新增 spec `storage-io-optimization`，3 Requirement：R1 页 I/O 位置参数化 / R2 零接口零格式变更 / R3 DataScan 预取可选能力默认关闭）
 
-### MS09：SQL 标准与上层能力 — planned
+### MS09：引擎能力收尾 — planned（2026-09-06 重定义，原"SQL 标准与上层能力"）
 
 - **Status**: planned
 - **Dependencies**: MS08
-- **Outcome**: 支持 Read Committed 隔离；NLJ + Hash Join 可切换；可选的 PG Extended Query 协议；关联子查询结果缓存
-- **Rationale**: 旧路线把代价模型、io_uring、B+Tree 节点级锁一起塞入。本 MS 严守"价值 > 复杂度"；D-candidates 移到后续
+- **Outcome**: 隔离级别可配（Read Committed）；NLJ/Hash Join 启发式切换；关联子查询结果缓存
+- **Rationale**: 原四项中 PG Extended Query 被非交互 CLI 形态决策降级（无消费者，server 保留为库能力，将来 serve 复活时再议）；其余三项同属引擎能力面，与应用层轨道（MS10-MS13）分开验收
 - **Scope**:
 
 | Task | 目标 | 备注 |
 |---|---|---|
 | MS09-T01 | Read Committed 隔离 | 不含 Serializable / SSI |
 | MS09-T02 | NLJ + 与 Hash Join 启发式切换 | **不含代价模型** |
-| MS09-T03 | PG Extended Query 协议子集（Parse/Execute） | Describe/Bind 后续可加 |
 | MS09-T04 | 关联子查询结果缓存 | 视 MS09-T02 完成后实际场景 |
 
-- **Non-goals**: Serializable / SSI；代价模型与 Join 重排；io_uring；B+Tree 节点级锁；clone 消除 Arc/Cow（待 MS08 完成后看真实数据再决定）
-- **Workload**: 4 change；总工作量适中
-- **Stable baseline**: Read Committed 跨并发可验证；NLJ 在小表上优于 Hash；PG 客户端可用 prepared statement；关联子查询 N 行外层不重复执行子查询
-- **Verification boundary**: 4 项独立测试套件
-- **Diagnostic boundary**: 4 个独立子系统
-- **Split signals**: 若 MS09-T01 实施发现 snapshot 与 RR 共享度过低，拆为独立 MS；若 MS09-T03 复杂度超 2 change 拆出
+- **Non-goals**: PG Extended Query（降级移出，2026-09-06）；Serializable / SSI；代价模型与 Join 重排；io_uring；B+Tree 节点级锁；clone 消除 Arc/Cow（待 MS08 完成后看真实数据再决定）；多用户权限
+- **Workload**: 3 change；总工作量适中
+- **Stable baseline**: Read Committed 跨并发可验证；NLJ 在小表上优于 Hash；关联子查询 N 行外层不重复执行子查询
+- **Verification boundary**: 3 项独立测试套件
+- **Diagnostic boundary**: 3 个独立子系统（事务管理 / Join 执行器 / 子查询执行器）
+- **Split signals**: 若 MS09-T01 实施发现 snapshot 与 RR 共享度过低，拆为独立 MS
+- **Related changes**: None
+
+### MS10：CLI 非交互命令面 — planned（应用层主轨，2026-09-06 新增）
+
+- **Status**: planned（T01 已完成，2026-09-06，含 Iteration 001 真投影扩展——用户批准方向 B；T02-T05 待后续 change）
+- **Dependencies**: MS08
+- **Outcome**: `rtsql <db> <sql>` 主命令全链路可用——裸名集中存储（`$RTSQL_HOME`，默认 `~/.rtsql/db/`）+ 含 `/` 路径直开；`new/list/schema/dump/restore/import` 生命周期子命令；TTY 默认表格、非 TTY 默认 JSON、`--format table|json|csv|tsv`；退出码分类（0 成功/2 用法/3 SQL 错/4 锁冲突/5 密钥）；多语句 `;` 分片逐条执行+报错行号；跨进程文件锁（advisory 独占，占用报 `database is locked`）；优雅停机（信号→`close()` checkpoint）；文件 magic/格式版本头（趁零用户落，不兼容即报"文件由新版创建"）
+- **Rationale**: 应用层一切能力的载体（R18 主题 7）；文件锁/优雅停机/格式头/多语句修复是正确性前置而非增强，与 CLI 壳同一验收域（"CLI 全链路可用"），不拆
+- **Scope**:
+
+| Task | 状态 | 目标 | 关键前置 | 关联 change |
+|---|---|---|---|---|
+| MS10-T01 | **completed**（2026-09-06，含 Iteration 001 真投影） | CLI 壳：参数化入口 + 名称解析（裸名/路径）+ 主命令 + 输出格式 + 退出码 | 无（main.rs 重写为参数化入口） | `archive/2026-09-06-2026-09-06-ms10-t01-cli-shell/` |
+| MS10-T02 | planned | 跨进程文件锁 + 优雅停机（信号接线 `close()`） | MS10-T01 | — |
+| MS10-T03 | planned | 文件 magic/格式版本头（FileStorage open 校验） | MS10-T01 | — |
+| MS10-T04 | planned | 多语句执行修复（`;` 分片逐条执行 + 明确报错，替换 `pipeline.rs` first() 截断） | MS10-T01 | — |
+| MS10-T05 | planned | 生命周期子命令：`new/list/schema/dump/restore/import --csv` | MS10-T01（schema 为 agent 发现刚需） | — |
+
+- **Non-goals**: REPL（后续可选）；密钥/加密（MS12）；分析函数（MS11/MS13）；安装分发（MS13）；鉴权/多用户
+- **Workload**: CLI 模块新建（clap 依赖 + `src/cli/`）+ file_storage 锁/格式头 + pipeline 多语句 + 5 子命令
+- **Stable baseline**: 脚本 `rtsql db "SELECT ..."` 端到端稳定；并发打开同一文件得到明确错误（退出码 4）；kill 后 WAL 恢复 e2e
+- **Verification boundary**: CLI 集成测试（参数/名称解析/格式三态/退出码分类/锁冲突/多语句含报错行号/信号停机 e2e）
+- **Diagnostic boundary**: `src/cli/`（新模块）+ `src/main.rs` + `src/storage/file_storage.rs`（锁/格式头）+ `src/pipeline.rs`（多语句）
+- **Split signals**: 多语句分片需动 pipeline 事务语义时拆出独立 change 级任务；加密讨论提前成熟时 MS12 并行
+- **Related changes**:
+  - `2026-09-06-ms10-t01-cli-shell`（T01 + Iteration 001 真投影扩展（用户批准方向 B，超出 T01 原始范围的引擎级修复），已归档为 `archive/2026-09-06-2026-09-06-ms10-t01-cli-shell/`，含新增 spec `cli-noninteractive-shell`，6 Requirement：R1 入口与主命令 / R2 名称解析 / R3 列名表头 / R4 输出格式 / R5 多语句护栏 / R6 扫描执行器真投影。规划依据：R18 `usability-gap-cli-form.md`）
+
+### MS11：SQL 表达式与函数层 — planned（分析能力主体，2026-09-06 新增）
+
+- **Status**: planned
+- **Dependencies**: MS10（CLI 可发现 schema，agent 可验证函数行为）
+- **Outcome**: WHERE/SELECT 支持 `IN / LIKE / BETWEEN / IS NULL / CASE / COALESCE / CAST`；标量函数库第一批（string: upper/lower/length/substr/replace/trim；math: abs/round/floor/ceil）；SQL 级 `BEGIN/COMMIT/ROLLBACK` 语句（复用 MS07-T04 显式事务 API 接线 planner 语句臂）
+- **Rationale**: 分析能力的主体在 SQL 层而非 CLI 命令（R18 主题 7 结论——agent 是写 SQL 的）；事务语句与表达式四件套同为"agent 写 SQL 的日常件"，同域验收；复用已有事务 API，实现面小
+- **Scope**:
+
+| Task | 目标 | 关键前置 |
+|---|---|---|
+| MS11-T01 | 表达式四件套 + CASE/COALESCE/CAST（`parser/planner/expression.rs` 扩展） | 无 |
+| MS11-T02 | SQL 事务语句 `BEGIN/COMMIT/ROLLBACK`（planner 语句臂 + pipeline 事务态接线） | 无（API 已有，MS07-T04） |
+| MS11-T03 | 标量函数库第一批（函数注册机制 + string/math 各 5-7 个） | MS11-T01（表达式层就绪） |
+
+- **Non-goals**: 日期/时间类型与函数（MS13 深水区）；窗口函数（OVER/PARTITION BY）；自定义函数（UDF）；聚合扩展
+- **Workload**: expression builder 扩展 + 函数注册新模块 + planner 事务臂 + 每函数/表达式测试
+- **Stable baseline**: 日常过滤/派生列 SQL 全绿；SQL 事务语句往返（BEGIN→DML→COMMIT/ROLLBACK 语义与 API 等价）
+- **Verification boundary**: 每函数/表达式独立测试 + parser/planner 回归（既有 585+ 零修改）
+- **Diagnostic boundary**: `src/parser/planner/expression.rs` + 新函数注册模块 + `src/parser/planner/mod.rs` 事务臂
+- **Split signals**: 单批函数超 1 change 时按 string/math 分两批；CAST 触发类型系统深层改动时拆出
+- **Related changes**: None
+
+### MS12：整库加密与 sudo 式密钥 — planned（安全域，2026-09-06 新增）
+
+- **Status**: planned
+- **Dependencies**: MS10（CLI 是密钥入口载体；锁与密钥是不同错误类、不同退出码）
+- **Outcome**: Argon2id KDF（密码+文件头随机盐）+ 页级 AES-256-GCM（SQLCipher 模型，加密可选——格式头 flag 区分明/密库，明文库保留）；密钥来源 `--key <arg>` / `--password-file <path>` / `RTSQL_KEY` 环境变量（终端 export 一次后续继承，sudo 式语义主路径）+ TTL 密钥缓存（派生密钥非明文，`~/.rtsql/keys/` 0600，过期重问）；`rtsql key set/remove/status` 子命令；`invalid key` 退出码 5
+- **Rationale**: 密码必须落在整库加密上才有意义（明文文件下"打开验证"只是礼貌性门锁）；安全域独立成段——新依赖（argon2/aes-gcm）+ 密码学安全路径 + 磁盘格式变更，与 CLI 壳/函数层互不依赖，独立验收
+- **Scope**:
+
+| Task | 目标 | 关键前置 |
+|---|---|---|
+| MS12-T01 | 文件头加密 flag + Argon2id KDF + 页级 AES-GCM transform（FileStorage 读写路径） | MS10-T03（格式头） |
+| MS12-T02 | 密钥来源三通道 + TTL 缓存 + `key` 子命令 | MS12-T01 |
+| MS12-T03 | BDD：错误密码拒绝/损坏密文检测/明密互斥/缓存过期/性能基线（MS08 纪律） | MS12-T01/T02 |
+
+- **Non-goals**: 多用户/角色权限（OS 文件权限即边界，R18 主题 6 结论）；列级加密；密钥轮换；key agent 常驻进程
+- **Workload**: 加密依赖引入 + FileStorage 加解密层 + 密钥管理 CLI + 密码学面 BDD + bench 基线
+- **Stable baseline**: 加密库与明文库行为等价（既有全量测试零修改）；打开延迟增量实测留档（Argon2 参数 = 打开延迟↔暴力破解权衡，专门决策）
+- **Verification boundary**: BDD 场景全绿 + 全量回归 + bench 对比结论（改善或明确未达预期）
+- **Diagnostic boundary**: `src/storage/file_storage.rs` 加解密层 + 密钥管理 CLI + 文件头
+- **Split signals**: 页加解密开销 >10% 时评估硬件加速或格式层优化；Argon2 参数争议大时单独出决策项
+- **Related changes**: None
+
+### MS13：分析函数与安装分发 — planned（终段收口，2026-09-06 新增）
+
+- **Status**: planned
+- **Dependencies**: MS10 + MS11（不依赖 MS12——加密与分析正交）
+- **Outcome**: 日期/时间类型与函数（类型系统扩展 + date_trunc/interval 等分析最高频维度）；`stats/sample/profile` 薄命令（底层聚合 SQL：行数/空值率/distinct/min/max/分位数）；安装分发：GitHub Releases 预编译矩阵（x86_64-linux-gnu/musl 静态/aarch64-linux/macOS aarch64+x86_64）+ `cargo install` crates.io 元数据 + clap 生成 completions/man + CI workflow
+- **Rationale**: 分析深水区（日期类型 = 磁盘格式变更，依赖 MS11 函数层）与分发（所有能力就绪才有可分发产物）都依赖前置完成且彼此正交，按"最后集中收口"合并为终段；CI 是分发的前置而非独立价值
+- **Scope**:
+
+| Task | 目标 | 关键前置 |
+|---|---|---|
+| MS13-T01 | 日期/时间类型（tuple.rs 格式扩展 + 序列化/解析） | MS11（函数层） |
+| MS13-T02 | 日期函数（date_trunc/interval/now 等）+ `stats/sample/profile` 薄命令 | MS13-T01 |
+| MS13-T03 | CI workflow + Releases 预编译矩阵 + completions/man + `cargo install` | MS10（CLI 壳稳定） |
+
+- **Non-goals**: 窗口函数（远期）；Homebrew tap（Releases 稳定后再议）；deb/AUR/install 脚本（按需求再议）；Windows（FileExt 限 Unix，需重写页 I/O 层，明确 out of scope）
+- **Workload**: 类型系统格式扩展 + 日期函数 + 3 薄命令 + CI/打包（cargo-zigbuild 或 runner 原生）
+- **Stable baseline**: 全平台二进制可下载可运行；`stats` 命令输出分位数；日期列可存可查可过滤
+- **Verification boundary**: 各平台 smoke 测试（CI 矩阵跑 `rtsql --version` + 基础 CRUD）+ 日期类型/函数独立测试
+- **Diagnostic boundary**: 类型系统层（`src/storage/page_format/tuple.rs`）+ CI workflow 文件 + stats 命令层
+- **Split signals**: 日期类型实现超 2 change 时拆出独立 MS；分发矩阵若 macOS 需专门修复拆出；Windows 支持呼声强烈时单独立项
 - **Related changes**: None
 
 ## D-candidates（不归入当前 MS，待后续决定）
@@ -213,16 +305,23 @@ MS00 → MS01 → MS02
                   ├→ MS04 [superseded → MS07+MS09]
                   └→ MS05 [superseded → MS08]
                                 ↓
-                              MS06 (ready)
+                              MS06 (completed)
                                 ↓
-                              MS07 (planned)
+                              MS07 (completed)
                                 ↓
-                              MS08 (planned)
-                                ↓
-                              MS09 (planned)
+                              MS08 (planned；T03-T06 穿插)
+                 ┌──────────────┼──────────────────┐
+                 ↓              ↓                  ↓
+        MS09 引擎能力收尾   MS10 CLI 非交互命令面（应用层主轨，优先执行）
+                            ├─────────┤
+                            ↓         ↓
+                     MS11 表达式与   MS12 整库加密与密钥
+                     函数层（分析）   （安全域；与 MS11 可互换）
+                            ↓
+                     MS13 分析函数与安装分发（终段收口）
 ```
 
-无环；所有依赖指向已存在编号。
+无环；所有依赖指向已存在编号；MS11 与 MS12 均只依赖 MS10、互不依赖；MS13 依赖 MS10+MS11 而非 MS12（加密与分析正交）。
 
 ## 进行中
 
@@ -240,6 +339,7 @@ MS00 → MS01 → MS02
 
 | 完成日期 | 内容 | commit |
 |---|---|---|
+| 2026-09-06 | MS10-T01 CLI 壳 + 扫描执行器真投影：Iteration 000（`src/cli/{mod,resolve,render}.rs` 新建 + `main.rs` 重写 one-shot 入口：clap 参数、裸名→`$RTSQL_HOME/db/<name>.db`（默认 `~/.rtsql/`）/含 `/` 直开、table/json/csv/tsv 四格式（TTY 表格 / 非 TTY JSON 默认）、退出码 0/1/2/3 + 4/5 枚举留位、多语句显式拒绝护栏（文案指向 T04）、`close()` checkpoint 截断 WAL、`get_plan_output_columns` 补 JOIN 三臂真表头；608 tests 既有零修改）＋ Iteration 001（真投影：6 plan 节点携带 `projection: Vec<usize>`、6 执行器（4 scan + Filter + Sort）`with_projection` 在谓词求值与 MVCC 判定后裁剪、聚合 `input_schema` 统一经 `get_plan_output_columns`（修复 PK 点查聚合静默 Null 与 GROUP BY 映射）、投影外 ORDER BY 正确排序（Sort 比较用输入形状、物化时裁剪）；IndexScan 表头错位/聚合静默 Null/排序失效三症状由 `tests/projection_test.rs` 6 测试锁定；既有测试校准面实测 0；614 tests pass，clippy/fmt/validate 全 0；两轮 Plan Review accepted） | 03ff1b9；change 归档至 `openspec/changes/archive/2026-09-06-2026-09-06-ms10-t01-cli-shell/`；新增 spec `cli-noninteractive-shell`（6 Requirement，R6=真投影） |
 | 2026-09-05 | MS08-T01+T02 页 I/O 位置参数化 + 扫描预取：T01 `FileStorage::read_page_blocking`/`write_page_blocking` 改 `FileExt::read_exact_at`/`write_all_at`（每页 2 syscall→1；strace 页路径 lseek 33→3、pread64 4→26、pwrite64 0→8；并发冷读串页损坏实测复现 RED→修复 GREEN，`tests/file_storage_io_test.rs` 4 测试）；T02 `DataScanExecutor` 后继页预取（closure 捕获 successor + spawn 丢弃结果 + 页 id 去重 + 在途 ≤1，`with_prefetch` 开关），默认路径实测回退 +40~47%/+17~18%（p<0.05，对照组不变）→ replan 默认改关、显式启用（`tests/prefetch_test.rs` 3 测试 + 默认关闭单测；Review 第三轮 bench 两档 No change p=0.24/0.73 回基线）；585 tests pass；clippy/fmt/validate 全 0；Plan Review accepted（T5.4 判读偏差裁定为环境侧 BASELINE-CHANGED 非阻塞） | dac6783；change 归档至 `openspec/changes/archive/2026-09-05-2026-09-05-ms08-t01-t02-pread-prefetch/`；新增 spec `storage-io-optimization`（3 Requirement） |
 | 2026-09-05 | MS07-T06 谓词/LIMIT 下推：`DataScanNode` 新增 `predicate`/`scan_cap`；planner 非 PK WHERE 无 OR 时谓词装入 DataScan（不再生成 Filter），OR 保留 Filter(DataScan)；Limit 输入链恰为纯 DataScan 时写入 `offset+limit` 封顶（limit=0 → Some(0) 立即 Done），顶层 Limit 任何形状保留；DataScanExecutor 两个行产出点接入 `filter_row`/`yield_capped`（语义逐字对齐 filter.rs）；`correlated.rs` 补 DataScan 相关参数注入臂（Plan 遗漏面）；新增 `tests/pushdown_test.rs` 15 测试（577 tests pass；clippy/fmt/validate 全 0；Plan Review accepted） | 5d652a2；change 归档至 `openspec/changes/archive/2026-09-05-2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown/` |
 | 2026-09-05 | MS07-T05 Checkpoint 真正工作：`full_recover` 消费 16B 位点（有效位点只重放 `≥ L`，缺失/损坏/代际失效安全退化全量；分类不裁剪）；K05 六处静默吞错显式化（`WalError::RedoFailed` 含表名/tx_id/row_id，`Database::open` 失败可见）；`WalWriter::rewrite_truncate` 单临界区原地截断（禁止 temp+rename）；`CheckpointManager::checkpoint()` 九步流程；`Database` 接线 `checkpoint_manager` + 公开 `checkpoint()` + `close()` 自动触发；新增 `tests/checkpoint_redo_reduction_test.rs` 9 测试（Plan Review accepted） | 0df2b93（与 T04 同提交） |
