@@ -1,5 +1,6 @@
 //! Filter executor - WHERE clause filtering
 
+use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, PredicateRef};
 use crate::storage::Result;
 
@@ -7,12 +8,27 @@ use crate::storage::Result;
 pub struct FilterExecutor {
     input: Box<dyn Executor + Send>,
     predicate: PredicateRef,
+    /// MS10-T01 Iter001: output projection (empty = identity), applied after
+    /// the predicate so predicate `column_index` keeps its full-schema
+    /// semantics.
+    projection: Vec<usize>,
 }
 
 impl FilterExecutor {
     /// Create a new filter executor
     pub fn new(input: Box<dyn Executor + Send>, predicate: PredicateRef) -> Self {
-        Self { input, predicate }
+        Self {
+            input,
+            predicate,
+            projection: Vec::new(),
+        }
+    }
+
+    /// MS10-T01 Iter001: narrow surviving rows to the given full-schema
+    /// column indices (empty = identity, the `new()` default).
+    pub fn with_projection(mut self, projection: Vec<usize>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -27,7 +43,12 @@ impl Executor for FilterExecutor {
                 Some(ExecResult::Row(values)) => {
                     // Evaluate predicate against the row
                     match self.predicate.evaluate(&values) {
-                        Ok(true) => return Ok(Some(ExecResult::Row(values))),
+                        Ok(true) => {
+                            return Ok(Some(ExecResult::Row(apply_projection(
+                                &self.projection,
+                                values,
+                            ))))
+                        }
                         Ok(false) => continue, // Skip this row
                         Err(e) => {
                             return Err(crate::storage::StorageError::ExecutionError(format!(

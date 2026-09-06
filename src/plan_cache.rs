@@ -130,10 +130,11 @@ mod tests {
     use crate::executor::{PhysicalPlan, ScanNode};
 
     fn dummy_plan() -> PhysicalPlan {
-        // ScanNode has only two fields: table_name and columns (see src/executor/plan.rs:61-66).
+        // ScanNode fields: table_name, columns, projection (see src/executor/plan.rs).
         PhysicalPlan::Scan(ScanNode {
             table_name: "t".to_string(),
             columns: vec![],
+            projection: Vec::new(),
         })
     }
 

@@ -1,5 +1,6 @@
 //! Index scan executor - primary key lookup
 
+use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor};
 use crate::profiling::{is_profiling_enabled, record_time};
 use crate::storage::page_format::{deserialize_value_refs, ColumnType};
@@ -14,6 +15,8 @@ pub struct IndexScanExecutor {
     key: Vec<u8>,
     schema: Vec<ColumnType>,
     snapshot: Option<Snapshot>,
+    /// MS10-T01 Iter001: output projection (empty = identity).
+    projection: Vec<usize>,
     executed: bool,
 }
 
@@ -35,8 +38,17 @@ impl IndexScanExecutor {
             key,
             schema,
             snapshot,
+            projection: Vec::new(),
             executed: false,
         }
+    }
+
+    /// MS10-T01 Iter001: narrow the produced row to the given full-schema
+    /// column indices (empty = identity, the `new()` default). Applied after
+    /// MVCC visibility resolution on the full-schema row.
+    pub fn with_projection(mut self, projection: Vec<usize>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -74,7 +86,10 @@ impl Executor for IndexScanExecutor {
                         .await?;
 
                     match values_opt {
-                        Some(values) => Ok(Some(ExecResult::Row(values))),
+                        Some(values) => Ok(Some(ExecResult::Row(apply_projection(
+                            &self.projection,
+                            values,
+                        )))),
                         None => Ok(None), // all versions invisible
                     }
                 } else {
@@ -84,7 +99,10 @@ impl Executor for IndexScanExecutor {
                             .map(|vrs| vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>())
                     })
                     .await?;
-                    Ok(Some(ExecResult::Row(values)))
+                    Ok(Some(ExecResult::Row(apply_projection(
+                        &self.projection,
+                        values,
+                    ))))
                 }
             }
             None => Ok(None),

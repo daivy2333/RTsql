@@ -1,5 +1,6 @@
 //! Sort executor - ORDER BY clause sorting
 
+use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, OrderByColumn, Value};
 use crate::storage::Result;
 use std::cmp::Ordering;
@@ -9,6 +10,10 @@ pub struct SortExecutor {
     input: Box<dyn Executor + Send>,
     order_by: Vec<OrderByColumn>,
     columns: Vec<String>,
+    /// MS10-T01 Iter001: output projection (empty = identity), applied when
+    /// materializing the sorted buffer so comparisons still see the input
+    /// row shape (design D10: sort keys may live outside the projection).
+    projection: Vec<usize>,
     sorted_rows: Vec<Vec<Value>>,
     position: usize,
     initialized: bool,
@@ -25,10 +30,18 @@ impl SortExecutor {
             input,
             order_by,
             columns,
+            projection: Vec::new(),
             sorted_rows: Vec::new(),
             position: 0,
             initialized: false,
         }
+    }
+
+    /// MS10-T01 Iter001: narrow output rows to the given input-shape column
+    /// indices (empty = identity, the `new()` default).
+    pub fn with_projection(mut self, projection: Vec<usize>) -> Self {
+        self.projection = projection;
+        self
     }
 
     /// Initialize: collect all rows and sort them
@@ -45,10 +58,14 @@ impl SortExecutor {
             }
         }
 
-        // Sort rows using the order_by specification
+        // Sort rows using the order_by specification (on the input row shape)
         rows.sort_unstable_by(|a, b| self.compare_rows(a, b));
 
-        self.sorted_rows = rows;
+        // MS10-T01 Iter001: apply the output projection after sorting.
+        self.sorted_rows = rows
+            .into_iter()
+            .map(|row| apply_projection(&self.projection, row))
+            .collect();
         self.initialized = true;
         Ok(())
     }

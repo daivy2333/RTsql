@@ -1679,12 +1679,16 @@ async fn test_planner_no_where_routes_to_data_scan() -> Result<()> {
             columns,
             predicate,
             scan_cap,
+            projection,
         }) => {
             assert_eq!(table_name, "test");
             assert_eq!(columns, vec!["id", "name"]);
             // MS07-T06: no WHERE / no LIMIT here — no pushed predicate or cap.
             assert!(predicate.is_none());
             assert_eq!(scan_cap, None);
+            // MS10-T01 Iter001: explicit full-column projection resolves to
+            // identity-ordered indices; emitted rows are unchanged.
+            assert_eq!(projection, vec![0, 1]);
         }
         other => panic!("Expected DataScan, got {:?}", other),
     }

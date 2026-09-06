@@ -12,6 +12,7 @@
 //! is parsed and checked. Invisible current versions follow `next_version`
 //! pointers (potentially across pages) to find a visible commit.
 
+use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, PredicateRef, Value};
 use crate::storage::page_format::{deserialize_value_refs, ColumnType, RowId, SlottedPageRef};
 use crate::storage::PageId;
@@ -64,6 +65,9 @@ pub struct DataScanExecutor {
     /// MS08-T02: page id already prefetched (dedups successor captures
     /// across the slots of one page).
     prefetched_page: Option<PageId>,
+    /// MS10-T01 Iter001: output projection (empty = identity), applied to a
+    /// row after visibility and the inline predicate have been evaluated.
+    projection: Vec<usize>,
 }
 
 impl DataScanExecutor {
@@ -95,7 +99,17 @@ impl DataScanExecutor {
             prefetch_enabled: false,
             prefetch_handle: None,
             prefetched_page: None,
+            projection: Vec::new(),
         }
+    }
+
+    /// MS10-T01 Iter001: narrow produced rows to the given full-schema column
+    /// indices (empty = identity, the `new()` default). Applied after the
+    /// inline predicate so predicate `column_index` keeps its full-schema
+    /// semantics.
+    pub fn with_projection(mut self, projection: Vec<usize>) -> Self {
+        self.projection = projection;
+        self
     }
 
     /// MS08-T02: override the prefetch switch (default `false` via `new`;
@@ -334,7 +348,9 @@ impl Executor for DataScanExecutor {
             match action {
                 PageAction::YieldValue(values) => {
                     match Self::filter_row(self.predicate.as_ref(), values)? {
-                        Some(values) => return self.yield_capped(values),
+                        Some(values) => {
+                            return self.yield_capped(apply_projection(&self.projection, values))
+                        }
                         None => continue, // filtered out by the inline predicate
                     }
                 }
@@ -354,7 +370,12 @@ impl Executor for DataScanExecutor {
                         {
                             Some(values) => {
                                 match Self::filter_row(self.predicate.as_ref(), values)? {
-                                    Some(values) => return self.yield_capped(values),
+                                    Some(values) => {
+                                        return self.yield_capped(apply_projection(
+                                            &self.projection,
+                                            values,
+                                        ))
+                                    }
                                     None => continue, // filtered out by the inline predicate
                                 }
                             }

@@ -70,3 +70,14 @@ pub use subquery_eval::SubqueryEvalExecutor;
 pub use update::UpdateExecutor;
 pub use value::{ColumnType, Value, ValueError};
 pub use value_ref::ValueRef;
+
+/// MS10-T01 Iter001: narrow a full-schema row to the selected column indices
+/// (projection order). An empty projection is the identity, returning the row
+/// unchanged. Indices are planner-resolved against the full schema, so a row
+/// reaching this function is always at least `projection.len()` long.
+pub(crate) fn apply_projection(projection: &[usize], values: Vec<Value>) -> Vec<Value> {
+    if projection.is_empty() {
+        return values;
+    }
+    projection.iter().map(|&i| values[i].clone()).collect()
+}

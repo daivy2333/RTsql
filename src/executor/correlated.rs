@@ -97,9 +97,11 @@ mod tests {
             input: Box::new(PhysicalPlan::Scan(ScanNode {
                 table_name: "dept".to_string(),
                 columns: vec!["id".to_string(), "name".to_string()],
+                projection: Vec::new(),
             })),
             predicate: Arc::clone(&pred),
             table_name: "dept".to_string(),
+            projection: Vec::new(),
         });
 
         // Inject emp.dept = 42
