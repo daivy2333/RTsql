@@ -250,3 +250,19 @@
   - `tests/recovery_e2e_test.rs::test_data_pages_survive_restart` workaround 可去掉 — 随 K05 修复
   - `rtsql.db` / `:memory:.wal` 旧文件不向后兼容 — pre-release 阶段可接受
 - **Persisted Evidence**: none（Plan 阶段声明；6 项验证命令均低成本可重跑；本审计已新鲜重跑）
+
+## R17: MS08 bench 基线采集与前后对比判读 Runbook
+
+- **类型**: runbook
+- **路径**: `.claude/runbooks/ms08-bench-comparison.md`
+- **日期**: 2026-09-05
+- **用途**: MS08 各 T（及后续同类性能优化）实施前后的 criterion 基线落盘、strace syscall 计数对比与 bench 变化的因果判读（含 `--` 透传、strace 5.16 syscall 名、对照组判定、机制归因等已验证要点）
+- **状态**: active
+
+## R18: 产品可用性与 CLI 形态差距分析
+
+- **类型**: analysis
+- **路径**: `.claude/analysis/usability-gap-cli-form.md`
+- **日期**: 2026-09-05（revision `709c85d`；同日四轮：形态/SQL 面 + 文件模型/隔离 + 非交互 CLI 与密钥/分析 + 安装分发实测）
+- **用途**: 评估 RTsql 距"可用且好用"的差距并沉淀应用层设计空间（产品形态现状 / SQL 语义广度 / CLI 交互缺口 / 文件模型与初始化 / 多库隔离 / 非交互命令面 + sudo 式密钥 + 集中存储 + 分析能力 + 安装分发与格式版本策略 / 缺陷层+应用层双轨规划输入）；用户形态决策（非交互 CLI 数据库优先）下的后续 milestone/change 规划上下文
+- **状态**: active
