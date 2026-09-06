@@ -1,5 +1,6 @@
 //! RTsql library - Async embedded database components
 
+pub mod cli;
 pub mod database;
 pub mod executor;
 pub mod network;

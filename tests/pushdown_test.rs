@@ -64,8 +64,8 @@ async fn plan_of(db: &Database, sql: &str) -> PhysicalPlan {
 
 // ---------------------------------------------------------------------------
 // T1 (a): pushed-down predicates return exactly the pre-pushdown row sets
-// (single-table scans yield full-schema rows — SELECT projection is not
-// applied on this path, unchanged by pushdown)
+// (queries use SELECT *, whose identity projection leaves the full-schema
+// row shape unchanged by MS10-T01 Iter001 true projection)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

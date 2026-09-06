@@ -428,48 +428,57 @@ pub(crate) fn create_executor_from_plan(
             PhysicalPlan::Filter(node) => {
                 // Recursively create input executor
                 let input = create_executor_from_plan(*node.input, database, tx_id).await?;
-                Ok(Box::new(FilterExecutor::new(input, node.predicate))
-                    as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    FilterExecutor::new(input, node.predicate).with_projection(node.projection),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Scan(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
-                Ok(Box::new(ScanExecutor::new(
-                    table_meta,
-                    database.buffer_pool.clone(),
-                    None,
-                )) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    ScanExecutor::new(table_meta, database.buffer_pool.clone(), None)
+                        .with_projection(node.projection),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::DataScan(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
-                Ok(Box::new(DataScanExecutor::new(
-                    table_meta,
-                    database.buffer_pool.clone(),
-                    None,
-                    node.predicate,
-                    node.scan_cap,
-                )) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    DataScanExecutor::new(
+                        table_meta,
+                        database.buffer_pool.clone(),
+                        None,
+                        node.predicate,
+                        node.scan_cap,
+                    )
+                    .with_projection(node.projection),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::IndexScan(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
-                Ok(Box::new(IndexScanExecutor::new(
-                    table_meta,
-                    database.buffer_pool.clone(),
-                    node.key.as_bytes().to_vec(),
-                    None,
-                )) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    IndexScanExecutor::new(
+                        table_meta,
+                        database.buffer_pool.clone(),
+                        node.key.as_bytes().to_vec(),
+                        None,
+                    )
+                    .with_projection(node.projection),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::IndexScanAll(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
-                Ok(Box::new(IndexScanAllExecutor::new(
-                    table_meta,
-                    database.buffer_pool.clone(),
-                    node.key.as_bytes().to_vec(),
-                    None,
-                )) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    IndexScanAllExecutor::new(
+                        table_meta,
+                        database.buffer_pool.clone(),
+                        node.key.as_bytes().to_vec(),
+                        None,
+                    )
+                    .with_projection(node.projection),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Insert(node) => {
@@ -545,10 +554,10 @@ pub(crate) fn create_executor_from_plan(
             PhysicalPlan::Sort(node) => {
                 // Recursively create input executor
                 let input = create_executor_from_plan(*node.input, database, tx_id).await?;
-                Ok(
-                    Box::new(SortExecutor::new(input, node.order_by, node.columns))
-                        as Box<dyn Executor + Send>,
-                )
+                Ok(Box::new(
+                    SortExecutor::new(input, node.order_by, node.columns)
+                        .with_projection(node.projection),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Limit(node) => {
@@ -681,7 +690,7 @@ pub(crate) fn create_executor_from_plan(
     })
 }
 
-fn value_to_json(value: Value) -> serde_json::Value {
+pub(crate) fn value_to_json(value: Value) -> serde_json::Value {
     match value {
         Value::Int(n) => serde_json::Value::Number(n.into()),
         Value::String(s) => serde_json::Value::String(s),

@@ -63,6 +63,9 @@ pub struct ScanNode {
     pub table_name: String,
     /// 输出列名列表
     pub columns: Vec<String>,
+    /// MS10-T01 Iter001: 输出投影（全 schema 列 index，按 SELECT 列表顺序）。
+    /// 空 = 恒等（产出全 schema 行，行为与引入前逐字节一致）。
+    pub projection: Vec<usize>,
 }
 
 /// 数据页直接扫描节点（M19）
@@ -82,6 +85,9 @@ pub struct DataScanNode {
     /// MS07-T06: 从 LIMIT 下推的扫描产出行封顶（`offset + limit`；`limit == 0`
     /// 时为 `Some(0)`）。`None` = 不封顶。
     pub scan_cap: Option<usize>,
+    /// MS10-T01 Iter001: 输出投影（全 schema 列 index，按 SELECT 列表顺序）。
+    /// 空 = 恒等。在行内谓词求值之后应用。
+    pub projection: Vec<usize>,
 }
 
 /// 主键索引扫描节点
@@ -91,8 +97,10 @@ pub struct IndexScanNode {
     pub table_name: String,
     /// 主键值（用于 IndexManager.get()）
     pub key: Key,
-    /// 输出列名列表
+    /// 输出列名列表（与 `projection` 一致的实际输出形状）
     pub columns: Vec<String>,
+    /// MS10-T01 Iter001: 输出投影（空 = 恒等，产出全 schema 行）
+    pub projection: Vec<usize>,
 }
 
 /// 非唯一索引扫描节点（返回所有匹配行）
@@ -102,8 +110,10 @@ pub struct IndexScanAllNode {
     pub table_name: String,
     /// 索引键值（用于 IndexManager.search_all()）
     pub key: Key,
-    /// 输出列名列表
+    /// 输出列名列表（与 `projection` 一致的实际输出形状）
     pub columns: Vec<String>,
+    /// MS10-T01 Iter001: 输出投影（空 = 恒等，产出全 schema 行）
+    pub projection: Vec<usize>,
 }
 
 /// 过滤节点（WHERE 子句求值）
@@ -115,6 +125,9 @@ pub struct FilterNode {
     pub predicate: PredicateRef,
     /// 表名
     pub table_name: String,
+    /// MS10-T01 Iter001: 输出投影（全 schema 列 index）。空 = 恒等。
+    /// 在谓词求值之后应用（谓词 `column_index` 按全 schema 解析）。
+    pub projection: Vec<usize>,
 }
 
 /// 插入节点
@@ -249,7 +262,11 @@ pub struct SortNode {
     pub input: Box<PhysicalPlan>,
     pub order_by: Vec<OrderByColumn>,
     pub table_name: String,
+    /// 排序键查找所用行形状的列名（= 输入计划的真实输出形状）
     pub columns: Vec<String>,
+    /// MS10-T01 Iter001: 输出投影（空 = 恒等）。Sort 在输入行形状上比较排序键、
+    /// 产出时按投影裁剪（design D10：排序键允许不在投影内）。
+    pub projection: Vec<usize>,
 }
 
 /// 分页节点（LIMIT + OFFSET）

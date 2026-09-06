@@ -1,5 +1,6 @@
 //! Scan executor - full table scan
 
+use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, Value};
 use crate::storage::page_format::{deserialize_value_refs, ColumnType};
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
@@ -11,6 +12,8 @@ pub struct ScanExecutor {
     buffer_pool: Arc<BufferPool>,
     schema: Vec<ColumnType>,
     snapshot: Option<Snapshot>,
+    /// MS10-T01 Iter001: output projection (empty = identity).
+    projection: Vec<usize>,
     results: Vec<Vec<Value>>,
     index: usize,
     executed: bool,
@@ -32,10 +35,18 @@ impl ScanExecutor {
             buffer_pool,
             schema,
             snapshot,
+            projection: Vec::new(),
             results: Vec::new(),
             index: 0,
             executed: false,
         }
+    }
+
+    /// MS10-T01 Iter001: narrow produced rows to the given full-schema column
+    /// indices (empty = identity, the `new()` default).
+    pub fn with_projection(mut self, projection: Vec<usize>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -58,7 +69,9 @@ impl Executor for ScanExecutor {
                         .await?;
 
                     match values_opt {
-                        Some(values) => self.results.push(values),
+                        Some(values) => self
+                            .results
+                            .push(apply_projection(&self.projection, values)),
                         None => continue, // all versions invisible
                     }
                 } else {
@@ -69,7 +82,8 @@ impl Executor for ScanExecutor {
                                 .map(|vrs| vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>())
                         })
                         .await?;
-                    self.results.push(values);
+                    self.results
+                        .push(apply_projection(&self.projection, values));
                 }
             }
         }

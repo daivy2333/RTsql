@@ -25,17 +25,55 @@ impl PlanBuilder {
             PhysicalPlan::Scan(node) => node.columns.clone(),
             PhysicalPlan::DataScan(node) => node.columns.clone(),
             PhysicalPlan::DerivedScan(node) => node.columns.clone(),
-            PhysicalPlan::Filter(node) => self.get_plan_output_columns(&node.input),
-            PhysicalPlan::Sort(node) => self.get_plan_output_columns(&node.input),
+            PhysicalPlan::Filter(node) => {
+                let mut columns = self.get_plan_output_columns(&node.input);
+                if !node.projection.is_empty() {
+                    // MS10-T01 Iter001: the Filter owns the projection trim —
+                    // describe the narrowed output shape.
+                    columns = node
+                        .projection
+                        .iter()
+                        .map(|&i| columns[i].clone())
+                        .collect();
+                }
+                columns
+            }
+            PhysicalPlan::Sort(node) => {
+                let mut columns = self.get_plan_output_columns(&node.input);
+                if !node.projection.is_empty() {
+                    // MS10-T01 Iter001: the Sort owns the projection trim —
+                    // describe the narrowed output shape.
+                    columns = node
+                        .projection
+                        .iter()
+                        .map(|&i| columns[i].clone())
+                        .collect();
+                }
+                columns
+            }
             PhysicalPlan::Limit(node) => self.get_plan_output_columns(&node.input),
             PhysicalPlan::Aggregate(node) => node.output_columns.clone(),
             PhysicalPlan::Having(node) => self.get_plan_output_columns(&node.input),
             PhysicalPlan::IndexScan(node) => node.columns.clone(),
             PhysicalPlan::IndexScanAll(node) => node.columns.clone(),
-            PhysicalPlan::Join(_) | PhysicalPlan::SemiJoin(_) | PhysicalPlan::AntiJoin(_) => {
-                // JOIN 的列来自左右子计划的合并
-                Vec::new()
+            PhysicalPlan::Join(node) => {
+                // JOIN 行组装严格按 output_columns 顺序（见 executor/join.rs），
+                // 列名直接取自节点，不递归合并左右子计划。
+                node.output_columns
+                    .iter()
+                    .map(|c| c.column.clone())
+                    .collect()
             }
+            PhysicalPlan::SemiJoin(node) => node
+                .output_columns
+                .iter()
+                .map(|c| c.column.clone())
+                .collect(),
+            PhysicalPlan::AntiJoin(node) => node
+                .output_columns
+                .iter()
+                .map(|c| c.column.clone())
+                .collect(),
             PhysicalPlan::SubqueryEval(node) => self.get_plan_output_columns(&node.input),
             PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => {
                 Vec::new()
@@ -66,6 +104,7 @@ impl PlanBuilder {
                 let plan = PhysicalPlan::Scan(ScanNode {
                     table_name: table_name.clone(),
                     columns: base_columns.clone(),
+                    projection: Vec::new(),
                 });
                 (plan, table_name)
             }
@@ -114,6 +153,7 @@ impl PlanBuilder {
             let right_plan = PhysicalPlan::Scan(ScanNode {
                 table_name: right_table.clone(),
                 columns: right_columns.clone(),
+                projection: Vec::new(),
             });
 
             // 解析 ON 条件
@@ -270,110 +310,10 @@ impl PlanBuilder {
             _ => "unknown".to_string(),
         };
 
-        // Handle WHERE clause
-        let plan_with_where = if let Some(where_expr) = &select.selection {
-            // Skip WHERE processing for JOIN queries (will be handled in future tasks)
-            if matches!(base_plan, PhysicalPlan::Join(_)) {
-                return Err(PlanError::UnsupportedStatement);
-            }
-
-            // Try subquery patterns first (IN subquery / EXISTS)
-            if let Some(subquery_plan) = self.try_build_where_subquery(
-                where_expr,
-                &base_plan,
-                &table_name,
-                &projection_columns,
-            )? {
-                subquery_plan
-            } else if let Some(key) = self.extract_pk_from_where(&table_name, where_expr)? {
-                // Try to extract primary key from WHERE clause for index scan
-                // Simple PK equality check - use index scan
-                // Note: This is a simplification. A more sophisticated optimizer would
-                // check if the WHERE clause is ONLY pk = value, not part of a complex expression
-                if self.is_simple_pk_equality(&table_name, where_expr)? {
-                    PhysicalPlan::IndexScan(IndexScanNode {
-                        table_name: table_name.clone(),
-                        key,
-                        columns: extract_columns(&select.projection)?,
-                    })
-                } else {
-                    // Complex WHERE with PK - use Filter over Scan
-                    let predicate = self.build_where(&table_name, where_expr)?;
-                    PhysicalPlan::Filter(FilterNode {
-                        input: Box::new(base_plan),
-                        predicate,
-                        table_name: table_name.clone(),
-                    })
-                }
-            } else {
-                // Non-PK WHERE — M19 routing + MS07-T06 pushdown:
-                // - PK equality in a non-simple form (e.g. AND-combined):
-                //   Filter over the original Scan, unchanged.
-                // - OR anywhere in the predicate: not pushdown-eligible;
-                //   keep the FilterExecutor wrapper (semantics baseline).
-                // - Otherwise: the predicate moves into the DataScan node
-                //   (row-level filtering) and no Filter node is generated.
-                let predicate = self.build_where(&table_name, where_expr)?;
-                let has_pk_eq = self.has_pk_equality(&table_name, where_expr)?;
-                if has_pk_eq {
-                    // PK equality present but in a non-simple form (e.g. AND-combined
-                    // with another predicate). Keep base_plan as-is.
-                    PhysicalPlan::Filter(FilterNode {
-                        input: Box::new(base_plan),
-                        predicate,
-                        table_name: table_name.clone(),
-                    })
-                } else if contains_or(where_expr) {
-                    let input = match base_plan {
-                        PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
-                            table_name: scan_node.table_name,
-                            columns: scan_node.columns,
-                            predicate: None,
-                            scan_cap: None,
-                        }),
-                        other => other,
-                    };
-                    PhysicalPlan::Filter(FilterNode {
-                        input: Box::new(input),
-                        predicate,
-                        table_name: table_name.clone(),
-                    })
-                } else {
-                    // Pushdown-eligible: swap the Scan for a DataScan carrying
-                    // the predicate. DerivedScan and other sources keep the
-                    // Filter wrapper (they are not the single-table scan the
-                    // predicate was built against).
-                    match base_plan {
-                        PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
-                            table_name: scan_node.table_name,
-                            columns: scan_node.columns,
-                            predicate: Some(predicate),
-                            scan_cap: None,
-                        }),
-                        other => PhysicalPlan::Filter(FilterNode {
-                            input: Box::new(other),
-                            predicate,
-                            table_name: table_name.clone(),
-                        }),
-                    }
-                }
-            }
-        } else {
-            // No WHERE clause — M19: route to DataScan (skip index layer).
-            // Subqueries / derived scans keep their original plan.
-            match base_plan {
-                PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
-                    table_name: scan_node.table_name,
-                    columns: scan_node.columns,
-                    predicate: None,
-                    scan_cap: None,
-                }),
-                _ => base_plan,
-            }
-        };
-
         // === Aggregate function detection ===
-        // Check if SELECT projection contains aggregate functions
+        // Check if SELECT projection contains aggregate functions.
+        // Runs before WHERE handling: `has_aggregates` gates the projection
+        // resolution below (aggregate plans keep the full-schema input).
         let mut aggregates = Vec::new();
         let mut non_agg_columns = Vec::new();
         let mut agg_output_columns = Vec::new();
@@ -420,6 +360,150 @@ impl PlanBuilder {
 
         let has_aggregates = !aggregates.is_empty();
 
+        // === Projection resolution (MS10-T01 Iter001) ===
+        // Resolve the SELECT list to base-schema column indices (projection
+        // order). `None` = identity projection: aggregates present (the
+        // aggregate consumes full-schema rows), scalar subqueries in the
+        // SELECT list (SubqueryEval owns those shapes), a wildcard, or a name
+        // that is not a base column (alias / expression).
+        let base_schema = match &base_plan {
+            PhysicalPlan::Scan(node) => Some(node.columns.clone()),
+            _ => None,
+        };
+        let sort_due = !query.order_by.is_empty();
+        let projection_indices = if has_aggregates || !subquery_evals.is_empty() {
+            None
+        } else {
+            base_schema
+                .as_ref()
+                .and_then(|schema| resolve_projection_indices(&projection_columns, schema))
+        };
+        // With ORDER BY the Sort node owns the trim (design D10): the chain
+        // below it must emit full-schema rows so sort keys outside the
+        // projection stay reachable. Otherwise the scan (or the Filter
+        // wrapper) applies the projection after its predicate evaluates.
+        let proj_or_empty = if sort_due {
+            Vec::new()
+        } else {
+            projection_indices.clone().unwrap_or_default()
+        };
+
+        // Handle WHERE clause
+        let plan_with_where = if let Some(where_expr) = &select.selection {
+            // Skip WHERE processing for JOIN queries (will be handled in future tasks)
+            if matches!(base_plan, PhysicalPlan::Join(_)) {
+                return Err(PlanError::UnsupportedStatement);
+            }
+
+            // Try subquery patterns first (IN subquery / EXISTS)
+            if let Some(subquery_plan) = self.try_build_where_subquery(
+                where_expr,
+                &base_plan,
+                &table_name,
+                &projection_columns,
+            )? {
+                subquery_plan
+            } else if let Some(key) = self.extract_pk_from_where(&table_name, where_expr)? {
+                // Try to extract primary key from WHERE clause for index scan
+                // Simple PK equality check - use index scan
+                // Note: This is a simplification. A more sophisticated optimizer would
+                // check if the WHERE clause is ONLY pk = value, not part of a complex expression
+                if self.is_simple_pk_equality(&table_name, where_expr)? {
+                    PhysicalPlan::IndexScan(IndexScanNode {
+                        table_name: table_name.clone(),
+                        key,
+                        columns: if !sort_due && projection_indices.is_some() {
+                            projection_columns.clone()
+                        } else {
+                            base_schema.clone().unwrap_or_default()
+                        },
+                        projection: proj_or_empty.clone(),
+                    })
+                } else {
+                    // Complex WHERE with PK - use Filter over Scan
+                    let predicate = self.build_where(&table_name, where_expr)?;
+                    PhysicalPlan::Filter(FilterNode {
+                        input: Box::new(base_plan),
+                        predicate,
+                        table_name: table_name.clone(),
+                        projection: proj_or_empty.clone(),
+                    })
+                }
+            } else {
+                // Non-PK WHERE — M19 routing + MS07-T06 pushdown:
+                // - PK equality in a non-simple form (e.g. AND-combined):
+                //   Filter over the original Scan, unchanged.
+                // - OR anywhere in the predicate: not pushdown-eligible;
+                //   keep the FilterExecutor wrapper (semantics baseline).
+                // - Otherwise: the predicate moves into the DataScan node
+                //   (row-level filtering) and no Filter node is generated.
+                let predicate = self.build_where(&table_name, where_expr)?;
+                let has_pk_eq = self.has_pk_equality(&table_name, where_expr)?;
+                if has_pk_eq {
+                    // PK equality present but in a non-simple form (e.g. AND-combined
+                    // with another predicate). Keep base_plan as-is.
+                    PhysicalPlan::Filter(FilterNode {
+                        input: Box::new(base_plan),
+                        predicate,
+                        table_name: table_name.clone(),
+                        projection: proj_or_empty.clone(),
+                    })
+                } else if contains_or(where_expr) {
+                    let input = match base_plan {
+                        PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
+                            table_name: scan_node.table_name,
+                            columns: scan_node.columns,
+                            predicate: None,
+                            scan_cap: None,
+                            // The Filter wrapper above owns the projection trim
+                            // (or the Sort node when ORDER BY is present).
+                            projection: Vec::new(),
+                        }),
+                        other => other,
+                    };
+                    PhysicalPlan::Filter(FilterNode {
+                        input: Box::new(input),
+                        predicate,
+                        table_name: table_name.clone(),
+                        projection: proj_or_empty.clone(),
+                    })
+                } else {
+                    // Pushdown-eligible: swap the Scan for a DataScan carrying
+                    // the predicate. DerivedScan and other sources keep the
+                    // Filter wrapper (they are not the single-table scan the
+                    // predicate was built against).
+                    match base_plan {
+                        PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
+                            table_name: scan_node.table_name,
+                            columns: scan_node.columns,
+                            predicate: Some(predicate),
+                            scan_cap: None,
+                            projection: proj_or_empty.clone(),
+                        }),
+                        other => PhysicalPlan::Filter(FilterNode {
+                            input: Box::new(other),
+                            predicate,
+                            table_name: table_name.clone(),
+                            projection: proj_or_empty.clone(),
+                        }),
+                    }
+                }
+            }
+        } else {
+            // No WHERE clause — M19: route to DataScan (skip index layer).
+            // Subqueries / derived scans keep their original plan.
+            match base_plan {
+                PhysicalPlan::Scan(scan_node) => PhysicalPlan::DataScan(DataScanNode {
+                    table_name: scan_node.table_name,
+                    columns: scan_node.columns,
+                    predicate: None,
+                    scan_cap: None,
+                    projection: proj_or_empty.clone(),
+                }),
+                _ => base_plan,
+            }
+        };
+
         // Build aggregate plan if needed
         let plan_with_aggregate = if has_aggregates {
             // Extract GROUP BY columns
@@ -441,20 +525,13 @@ impl PlanBuilder {
                 }
             }
 
-            // Build column index mapping from input plan
-            let input_schema = match &plan_with_where {
-                PhysicalPlan::Scan(node) => node.columns.clone(),
-                PhysicalPlan::DataScan(node) => node.columns.clone(),
-                PhysicalPlan::Filter(node) => {
-                    // Get schema from input of filter
-                    match node.input.as_ref() {
-                        PhysicalPlan::Scan(scan) => scan.columns.clone(),
-                        PhysicalPlan::DataScan(scan) => scan.columns.clone(),
-                        _ => vec![],
-                    }
-                }
-                _ => vec![],
-            };
+            // Build column index mapping from input plan.
+            // MS10-T01 Iter001: unified through get_plan_output_columns, which
+            // describes the input plan's real output shape on every form —
+            // IndexScan/IndexScanAll inputs previously fell into the empty
+            // fallback and silently NULL-ed aggregates (and mis-mapped GROUP
+            // BY keys).
+            let input_schema = self.get_plan_output_columns(&plan_with_where);
             let column_indices: HashMap<String, usize> = input_schema
                 .iter()
                 .enumerate()
@@ -505,11 +582,29 @@ impl PlanBuilder {
                 })
                 .collect::<Result<Vec<_>, PlanError>>()?;
 
+            // MS10-T01 Iter001: sort-key lookup uses the input plan's real
+            // output shape. With no aggregate in play the Sort node also owns
+            // the projection trim (the scan chain below emits full-schema
+            // rows, so keys outside the projection stay reachable — design
+            // D10). Aggregate inputs keep their own output shape and are not
+            // re-projected.
+            let sort_columns = if has_aggregates {
+                projection_columns.clone()
+            } else {
+                self.get_plan_output_columns(&plan_with_aggregate)
+            };
+            let sort_projection = if has_aggregates || !is_base_scan_chain(&plan_with_aggregate) {
+                Vec::new()
+            } else {
+                projection_indices.clone().unwrap_or_default()
+            };
+
             PhysicalPlan::Sort(SortNode {
                 input: Box::new(plan_with_aggregate),
                 order_by,
                 table_name: table_name.clone(),
-                columns: projection_columns.clone(),
+                columns: sort_columns,
+                projection: sort_projection,
             })
         } else {
             plan_with_aggregate
@@ -715,6 +810,46 @@ impl PlanBuilder {
     }
 }
 
+/// Whether the plan is the single-table scan chain (optionally Filter-wrapped)
+/// whose nodes emit full-schema rows when their projections are empty.
+/// Gates Sort-owned projection: the projection indices are resolved against
+/// the base schema and are only valid for that chain.
+fn is_base_scan_chain(plan: &PhysicalPlan) -> bool {
+    match plan {
+        PhysicalPlan::Scan(_)
+        | PhysicalPlan::DataScan(_)
+        | PhysicalPlan::IndexScan(_)
+        | PhysicalPlan::IndexScanAll(_) => true,
+        PhysicalPlan::Filter(node) => is_base_scan_chain(&node.input),
+        _ => false,
+    }
+}
+
+/// Resolve select-list column names to base-schema indices (projection order).
+///
+/// Returns `None` for the identity projection: an empty list, a wildcard
+/// item, or any name that is not a base column (alias, expression, aggregate
+/// result). Identity keeps the pre-projection row shape byte-for-byte.
+fn resolve_projection_indices(projection: &[String], schema: &[String]) -> Option<Vec<usize>> {
+    if projection.is_empty() {
+        return None;
+    }
+    let mut indices = Vec::with_capacity(projection.len());
+    for col in projection {
+        if col == "*" {
+            return None;
+        }
+        match schema
+            .iter()
+            .position(|c| c.to_lowercase() == col.to_lowercase())
+        {
+            Some(idx) => indices.push(idx),
+            None => return None,
+        }
+    }
+    Some(indices)
+}
+
 /// Check whether a WHERE expression contains a logical `OR` at any depth.
 ///
 /// MS07-T06 pushdown eligibility: only the planner-buildable surface matters
@@ -860,5 +995,25 @@ mod tests {
             }
             _ => panic!("Expected DataScan with pushed predicate, got {:?}", plan),
         }
+    }
+
+    #[test]
+    fn test_get_plan_output_columns_join() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("orders", vec!["user_id".into(), "total".into()], "");
+
+        let sql =
+            "SELECT users.id, orders.total FROM users JOIN orders ON users.id = orders.user_id";
+        let stmts = parse_sql(sql).unwrap();
+        let plan = builder.build_plan(&stmts[0]).unwrap();
+
+        assert!(
+            matches!(plan, PhysicalPlan::Join(_)),
+            "expected Join plan, got {:?}",
+            plan
+        );
+        let columns = builder.get_plan_output_columns(&plan);
+        assert_eq!(columns, vec!["id", "total"]);
     }
 }

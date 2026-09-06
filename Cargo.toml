@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
 async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
 thiserror = "1.0"
 anyhow = "1.0"
 futures = "0.3"

@@ -1,5 +1,6 @@
 //! Index scan executor for non-unique indexes - returns all matching rows
 
+use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor};
 use crate::profiling::{is_profiling_enabled, record_time};
 use crate::storage::page_format::{deserialize_value_refs, ColumnType, RowId};
@@ -14,6 +15,8 @@ pub struct IndexScanAllExecutor {
     key: Vec<u8>,
     schema: Vec<ColumnType>,
     snapshot: Option<Snapshot>,
+    /// MS10-T01 Iter001: output projection (empty = identity).
+    projection: Vec<usize>,
     row_ids: Vec<RowId>,
     current_idx: usize,
     initialized: bool,
@@ -37,10 +40,18 @@ impl IndexScanAllExecutor {
             key,
             schema,
             snapshot,
+            projection: Vec::new(),
             row_ids: Vec::new(),
             current_idx: 0,
             initialized: false,
         }
+    }
+
+    /// MS10-T01 Iter001: narrow produced rows to the given full-schema column
+    /// indices (empty = identity, the `new()` default).
+    pub fn with_projection(mut self, projection: Vec<usize>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -77,7 +88,12 @@ impl Executor for IndexScanAllExecutor {
                     .await?;
 
                 match values_opt {
-                    Some(values) => return Ok(Some(ExecResult::Row(values))),
+                    Some(values) => {
+                        return Ok(Some(ExecResult::Row(apply_projection(
+                            &self.projection,
+                            values,
+                        ))))
+                    }
                     None => continue, // all versions invisible: skip to next RowId
                 }
             } else {
@@ -87,7 +103,10 @@ impl Executor for IndexScanAllExecutor {
                         .map(|vrs| vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>())
                 })
                 .await?;
-                return Ok(Some(ExecResult::Row(values)));
+                return Ok(Some(ExecResult::Row(apply_projection(
+                    &self.projection,
+                    values,
+                ))));
             }
         }
 
