@@ -6,7 +6,7 @@ description = "Async coroutine-driven embedded relational database"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util", "signal"] }
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 thiserror = "1.0"
@@ -26,6 +26,7 @@ criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 rusqlite = "0.31"
 tempfile = "3.0"
 which = "6.0"
+libc = "0.2"
 
 [[bench]]
 name = "micro_bench"

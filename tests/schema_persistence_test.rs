@@ -33,13 +33,16 @@ async fn test_create_table_writes_to_tables_page0() {
     drop(db);
 
     // Read raw file: page 0 should exist (catalog). `__tables` must hold
-    // the row for `users`.
-    let storage = Arc::new(FileStorage::open(&path).unwrap());
-    assert!(
-        storage.page_count() >= 2,
-        "expected at least 2 pages (catalog page 0 + page 1), got {}",
-        storage.page_count()
-    );
+    // the row for `users`. The probe is scoped so the lock is released
+    // before the database is reopened (MS10-T02 exclusive file lock).
+    {
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        assert!(
+            storage.page_count() >= 2,
+            "expected at least 2 pages (catalog page 0 + page 1), got {}",
+            storage.page_count()
+        );
+    }
 
     // Reopen the database and confirm we can list tables via the catalog.
     let db2 = Database::open(&path).await.unwrap();

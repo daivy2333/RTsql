@@ -9,6 +9,9 @@ pub enum StorageError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("database is locked: {0}")]
+    DatabaseLocked(String),
+
     #[error("Page size mismatch: expected {expected}, got {actual}")]
     PageSizeMismatch { expected: usize, actual: usize },
 

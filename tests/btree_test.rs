@@ -244,6 +244,13 @@ async fn test_btree_persists_changes_to_disk() {
     // Sync all pages to disk
     buffer_pool.flush_all().await.unwrap();
 
+    // MS10-T02 calibration: the file lock is exclusive, so drop the first
+    // holder (pool clones keep the storage Arc alive) before reopening to
+    // verify the data persisted.
+    drop(_buffer_pool_clone2);
+    drop(buffer_pool);
+    drop(storage);
+
     // Create new BufferPool and verify data persisted in the original root page
     let storage2 = Arc::new(FileStorage::open(&db_path).unwrap());
     let buffer_pool2 = Arc::new(BufferPool::new(10, storage2).unwrap());

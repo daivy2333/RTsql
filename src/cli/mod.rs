@@ -7,6 +7,7 @@ use crate::database::Database;
 use crate::network::protocol::Response;
 use crate::parser::PlanBuilder;
 use crate::pipeline::{execute_stage, parse_stage, plan_stage};
+use crate::storage::StorageError;
 use clap::{Parser, ValueEnum};
 use render::{render, OutputKind, QueryPayload};
 use std::io::{IsTerminal, Write};
@@ -14,7 +15,7 @@ use std::process::ExitCode;
 
 /// 退出码分类：0 成功 / 1 一般错误 / 2 用法错误 / 3 SQL 错误 / 4 锁冲突 / 5 密钥错误。
 ///
-/// Locked 与 InvalidKey 当前无产生路径（跨进程文件锁 T02、密钥 MS12 落地），仅枚举留位。
+/// InvalidKey 当前无产生路径（密钥 MS12 落地），仅枚举留位。
 pub enum ExitStatus {
     Success,
     General(String),
@@ -94,6 +95,9 @@ async fn execute_command(args: &CliArgs) -> ExitStatus {
 
     let db = match Database::open(&db_path).await {
         Ok(db) => db,
+        Err(StorageError::DatabaseLocked(_)) => {
+            return ExitStatus::Locked(format!("database is locked: {}", db_path.display()));
+        }
         Err(e) => {
             return ExitStatus::General(format!(
                 "failed to open database {}: {}",

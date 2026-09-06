@@ -25,6 +25,17 @@ impl FileStorage {
             .truncate(false)
             .open(path)?;
 
+        // MS10-T02: advisory exclusive lock, held for the fd's lifetime and
+        // released on drop/process exit. Taken before WAL open and recovery
+        // so a rejected second opener never touches companion files.
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(StorageError::DatabaseLocked(path.display().to_string()));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(StorageError::Io(e)),
+        }
+
         let metadata = file.metadata()?;
         let file_len = metadata.len();
         let page_size = Page::PAGE_SIZE;
