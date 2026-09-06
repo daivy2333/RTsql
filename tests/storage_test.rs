@@ -126,6 +126,9 @@ mod tests {
         page.data[0] = 123;
         storage.write_page(page_id, &page).await.unwrap();
         storage.sync().await.unwrap();
+        // MS10-T02 calibration: the file lock is exclusive, so the first
+        // holder must be dropped before the durability check reopens.
+        drop(storage);
         let storage2 = FileStorage::open(temp_file.path()).unwrap();
         let read_page = storage2.read_page(page_id).await.unwrap();
         assert_eq!(read_page.data[0], 123);

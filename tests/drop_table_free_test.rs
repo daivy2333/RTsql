@@ -7,15 +7,16 @@
 use rtsql::database::Database;
 use rtsql::network::protocol::Response;
 use rtsql::storage::page_format::ColumnType;
-use rtsql::storage::FileStorage;
+use rtsql::storage::Page;
 use std::path::Path;
-use std::sync::Arc;
 use tempfile::tempdir;
 
-/// Open a second read-only handle to the same file and return its current
-/// page count (file is not resized, so this reflects the high-water mark).
+/// Physical page count from the on-disk file length. The file lock is
+/// exclusive, so the old "second read-only handle" probe is replaced by a
+/// plain metadata read; the length is the high-water mark because freed
+/// pages go to the free-list without truncation.
 fn page_count(path: &Path) -> u64 {
-    Arc::new(FileStorage::open(path).unwrap()).page_count()
+    std::fs::metadata(path).unwrap().len() / Page::PAGE_SIZE as u64
 }
 
 async fn create_users(db: &Database) {
