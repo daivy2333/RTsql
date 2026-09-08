@@ -32,6 +32,13 @@
 - **THEN** stderr 输出以 `database is locked` 开头的错误信息（含目标路径），退出码 4，且不执行任何 SQL
 - **AND** 密钥错误退出码 5 仍为枚举留位（MS12 落地）
 
+#### Scenario: 退出码枚举为后续任务留位
+
+- **GIVEN** CLI 退出码枚举（0/2/3/4/5）
+- **WHEN** 本 capability 落地后的代码审查
+- **THEN** 退出码 4（锁冲突）已由本 Requirement 的锁冲突场景获得产生路径（T02 落地）
+- **AND** 退出码 5（密钥）已存在于枚举与映射表中，但尚无产生路径（MS12 落地）
+
 ## ADDED Requirements
 
 ### Requirement: 优雅停机（信号接线 close）

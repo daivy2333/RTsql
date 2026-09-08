@@ -2,7 +2,7 @@
 
 ## Plan Context
 
-- Status: draft
+- Status: ready
 - Iteration: 000-wal-recovery-fix（WAL 恢复逐帧无歧义）
 - Cycle: 000-initial
 - Cycle Type: initial
@@ -186,23 +186,44 @@ Act Response（命令、输出、退出码）足以承载全部 Acceptance；实
 
 ## Act Response
 
-- Status: pending
+- Status: blocked
 
 **Implemented**
 
-（Act 填写）
+- T0 **完成**（Gate 3-5 通过）：`read_next_with_lsn` 逐帧无歧义解析落地——byte[0] 非合法 type → 新格式分支（原行为）；歧义偏移先按新格式全帧读取 + `deserialize_with_lsn`（CRC 判据）接受，失败 seek 回 peek 后位点按旧格式重试，两路皆败显式 `WalError` 传播（K05 保持）。见证测试 2 用例 RED（`Incomplete WAL record`）→ GREEN，混合流（旧格式 Checkpoint 帧 + 新格式帧）与旧格式回退分支被 7.7MB 级 WAL 实测覆盖。
+- T1 **部分完成，1 项阻塞**：`cargo test --all` 白名单口径除 `test_sigkill_leaves_recoverable_db` 外全绿（3 个信号用例呈计划预期的真 T4 RED 形态 `code==None`）；clippy 0 / fmt 0 / openspec validate PASS。**sigkill 项命中 Gate 6 阻塞**（见 Blocker Handoff）。
 
 **Changed Files and Symbols**
 
-（Act 填写）
+| 文件 | 变更 |
+|---|---|
+| `src/wal/reader.rs` | `read_next_with_lsn` 判别与回退重排；新增私有 helper `read_new_format_frame`（两条新格式路径复用） |
+| `tests/wal_recovery_large_test.rs`（新增） | T0 见证：大 WAL（checkpoint 后 500 行，>2KB，混合流）崩溃恢复 + 小 WAL 守护 |
+| `tests/cli_test.rs` | `WAL_ROWS` 20_000→160_000（含 D5 标定注释）；2 处机械 clippy 修复（`matches!` / `is_multiple_of`，工作区存量 lint）；cargo fmt 空白 |
+| `iterations/000-wal-recovery-fix/000-initial.md` | Plan Context 状态 draft→ready（用户批准 Gate 2） |
+
+产品代码 diff 仅 `src/wal/reader.rs`（+61/-36 量级）；record/writer/checkpoint/buffer/recovery 零改动。
 
 **Deviations from Plan**
 
-（Act 填写；没有则 None）
+1. **见证夹具重整**（实质偏差，已按契约目标收敛）：计划的「无 checkpoint 单条多行 INSERT」夹具在 RED 阶段暴露 redo 层 `table not found`——DDL 无 WAL 记录，小库（页数 < 容量 100）无驱逐，catalog 页未落盘，与 reader 正交（计划夹具前提盲区：计划实验均卡在 reader bug 更早处）。改为 CREATE TABLE 后显式 `checkpoint()` 再 INSERT：catalog 落盘 + WAL 截断为 21B 旧格式 Checkpoint 记录后追加新格式帧——同时满足「WAL >2KB + 混合格式流」并额外覆盖旧格式帧回退分支。RED 判据不变（两用例均 `Incomplete WAL record`）。
+2. 新增同文件私有 helper `read_new_format_frame`（局部实现选择，非实质；消除两条新格式路径重复）。
+3. `WAL_ROWS` 20k→160k：计划 D5 预设标定程序（T<500ms 倍增 N）。实测 20k→98.5ms、40k→196ms、160k→697ms（≥500ms 且 200ms ∈ [T/4, T/2]=[174, 349] ✓；20k 档子进程在 200ms 延迟内正常退出 exit 0，SIGKILL/SIGTERM 落空——20k 基线下 sigkill 首断言失败的次要混杂因素一并消除）。
+4. cli_test 脚手架 2 处机械 clippy + fmt：工作区存量 lint（计划基线 clippy 0 实测于 `1a9c91f` 无脚手架状态），语义零修改，T1 clippy 项的必要夹具适配。
+5. 临时诊断测试 `_diag_tmp.rs` 已建已删（两轮根因鉴别，见 Blocker Handoff），未留在工作区。
 
 **Blocker Handoff**
 
-（正常完成写 None）
+- **发现位置**：T1 验证门 / `test_sigkill_leaves_recoverable_db` 第二断言（重开行数完整）/ Gate 5。
+- **Plan 预期 vs 实际**：Plan 预期「T0 落地后 sigkill 用例转绿」；实际第一断言（SIGKILL 信号死亡 `code==None`）如期转绿，**第二断言暴露引擎级恢复正确性缺陷**：kill 后重开行数 163190 ≠ 160000。
+- **关键事实——无 kill 也复现（干净重开）**：build 160k 行（50 行/事务显式事务 ×3200，drop 不 close）→ 无任何 kill 直接 `Database::open` 重开 → `COUNT(*)`=162992（2 列 schema）/ 163190（1 列 schema）≠ 160000，逐次确定。
+- **WAL 本身干净**（写侧排除）：166400 records、unique_lsn=166400、dup_lsn=0、inserts=160000 整、begins/commits=3200——T0 修复后的 reader 全量解析正确（7.7MB）。
+- **探针证据**：重数 `WHERE v=<id>`（无索引列）——v=5→**2 行**，v=60000/120000/159999→**1 行**（重复/异常集中头部）；MIN=0/MAX=159999；数据文件 21995520B（~5370 页）→ 29446144B（~7189 页），+1819 页 ≈ 160k 行全量重放追加；`close()`（checkpoint 截断 WAL）后重开仍 162992——**损坏持久化**。
+- **根因画像（供 Plan 审定）**：`recovery.rs::redo_record` 的 Insert/Update 为**追加式**（`row_id: _` 被忽略，经 `data_page.rs::write_tuple_to_data_page` 从 `data_page_tail` 顺序追加），重放与原运行期间**驱逐落盘**的数据页叠加；重数/页增长/头部集中模式与「头部 ~k 页父行保持可达被计数 + 其后父行页链孤立/丢失 + 160k 行重放全部追加且可见 → 计数 = 头部遗留 + 160000」自洽。首要嫌疑面：`TableManager::open_or_init` 的 `data_page_tail` 重建与页链 next 指针交互、追加式 redo 的幂等性。**触发条件 = 未 checkpoint 的 WAL + 超过 BufferPool 容量（100 页）的驱逐规模**；既有 614 基线与计划实验（2000 行 ≈ 23 页，无驱逐）全部低于该规模或已 checkpoint，故从未暴露——T0 修复使该路径首次可达。
+- **影响面**：① T1 sigkill 项无法在 T0 契约内闭合（修复面在 Forbidden 清单：recovery/writer/TM/data_page）；② MS10-T02 Iteration 001 stable baseline「kill 后 WAL 恢复 e2e + 数据完整」在驱逐规模下当前引擎不可达；③ 隐含 crash-during-recovery 重放非幂等（SIGKILL 于恢复中 → 脏页部分落盘 → 重开重放叠加）。
+- **任务状态**：T0 完成（Acceptance 1-3 成立）；T1 部分完成（唯 sigkill 项阻塞）；T2-T5 未开始（Iteration 001）。
+- **工作区状态**：reader.rs 修复 + 2 个测试文件就绪，无未完成中间态，全部未提交（位于 `590fdc6` 之上）。
+- **恢复条件**：Plan 审定 recovery 层修复方案（重放幂等 / 恢复前位点固化 / 链尾重建正确性——属 replan 级设计决策）并创建后继 Cycle 或扩展执行契约后，Act 从恢复点继续（T1 sigkill 项 + T1 收尾）。
 
 **Blocker Resolution**
 
@@ -210,52 +231,70 @@ Act Response（命令、输出、退出码）足以承载全部 Acceptance；实
 
 **Self-Review**
 
-- Plan compliance: 
-- Full diff reviewed: 
-- Critical findings unresolved: 
-- Important findings unresolved: 
-- Minor findings unresolved: 
-
-（Act 填写）
+- Plan compliance: T0 契约逐项核验通过（3 场景、Preserve、Forbidden、RED→GREEN、验证命令）；T1 按白名单口径执行。
+- Full diff reviewed: 已审查工作区完整 diff（reader.rs + 2 测试文件 + 状态行），跨任务交互与回归面已核（全量套件 + 白名单口径）。
+- Critical findings unresolved: 1（即 Blocker Handoff 的恢复正确性缺陷——非 T0 引入，由 T0 揭示，超出本 Cycle 契约）。
+- Important findings unresolved: 0（实施中 1 次 self-caught 缺陷——回退 seek 位点应为 `start + bytes_read` 而非 `start`，由见证测试捕获，已修复并重验 GREEN）。
+- Minor findings unresolved: 1（歧义路径 `vec![0u8; total_len]` 沿用未验证 len 分配，与既有两分支同类暴露，未扩大）。
 
 **Verification Evidence**
 
-（Act 填写：命令、≤20 行决定性输出、退出码、支持的 Acceptance）
+| 验证项 | 命令 | 输出摘录 | 结论 |
+|---|---|---|---|
+| T0 见证 RED | `cargo test --test wal_recovery_large_test`（修复前） | `2 failed`，两用例 `WalError("Incomplete WAL record")` | RED ✓ |
+| T0 见证 GREEN | `cargo test --test wal_recovery_large_test`（修复后） | `test result: ok. 2 passed; 0 failed`，exit 0 | GREEN ✓ |
+| T1 全量（白名单口径） | `cargo test --all` | 除 cli_test 外全部 `ok`（176 lib 等）；cli_test `13 passed; 4 failed`（3 白名单 RED `left: None` + sigkill 阻塞项） | 部分达成 |
+| T1 clippy | `cargo clippy --all-targets -- -D warnings` | `Finished` 0 warning，exit 0 | PASS |
+| T1 fmt | `cargo fmt --check` | 0 diff | PASS |
+| T1 validate | `openspec validate 2026-09-06-ms10-t02-file-lock-graceful-shutdown` | `is valid`，exit 0 | PASS |
+| D5 标定 | `RTSQL_CALIBRATION_ROWS={20000,40000,160000} ... calibration_recovery_time --ignored` | T=98.5ms / 196ms / 697ms | 160k 档达标 |
+| 阻塞鉴别（已删临时测试，recipe 见 Blocker Handoff） | build 160k → drop → 干净重开 → COUNT/重数/页数探针 | 162992；v=5→2 行；+1819 页；checkpoint 后仍 162992 | 阻塞证据 |
 
 **Persisted Evidence**
 
-（`None required`）
+`None required`——全部决定性数字 ≤20 行已载入本 Response；阻塞场景可由 Blocker Handoff 的 recipe 以临时测试在 ~35s 内低成本复现，无一次性环境或结构化丢失。
 
 **Experience Candidates**
 
 | Type | Candidate | Evidence | Reason |
 |---|---|---|---|
-
-（没有候选时写 None）
+| Incident | 驱逐规模（>BufferPool 容量）+ 未 checkpoint WAL 的崩溃恢复产生持久化数据错误（重复/丢失）——追加式 redo 非幂等 × 页链/tail 重建，系统性诊断路径（WAL 帧统计→重数探针→页增长→固化验证）完整 | 本 Act Response「Blocker Handoff」 | 显著影响（数据正确性）、需异常恢复、诊断信息系统性强；等 Plan 审定根因与修复后可由 Recorder 落 Incident |
 
 **Remaining Issues**
 
-（Act 填写或 None）
+- Blocker Handoff 的恢复正确性缺陷（本 change 后续 Iteration 的验收前提，待 Plan）。
+- 计划 Risk 3（`WALBuffer::do_flush` 三入口无互斥）维持 improvement 候选不变（本轮 160k 实测 WAL 干净，未触发）。
+- 计划 Risk 4（多行 INSERT 万行级 `Page full`）未复核（本轮夹具用 50 行/事务分块，未触达）。
 
 **Commit or Diff Reference**
 
-（可选）
+工作区未提交（`590fdc6` 之上）：`src/wal/reader.rs`、`tests/wal_recovery_large_test.rs`、`tests/cli_test.rs`、本文件状态行。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: replan-required
 
 **Findings**
 
-（Plan 填写）
+1. **T0 实现审查通过（独立检查，非采信 Self-Review）**：`src/wal/reader.rs` diff 与 D0 契约逐项核验一致——非歧义偏移走原新格式分支；歧义偏移先新格式（CRC 判据）失败后 seek 回 `start + bytes_read` 按旧格式重试；两路皆败显式报错；helper `read_new_format_frame` 消除两路重复。Forbidden 面（writer/record/checkpoint/buffer/recovery）零改动。`tests/wal_recovery_large_test.rs` 2 用例与契约一致（checkpoint 夹具偏差已核：DDL 无 WAL 记录为引擎持久化模型，夹具同时构成混合流覆盖）。`tests/cli_test.rs` 改动 = WAL_ROWS 160k 标定 + 2 处机械 clippy + fmt，与 Act Response 偏差 3/4 一致。
+2. **Blocker Handoff 实证成立（Plan 独立复现，非采信 Act 数据）**：以 10k 行（1 列、50 行/显式事务 ×200、~315 数据页 > BufferPool 容量 100）、create_table 后不 checkpoint、drop 不 close、**无 kill 干净重开**复现：`COUNT(*)`=13190 ≠ 10000（+3190，与 Act 160k 档 1 列 +3190 同机制同值）；`checkpoint()` 后重开仍 13190（损坏持久化）；数据文件 +91 页。与 Act「无 kill 也复现」结论一致，缺陷为引擎级恢复正确性问题，非测试/kill 时序伪影。
+3. **根因裁定（代码链独立调查）**：`recovery.rs::redo_record` 追加式逻辑重放（`row_id: _` 忽略）非幂等，叠加 stale catalog tail 恢复（`open_or_init` ← `tm.write_tuple → update_table_tail`，catalog 页刷盘滞后）→ 重放落在 stale tail、覆盖其 next 指针致原链尾部孤儿化 + 已驱逐页行重复追加。同族缺口：重放不重建 PK 索引（运行期 `insert.rs:152-155` 维护；与规模无关的既有缺口）、不重放 Delete 数据页墓碑（运行期 `delete.rs:61-83`）、Update 重放丢 `next_version` 链。修复面在父 Cycle Forbidden 清单（recovery/data_page），Act 无法在父契约内闭合——Blocker Handoff 的「恢复条件 = Plan 审定并创建后继 Cycle」判断正确。
+4. **修复设计闭合（design D7）**：位置寻址重放（按记录 `row_id` 目标写入 + slot 已存在跳过 + 稠密落位校验 + 页链/tail 重建 + 索引重放 + Delete 墓碑）。关键设计事实（经代码核实）：`Update.row_id` 已是新版本位置（`update.rs:117`）→ **零 WAL 格式变更**；slot 经 `next_logical_id` 稠密只追加 → 目标落位成立；文件页只增不减 → 重放无需 allocate。拒绝备选（驱逐时强制 checkpoint / 页级 page_lsn / 仅修 tail / Update 格式扩展）理由明确。
+5. Minor（不阻塞，随后继 Cycle 记录）：父 Cycle 自报的歧义路径 `vec![0u8; total_len]` 未验证 len 分配维持现状（reader 已冻结，本 Cycle 不扩大）。
 
 **Deviation Classification**
 
-（Plan 填写）
+- 偏差 1（见证夹具改为 checkpoint 后 INSERT）：**PLAN-OMISSION**（计划夹具前提盲区：DDL 无 WAL 记录 + 小库 catalog 不落盘）——Act 按契约目标收敛（WAL >2KB + 混合流成立），RED 判据不变，非阻塞。
+- 偏差 2（私有 helper `read_new_format_frame`）：非实质局部实现选择，符合契约。
+- 偏差 3（WAL_ROWS 20k→160k）：**PLAN-OMISSION 的既有修正**（D5 标定程序预设了倍增路径），实测三档数据达标，非阻塞。
+- 偏差 4（cli_test 机械 clippy/fmt）：T1 门的必要夹具适配，语义零修改，非阻塞。
+- **Blocker 本体：NEW-EVIDENCE**——T0 使大 WAL 恢复路径首次可达，暴露既有引擎恢复正确性缺陷（非 T0 引入、非 Act 偏离）；其根因亦是父计划的 PLAN-OMISSION（T1 预期「T0 后 sigkill 转绿」未验证驱逐规模下的恢复正确性基线）。按 iteration-planning.md 判断问题——「该工作是否是达到当前 Iteration 原有 Acceptance 的必要条件？」= 是（sigkill e2e 转绿是 T1 明确 Gate 项），留在当前 Iteration；修复需新 Current-State Evidence、新设计与新 Task Contract（Act Forbidden 面外）→ **replan-required**，不伪装为 rework。
 
 **Acceptance Gaps**
 
-（Plan 填写）
+- 父 Cycle Acceptance 1-3（D0 三场景）：**满足**（RED→GREEN 见证 + 独立审查 + 混合流/损坏帧由既有套件守护）。
+- 父 Cycle Acceptance 4（T1 回归门）：**未满足**——唯 `test_sigkill_leaves_recoverable_db` 阻塞（归因：引擎恢复正确性缺陷，需 T0b）；3 个信号用例为计划内 T4-RED 白名单，非 gap。
+- 收敛口径：gap = {sigkill 项数据完整性}，由 Replan Cycle 001 的 T0b 直接闭合。
 
 **Convergence**
 
@@ -263,20 +302,22 @@ N/A（首次 Review）
 
 **Evidence**
 
-（Plan 填写）
+- Plan 独立复现（本机，debug，~2s/轮）：10k 行干净重开 count=13190（期望 10000）、`probe id=5`=1、checkpoint 后重开 count=13190、数据文件 1290240B→1662976B；复现临时测试已删除（recipe 见 001-replan Background）。
+- 代码审查：`git diff src/wal/reader.rs`（+95/-66 行域）、`tests/wal_recovery_large_test.rs` 全文、`tests/cli_test.rs` diff、`src/wal/recovery.rs`、`src/storage/data_page.rs`、`src/storage/data/table_manager.rs`、`src/storage/page_format/slotted_page.rs`、`src/executor/{insert,update,delete}.rs`、`src/wal/record.rs`（记录字段核实）。
+- `openspec validate 2026-09-06-ms10-t02-file-lock-graceful-shutdown` → valid（含新增 delta spec `wal-recovery-replay-integrity`）。
 
 **Follow-up Decision**
 
-（Plan 填写）
+创建 Replan Cycle **001-replan**（`iterations/000-wal-recovery-fix/001-replan.md`，Plan Context `draft`）执行新全局任务 T0b（WAL 重放位置寻址幂等修复，design D7，delta spec `wal-recovery-replay-integrity`）+ T1 收尾（sigkill 项转绿 + 四命令门）。Act 待用户批准 Gate 2（Plan Context 转 ready）后从 001-replan 执行；父 Cycle 冻结（后继 Cycle 已创建）。
 
 **Iteration Plan Update**
 
-None
+tasks.md 已修订：Iteration 000 更名「WAL 恢复逐帧无歧义与重放正确性」，Tasks = T0, T0b, T1，Stable baseline / Verification boundary / Diagnostic boundary 按 D7 扩充，平衡审计复审通过；新增 T0b 任务契约；T1 的 Depends/当前行为/归因口径更新；Iteration 001 不变。proposal 增补 Review 裁定 note；design 增补 D7 并修订责任边界/行为变化汇总。
 
 **Next Cycle**
 
-None
+`iterations/000-wal-recovery-fix/001-replan.md`（replan，Status: draft，待 Gate 2）
 
 **Next Iteration**
 
-None
+None（001-lock-shutdown 维持 Map 原位，依赖本 Iteration 完成）
