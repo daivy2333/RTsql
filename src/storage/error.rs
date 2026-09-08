@@ -12,6 +12,15 @@ pub enum StorageError {
     #[error("database is locked: {0}")]
     DatabaseLocked(String),
 
+    #[error("not an RTsql database: {0}")]
+    NotADatabase(String),
+
+    #[error("database file was created by a newer version of RTsql ({0})")]
+    NewerFileVersion(String),
+
+    #[error("incompatible database header: {0}")]
+    IncompatibleHeader(String),
+
     #[error("Page size mismatch: expected {expected}, got {actual}")]
     PageSizeMismatch { expected: usize, actual: usize },
 

@@ -7,16 +7,17 @@
 use rtsql::database::Database;
 use rtsql::network::protocol::Response;
 use rtsql::storage::page_format::ColumnType;
-use rtsql::storage::Page;
+use rtsql::storage::{Page, HEADER_SIZE};
 use std::path::Path;
 use tempfile::tempdir;
 
 /// Physical page count from the on-disk file length. The file lock is
 /// exclusive, so the old "second read-only handle" probe is replaced by a
 /// plain metadata read; the length is the high-water mark because freed
-/// pages go to the free-list without truncation.
+/// pages go to the free-list without truncation. MS10-T03: the 64-byte
+/// format header lives outside the page space and is subtracted first.
 fn page_count(path: &Path) -> u64 {
-    std::fs::metadata(path).unwrap().len() / Page::PAGE_SIZE as u64
+    (std::fs::metadata(path).unwrap().len() - HEADER_SIZE as u64) / Page::PAGE_SIZE as u64
 }
 
 async fn create_users(db: &Database) {

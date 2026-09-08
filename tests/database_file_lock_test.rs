@@ -92,3 +92,19 @@ async fn test_locked_error_message_contains_path() {
         "message should contain the db path, got: {msg}"
     );
 }
+
+/// MS10-T03（file-format-header R3-S1）：锁先于头校验——非 RTsql 文件被
+/// 持锁时，第二打开者得 `DatabaseLocked` 而非格式错误。
+/// GREEN 守卫（锁本就先于一切，MS10-T02 语义）。
+#[tokio::test]
+async fn test_locked_bad_file_reports_lock_not_format() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("garbage.db");
+    std::fs::write(&path, vec![0xABu8; 8192]).unwrap();
+
+    let holder = std::fs::File::open(&path).unwrap();
+    holder.try_lock().expect("test process acquires flock");
+
+    let err = expect_locked(FileStorage::open(&path));
+    assert_locked(&err);
+}

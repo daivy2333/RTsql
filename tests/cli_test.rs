@@ -363,6 +363,118 @@ fn test_corrupt_file_open_fails_exit_1() {
     assert!(!out.stderr.is_empty(), "open failure must go to stderr");
 }
 
+// ---- T03：文件格式头（database-file-format-header spec） ----
+
+/// R2-S1：8KiB 垃圾文件干净拒绝——exit 1 + stderr 报 not an RTsql database
+/// 与路径，文件内容未被修改。（RED 基线：catalog 解析 panic → abort，code=None）
+#[test]
+fn test_garbage_file_clean_rejection_exit_1() {
+    let dir = fixture();
+    let junk = dir.path().join("garbage.db");
+    let bytes: Vec<u8> = (0..8192usize).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&junk, &bytes).unwrap();
+
+    let out = run_cli(dir.path(), &[junk.to_str().unwrap(), "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("not an RTsql database"),
+        "stderr must name the format problem: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(junk.to_str().unwrap()),
+        "stderr must contain the db path: {:?}",
+        out.stderr
+    );
+    assert_eq!(
+        std::fs::read(&junk).unwrap(),
+        bytes,
+        "rejection must not modify the file"
+    );
+}
+
+/// R2-S2：文件由新版创建 → exit 1 + "newer version" 文案。
+#[test]
+fn test_newer_version_file_exit_1() {
+    let dir = fixture();
+    let db = dir.path().join("future.db");
+    let mut bytes = vec![0u8; 64 + 4096];
+    bytes[..8].copy_from_slice(b"RTSQLDB\0");
+    bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
+    bytes[16..20].copy_from_slice(&4096u32.to_le_bytes());
+    std::fs::write(&db, &bytes).unwrap();
+
+    let out = run_cli(dir.path(), &[db.to_str().unwrap(), "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("newer version"),
+        "stderr must say the file is from a newer version: {:?}",
+        out.stderr
+    );
+}
+
+/// R3-S2：头拒绝不触碰伴生文件——失败后同目录无 `.wal` / `.checkpoint`。
+#[test]
+fn test_header_rejection_leaves_no_companion_files() {
+    let dir = fixture();
+    let db = dir.path().join("bad.db");
+    std::fs::write(&db, vec![0u8; 8192]).unwrap();
+
+    let out = run_cli(dir.path(), &[db.to_str().unwrap(), "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        !dir.path().join("bad.wal").exists(),
+        "wal must not be created on rejection"
+    );
+    assert!(
+        !dir.path().join("bad.checkpoint").exists(),
+        "checkpoint must not be created on rejection"
+    );
+}
+
+/// R3-S1：锁先于头校验——垃圾文件被持锁 → exit 4 而非格式错 1。（GREEN 守卫）
+#[test]
+fn test_lock_precedes_header_validation_exit_4() {
+    let dir = fixture();
+    let db = dir.path().join("locked-garbage.db");
+    std::fs::write(&db, vec![0u8; 8192]).unwrap();
+
+    let holder = std::fs::File::open(&db).unwrap();
+    holder.try_lock().expect("test process acquires flock");
+
+    let out = run_cli(dir.path(), &[db.to_str().unwrap(), "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(4),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.starts_with("database is locked"),
+        "stderr must start with 'database is locked', got: {:?}",
+        out.stderr
+    );
+}
+
 /// T02（file-lock R1-S2 / cli R1 锁冲突场景）：测试进程持有目标库的
 /// advisory 独占锁 → rtsql 打开被拒 → 退出 4 + stderr `database is locked`
 /// 前缀 + stdout 为空（SQL 未执行）；释放锁后同一命令退出 0。
