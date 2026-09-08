@@ -4,11 +4,26 @@ use std::cmp::Ordering;
 pub const MAX_KEY_LEN: usize = 32;
 
 /// 固定长度 Key（M2 简化实现）
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **R-T0b-R2 修复点（Cycle 002-rework）**：`PartialEq`/`Eq` 不再依赖
+/// `len` 字段，只比较 `data`（32 字节固定）。`len` 在 `Key::deserialize`
+/// 通过尾部零扫描推断，对全零或尾部为零的键（如 i64 BE 0、高位零整数）
+/// 会推断为 0，导致 `key == *key` 误判为不等，进而 `LeafNode::update`
+/// 错误返回 `KeyNotFound`。`cmp` 已改用 `full_data()`，`PartialEq` 对齐
+/// 后 `find`/`update`/`delete` 的 `==` 判定与排序语义保持一致。
+#[derive(Debug, Clone)]
 pub struct Key {
     data: [u8; MAX_KEY_LEN],
-    len: u8, // 实际长度（<= 32）
+    len: u8, // 实际长度（<= 32）— 不参与 PartialEq / cmp
 }
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+impl Eq for Key {}
 
 impl Key {
     /// 从字节切片创建 Key
@@ -82,8 +97,22 @@ impl PartialOrd for Key {
 }
 
 impl Ord for Key {
+    /// 使用 `full_data()` 固定 32 字节字典序比较。
+    ///
+    /// **R-T0b-R2 修复点（Cycle 002-rework）**：`as_bytes()` 的切片长度依赖
+    /// `len` 字段，而 `len` 来自 `Key::new` 的输入字节数。当键数据为全零
+    /// 或尾部为零（如 i64 BE 0、4-byte 小整数高位为零）时，`deserialize`
+    /// 推断的 `len` 会偏小（`Key::deserialize` 用 `rposition(|&b| b != 0)`
+    /// 推断长度，r#f"全零键" 时返回 None → len=0），导致 `as_bytes()` 返回
+    /// 空切片，比较语义被破坏，B-Tree 搜索最小键 / 含尾部零的键全部失败。
+    ///
+    /// 改用 `full_data()` 固定 32 字节比较：所有键在序列化时已经填充到
+    /// 32 字节（`Key::serialize` 拷贝 `self.data` 全长），比较一致；不同
+    /// 实际长度的键（如 5-byte 字符串与 8-byte i64）因高位为零填充，
+    /// 短键 < 长键仍按字典序正确（如 "hello" 数据 5 字节后填 0 vs
+    /// i64 0 的全零 32 字节，因 'h'=0x68 > 0x00 仍正确保持 "hello" > 0）。
     fn cmp(&self, other: &Self) -> Ordering {
-        self.as_bytes().cmp(other.as_bytes())
+        self.full_data().cmp(other.full_data())
     }
 }
 

@@ -6,13 +6,13 @@
 //! 子目录（CLI 不建目录，父目录缺失按契约报错退出 1）。stdout/stderr 始终
 //! 为管道（非 TTY），因此默认格式为 JSON。
 
+use rtsql::database::Database;
+use rtsql::network::protocol::Response;
+use rtsql::storage::page_format::ColumnType;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use rtsql::database::Database;
-use rtsql::network::protocol::Response;
-use rtsql::storage::page_format::ColumnType;
 use tempfile::TempDir;
 
 struct CliOutput {
@@ -399,9 +399,14 @@ fn test_lock_conflict_exit_4() {
 
 // ---- T3：优雅停机（信号接线 close，D4/D5） ----
 
-/// D5 标定结果（2026-09-06 本机 WSL2 实测，见 Act Response）：N 行单事务
-/// WAL 的恢复（open）耗时 T；要求 T ≥ 500ms，信号延迟 D ∈ [T/4, T/2]。
-const WAL_ROWS: i64 = 20_000;
+/// D5 标定结果（2026-09-08 本机 WSL2 实测，D10 恢复重建落地后重标，见 Act Response）：
+/// N 行单会话 WAL 的恢复（open）耗时 T——40k→8.86s、160k→40.7s（驱逐规模下
+/// 重放后重建 B-Tree 在 100 页池上的随机访存主导，小库无驱逐档 T 为毫秒级，
+/// 200ms ∈ [T/4, T/2] 的窗口恰在耗时悬崖内、不可稳健命中）。T ≥ 500ms 以
+/// 17 倍余量满足；D=200ms 低于 T/4 → 信号确定落在打开阶段（两条 e2e 用例
+/// 注释均容忍该落点，执行+close 阶段见证由 D5-⑤ 库级结构测试确定性承担）。
+/// 40k 档兼顾夹具驱逐阈值（>100 页，catalog 随驱逐落盘）与套件耗时。
+const WAL_ROWS: i64 = 40_000;
 const SIGNAL_DELAY_MS: u64 = 200;
 
 /// D5 构造：单会话分块事务批量插入 N 行（50 行/事务，缓冲记录数恒低于
@@ -479,10 +484,10 @@ async fn test_sigint_during_open_130() {
     let child = spawn_cli(dir.path(), &["app", "SELECT COUNT(*) FROM t"]);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let held_by_child = match std::fs::File::open(&db_file).unwrap().try_lock() {
-            Err(std::fs::TryLockError::WouldBlock) => true,
-            _ => false,
-        };
+        let held_by_child = matches!(
+            std::fs::File::open(&db_file).unwrap().try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        );
         if held_by_child {
             break;
         }
@@ -501,6 +506,15 @@ async fn test_sigint_during_open_130() {
         "stdout: {:?} stderr: {:?}",
         out.stdout,
         out.stderr
+    );
+
+    // D5-② 观测物：打开阶段信号走无 close 分支——WAL 保持未截断的大文件。
+    let wal_len = std::fs::metadata(dir.path().join("db/app.wal"))
+        .expect("wal file must exist")
+        .len();
+    assert!(
+        wal_len > 2048,
+        "open-phase signal must not run close(): WAL still large, got {wal_len} bytes"
     );
 }
 
@@ -594,15 +608,13 @@ async fn diagnostic_wal_parse() {
             }
             Err(e) => {
                 let pos = reader.current_position().unwrap();
-                println!(
-                    "parse error after {count} records at pos {pos}/{wal_len}: {e}"
-                );
+                println!("parse error after {count} records at pos {pos}/{wal_len}: {e}");
                 let bytes = std::fs::read(&wal_path).unwrap();
                 let start = pos.saturating_sub(60) as usize;
                 let end = (pos + 80) as usize;
                 for (i, b) in bytes[start..end.min(bytes.len())].iter().enumerate() {
                     print!("{:02x} ", b);
-                    if (start + i + 1) % 16 == 0 {
+                    if (start + i + 1).is_multiple_of(16) {
                         println!();
                     }
                 }

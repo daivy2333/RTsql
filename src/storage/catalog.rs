@@ -244,6 +244,35 @@ impl Catalog {
         )
         .await
     }
+
+    /// Update the `index_root_page_id` field of an existing row in `__tables`.
+    ///
+    /// MS10-T02 Iter000 003-rework (R-T0b-R5): the in-memory B-Tree root
+    /// moves on root splits (insert) and root shrink (delete merge); the
+    /// catalog row must follow so a restart loads a root that reaches every
+    /// entry persisted up to the last checkpoint site. Persistence of the
+    /// updated row is guaranteed by the existing flush paths (checkpoint
+    /// full flush / page eviction).
+    ///
+    /// No-op if the table does not exist.
+    pub async fn update_table_root(&self, name: &str, new_root: u32) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.index_root_page_id = new_root;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------
