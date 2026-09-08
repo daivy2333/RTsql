@@ -137,6 +137,20 @@ impl TableManager {
         &self.catalog
     }
 
+    /// MS10-T02 Iter000 003-rework (R-T0b-R5): attach the catalog root-sync
+    /// context to every restored table's index manager. Called by
+    /// `Database::open` AFTER `full_recover` — replay runs context-free so
+    /// recovery-time root changes are never persisted (load-point
+    /// invariance across re-recoveries), while runtime DML after open
+    /// persists root changes for the next restart.
+    pub async fn attach_index_catalog_contexts(&self) {
+        let tables = self.tables.read().await;
+        for (name, meta) in tables.iter() {
+            meta.index_manager
+                .set_catalog_context(self.catalog.clone(), name.clone());
+        }
+    }
+
     /// Rebuild the in-memory `tables` cache by scanning the catalog.
     ///
     /// For a freshly-bootstrapped database this is a no-op (the catalog
@@ -160,6 +174,12 @@ impl TableManager {
             let data_page_head = PageId(row.data_page_head as u64);
             let data_page_tail = PageId(row.data_page_tail as u64);
             let root_index_page = PageId(row.index_root_page_id as u64);
+            // R-T0b-R5: no catalog context here — restored tables get it
+            // attached AFTER crash recovery (`attach_index_catalog_contexts`).
+            // Replay-time root changes must not be persisted: the recovery
+            // load point stays fixed across re-recoveries (a rebuilt tree's
+            // pages are not durably coordinated with the catalog row, and a
+            // partial tree base would break the next replay).
             let index_manager = Arc::new(IndexManager::from_root(
                 self.buffer_pool.clone(),
                 root_index_page,
@@ -217,9 +237,16 @@ impl TableManager {
         // --- create per-table index ---
         // IndexManager::new is sync but internally calls block_on, so we
         // offload it to spawn_blocking to avoid blocking the async runtime.
+        // R-T0b-R5: attach the catalog context so root splits during later
+        // inserts persist to the catalog row for crash recovery.
         let bp = self.buffer_pool.clone();
-        let index_manager =
-            Arc::new(tokio::task::spawn_blocking(move || IndexManager::new(bp)).await??);
+        let catalog = self.catalog.clone();
+        let table_name = name.to_string();
+        let index_manager = Arc::new(
+            tokio::task::spawn_blocking(move || IndexManager::new(bp))
+                .await??
+                .with_catalog_context(catalog, table_name),
+        );
         let index_root_page_id = index_manager.root_page_id().0 as u32;
 
         // --- build TableMeta ---
@@ -281,6 +308,38 @@ impl TableManager {
             .get(name)
             .cloned()
             .ok_or_else(|| StorageError::TableNotFound(name.to_string()))
+    }
+
+    /// MS10-T02 Iter000 004-rework (R-T0b-R8, D10): swap in the
+    /// recovery-rebuilt index manager for a restored table, returning the
+    /// pre-rebuild instance so the caller can release its (possibly torn)
+    /// pages. The rebuilt `TableMeta` inherits every other field, including
+    /// the current in-memory `data_page_tail`. Must run BEFORE
+    /// `attach_index_catalog_contexts` (called from `Database::open` after
+    /// `full_recover` returns), so the rebuilt instance receives the catalog
+    /// root-sync context.
+    pub async fn replace_index_manager(
+        &self,
+        name: &str,
+        new_index: Arc<IndexManager>,
+    ) -> Result<Arc<IndexManager>> {
+        let mut tables = self.tables.write().await;
+        let old = tables
+            .get(name)
+            .ok_or_else(|| StorageError::TableNotFound(name.to_string()))?;
+        let old_index = old.index_manager.clone();
+        let data_page_tail = *old.data_page_tail.lock().unwrap();
+        let meta = Arc::new(TableMeta {
+            name: old.name.clone(),
+            columns: old.columns.clone(),
+            pk_column: old.pk_column.clone(),
+            pk_index: old.pk_index,
+            index_manager: new_index,
+            data_page_head: old.data_page_head,
+            data_page_tail: Mutex::new(data_page_tail),
+        });
+        tables.insert(name.to_string(), meta);
+        Ok(old_index)
     }
 
     /// Check whether a table with the given name exists.

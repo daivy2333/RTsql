@@ -36,6 +36,12 @@ impl WalReader {
     ///
     /// 新格式返回记录内嵌的 LSN（即写入时的文件偏移）；
     /// 旧格式无内嵌 LSN，退化为读取时的文件偏移。
+    ///
+    /// 格式判别（逐帧无歧义）：新格式帧首字节是内嵌 LSN 的最低有效字节，
+    /// 当文件偏移低字节落在合法 type 值域 (0x01-0x09) 时，byte[0] 无法单独
+    /// 判别格式——先按新格式解析并以 CRC32 为接受判据，失败则 seek 回帧首
+    /// 按旧格式重试；两路皆败显式报错。非歧义偏移（byte[0] 非合法 type）
+    /// 必为新格式。
     pub fn read_next_with_lsn(&mut self) -> Result<Option<(u64, WalRecord)>, WalError> {
         let start = self
             .file
@@ -57,51 +63,70 @@ impl WalReader {
             return Err(WalError::IncompleteRecord);
         }
 
-        // 判断格式：检查是否为新格式
-        // 新格式: byte[8] 是有效的 WalRecordType
-        // 旧格式: byte[0] 是有效的 WalRecordType
-        let is_new_format = bytes_read >= 9
-            && WalRecordType::try_from(peek_buf[8]).is_ok()
-            && WalRecordType::try_from(peek_buf[0]).is_err();
+        let byte0_is_type = WalRecordType::try_from(peek_buf[0]).is_ok();
 
-        if is_new_format {
-            // 新格式: [lsn:8B][type:1B][len:4B][body:variable][crc:4B]
-            if bytes_read < 13 {
-                return Err(WalError::IncompleteRecord);
+        if !byte0_is_type {
+            // 非歧义偏移：必为新格式
+            let (lsn, record) = self.read_new_format_frame(&peek_buf, bytes_read)?;
+            return Ok(Some((lsn, record)));
+        }
+
+        // 歧义偏移：先按新格式解析（CRC 为接受判据）。
+        // 新格式尝试的任何失败（EOF / CRC / 结构）都是回退信号，不向调用者传播
+        if bytes_read >= 13 {
+            if let Ok(pair) = self.read_new_format_frame(&peek_buf, bytes_read) {
+                return Ok(Some(pair));
             }
+            // seek 回 peek 之后的位点（peek_buf 仍持有帧首前缀），按旧格式重试
+            self.file
+                .seek(SeekFrom::Start(start + bytes_read as u64))
+                .map_err(|e| WalError::IoError(e.to_string()))?;
+        }
 
-            let len = u32::from_le_bytes([peek_buf[9], peek_buf[10], peek_buf[11], peek_buf[12]])
-                as usize;
+        // 旧格式: [type:1B][len:4B][data:variable]
+        let len = u32::from_le_bytes([peek_buf[1], peek_buf[2], peek_buf[3], peek_buf[4]]) as usize;
 
-            let total_len = 8 + 1 + 4 + len + 4;
-            let mut record_buf = vec![0u8; total_len];
-            record_buf[..bytes_read].copy_from_slice(&peek_buf[..bytes_read]);
+        let total_len = 5 + len;
+        let mut record_buf = vec![0u8; total_len];
+        record_buf[..bytes_read.min(total_len)]
+            .copy_from_slice(&peek_buf[..bytes_read.min(total_len)]);
 
+        if total_len > bytes_read {
             self.file
                 .read_exact(&mut record_buf[bytes_read..])
                 .map_err(|e| WalError::IoError(e.to_string()))?;
-
-            let (lsn, record, _consumed) = WalRecord::deserialize_with_lsn(&record_buf)?;
-            Ok(Some((lsn, record)))
-        } else {
-            // 旧格式: [type:1B][len:4B][data:variable]
-            let len =
-                u32::from_le_bytes([peek_buf[1], peek_buf[2], peek_buf[3], peek_buf[4]]) as usize;
-
-            let total_len = 5 + len;
-            let mut record_buf = vec![0u8; total_len];
-            record_buf[..bytes_read.min(total_len)]
-                .copy_from_slice(&peek_buf[..bytes_read.min(total_len)]);
-
-            if total_len > bytes_read {
-                self.file
-                    .read_exact(&mut record_buf[bytes_read..])
-                    .map_err(|e| WalError::IoError(e.to_string()))?;
-            }
-
-            let (record, _) = WalRecord::deserialize(&record_buf)?;
-            Ok(Some((start, record)))
         }
+
+        let (record, _) = WalRecord::deserialize(&record_buf)?;
+        Ok(Some((start, record)))
+    }
+
+    /// 按新格式 [lsn:8B][type:1B][len:4B][body][crc:4B] 读取一帧（头部已 peek）
+    ///
+    /// 失败（头部不足 13B / EOF / type 或 CRC 验证不通过）返回 Err；
+    /// 由调用者决定传播（非歧义偏移）还是回退旧格式（歧义偏移）。
+    fn read_new_format_frame(
+        &mut self,
+        peek_buf: &[u8; 13],
+        bytes_read: usize,
+    ) -> Result<(u64, WalRecord), WalError> {
+        if bytes_read < 13 {
+            return Err(WalError::IncompleteRecord);
+        }
+
+        let len =
+            u32::from_le_bytes([peek_buf[9], peek_buf[10], peek_buf[11], peek_buf[12]]) as usize;
+
+        let total_len = 8 + 1 + 4 + len + 4;
+        let mut record_buf = vec![0u8; total_len];
+        record_buf[..bytes_read].copy_from_slice(&peek_buf[..bytes_read]);
+
+        self.file
+            .read_exact(&mut record_buf[bytes_read..])
+            .map_err(|e| WalError::IoError(e.to_string()))?;
+
+        let (lsn, record, _consumed) = WalRecord::deserialize_with_lsn(&record_buf)?;
+        Ok((lsn, record))
     }
 
     /// 读取所有 WAL 记录（带记录起始字节偏移）

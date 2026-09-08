@@ -9,8 +9,14 @@
 //! `Vec<Vec<Value>>` like the existing `ScanExecutor` does.
 //!
 //! MVCC visibility: when a `Snapshot` is provided, each slot's `VersionHeader`
-//! is parsed and checked. Invisible current versions follow `next_version`
-//! pointers (potentially across pages) to find a visible commit.
+//! is parsed and checked. Slots invisible to the snapshot are skipped — their
+//! older versions live in their own slots and are yielded from there.
+//!
+//! MS10-T02 Iter000 003-rework (R-T0b-R6): before the first slot visit, one
+//! pass over the data page chain builds a superseded-version map
+//! (`next_version` targets → newer version). Slots superseded by a
+//! suppressing newer version are skipped, so a version chain produces exactly
+//! its latest visible version — at runtime and after WAL recovery alike.
 
 use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, PredicateRef, Value};
@@ -18,16 +24,26 @@ use crate::storage::page_format::{deserialize_value_refs, ColumnType, RowId, Slo
 use crate::storage::PageId;
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
 use crate::transaction::{Snapshot, VersionHeader};
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Safety bound for walking a superseder chain (R-T0b-R6), mirroring the
+/// version-chain depth bound of the old `find_visible_in_chain`.
+const MAX_CHAIN_DEPTH: usize = 64;
+
+/// One `next_version` link found while building the superseded map:
+/// (superseder slot rid, its create_tx_id, target rid).
+type VersionLink = (RowId, u64, RowId);
 
 /// Action returned from a per-page closure describing what the outer loop
 /// should do next.
 enum PageAction {
     /// Yield this row and continue from the next slot on the next call.
     YieldValue(Vec<Value>),
-    /// Current version is invisible to the snapshot. `Some(rid)` = start of
-    /// version chain to follow; `None` = no chain, just skip the slot.
-    NeedVersionChain(Option<RowId>),
+    /// Slot produces nothing for this scan: tombstone, malformed, invisible
+    /// to the snapshot, or — decided outside the closure — superseded by a
+    /// suppressing newer version (R-T0b-R6).
+    SkipSlot,
     /// Page is exhausted; jump to the page with the given id and reset slot index.
     JumpToPage(u64),
     /// End of scan (next_page_id == 0).
@@ -68,6 +84,16 @@ pub struct DataScanExecutor {
     /// MS10-T01 Iter001: output projection (empty = identity), applied to a
     /// row after visibility and the inline predicate have been evaluated.
     projection: Vec<usize>,
+    /// Head page of the data page chain; anchor for the superseded-version
+    /// map build (R-T0b-R6).
+    data_page_head: PageId,
+    /// MS10-T02 Iter000 003-rework (R-T0b-R6): superseded-version map —
+    /// target rid → (direct newer version rid, its create_tx_id). Built
+    /// lazily before the first slot visit with one pass over the data page
+    /// chain. A slot whose rid is a key is superseded by some newer version
+    /// and must be skipped when any newer version in its chain suppresses it
+    /// (see `superseder_suppresses`). `None` until first `next()`.
+    superseded_map: Option<HashMap<RowId, (RowId, u64)>>,
 }
 
 impl DataScanExecutor {
@@ -100,6 +126,8 @@ impl DataScanExecutor {
             prefetch_handle: None,
             prefetched_page: None,
             projection: Vec::new(),
+            data_page_head: table_meta.data_page_head,
+            superseded_map: None,
         }
     }
 
@@ -175,52 +203,150 @@ impl DataScanExecutor {
         }
     }
 
-    /// Walk the version chain from `start_rid`, returning the first version
-    /// visible to `snapshot`. Returns `Ok(None)` if no visible version exists
-    /// in the chain (e.g., the row was created after the snapshot, or every
-    /// older version is also invisible).
-    ///
-    /// Note: this helper does not hold a reference to `&mut self` so it can
-    /// be invoked from `next()` without splitting borrows.
-    async fn find_visible_in_chain(
+    /// R-T0b-R6 (G5): build the superseded-version map with one pass over
+    /// the data page chain. For each slot whose version header points to an
+    /// older version (`next_version`), record target → (this slot's rid,
+    /// create tx). Slot rids use the slot's own `logical_id` — the identity
+    /// every writer used when creating `next_version` targets (data pages
+    /// are append-only, so logical ids are dense and equal the slot
+    /// position).
+    async fn build_superseded_map(
         buffer_pool: &BufferPool,
-        start_rid: RowId,
-        snapshot: &Snapshot,
-        schema: &[ColumnType],
-    ) -> Result<Option<Vec<Value>>> {
-        let mut current = Some(start_rid);
+        head: PageId,
+    ) -> Result<HashMap<RowId, (RowId, u64)>> {
+        let mut map: HashMap<RowId, (RowId, u64)> = HashMap::new();
+        let mut page_id = Some(head);
+        while let Some(pid) = page_id {
+            let (next_page, links) = buffer_pool
+                .with_page_data(pid, |data| -> Result<(u32, Vec<VersionLink>)> {
+                    let slotted = SlottedPageRef::new(data);
+                    let slot_count = slotted.slot_count();
+                    let mut links = Vec::new();
+                    for index in 0..slot_count {
+                        let Some(slot) = slotted.get_slot(index) else {
+                            continue;
+                        };
+                        let slot_data = slotted.get_slot_data(&slot);
+                        if slot_data.len() < VersionHeader::SIZE {
+                            continue;
+                        }
+                        let Some(vh) = VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE])
+                        else {
+                            continue;
+                        };
+                        if let Some(target) = vh.next_version() {
+                            links.push((
+                                RowId::new(pid.0 as u32, slot.logical_id),
+                                vh.create_tx_id(),
+                                target,
+                            ));
+                        }
+                    }
+                    Ok((slotted.header().next_page_id, links))
+                })
+                .await?;
+
+            for (rid, create_tx, target) in links {
+                match map.get(&target) {
+                    // Malformed chain: two superseders point at one target —
+                    // the newer creator wins ("以最新为准").
+                    Some((_, existing_tx)) if *existing_tx > create_tx => {}
+                    _ => {
+                        map.insert(target, (rid, create_tx));
+                    }
+                }
+            }
+
+            page_id = if next_page == 0 {
+                None
+            } else {
+                Some(PageId(next_page as u64))
+            };
+        }
+        Ok(map)
+    }
+
+    /// R-T0b-R6 (G5): whether the version at `rid` is superseded by a newer
+    /// version that suppresses it for this scan. Walks the superseder chain
+    /// upward — the direct superseder may be uncommitted while an even newer
+    /// one is committed.
+    async fn slot_is_superseded(&self, rid: RowId) -> Result<bool> {
+        let map = self
+            .superseded_map
+            .as_ref()
+            .expect("superseded map built before first slot visit");
+        let mut current = match map.get(&rid) {
+            Some((superseder, _)) => *superseder,
+            None => return Ok(false),
+        };
         let mut depth = 0usize;
-        const MAX_CHAIN_DEPTH: usize = 64; // safety bound
-        while let Some(rid) = current {
+        loop {
+            let vh = read_tuple_from_data_page(&self.buffer_pool, current, |vh, _| Ok(vh)).await?;
+            if Self::superseder_suppresses(&vh, self.snapshot.as_ref()) {
+                return Ok(true);
+            }
+            current = match map.get(&current) {
+                Some((next, _)) => *next,
+                None => return Ok(false),
+            };
+            depth += 1;
             if depth >= MAX_CHAIN_DEPTH {
                 return Err(crate::storage::StorageError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "version chain too deep",
                 )));
             }
-            depth += 1;
-            let result: Result<(VersionHeader, Vec<u8>)> =
-                read_tuple_from_data_page(buffer_pool, rid, |vh, bytes| Ok((vh, bytes.to_vec())))
-                    .await;
-            let (vh, bytes) = result?;
-            if snapshot.is_visible(vh.create_tx_id(), vh.commit_tx_id()) {
-                let vrs = deserialize_value_refs(&bytes, schema)?;
-                return Ok(Some(vrs.iter().map(|vr| vr.to_value()).collect()));
-            }
-            current = vh.next_version();
         }
-        Ok(None)
+    }
+
+    /// R-T0b-R6 (G5): whether a newer version suppresses the old versions it
+    /// supersedes. Only a committed, non-tombstone version suppresses:
+    /// tombstones never suppress (an aborted update must not hide the
+    /// surviving old version; delete semantics stay exactly as before), and
+    /// uncommitted versions never suppress (scans without a snapshot keep
+    /// seeing the old version alongside — unchanged explicit-tx behavior).
+    /// With a snapshot, suppression follows `Snapshot::is_visible` so old
+    /// snapshots keep seeing their own version.
+    fn superseder_suppresses(vh: &VersionHeader, snapshot: Option<&Snapshot>) -> bool {
+        if vh.is_deleted() {
+            return false;
+        }
+        let Some(commit) = vh.commit_tx_id() else {
+            return false;
+        };
+        match snapshot {
+            None => true,
+            Some(s) => s.is_visible(vh.create_tx_id(), Some(commit)),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl Executor for DataScanExecutor {
     async fn next(&mut self) -> Result<Option<ExecResult>> {
+        // R-T0b-R6 (G5): build the superseded-version map once, before the
+        // first slot visit — skip decisions need the whole-chain view.
+        if self.superseded_map.is_none() {
+            self.superseded_map =
+                Some(Self::build_superseded_map(&self.buffer_pool, self.data_page_head).await?);
+        }
+
         loop {
             let page_id = match self.current_page_id {
                 Some(p) => p,
                 None => return Ok(None), // scan complete
             };
+
+            // R-T0b-R6 (G5): a slot superseded by a suppressing newer version
+            // is skipped before any page access. Data pages are append-only
+            // (dense logical ids), so (page, slot index) identifies the same
+            // version the map builder tagged. A miss past the page's slot
+            // count falls through to the closure's exhaustion handling.
+            let candidate_rid = RowId::new(page_id.0 as u32, self.current_slot_index as u16);
+            if self.slot_is_superseded(candidate_rid).await? {
+                self.current_slot_index += 1;
+                continue;
+            }
 
             // Snapshot schema and slot index into locals for the closure.
             // The closure is `FnOnce` (synchronous) so we can move `slot_index`
@@ -281,7 +407,7 @@ impl Executor for DataScanExecutor {
 
                     if slot_data.len() < VersionHeader::SIZE {
                         // Malformed slot — skip to next slot.
-                        return Ok(PageAction::NeedVersionChain(None));
+                        return Ok(PageAction::SkipSlot);
                     }
                     let vh = VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE])
                         .ok_or_else(|| {
@@ -294,7 +420,7 @@ impl Executor for DataScanExecutor {
 
                     // Skip deleted rows (commit_tx_id = DELETED_TX_ID sentinel)
                     if vh.is_deleted() {
-                        return Ok(PageAction::NeedVersionChain(None));
+                        return Ok(PageAction::SkipSlot);
                     }
 
                     // M21: Skip per-row MVCC visibility check when the whole page
@@ -302,7 +428,11 @@ impl Executor for DataScanExecutor {
                     if !page_all_visible {
                         if let Some(snapshot) = snapshot_ref {
                             if !snapshot.is_visible(vh.create_tx_id(), vh.commit_tx_id()) {
-                                return Ok(PageAction::NeedVersionChain(vh.next_version()));
+                                // Invisible for this snapshot. The version its
+                                // chain points to lives in its own slot and is
+                                // yielded from there (R-T0b-R6 map guarantees it
+                                // is not superseded-suppressed), so simply skip.
+                                return Ok(PageAction::SkipSlot);
                             }
                         }
                     }
@@ -354,37 +484,11 @@ impl Executor for DataScanExecutor {
                         None => continue, // filtered out by the inline predicate
                     }
                 }
-                PageAction::NeedVersionChain(None) => {
-                    // No chain — skip this slot, continue to next.
+                PageAction::SkipSlot => {
+                    // Tombstone / malformed / invisible / superseded — no row
+                    // for this slot; the latest visible version (if any) comes
+                    // from its own slot (R-T0b-R6).
                     continue;
-                }
-                PageAction::NeedVersionChain(Some(rid)) => {
-                    if let Some(snapshot) = self.snapshot.as_ref() {
-                        match Self::find_visible_in_chain(
-                            &self.buffer_pool,
-                            rid,
-                            snapshot,
-                            &self.schema,
-                        )
-                        .await?
-                        {
-                            Some(values) => {
-                                match Self::filter_row(self.predicate.as_ref(), values)? {
-                                    Some(values) => {
-                                        return self.yield_capped(apply_projection(
-                                            &self.projection,
-                                            values,
-                                        ))
-                                    }
-                                    None => continue, // filtered out by the inline predicate
-                                }
-                            }
-                            None => continue, // no visible version in chain
-                        }
-                    } else {
-                        // Defensive: no snapshot but chain needed shouldn't happen.
-                        continue;
-                    }
                 }
                 PageAction::JumpToPage(next_id) => {
                     self.current_page_id = Some(PageId(next_id));

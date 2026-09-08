@@ -5,9 +5,11 @@ use std::sync::Arc;
 
 use crate::storage::{
     btree::node::{InternalNodeRef, LeafNodeRef, INTERNAL_NODE, LEAF_NODE},
+    catalog::Catalog,
     page_format::{Key, RowId},
     BufferPool, PageId, Result, StorageError,
 };
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 
 use super::{AsyncPageLoader, BTree, SyncPageLoader};
@@ -20,6 +22,13 @@ pub struct IndexManager {
     sync_loader: Arc<SyncPageLoader>, // 写操作仍用 sync
     async_loader: AsyncPageLoader,    // 读操作用 async
     row_to_key: RwLock<HashMap<RowId, Vec<u8>>>,
+    /// MS10-T02 Iter000 003-rework (R-T0b-R5): optional catalog context
+    /// `(catalog, table_name)` for root-change persistence. Attached by
+    /// `TableManager` — at `create_table` directly, and for restored tables
+    /// only AFTER crash recovery finished (replay-time root changes must not
+    /// be persisted: the recovery load point stays fixed across re-recoveries).
+    /// Direct constructions without a catalog (tests) leave it `None`.
+    catalog_ctx: Mutex<Option<(Arc<Catalog>, String)>>,
 }
 
 impl IndexManager {
@@ -41,6 +50,7 @@ impl IndexManager {
             sync_loader,
             async_loader,
             row_to_key: RwLock::new(HashMap::new()),
+            catalog_ctx: Mutex::new(None),
         })
     }
 
@@ -57,7 +67,39 @@ impl IndexManager {
             sync_loader,
             async_loader,
             row_to_key: RwLock::new(HashMap::new()),
+            catalog_ctx: Mutex::new(None),
         })
+    }
+
+    /// MS10-T02 Iter000 003-rework (R-T0b-R5): attach the catalog context so
+    /// every B-Tree root change (split on insert, shrink on delete merge) is
+    /// persisted to the table's `__tables` row. Builder style keeps the
+    /// `new` / `from_root` signatures (and every catalog-less caller)
+    /// unchanged.
+    pub fn with_catalog_context(self, catalog: Arc<Catalog>, table_name: String) -> Self {
+        *self.catalog_ctx.lock().unwrap() = Some((catalog, table_name));
+        self
+    }
+
+    /// R-T0b-R5: attach the catalog context post-construction (used by
+    /// `TableManager` for tables restored by `open_or_init`, after crash
+    /// recovery has completed — see the field docs for why replay must run
+    /// without a context).
+    pub fn set_catalog_context(&self, catalog: Arc<Catalog>, table_name: String) {
+        *self.catalog_ctx.lock().unwrap() = Some((catalog, table_name));
+    }
+
+    /// Persist a root change to the catalog row (R-T0b-R5). No-op without a
+    /// catalog context. Errors propagate strictly — a failed catalog write
+    /// must not silently desynchronize the recoverable root.
+    async fn sync_root_to_catalog(&self, new_root: PageId) -> Result<()> {
+        let ctx = self.catalog_ctx.lock().unwrap().clone();
+        if let Some((catalog, table_name)) = ctx {
+            catalog
+                .update_table_root(&table_name, new_root.0 as u32)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Async search — direct async path without spawn_blocking
@@ -192,6 +234,7 @@ impl IndexManager {
         // If root split occurred, update the atomic root page id
         if let Some(new_root_id) = new_root {
             self.root_page_id.store(new_root_id.0, Ordering::Release);
+            self.sync_root_to_catalog(new_root_id).await?;
         }
 
         self.row_to_key.write().await.insert(row_id, key.to_vec());
@@ -216,6 +259,7 @@ impl IndexManager {
 
         if let Some(new_root_id) = new_root {
             self.root_page_id.store(new_root_id.0, Ordering::Release);
+            self.sync_root_to_catalog(new_root_id).await?;
         }
 
         Ok(())
@@ -342,6 +386,87 @@ impl IndexManager {
         }
 
         Ok(result)
+    }
+
+    /// MS10-T02 Iter000 004-rework (R-T0b-R8, D10): hole-tolerant variant of
+    /// [`Self::collect_all_pages`] for releasing the PREVIOUS tree after
+    /// recovery rebuilt the index from data pages. A torn tree can contain
+    /// hole pages (`InvalidPageType`) or unreadable pages mid-tree; every
+    /// page id reached from the root — including a discovered hole itself,
+    /// whose id the parent pointer still names — is returned so the caller
+    /// can free it, but a bad page never fails the walk and its subtree is
+    /// simply unrecoverable (leaked by design, warned). Never returns `Err`.
+    pub async fn collect_all_pages_tolerant(&self) -> Vec<PageId> {
+        let root = PageId(self.root_page_id.load(Ordering::Acquire));
+        let mut result = Vec::new();
+        if root.0 == 0 {
+            return result;
+        }
+
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut stack = vec![root];
+
+        while let Some(page_id) = stack.pop() {
+            if !visited.insert(page_id.0) {
+                continue;
+            }
+            result.push(page_id);
+
+            let children = {
+                let guard = match self.async_loader.load_page(page_id).await {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        eprintln!(
+                            "[recovery] old index page {:?} unreadable, skipping subtree: {}",
+                            page_id, e
+                        );
+                        continue;
+                    }
+                };
+                let data_guard = guard.page_data();
+
+                match data_guard[0] {
+                    LEAF_NODE => {
+                        let leaf = LeafNodeRef::new(&data_guard);
+                        let next = leaf.next_leaf_page_id();
+                        if next > 0 {
+                            vec![PageId(next as u64)]
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    INTERNAL_NODE => {
+                        let internal = InternalNodeRef::new(&data_guard);
+                        let mut pages = Vec::with_capacity(internal.key_count() + 1);
+                        pages.push(PageId(internal.leftmost_child() as u64));
+                        for i in 0..internal.key_count() {
+                            if let Some(child) = internal.get_child_page_id(i) {
+                                pages.push(PageId(child as u64));
+                            }
+                        }
+                        pages
+                    }
+                    other => {
+                        // Torn/hole page reached via its parent pointer: free
+                        // it, but its subtree is unnameable — leak with a
+                        // warning (same policy as drop_table free failures).
+                        eprintln!(
+                            "[recovery] old index page {:?} has invalid type {:#04x}, skipping subtree",
+                            page_id, other
+                        );
+                        Vec::new()
+                    }
+                }
+            };
+
+            for child in children {
+                if child.0 != 0 {
+                    stack.push(child);
+                }
+            }
+        }
+
+        result
     }
 }
 

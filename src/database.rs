@@ -66,6 +66,11 @@ impl Database {
         // Skip past recovered transaction IDs
         // (TransactionManager's allocator starts at 1, auto-increment)
 
+        // R-T0b-R5: attach catalog root-sync contexts only AFTER recovery —
+        // replay-time root changes must not be persisted (the recovery load
+        // point stays fixed across re-recoveries).
+        table_manager.attach_index_catalog_contexts().await;
+
         // 4. Initialize plan cache
         let plan_cache = Arc::new(PlanCache::new());
 

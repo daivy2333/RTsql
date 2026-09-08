@@ -9,7 +9,15 @@ use crate::storage::{
 
 use super::{AsyncPageLoader, SyncPageLoader};
 
-const MIN_KEYS: usize = 48;
+/// **R-T0b-R3 修复点（Cycle 002-rework）**：`MIN_KEYS = 46` 满足
+/// B-Tree 不变量 `2*MIN_KEYS - 1 ≤ max_capacity_per_page`。
+///
+/// 历史值 48 在 leaf max=92（`16 + 44n ≤ 4096 → n ≤ 92`）下违反不变量：
+/// 两个 leaf 都恰好 =47 时 `merge_leaves` 试图合并 94 项，超出页容量，
+/// 在 `LeafNode::insert` 内返回 `StorageError::PageFull`。新值 46 满足
+/// `2*46-1 = 91 ≤ 92`，merge 路径（redistribute 不可用时）可安全合并。
+/// Internal node max=97（`16 + 42n ≤ 4096 → n ≤ 97`）下同样满足。
+const MIN_KEYS: usize = 46;
 
 type LeafEntries = Vec<(Key, RowId)>;
 type InternalSeps = Vec<(Key, u32)>;
@@ -1024,6 +1032,10 @@ impl BTree {
     }
 
     /// Update in a page
+    ///
+    /// **R-T0b-R4 修复点（Cycle 002-rework）**：内部节点分支沿 `search`
+    /// 同构路径递归下探至叶。LeafNode::update 既有实现复用；键不存在
+    /// 保持 `KeyNotFound`（K05 对齐）。
     fn update_in_page(&self, page_id: PageId, key: &Key, new_row_id: &RowId) -> Result<()> {
         let guard = self.loader.load_page(page_id)?;
         let page = guard.page();
@@ -1037,11 +1049,15 @@ impl BTree {
                 Ok(())
             })
         } else {
-            // Internal node: find child and recurse
-            // Simplified: not implemented yet
-            Err(StorageError::Io(std::io::Error::other(
-                "Internal node update not implemented yet",
-            )))
+            // Internal node: route to child using same binary search as `search`
+            // (避免借用冲突：先取 child_page_id 后 drop guard，再递归)
+            let child_page_id = {
+                let data_guard = guard.page_data();
+                let internal = InternalNodeRef::new(&data_guard);
+                internal.find_child_page_id_binary(key)
+            };
+            drop(guard);
+            self.update_in_page(PageId(child_page_id as u64), key, new_row_id)
         }
     }
 
