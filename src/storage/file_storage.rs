@@ -7,7 +7,30 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use tokio::task::spawn_blocking;
 
+use super::file_header::{FileHeader, HeaderError, HEADER_SIZE};
 use crate::storage::{AsyncStorage, Page, PageId, Result, StorageError};
+
+/// Map a module-private header classification to a `StorageError` with the
+/// path attached (MS10-T03 design D5).
+fn header_rejection(err: HeaderError, path: &Path) -> StorageError {
+    let p = path.display().to_string();
+    match err {
+        HeaderError::BadMagic | HeaderError::ZeroVersion => StorageError::NotADatabase(p),
+        HeaderError::NewerVersion(found) => {
+            StorageError::NewerFileVersion(format!("file version {found}: {p}"))
+        }
+        HeaderError::UnknownFlags(bits) => {
+            StorageError::IncompatibleHeader(format!("unknown feature flags: {bits:#x} ({p})"))
+        }
+        HeaderError::PageMismatch(found) => StorageError::IncompatibleHeader(format!(
+            "header page size {found}, expected {} ({p})",
+            Page::PAGE_SIZE
+        )),
+        HeaderError::ReservedNonZero(region) => {
+            StorageError::IncompatibleHeader(format!("{region} region must be zero ({p})"))
+        }
+    }
+}
 
 pub struct FileStorage {
     file: Arc<std::fs::File>,
@@ -40,14 +63,28 @@ impl FileStorage {
         let file_len = metadata.len();
         let page_size = Page::PAGE_SIZE;
 
-        if file_len % page_size as u64 != 0 {
-            return Err(StorageError::PageSizeMismatch {
-                expected: page_size,
-                actual: file_len as usize % page_size,
-            });
-        }
-
-        let page_count = file_len / page_size as u64;
+        // MS10-T03: format header — initialize (new database) or validate
+        // before any page is parsed and before WAL or companion files are
+        // touched (design D4). No fsync (D7): a torn header on a database
+        // that has no pages yet is rejected as NotADatabase on next open.
+        let page_count = if file_len == 0 {
+            file.write_all_at(&FileHeader::current().encode(), 0)?;
+            0
+        } else if file_len < HEADER_SIZE as u64 {
+            return Err(StorageError::NotADatabase(path.display().to_string()));
+        } else {
+            let mut buf = [0u8; HEADER_SIZE];
+            file.read_exact_at(&mut buf, 0)?;
+            FileHeader::decode(&buf).map_err(|e| header_rejection(e, path))?;
+            let data_len = file_len - HEADER_SIZE as u64;
+            if !data_len.is_multiple_of(page_size as u64) {
+                return Err(StorageError::PageSizeMismatch {
+                    expected: page_size,
+                    actual: (data_len % page_size as u64) as usize,
+                });
+            }
+            data_len / page_size as u64
+        };
 
         Ok(Self {
             file: Arc::new(file),
@@ -66,7 +103,7 @@ impl FileStorage {
         page_id: PageId,
         page_size: usize,
     ) -> Result<Page> {
-        let offset = page_id.to_offset(page_size);
+        let offset = HEADER_SIZE as u64 + page_id.to_offset(page_size);
         let mut buf = vec![0u8; page_size];
         file.as_ref().read_exact_at(&mut buf, offset)?;
         Page::from_bytes(page_id, &buf)
@@ -78,7 +115,7 @@ impl FileStorage {
         page_size: usize,
         data: Box<[u8; Page::PAGE_SIZE]>,
     ) -> Result<()> {
-        let offset = page_id.to_offset(page_size);
+        let offset = HEADER_SIZE as u64 + page_id.to_offset(page_size);
         file.as_ref().write_all_at(&*data, offset)?;
         Ok(())
     }
@@ -110,7 +147,8 @@ impl AsyncStorage for FileStorage {
         let file = self.file.clone();
         let page_size = self.page_size;
         spawn_blocking(move || {
-            file.as_ref().set_len(offset + page_size as u64)?;
+            file.as_ref()
+                .set_len(HEADER_SIZE as u64 + offset + page_size as u64)?;
             Ok::<(), std::io::Error>(())
         })
         .await??;

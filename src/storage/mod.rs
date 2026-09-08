@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod data;
 mod data_page;
 mod error;
+mod file_header;
 mod file_storage;
 mod page;
 pub mod page_format;
@@ -27,6 +28,7 @@ pub use data_page::{
     write_tuple_to_data_page,
 };
 pub use error::{Result, StorageError};
+pub use file_header::{FileHeader, FLAG_ENCRYPTED, FORMAT_VERSION, HEADER_SIZE, KNOWN_FLAGS_MASK};
 pub use file_storage::FileStorage;
 pub use page::Page;
 pub use page_format::{ColumnType, Key, RowId, MAX_KEY_LEN};
