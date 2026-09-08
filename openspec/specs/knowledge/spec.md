@@ -439,3 +439,11 @@
 - **优先级**: 低
 - **备注**: 减少 String/Vec 分配开销；M36 收益在 String 列场景可能放大
 - **关联改进**: 隐含于 I020 (clone 消除)
+
+## K38: 页驱逐撕裂磁盘 B-Tree；恢复必须不信任磁盘索引树
+
+- **结论**: BufferPool 页驱逐按 LRU 而非树拓扑刷盘——checkpoint 后的运行期修改使磁盘 B-Tree 同时含洞（已刷盘父页指向未刷盘子页，读为 `InvalidPageType`）与孤儿页（已刷盘但不可达）。任何 catalog root 同步策略都无法修复（根正确、树页撕裂）；恢复重放对撕裂树的任何消费（search/判重/反查）都不健全
+- **机制（MS10-T02 实证）**: 裸读崩溃夹具磁盘树 `scan_all` 184/10000 条可达 + `collect_all_pages` 命中 `InvalidPageType { expected: 0x1, actual: 0x0 }` 洞页；修复前的 stale 叶根全量重建属「意外自愈」掩盖（002-rework 对照组机制）
+- **修复原则（已落地）**: `redo_count > 0`（不洁关闭）时恢复路径零消费磁盘索引树——Update `old_row_id` 由数据页自建的磁盘版本多映射按 `max{rid < record.row_id}` 派生（同键版本链 rid 序 == LSN 序，行锁串行化保证），重放后从最终数据页重建 PK 索引（链尾回溯 + 重复 PK 显式报错）；`redo_count == 0`（checkpoint-clean 关闭）时磁盘树可信（checkpoint 全量刷盘保证一致）。数据页不受此影响——WAL 位置寻址重放本就以数据页为权威
+- **证据**: `openspec/changes/archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/`（design D10 + 003/004-rework Cycle 记录）；`src/wal/recovery.rs::rebuild_pk_indexes`
+- **关联改进**: I031（撕裂树运行期根修）；MS08-T03（脏页 writev）触碰同一驱逐/刷盘路径，实施前必读本条

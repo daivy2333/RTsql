@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-09-06（MS10-T01 完成并增量刷新，commit `03ff1b9`；同日 roadmap 重排：MS09 重定义 + 新增 MS10-MS13 应用层轨道，依据 R18 四轮探索，用户批准）
+> 最后更新：2026-09-08（MS10-T02 完成并增量刷新；change 归档至 `archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/`，含 Iteration 000 WAL 恢复引擎正确性收口）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -192,7 +192,7 @@
 
 ### MS10：CLI 非交互命令面 — planned（应用层主轨，2026-09-06 新增）
 
-- **Status**: planned（T01 已完成，2026-09-06，含 Iteration 001 真投影扩展——用户批准方向 B；T02-T05 待后续 change）
+- **Status**: planned（T01/T02 已完成，2026-09-06/2026-09-08；T03-T05 待后续 change）
 - **Dependencies**: MS08
 - **Outcome**: `rtsql <db> <sql>` 主命令全链路可用——裸名集中存储（`$RTSQL_HOME`，默认 `~/.rtsql/db/`）+ 含 `/` 路径直开；`new/list/schema/dump/restore/import` 生命周期子命令；TTY 默认表格、非 TTY 默认 JSON、`--format table|json|csv|tsv`；退出码分类（0 成功/2 用法/3 SQL 错/4 锁冲突/5 密钥）；多语句 `;` 分片逐条执行+报错行号；跨进程文件锁（advisory 独占，占用报 `database is locked`）；优雅停机（信号→`close()` checkpoint）；文件 magic/格式版本头（趁零用户落，不兼容即报"文件由新版创建"）
 - **Rationale**: 应用层一切能力的载体（R18 主题 7）；文件锁/优雅停机/格式头/多语句修复是正确性前置而非增强，与 CLI 壳同一验收域（"CLI 全链路可用"），不拆
@@ -201,7 +201,7 @@
 | Task | 状态 | 目标 | 关键前置 | 关联 change |
 |---|---|---|---|---|
 | MS10-T01 | **completed**（2026-09-06，含 Iteration 001 真投影） | CLI 壳：参数化入口 + 名称解析（裸名/路径）+ 主命令 + 输出格式 + 退出码 | 无（main.rs 重写为参数化入口） | `archive/2026-09-06-2026-09-06-ms10-t01-cli-shell/` |
-| MS10-T02 | planned | 跨进程文件锁 + 优雅停机（信号接线 `close()`） | MS10-T01 | — |
+| MS10-T02 | **completed**（2026-09-08，含 Iteration 000 WAL 恢复引擎正确性收口——T0 reader 帧解析 / T0b 位置寻址重放 / B-Tree 规模缺口 G1-G3 / catalog root 同步 R5 / 扫描去重 R6 / 恢复期索引去信任+重放后重建 R7/R8，design D0+D7-D10） | 跨进程文件锁 + 优雅停机（信号接线 `close()`） | MS10-T01 | `archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/` |
 | MS10-T03 | planned | 文件 magic/格式版本头（FileStorage open 校验） | MS10-T01 | — |
 | MS10-T04 | planned | 多语句执行修复（`;` 分片逐条执行 + 明确报错，替换 `pipeline.rs` first() 截断） | MS10-T01 | — |
 | MS10-T05 | planned | 生命周期子命令：`new/list/schema/dump/restore/import --csv` | MS10-T01（schema 为 agent 发现刚需） | — |
@@ -213,6 +213,7 @@
 - **Diagnostic boundary**: `src/cli/`（新模块）+ `src/main.rs` + `src/storage/file_storage.rs`（锁/格式头）+ `src/pipeline.rs`（多语句）
 - **Split signals**: 多语句分片需动 pipeline 事务语义时拆出独立 change 级任务；加密讨论提前成熟时 MS12 并行
 - **Related changes**:
+  - `2026-09-06-ms10-t02-file-lock-graceful-shutdown`（T02 + Iteration 000 WAL 恢复引擎正确性收口（4 个 Iteration、6 个 Cycle：000-initial → 001-replan → 002-rework → 003-rework → 004-rework → 001-lock-shutdown/000-initial），已归档为 `archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/`，含新增 spec `database-file-lock`（R1 锁语义 / R2 生命周期）、`wal-recovery-frame-parsing`、`wal-recovery-replay-integrity`（各 2 Requirement）与修改 spec `cli-noninteractive-shell`（R1 锁冲突退出码 4 + 新增 Requirement 优雅停机 4 场景）。规划依据：MS10 稳定基线「kill 后 WAL 恢复 e2e」；design D0/D7-D10）
   - `2026-09-06-ms10-t01-cli-shell`（T01 + Iteration 001 真投影扩展（用户批准方向 B，超出 T01 原始范围的引擎级修复），已归档为 `archive/2026-09-06-2026-09-06-ms10-t01-cli-shell/`，含新增 spec `cli-noninteractive-shell`，6 Requirement：R1 入口与主命令 / R2 名称解析 / R3 列名表头 / R4 输出格式 / R5 多语句护栏 / R6 扫描执行器真投影。规划依据：R18 `usability-gap-cli-form.md`）
 
 ### MS11：SQL 表达式与函数层 — planned（分析能力主体，2026-09-06 新增）
@@ -339,6 +340,7 @@ MS00 → MS01 → MS02
 
 | 完成日期 | 内容 | commit |
 |---|---|---|
+| 2026-09-08 | MS10-T02 跨进程文件锁 + 优雅停机 + Iteration 000 WAL 恢复引擎正确性（design D0/D7-D10）：T2 `FileStorage::open` try_lock 独占锁（`StorageError::DatabaseLocked`，先于 WAL 打开与恢复）+ T3 CLI 锁冲突 exit 4（存量收编，hunk 摘除 RED 复现）；T4 两阶段 select 优雅停机（`execute_command_inner`：open/执行各与信号竞争，信号臂 → `close()` checkpoint → `Signaled(signum)` exit 130/143；打开阶段无 close）+ D5-⑤ 库级结构测试（Notify 握手使信号确定落在执行阶段：WAL<1KB 证 close 已执行）+ 打开阶段 WAL>2KB 断言 + 重标定（D10 后 40k→8.86s、160k→40.7s，`WAL_ROWS=40_000`）；Iteration 000 引擎正确性：T0 reader 逐帧无歧义（歧义偏移先新格式 CRC 验证、失败回退旧格式，修复嗅探 derail 79/2046 帧）、T0b 位置寻址重放（redo 按记录 `row_id` 写入：slot 已存在跳过/稠密落位校验/未初始化页 init + Update 版本链重建 + Delete 墓碑，修复 10k 重开 13190≠10000）、G1-G3 B-Tree 规模缺口（`Key::deserialize` 32 字节定长比较修最小键盲区 / delete 重平衡 Page-full / 内部节点 update）、R5 catalog `index_root_page_id` 根变更同步、R6 DataScan 替代集合去重（产出 ⟺ 可见 ∧ 无已提交非墓碑替代者——运行期与恢复同源修复 110→100）、R7/R8 恢复期索引去信任 + 重放后重建（撕裂树修复：中位点 checkpoint 后页驱逐按 LRU 而非树拓扑刷盘致磁盘树含洞/孤儿（裸读实测 184/10000 可达 + 洞页）→ `redo_count > 0` 时恢复零消费磁盘索引树，Update `old_row_id` 由磁盘版本多映射 max-rid 派生 + old_tuple 校验，重放后从最终数据页重建 PK 索引（链尾回溯 + 重复 PK 显式报错保 K05）+ `replace_index_manager` 换入 + catalog root 写回 + 洞容忍释放旧树；`redo_count == 0` 路径零变化）；6 个 Cycle（000-initial → 001-replan → 002-rework → 003-rework → 004-rework；001-lock-shutdown/000-initial），6 轮 Plan Review（2 次 rework 扩面经用户 Gate 2 批准）；636 tests pass / 0 failed（白名单清零）/ clippy 0 / fmt 0 / validate 18 PASS | 5855245；change 归档至 `openspec/changes/archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/`；新增 spec `database-file-lock`（R1 独占锁语义 / R2 生命周期与释放）、`wal-recovery-frame-parsing`（2 Requirement）、`wal-recovery-replay-integrity`（2 Requirement），修改 spec `cli-noninteractive-shell`（R1 锁冲突 exit 4 场景 + 新增 Requirement 优雅停机 4 场景）；登记 I031-I033 + K38 |
 | 2026-09-06 | MS10-T01 CLI 壳 + 扫描执行器真投影：Iteration 000（`src/cli/{mod,resolve,render}.rs` 新建 + `main.rs` 重写 one-shot 入口：clap 参数、裸名→`$RTSQL_HOME/db/<name>.db`（默认 `~/.rtsql/`）/含 `/` 直开、table/json/csv/tsv 四格式（TTY 表格 / 非 TTY JSON 默认）、退出码 0/1/2/3 + 4/5 枚举留位、多语句显式拒绝护栏（文案指向 T04）、`close()` checkpoint 截断 WAL、`get_plan_output_columns` 补 JOIN 三臂真表头；608 tests 既有零修改）＋ Iteration 001（真投影：6 plan 节点携带 `projection: Vec<usize>`、6 执行器（4 scan + Filter + Sort）`with_projection` 在谓词求值与 MVCC 判定后裁剪、聚合 `input_schema` 统一经 `get_plan_output_columns`（修复 PK 点查聚合静默 Null 与 GROUP BY 映射）、投影外 ORDER BY 正确排序（Sort 比较用输入形状、物化时裁剪）；IndexScan 表头错位/聚合静默 Null/排序失效三症状由 `tests/projection_test.rs` 6 测试锁定；既有测试校准面实测 0；614 tests pass，clippy/fmt/validate 全 0；两轮 Plan Review accepted） | 03ff1b9；change 归档至 `openspec/changes/archive/2026-09-06-2026-09-06-ms10-t01-cli-shell/`；新增 spec `cli-noninteractive-shell`（6 Requirement，R6=真投影） |
 | 2026-09-05 | MS08-T01+T02 页 I/O 位置参数化 + 扫描预取：T01 `FileStorage::read_page_blocking`/`write_page_blocking` 改 `FileExt::read_exact_at`/`write_all_at`（每页 2 syscall→1；strace 页路径 lseek 33→3、pread64 4→26、pwrite64 0→8；并发冷读串页损坏实测复现 RED→修复 GREEN，`tests/file_storage_io_test.rs` 4 测试）；T02 `DataScanExecutor` 后继页预取（closure 捕获 successor + spawn 丢弃结果 + 页 id 去重 + 在途 ≤1，`with_prefetch` 开关），默认路径实测回退 +40~47%/+17~18%（p<0.05，对照组不变）→ replan 默认改关、显式启用（`tests/prefetch_test.rs` 3 测试 + 默认关闭单测；Review 第三轮 bench 两档 No change p=0.24/0.73 回基线）；585 tests pass；clippy/fmt/validate 全 0；Plan Review accepted（T5.4 判读偏差裁定为环境侧 BASELINE-CHANGED 非阻塞） | dac6783；change 归档至 `openspec/changes/archive/2026-09-05-2026-09-05-ms08-t01-t02-pread-prefetch/`；新增 spec `storage-io-optimization`（3 Requirement） |
 | 2026-09-05 | MS07-T06 谓词/LIMIT 下推：`DataScanNode` 新增 `predicate`/`scan_cap`；planner 非 PK WHERE 无 OR 时谓词装入 DataScan（不再生成 Filter），OR 保留 Filter(DataScan)；Limit 输入链恰为纯 DataScan 时写入 `offset+limit` 封顶（limit=0 → Some(0) 立即 Done），顶层 Limit 任何形状保留；DataScanExecutor 两个行产出点接入 `filter_row`/`yield_capped`（语义逐字对齐 filter.rs）；`correlated.rs` 补 DataScan 相关参数注入臂（Plan 遗漏面）；新增 `tests/pushdown_test.rs` 15 测试（577 tests pass；clippy/fmt/validate 全 0；Plan Review accepted） | 5d652a2；change 归档至 `openspec/changes/archive/2026-09-05-2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown/` |
