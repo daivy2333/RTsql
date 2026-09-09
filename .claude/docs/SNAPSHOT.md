@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-08（MS10-T03 提交并增量刷新；commit `2eda010`，docs sync 提交在其上）
+> 最后更新：2026-09-09（MS10-T04 提交并增量刷新；commit `8827700`，docs sync 提交在其上）
 > 同步状态：current
 
 ## 项目身份
@@ -31,8 +31,8 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 主要模块边界
 
 - `src/database.rs` — Database 协调器（含 `close()` 显式落盘，MS07-T01；显式事务 API `begin/commit/rollback/execute_in_tx`，MS07-T04；`checkpoint_manager` 接线 + 公开 `checkpoint()` + `close()` 自动触发，MS07-T05）
-- `src/pipeline.rs` — SQL 执行管道入口（含 DML 事务包裹，MS06-T01；用户事务执行路径 `execute_in_tx`/`execute_stage_in_tx`，MS07-T04；6 执行器构造点接线投影 `with_projection`，MS10-T01）
-- `src/cli/` — CLI 非交互入口（one-shot 主命令 `rtsql <db> <sql>`：clap 参数化；`resolve_db_path` 名称解析——裸名→`$RTSQL_HOME/db/<name>.db`（默认 `~/.rtsql/`）、含 `/` 路径直开；`render` 四格式纯函数（table/json/csv/tsv，TTY 默认 table / 非 TTY 默认 json）；退出码 0/1/2/3/4/5；多语句显式拒绝护栏，MS10-T01；锁冲突 `DatabaseLocked → exit 4` 映射 + 两阶段 select 优雅停机——open 阶段信号无 close 立即退、执行阶段信号经 `close()` checkpoint 后退，`Signaled(signum)` exit 130/143，`execute_command_inner` 信号 future 可注入，MS10-T02）
+- `src/pipeline.rs` — SQL 执行管道入口（含 DML 事务包裹，MS06-T01；用户事务执行路径 `execute_in_tx`/`execute_stage_in_tx`，MS07-T04；6 执行器构造点接线投影 `with_projection`，MS10-T01；`execute_inner`/`execute_in_tx` 多语句在 plan/cache put 前显式拒绝 `Response::Error`，替换 first() 静默截断，MS10-T04）
+- `src/cli/` — CLI 非交互入口（one-shot 主命令 `rtsql <db> <sql>`：clap 参数化；`resolve_db_path` 名称解析——裸名→`$RTSQL_HOME/db/<name>.db`（默认 `~/.rtsql/`）、含 `/` 路径直开；`render` 四格式纯函数（table/json/csv/tsv，TTY 默认 table / 非 TTY 默认 json）；退出码 0/1/2/3/4/5；多语句 `;` 分片逐条执行（每条独立 auto-commit + 顺序渲染 + fail-fast 序号定位 `statement k of n failed`，T01 临时护栏退役），MS10-T04；锁冲突 `DatabaseLocked → exit 4` 映射 + 两阶段 select 优雅停机——open 阶段信号无 close 立即退、执行阶段信号经 `close()` checkpoint 后退，`Signaled(signum)` exit 130/143，`execute_command_inner` 信号 future 可注入，MS10-T02）
 - `src/parser/` — SQL 解析 + PlanBuilder；`planner/` 6 模块（mod/query/expression/aggregate/subquery/ddl_dml，`PlanBuilder` 三字段 pub(crate) + 公共 API 零变化，MS07-T03 落地）；query.rs 含 JOIN 表头臂 + `resolve_projection_indices` 投影解析 + 聚合 `input_schema` 统一（MS10-T01）
 - `src/executor/` — 24 个执行器（Scan / DataScan / IndexScan / IndexScanAll / Filter / Join / Aggregate / Sort / Limit / SemiJoin / AntiJoin / SubqueryEval / Correlated / Insert / Update / Delete / CreateTable / DropTable / DerivedScan / Having / Predicate / ValueRef / Result 等；InsertExecutor 持有 `Option<Arc<TableManager>>` 走 `write_tuple` 路径，MS07-T01；DataScan 支持 `predicate` 行内谓词过滤与 `scan_cap` 提前封顶，OR/Sort/Aggregate 路径保留原节点，MS07-T06；DataScan 支持后继页预取 `with_prefetch(true)` 显式启用、默认关闭，MS08-T02；扫描/Filter/Sort 执行器 `with_projection` 真投影——谓词与 MVCC 判定后按投影裁剪，`SELECT *` 恒等，MS10-T01；DataScan 替代集合去重——每行恰产出对当前快照的最新可见版本（已提交非墓碑替代者抑制），运行期与恢复后同源，MS10-T02 R6）
 - `src/storage/` — BufferPool（DashMap + Miss Semaphore + Per-Page Loading Locks）、AsyncStorage（含 `page_count()`，MS07-T01）、FileStorage（页读写 `FileExt::read_exact_at`/`write_all_at` 位置参数化，每页 1 syscall，MS08-T01；open 即 `try_lock` advisory 独占锁，冲突 → `StorageError::DatabaseLocked`，先于 WAL 打开与恢复，MS10-T02；64B 格式头——open 时初始化（0 字节新库）或分类校验，`NotADatabase`/`NewerFileVersion`/`IncompatibleHeader` 先于页解析与 WAL 触碰，页 I/O 偏移 +HEADER_SIZE 平移（`PageId::to_offset` 纯数学不变），MS10-T03）、DataPage、file_header（64B 布局编解码纯函数 + 私有 HeaderError，`KNOWN_FLAGS_MASK=0`——加密位拒绝至 MS12，MS10-T03）
@@ -48,7 +48,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 目录约定
 
 - 源码: `src/`
-- 集成测试: `tests/`（含新增 `tests/schema_persistence_test.rs` 8 测试，MS07-T01 落地；新增 `tests/drop_table_free_test.rs` 6 测试，MS07-T02 落地；新增 `tests/explicit_tx_test.rs` 8 测试，MS07-T04 落地；新增 `tests/checkpoint_redo_reduction_test.rs` 9 测试，MS07-T05 落地；新增 `tests/pushdown_test.rs` 15 测试，MS07-T06 落地；新增 `tests/file_storage_io_test.rs` 4 测试 + `tests/prefetch_test.rs` 3 测试，MS08-T01/T02 落地；新增 `tests/cli_test.rs` 12 测试 + `tests/projection_test.rs` 6 测试，MS10-T01 落地；新增 `tests/wal_recovery_large_test.rs` 7 测试 + `tests/btree_scale_test.rs` 5 测试 + `tests/database_file_lock_test.rs` 4 测试（cli_test 增至 17），MS10-T02 落地；新增 `tests/file_header_test.rs` 14 测试 + database_file_lock_test 增至 5 + cli_test 增至 21，MS10-T03 落地）
+- 集成测试: `tests/`（含新增 `tests/schema_persistence_test.rs` 8 测试，MS07-T01 落地；新增 `tests/drop_table_free_test.rs` 6 测试，MS07-T02 落地；新增 `tests/explicit_tx_test.rs` 8 测试，MS07-T04 落地；新增 `tests/checkpoint_redo_reduction_test.rs` 9 测试，MS07-T05 落地；新增 `tests/pushdown_test.rs` 15 测试，MS07-T06 落地；新增 `tests/file_storage_io_test.rs` 4 测试 + `tests/prefetch_test.rs` 3 测试，MS08-T01/T02 落地；新增 `tests/cli_test.rs` 12 测试 + `tests/projection_test.rs` 6 测试，MS10-T01 落地；新增 `tests/wal_recovery_large_test.rs` 7 测试 + `tests/btree_scale_test.rs` 5 测试 + `tests/database_file_lock_test.rs` 4 测试（cli_test 增至 17），MS10-T02 落地；新增 `tests/file_header_test.rs` 14 测试 + database_file_lock_test 增至 5 + cli_test 增至 21，MS10-T03 落地；cli_test 增至 25（多语句分片 4 新增 + 1 护栏用例重写），MS10-T04 落地）
 - 单元测试: 文件内 `#[cfg(test)]`（含新增 `src/storage/catalog.rs` 10 单元测试）
 - 基准测试: `benches/` (8 套: micro / concurrent / scale / sqlite_compare / single / precise_compare / data_scan / visibility)
 - OpenSpec: `openspec/`
@@ -67,15 +67,15 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **最新 revision**: 2eda010（MS10-T03 实施 commit；其上为本次 docs sync）
-- **ahead of origin**: 5 commits（590fdc6 WIP + 5855245 MS10-T02 实施 + 268fa4f docs sync + 2eda010 MS10-T03 实施 + 本次 docs sync）
+- **最新 revision**: 8827700（MS10-T04 实施 commit；其上为本次 docs sync）
+- **ahead of origin**: 7 commits（590fdc6 WIP + 5855245 MS10-T02 实施 + 268fa4f docs sync + 2eda010 MS10-T03 实施 + 5c42ec8 docs sync + 8827700 MS10-T04 实施 + 本次 docs sync）
 - **最新 tag**: M11
-- **测试**: 665 tests pass, 0 failures, 2 ignored（2026-09-08 MS10-T03 提交后；基线 636 + file_header_test 14 + file_header 单测 10 + database_file_lock_test 1 + cli_test 4；2 ignored 为信号标定设计项）
-- **OpenSpec**: 19 capability specs validate PASS（新增 database-file-format-header；2026-09-08 归档 ms10-t03 change 后）
+- **测试**: 671 tests pass, 0 failures, 2 ignored（2026-09-09 MS10-T04 提交后；基线 665 + cli_test 净增 4（5 新增 − 1 护栏重写）+ lib 净增 2（多语句拒绝单测）；2 ignored 为信号标定设计项）
+- **OpenSpec**: 19 capability specs validate PASS（2026-09-09 归档 ms10-t04 change 后；cli-noninteractive-shell R5 护栏替换为多语句分片逐条执行，无新增 spec）
 
 ## 同步状态
 
-- `current` — 文档与代码一致（MS10-T03 提交后增量刷新；commit `2eda010`）
+- `current` — 文档与代码一致（MS10-T04 提交后增量刷新；commit `8827700`）
 
 ## 权威文档
 
@@ -86,7 +86,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 参考: `openspec/specs/references/spec.md` (Rxx)
 - 改进: `openspec/specs/improvements/spec.md` (Ixx)
 - 任务与路线: `.claude/docs/tasks.md`
-- 变更: `openspec/changes/`（当前无活跃 change；归档目录含 MS06-T01 + MS06-T02 + MS06-T03-T04 + MS07-T01 + MS07-T02 + MS07-T03 + ms07-rest + ms08-t01-t02 + ms10-t01-cli-shell + ms10-t02-file-lock-graceful-shutdown + ms10-t03-file-format-header carrier）
+- 变更: `openspec/changes/`（当前无活跃 change；归档目录含 MS06-T01 + MS06-T02 + MS06-T03-T04 + MS07-T01 + MS07-T02 + MS07-T03 + ms07-rest + ms08-t01-t02 + ms10-t01-cli-shell + ms10-t02-file-lock-graceful-shutdown + ms10-t03-file-format-header + ms10-t04-multi-statement-execution carrier）
 - Legacy migration carrier: `.claude/legacy/2026-08-25-openspec-init-migration/`
 - 新增能力 spec:
   - `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）
@@ -98,7 +98,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - `openspec/specs/planner-module-decomposition/spec.md`（MS07-T03 落地，5 个 Requirement）
 - `openspec/specs/ms07-rest-tx-checkpoint-pushdown/spec.md`（MS07-T04/T05/T06 落地，3 个 Requirement：R1 显式事务 / R2 Checkpoint / R3 谓词-LIMIT 下推）
 - `openspec/specs/storage-io-optimization/spec.md`（MS08-T01/T02 落地，3 个 Requirement：R1 页 I/O 位置参数化 / R2 零接口零格式变更 / R3 DataScan 预取可选能力默认关闭）
-- `openspec/specs/cli-noninteractive-shell/spec.md`（MS10-T01 落地，6 个 Requirement：R1 参数化入口与主命令 / R2 名称解析 / R3 列名表头 / R4 输出格式四态 / R5 多语句显式拒绝 / R6 扫描执行器真投影；MS10-T02 修改：R1 增锁冲突 exit 4 场景 + 新增 Requirement 优雅停机 4 场景）
+- `openspec/specs/cli-noninteractive-shell/spec.md`（MS10-T01 落地，6 个 Requirement：R1 参数化入口与主命令 / R2 名称解析 / R3 列名表头 / R4 输出格式四态 / R5 多语句护栏 / R6 扫描执行器真投影；MS10-T02 修改：R1 增锁冲突 exit 4 场景 + 新增 Requirement 优雅停机 4 场景；MS10-T04 修改：R1 多语句语义修正 + R5 护栏退役替换为 Requirement「多语句分片逐条执行」6 场景）
 - `openspec/specs/database-file-lock/spec.md`（MS10-T02 落地，2 个 Requirement：R1 独占锁语义 / R2 生命周期与释放）
 - `openspec/specs/wal-recovery-frame-parsing/spec.md`（MS10-T02 落地，2 个 Requirement）
 - `openspec/specs/wal-recovery-replay-integrity/spec.md`（MS10-T02 落地，2 个 Requirement）

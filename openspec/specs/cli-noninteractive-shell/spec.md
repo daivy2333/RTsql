@@ -5,7 +5,7 @@ TBD - created by archiving change 2026-09-06-ms10-t01-cli-shell. Update Purpose 
 ## Requirements
 ### Requirement: 参数化 CLI 入口与主命令
 
-`rtsql` 二进制 SHALL 提供 `rtsql <db> <sql>` one-shot 主命令：解析参数、打开数据库、执行单条 SQL、渲染结果到 stdout、以分类退出码退出。进程正常退出前 SHALL 调用 `Database::close()`（checkpoint + WAL 截断）。参数缺失或非法时 SHALL 以退出码 2 报用法错误。打开时遇跨进程锁冲突 SHALL 以退出码 4 报 `database is locked`。
+`rtsql` 二进制 SHALL 提供 `rtsql <db> <sql>` one-shot 主命令：解析参数、打开数据库、执行 SQL（单条语句，或以 `;` 分隔的多条语句逐条执行）、渲染结果到 stdout、以分类退出码退出。进程正常退出前 SHALL 调用 `Database::close()`（checkpoint + WAL 截断）。参数缺失或非法时 SHALL 以退出码 2 报用法错误。打开时遇跨进程锁冲突 SHALL 以退出码 4 报 `database is locked`。
 
 #### Scenario: one-shot SELECT 执行成功
 
@@ -131,17 +131,6 @@ CLI SHALL 支持 `--format table|json|csv|tsv`；未指定时 TTY stdout 默认 
 - **WHEN** 以任意格式执行
 - **THEN** 输出受影响行数（table/json：`AffectedRows` 语义；csv/tsv：同值单字段），退出码 0
 
-### Requirement: 多语句显式拒绝（临时护栏）
-
-T01 阶段 CLI SHALL 对包含多条语句的 SQL 显式报错（parse 后语句数 > 1），退出码 3，错误信息说明当前版本每次只执行一条语句；不得静默截断。MS10-T04 落地分片执行后本护栏退役。
-
-#### Scenario: 多语句被拒绝
-
-- **GIVEN** 任意库
-- **WHEN** `rtsql db "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)"`
-- **THEN** stderr 报"每次只执行一条语句"类错误，退出码 3
-- **AND** 两条 INSERT 均未执行（不是只执行第一条）
-
 ### Requirement: 扫描执行器真投影（Iteration 001）
 
 `SELECT` 的投影列表 SHALL 决定扫描路径返回行的形状：四个扫描执行器（Scan / DataScan / IndexScan / IndexScanAll）SHALL 按投影裁剪产出行，plan 节点的 `columns` 元数据与行形状一致。谓词求值（WHERE / 下推谓词 / MVCC 可见性）SHALL 在全 schema 行上先行完成，投影只发生在行产出最后一步。`SELECT *` 的投影等于全 schema，行为不变。
@@ -207,4 +196,50 @@ CLI SHALL 处理 SIGINT 与 SIGTERM：信号到达时中止当前阶段。数据
 - **GIVEN** 任意库与单条合法 SQL
 - **WHEN** 正常执行（无信号）
 - **THEN** 退出码、stdout/stderr 输出与 checkpoint 语义与本 Requirement 落地前完全一致（既有 cli 集成测试零修改全绿）
+
+### Requirement: 多语句分片逐条执行
+
+CLI SHALL 对以 `;` 分隔的多条 SQL 语句逐条执行：每条语句独立 plan/execute、独立 auto-commit 事务（逐条生效）。每条语句的结果 SHALL 顺序渲染到 stdout：DML/DDL 输出受影响行数，SELECT 输出查询结果（列名表头等既有渲染语义不变）；`json` 格式下每条语句输出一个独立 JSON 文档。任一语句失败时 SHALL 立即停止执行（fail-fast）：以退出码 3 报错，错误信息 SHALL 包含失败语句的序号（第 k 条/共 n 条）与失败语句文本，并注明失败之前的语句已生效；失败之后的语句 SHALL NOT 执行。SQL 语法错误 SHALL 在任何语句执行前整体拒绝（零执行），错误信息保留解析器的行/列定位。lib 单结果执行路径（`pipeline::execute` 网络路径、`execute_in_tx` 显式事务路径）遇多语句 SHALL 显式报错，SHALL NOT 静默截断。
+
+#### Scenario: 多条 DML 逐条执行全部生效
+
+- **GIVEN** 表 `t(id INT)` 为空
+- **WHEN** `rtsql db "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)"`
+- **THEN** 退出码 0，stdout 顺序输出两段受影响行数结果
+- **AND** 重开查询可见两行（两条独立事务均已提交）
+
+#### Scenario: 顺序渲染混合语句结果
+
+- **GIVEN** 表 `t(id INT)` 已有数据
+- **WHEN** `rtsql db "INSERT INTO t VALUES (9); SELECT id FROM t"`（`--format json`，非 TTY）
+- **THEN** stdout 先输出 INSERT 的受影响行文档（与单语句 DML 输出形状一致），再输出 SELECT 的 rows 文档（两个独立 JSON 文档）
+- **AND** 退出码 0
+
+#### Scenario: 中间语句失败 fail-fast（部分已生效）
+
+- **GIVEN** 表 `t(id INT)` 为空
+- **WHEN** `rtsql db "INSERT INTO t VALUES (1); INSERT INTO missing_table VALUES (2); INSERT INTO t VALUES (3)"`
+- **THEN** 退出码 3，stderr 错误信息包含失败语句序号（第 2 条/共 3 条）与失败语句文本
+- **AND** 第 1 条 INSERT 已生效（重开可查 `id=1`），第 3 条未执行
+
+#### Scenario: 语法错误整体拒绝（零执行）
+
+- **GIVEN** 表 `t(id INT)` 为空
+- **WHEN** `rtsql db "INSERT INTO t VALUES (1); SELEC typo"`
+- **THEN** 退出码 3，stderr 错误信息含解析器行/列定位
+- **AND** 任何语句均未执行（`t` 仍为空）
+
+#### Scenario: 分号边界语义
+
+- **GIVEN** 表 `users(id INT PRIMARY KEY, name STRING)` 已有一行（`id=1`，`name='Alice'`）
+- **WHEN** `rtsql db "SELECT id FROM users;; SELECT name FROM users WHERE name = 'a;b';"`（连续分号、字符串字面量内分号、尾随分号）
+- **THEN** 按两条语句执行（字符串字面量不被分片），退出码 0
+- **AND** 第一条查询输出 1 行，第二条查询输出空行集（`'a;b'` 不匹配任何行）
+
+#### Scenario: lib 单结果路径显式拒绝多语句
+
+- **GIVEN** 已打开的 `Database`
+- **WHEN** `Database::execute_sql("SELECT 1; SELECT 2")` 或 `execute_in_tx` 传入多语句
+- **THEN** 返回 `Response::Error`，错误信息说明该路径仅支持单语句
+- **AND** 不执行任何语句（无静默截断）
 

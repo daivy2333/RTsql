@@ -262,3 +262,21 @@
 - **影响**: 语义为「既有行为未扩大」（R6 前同样重现）；MS10-T02 验收夹具 UPDATE/DELETE 域不相交故未触发；未来混合负载计数会虚高
 - **方案**: 抑制谓词区分「已提交墓碑」（应抑制整条链）与「未提交墓碑」（不抑制、回溯前驱）——需对照 WAL committed 集合或 header 编码扩展
 - **状态**: planned（与 MS09-T01 隔离级别工作同域，届时一并处理）
+
+## I034: 裸 DataScan 子集投影的 CLI 表头返回全 schema
+
+- **分类**: 正确性 / CLI 渲染
+- **问题**: 无 WHERE 的裸 DataScan 子集投影，CLI 表头经 `get_plan_output_columns`（plan 节点 columns 元数据）返回全 schema 而行已按 projection 裁剪——`SELECT name FROM t` 表头 `["id","name"]`、行 `[["Alice"]]`；带 WHERE 的 IndexScan 路径表头正确（`["name"]`）。spec `cli-noninteractive-shell` R6 S1「表头 ["name"]」的 bare-DataScan 分支自 MS10-T01 起未满足
+- **证据**: MS10-T04 Plan Review finding 5 独立探针复现（2026-09-09，revision `8827700`）；`tests/projection_test.rs`（MS10-T01）只断言 lib 行形状，未覆盖 CLI 表头
+- **影响**: json 输出 `columns` 与 `rows` 字段数不一致，机器消费需二次裁剪；表格输出表头错位
+- **方案**: `get_plan_output_columns` 对裸 DataScan 节点按 `projection` 索引裁剪表头；修正后同步校准 `tests/cli_test.rs::test_multi_statement_sequential_render` 的注释登记
+- **状态**: planned
+
+## I035: no-FROM SELECT 不受支持
+
+- **分类**: 功能 / SQL 能力边界
+- **问题**: `SELECT 1`（无 FROM 子句）在 plan 阶段报 `Plan error: Missing required field: FROM clause`（exit 3）——MS10-T04 S5 分号边界见证原拟 SQL 因此不可达，修订为含 FROM 等价 SQL（用户批准，见归档 change Blocker Handoff/Resolution）；`tests/cli_test.rs:481-482` 既有注释同证
+- **证据**: MS10-T04 Act Blocker Handoff + Plan Review 独立复现（2026-09-09，revision `5c42ec8`）
+- **影响**: 常量表达式查询、`SELECT current_setting()` 类无表探测不可达；agent/脚本日常探测用法受挫
+- **方案**: planner 增加 no-FROM SELECT 臂（单行虚拟输入），属引擎能力扩展，需独立 change
+- **状态**: planned
