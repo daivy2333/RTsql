@@ -224,6 +224,16 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
     }
 }
 
+/// MS10-T04：单结果执行路径（网络 / 显式事务）的多语句显式拒绝——
+/// 两条路径共用同一文案；拒绝必须发生在 plan_stage / cache put 之前。
+fn multi_statement_rejected(count: usize) -> Response {
+    Response::Error {
+        message: format!(
+            "only a single statement is supported on this path (got {count} statements); use the CLI (rtsql) to run multi-statement scripts"
+        ),
+    }
+}
+
 /// Execute one SQL statement inside an existing user transaction (MS07-T04).
 ///
 /// Reuses the same parse/plan stages as the implicit pipeline; execution
@@ -234,6 +244,9 @@ pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Respon
         Ok(s) => s,
         Err(message) => return Response::Error { message },
     };
+    if statements.len() > 1 {
+        return multi_statement_rejected(statements.len());
+    }
     let stmt = match statements.first() {
         Some(s) => s,
         None => {
@@ -337,6 +350,11 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
     };
     if let Some(start) = parse_start {
         record_time("parse", start.elapsed());
+    }
+    // MS10-T04：单结果执行路径仅支持单语句——多语句从静默截断改为显式拒绝，
+    // 拒绝发生在 plan_stage / cache put 之前（完整串键污染随之消失）。
+    if statements.len() > 1 {
+        return multi_statement_rejected(statements.len());
     }
     let stmt = match statements.first() {
         Some(s) => s,
@@ -1156,5 +1174,61 @@ mod tests {
             0,
             "DDL execute_stage should clear the plan cache"
         );
+    }
+
+    // ---- multi-statement explicit rejection (MS10-T04 S6) ----
+
+    /// S6：网络路径（`execute` → `execute_inner`）遇多语句必须显式报错，
+    /// 不得静默截断执行第一条；拒绝发生在 plan_stage / cache put 之前
+    /// （cache 长度为 0 证明无键污染、无执行）。
+    #[tokio::test]
+    async fn execute_sql_multi_statement_returns_error() {
+        let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY)").await;
+        let resp = db.execute_sql("SELECT 1; SELECT 2").await;
+        match resp {
+            Response::Error { message } => {
+                assert!(
+                    message.contains("single statement"),
+                    "error must state the single-statement policy: {}",
+                    message
+                );
+            }
+            other => panic!("expected Response::Error, got {:?}", other),
+        }
+        assert_eq!(
+            db.plan_cache_len(),
+            0,
+            "rejection must happen before plan_stage puts a cache entry"
+        );
+    }
+
+    /// S6：显式事务路径遇多语句必须显式报错，且事务保持存活——
+    /// 随后单语句 `execute_in_tx` 正常执行、commit 成功。
+    #[tokio::test]
+    async fn execute_in_tx_multi_statement_returns_error() {
+        let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY)").await;
+        let tx = db.begin().await.unwrap();
+        let resp = db
+            .execute_in_tx("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)", &tx)
+            .await;
+        match resp {
+            Response::Error { message } => {
+                assert!(
+                    message.contains("single statement"),
+                    "error must state the single-statement policy: {}",
+                    message
+                );
+            }
+            other => panic!("expected Response::Error, got {:?}", other),
+        }
+
+        // 事务未终结：单语句继续可用并成功提交
+        let resp = db.execute_in_tx("INSERT INTO t VALUES (1)", &tx).await;
+        assert!(
+            !matches!(resp, Response::Error { .. }),
+            "tx must remain usable after multi-statement rejection: {:?}",
+            resp
+        );
+        db.commit(tx).await.unwrap();
     }
 }

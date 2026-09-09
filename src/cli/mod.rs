@@ -200,32 +200,57 @@ async fn run_sql(db: &Database, sql: &str, format: Option<FormatArg>) -> ExitSta
         Ok(statements) => statements,
         Err(e) => return ExitStatus::Sql(e),
     };
-    if statements.len() > 1 {
-        return ExitStatus::Sql(format!(
-            "one statement at a time: got {} statements; `;` splitting is not supported yet (lands with MS10-T04)",
-            statements.len()
-        ));
+
+    // MS10-T04：分片逐条执行。每条语句独立 plan/execute（auto-commit，逐条生效），
+    // 结果顺序渲染写 stdout；缓存键用该语句自身的 canonical 文本而非完整串
+    // （完整串键会让逐条 SELECT 互相覆盖同一键）。
+    let total = statements.len();
+    for (index, stmt) in statements.iter().enumerate() {
+        let statement_text = stmt.to_string();
+        let plan = match plan_stage(db, &statement_text, stmt, false).await {
+            Ok(plan) => plan,
+            Err(e) => return sql_failure_status(index + 1, total, &e, &statement_text),
+        };
+        let columns = PlanBuilder::new().get_plan_output_columns(&plan);
+
+        match execute_stage(db, plan, false).await {
+            Response::QueryResult { rows } => {
+                if let Err(e) =
+                    emit_stdout(&render(kind(format), &columns, &QueryPayload::Rows(rows)))
+                {
+                    return ExitStatus::General(e);
+                }
+            }
+            Response::AffectedRows { count } => {
+                if let Err(e) =
+                    emit_stdout(&render(kind(format), &[], &QueryPayload::Affected(count)))
+                {
+                    return ExitStatus::General(e);
+                }
+            }
+            Response::Error { message } => {
+                return sql_failure_status(index + 1, total, &message, &statement_text);
+            }
+            Response::Pong => {}
+        }
     }
 
-    let plan = match plan_stage(db, sql, &statements[0], false).await {
-        Ok(plan) => plan,
-        Err(e) => return ExitStatus::Sql(e),
-    };
-    let columns = PlanBuilder::new().get_plan_output_columns(&plan);
-
-    match execute_stage(db, plan, false).await {
-        Response::QueryResult { rows } => emit(kind(format), &columns, &QueryPayload::Rows(rows)),
-        Response::AffectedRows { count } => emit(kind(format), &[], &QueryPayload::Affected(count)),
-        Response::Error { message } => ExitStatus::Sql(message),
-        Response::Pong => ExitStatus::Success,
-    }
+    ExitStatus::Success
 }
 
-fn emit(kind: OutputKind, columns: &[String], payload: &QueryPayload) -> ExitStatus {
-    match emit_stdout(&render(kind, columns, payload)) {
-        Ok(()) => ExitStatus::Success,
-        Err(e) => ExitStatus::General(e),
+/// 逐条执行的失败定位（D3）：语句序号 + 失败语句文本（≤200 字符截断），
+/// k > 1 时注明前序语句已生效（逐条 auto-commit 的可观察事实）。
+/// parse 错误不套本模板——parse_stage 全串解析、零执行，文本自带行列定位。
+fn sql_failure_status(k: usize, n: usize, error: &str, statement_text: &str) -> ExitStatus {
+    let mut display = statement_text.to_string();
+    if display.chars().count() > 200 {
+        display = format!("{}...", display.chars().take(200).collect::<String>());
     }
+    let mut message = format!("statement {k} of {n} failed: {error}; statement: {display}");
+    if k > 1 {
+        message.push_str("; previous statement(s) were committed");
+    }
+    ExitStatus::Sql(message)
 }
 
 /// TTY 默认 table，非 TTY 默认 json；显式 `--format` 覆盖。
