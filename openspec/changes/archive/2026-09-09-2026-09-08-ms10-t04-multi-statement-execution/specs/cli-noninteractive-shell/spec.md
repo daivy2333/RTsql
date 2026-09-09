@@ -39,6 +39,8 @@
 - **THEN** 退出码 4（锁冲突）已由本 Requirement 的锁冲突场景获得产生路径（T02 落地）
 - **AND** 退出码 5（密钥）已存在于枚举与映射表中，但尚无产生路径（MS12 落地）
 
+## ADDED Requirements
+
 ### Requirement: 多语句分片逐条执行
 
 CLI SHALL 对以 `;` 分隔的多条 SQL 语句逐条执行：每条语句独立 plan/execute、独立 auto-commit 事务（逐条生效）。每条语句的结果 SHALL 顺序渲染到 stdout：DML/DDL 输出受影响行数，SELECT 输出查询结果（列名表头等既有渲染语义不变）；`json` 格式下每条语句输出一个独立 JSON 文档。任一语句失败时 SHALL 立即停止执行（fail-fast）：以退出码 3 报错，错误信息 SHALL 包含失败语句的序号（第 k 条/共 n 条）与失败语句文本，并注明失败之前的语句已生效；失败之后的语句 SHALL NOT 执行。SQL 语法错误 SHALL 在任何语句执行前整体拒绝（零执行），错误信息保留解析器的行/列定位。lib 单结果执行路径（`pipeline::execute` 网络路径、`execute_in_tx` 显式事务路径）遇多语句 SHALL 显式报错，SHALL NOT 静默截断。
@@ -84,3 +86,9 @@ CLI SHALL 对以 `;` 分隔的多条 SQL 语句逐条执行：每条语句独立
 - **WHEN** `Database::execute_sql("SELECT 1; SELECT 2")` 或 `execute_in_tx` 传入多语句
 - **THEN** 返回 `Response::Error`，错误信息说明该路径仅支持单语句
 - **AND** 不执行任何语句（无静默截断）
+
+## REMOVED Requirements
+
+### Requirement: 多语句显式拒绝（临时护栏）
+
+**Reason**: MS10-T04 落地 `;` 分片逐条执行，T01 临时护栏按本 Requirement 原文承诺退役，由 ADDED Requirement「多语句分片逐条执行」替换。
