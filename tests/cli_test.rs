@@ -213,9 +213,10 @@ fn test_sql_error_exit_3() {
     assert!(!out.stderr.is_empty(), "plan error must go to stderr");
 }
 
-/// ④ 多语句护栏：`;` 分隔的双 INSERT 退出 3 且零执行（再查行集只剩种子行）
+/// ④ 多语句分片执行（MS10-T04 替换原护栏语义）：`;` 分隔的双 INSERT 逐条
+/// 生效、顺序输出两段受影响行数、退出 0；重开可见两行（独立事务均已提交）。
 #[test]
-fn test_multi_statement_rejected() {
+fn test_multi_statement_executes() {
     let dir = fixture();
     seed_users(dir.path());
 
@@ -228,27 +229,202 @@ fn test_multi_statement_rejected() {
     );
     assert_eq!(
         out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    // 顺序两段受影响行数输出（非 TTY 默认 json）
+    let mut docs = out.stdout.trim().lines();
+    let first: serde_json::Value = serde_json::from_str(docs.next().expect("first doc")).unwrap();
+    let second: serde_json::Value = serde_json::from_str(docs.next().expect("second doc")).unwrap();
+    assert_eq!(first["affected_rows"], serde_json::json!(1));
+    assert_eq!(second["affected_rows"], serde_json::json!(1));
+
+    // 重开：两条独立事务均已提交（行序无关断言）
+    let out = run_cli(dir.path(), &["app", "SELECT name FROM users"]);
+    assert_eq!(out.code, Some(0));
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let mut names: Vec<String> = parsed["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[0].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["Alice", "Bob", "Carol"],
+        "both inserts must be committed"
+    );
+}
+
+/// ④（S2）顺序渲染：INSERT 的受影响行文档在前，SELECT 的 rows 文档在后，
+/// json 格式下为两个独立 JSON 文档（逐行 JSONL 风格）。
+/// （SELECT 取两列投影：与既有单语句渲染语义逐字一致——见 test_piped_default_json；
+/// Act 校准：全表扫描子集单列投影的表头为全 schema，属既有单语句行为，
+/// 不在本 change 契约内，避免在多语句用例中锁死该形状。）
+#[test]
+fn test_multi_statement_sequential_render() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "INSERT INTO users VALUES (9, 'Zed'); SELECT id, name FROM users",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+
+    let lines: Vec<&str> = out.stdout.trim().lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected two independent JSON documents: {:?}",
+        out.stdout
+    );
+    let insert_doc: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let select_doc: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(insert_doc["affected_rows"], serde_json::json!(1));
+    assert_eq!(select_doc["columns"], serde_json::json!(["id", "name"]));
+    let mut rows: Vec<(i64, String)> = select_doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r[0].as_i64().unwrap(), r[1].as_str().unwrap().to_string()))
+        .collect();
+    rows.sort();
+    assert_eq!(rows, vec![(1, "Alice".to_string()), (9, "Zed".to_string())]);
+}
+
+/// ④（S5，2026-09-08 用户批准修订：no-FROM SELECT 引擎不可达，见 Act Response
+/// Blocker Resolution）分号边界：连续分号（空语句跳过）、字符串字面量内分号
+/// （不分片）、尾随分号（合法）——按两条语句执行且退出 0。
+#[test]
+fn test_multi_statement_semicolon_boundaries() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT id FROM users;; SELECT name FROM users WHERE name = 'a;b';",
+        ],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    let lines: Vec<&str> = out.stdout.trim().lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected exactly two statements' outputs: {:?}",
+        out.stdout
+    );
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(first["rows"], serde_json::json!([[1]]));
+    assert_eq!(
+        second["rows"],
+        serde_json::json!([]),
+        "string literal 'a;b' matches no row (and must not be split)"
+    );
+}
+
+/// ④（S3）fail-fast：中间语句失败 → 退出 3，错误含失败语句序号（第 2 条/共 3 条）
+/// 与语句文本，并注明前序语句已生效；失败后语句未执行。
+#[test]
+fn test_multi_statement_fail_fast() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "INSERT INTO users VALUES (2, 'Bob'); INSERT INTO missing_table VALUES (3); INSERT INTO users VALUES (4, 'Dan')",
+        ],
+    );
+    assert_eq!(
+        out.code,
         Some(3),
         "stdout: {:?} stderr: {:?}",
         out.stdout,
         out.stderr
     );
     assert!(
-        out.stderr.contains("one statement at a time"),
-        "guard message must explain the policy: {:?}",
+        out.stderr.contains("statement 2 of 3"),
+        "error must locate the failing statement: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("missing_table"),
+        "error must contain the failing statement text: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("previous statement(s) were committed"),
+        "error must note prior statements took effect: {:?}",
         out.stderr
     );
 
-    // 零执行：两条 INSERT 都未生效，行集只剩种子数据 Alice。
-    // MS10-T01 Iter001（T9 校准）：改回子集投影锁定真投影语义——
-    // 返回投影列的行，不再退化为全 schema 行。
-    let out = run_cli(dir.path(), &["app", "SELECT name FROM users"]);
+    // 部分生效：仅第 1 条 INSERT 落库（fail-fast 阻止第 3 条）
+    let out = run_cli(dir.path(), &["app", "SELECT id FROM users"]);
+    assert_eq!(out.code, Some(0));
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let mut ids: Vec<i64> = parsed["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[0].as_i64().unwrap())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 2], "only the first statement may take effect");
+}
+
+/// ④（S4）语法错误整体拒绝：parse 在任何语句执行前失败（零执行），
+/// 错误保留解析器行/列定位文本（不套语句序号模板）。
+#[test]
+fn test_multi_statement_parse_error_zero_exec() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &["app", "INSERT INTO users VALUES (2, 'Bob'); SELEC typo"],
+    );
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Line:"),
+        "parse error must keep parser line/column location: {:?}",
+        out.stderr
+    );
+
+    // 零执行：parse 失败前的 INSERT 也未生效
+    let out = run_cli(dir.path(), &["app", "SELECT id FROM users"]);
     assert_eq!(out.code, Some(0));
     let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
     assert_eq!(
         parsed["rows"],
-        serde_json::json!([["Alice"]]),
-        "unexpected rows"
+        serde_json::json!([[1]]),
+        "no statement may execute when parse fails"
     );
 }
 

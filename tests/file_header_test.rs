@@ -32,7 +32,7 @@ fn header_bytes(version: u32, flags: u32, page_size: u32) -> Vec<u8> {
 /// 合法头 + n 页零数据
 fn header_plus_pages(version: u32, flags: u32, page_size: u32, pages: usize) -> Vec<u8> {
     let mut bytes = header_bytes(version, flags, page_size);
-    bytes.extend(std::iter::repeat(0u8).take(pages * 4096));
+    bytes.extend(std::iter::repeat_n(0u8, pages * 4096));
     bytes
 }
 
@@ -230,7 +230,7 @@ async fn test_truncated_file_rejected() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("trunc.db");
     let mut bytes = header_bytes(1, 0, 4096);
-    bytes.extend(std::iter::repeat(0u8).take(100));
+    bytes.extend(std::iter::repeat_n(0u8, 100));
     std::fs::write(&path, bytes).unwrap();
 
     let err = expect_err(FileStorage::open(&path));
