@@ -20,8 +20,8 @@
 - **分类**: architecture
 - **范围**: 整个数据库系统
 - **不变量**:
-  - SQL Text → Parser (sqlparser) → PlanCache (LRU, SELECT only) → PlanBuilder → PhysicalPlan (19 节点) → Pipeline → Volcano Executor Tree → Storage (BufferPool → PageGuard / BTree → AtomicPageId / SlottedPage)
-  - 19 种 PhysicalPlan 节点：Scan / DataScan / IndexScan / IndexScanAll / Filter / Join / Aggregate / Having / Sort / Limit / SemiJoin / AntiJoin / SubqueryEval / DerivedScan / Insert / Update / Delete / CreateTable / DropTable
+  - SQL Text → Parser (sqlparser) → PlanCache (LRU, SELECT only) → PlanBuilder → PhysicalPlan (20 节点) → Pipeline → Volcano Executor Tree → Storage (BufferPool → PageGuard / BTree → AtomicPageId / SlottedPage)
+  - 20 种 PhysicalPlan 节点：Scan / DataScan / IndexScan / IndexScanAll / Filter / Join / Aggregate / Having / Sort / Limit / SemiJoin / AntiJoin / SubqueryEval / DerivedScan / Projection / Insert / Update / Delete / CreateTable / DropTable（Projection 为 MS11-T01 新增——SELECT 派生列逐行求值节点）
 - **证据**: `src/database.rs`, `src/pipeline.rs`, `src/parser/planner.rs`, `src/executor/mod.rs`, `src/storage/buffer_pool.rs`
 - **状态**: active
 - **Legacy**: A001-A012 系统架构图与节点表（来自 `openspec/specs/architecture/spec.md`）

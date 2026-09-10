@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-09-09（MS10-T04 完成并增量刷新；change 归档至 `archive/2026-09-09-2026-09-08-ms10-t04-multi-statement-execution/`，cli-noninteractive-shell spec R5 护栏替换为多语句分片逐条执行；登记 I034/I035）
+> 最后更新：2026-09-10（MS11-T01 完成并增量刷新；change 归档至 `archive/2026-09-10-ms11-t01-sql-expressions/`，新增 spec `sql-expression-evaluation`（6 Requirement）；I040 标记 promoted）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-14 个 Milestone：5 completed（MS00-MS02 历史 + MS06/MS07）+ 3 旧 superseded + 6 planned（MS08 剩余、MS09 重定义、MS10-MS13 应用层新轨）。
+14 个 Milestone：6 completed（MS00-MS02 历史 + MS06/MS07/MS10）+ 3 旧 superseded + 5 planned（MS08 剩余、MS09、MS11-MS13 应用层新轨余下）。
 
 规划理念：**先收口正确性 → 建设基础能力 → 实测驱动性能 → 引擎能力收尾 → 应用层可用好用（非交互 CLI / 密钥 / 分析 / 分发）**（2026-09-06 依据 R18 分析扩展应用层轨道）。
 
@@ -190,9 +190,9 @@
 - **Split signals**: 若 MS09-T01 实施发现 snapshot 与 RR 共享度过低，拆为独立 MS
 - **Related changes**: None
 
-### MS10：CLI 非交互命令面 — planned（应用层主轨，2026-09-06 新增）
+### MS10：CLI 非交互命令面 — completed（2026-09-09）
 
-- **Status**: planned（T01-T04 已完成，2026-09-06 至 2026-09-09；T05 待后续 change）
+- **Status**: completed（T01-T05 全部完成，2026-09-06 至 2026-09-09；T05 含 Iteration 001 001-rework 无键行落库语义——引擎键位不可键控行由静默丢弃改为落库不入索引 + 恢复无键回退，用户裁定方向 A）
 - **Dependencies**: MS08
 - **Outcome**: `rtsql <db> <sql>` 主命令全链路可用——裸名集中存储（`$RTSQL_HOME`，默认 `~/.rtsql/db/`）+ 含 `/` 路径直开；`new/list/schema/dump/restore/import` 生命周期子命令；TTY 默认表格、非 TTY 默认 JSON、`--format table|json|csv|tsv`；退出码分类（0 成功/2 用法/3 SQL 错/4 锁冲突/5 密钥）；多语句 `;` 分片逐条执行+报错行号；跨进程文件锁（advisory 独占，占用报 `database is locked`）；优雅停机（信号→`close()` checkpoint）；文件 magic/格式版本头（趁零用户落，不兼容即报"文件由新版创建"）
 - **Rationale**: 应用层一切能力的载体（R18 主题 7）；文件锁/优雅停机/格式头/多语句修复是正确性前置而非增强，与 CLI 壳同一验收域（"CLI 全链路可用"），不拆
@@ -204,7 +204,7 @@
 | MS10-T02 | **completed**（2026-09-08，含 Iteration 000 WAL 恢复引擎正确性收口——T0 reader 帧解析 / T0b 位置寻址重放 / B-Tree 规模缺口 G1-G3 / catalog root 同步 R5 / 扫描去重 R6 / 恢复期索引去信任+重放后重建 R7/R8，design D0+D7-D10） | 跨进程文件锁 + 优雅停机（信号接线 `close()`） | MS10-T01 | `archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/` |
 | MS10-T03 | **completed**（2026-09-08） | 文件 magic/格式版本头（FileStorage open 校验） | MS10-T01 | `archive/2026-09-08-2026-09-08-ms10-t03-file-format-header/` |
 | MS10-T04 | **completed**（2026-09-09） | 多语句执行修复（`;` 分片逐条执行 + fail-fast 序号定位 + lib 两路径显式拒绝，替换 `pipeline.rs` first() 截断；护栏退役） | MS10-T01 | `archive/2026-09-09-2026-09-08-ms10-t04-multi-statement-execution/` |
-| MS10-T05 | planned | 生命周期子命令：`new/list/schema/dump/restore/import --csv` | MS10-T01（schema 为 agent 发现刚需） | — |
+| MS10-T05 | **completed**（2026-09-09，含 Iteration 000 001-rework 建库约束持久化通道 + Iteration 001 001-rework 无键行落库语义与恢复回退） | 生命周期子命令：`new/list/schema/dump/restore/import --csv` | MS10-T01（schema 为 agent 发现刚需） | `2026-09-09-ms10-t05-lifecycle-subcommands` |
 
 - **Non-goals**: REPL（后续可选）；密钥/加密（MS12）；分析函数（MS11/MS13）；安装分发（MS13）；鉴权/多用户
 - **Workload**: CLI 模块新建（clap 依赖 + `src/cli/`）+ file_storage 锁/格式头 + pipeline 多语句 + 5 子命令
@@ -213,6 +213,7 @@
 - **Diagnostic boundary**: `src/cli/`（新模块）+ `src/main.rs` + `src/storage/file_storage.rs`（锁/格式头）+ `src/pipeline.rs`（多语句）
 - **Split signals**: 多语句分片需动 pipeline 事务语义时拆出独立 change 级任务；加密讨论提前成熟时 MS12 并行
 - **Related changes**:
+  - `2026-09-09-ms10-t05-lifecycle-subcommands`（T05 生命周期子命令 + 两轮引擎收口（Iteration 000 001-rework 建库约束持久化通道——NOT NULL/UNIQUE 经 `create_table_with_constraints` 写入 catalog；Iteration 001 001-rework 无键行落库语义——键位不可键控行落库不入索引 + 恢复 keyless 桶回退，用户裁定方向 A），已归档为 `archive/2026-09-09-2026-09-09-ms10-t05-lifecycle-subcommands/`，修改 spec `cli-noninteractive-shell`（R1 子命令分发扩展 + 新增 Requirement：new/list/schema/dump-restore/import 共 5 个）、`wal-recovery-replay-integrity`（「重放保持 DML 语义」修改 + 新增场景「无键行 Update 崩溃恢复语义正确」）。规划依据：R20 分析 + R18 主题 7/主题 5；4 Iteration（000 000-initial→001-rework、001 000-initial→001-rework），两轮 blocked 均为引擎既有缺陷经 CLI 数据面暴露（约束丢弃链 / 键位静默丢弃），Plan Review 记录 PLAN-OMISSION 与 PLAN-INVALID 各一并关闭；704 tests pass / 0 failed / 2 ignored；登记 I036-I040）
   - `2026-09-08-ms10-t04-multi-statement-execution`（T04 多语句执行修复，已归档为 `archive/2026-09-09-2026-09-08-ms10-t04-multi-statement-execution/`，修改 spec `cli-noninteractive-shell`（R1 多语句语义修正 + R5 临时护栏退役、替换为 Requirement「多语句分片逐条执行」6 场景）。规划依据：R18 主题 2/3 + spec R5 原文承诺；单 Iteration 000-initial，Plan Review accepted（6 非阻塞 finding），含 S5 见证 SQL 经用户批准修订为含 FROM 等价（no-FROM SELECT 不受支持登记 I035；裸 DataScan 表头缺口登记 I034））
   - `2026-09-08-ms10-t03-file-format-header`（T03 文件 magic/格式版本头，已归档为 `archive/2026-09-08-2026-09-08-ms10-t03-file-format-header/`，含新增 spec `database-file-format-header`，4 Requirement：R1 头布局与生命周期 / R2 格式错误显式拒绝 / R3 打开顺序守卫 / R4 既有语义零回归。规划依据：R19 分析 + 用户决策 2026-09-08（exit 1 复用 / 旧无头文件统一拒绝 / 仅主库加头 / 不加 CRC）；单 Iteration 000-initial，Plan Review accepted，含 Guidance 掩码行勘误裁定——`KNOWN_FLAGS_MASK=0`（加密位拒绝至 MS12））
   - `2026-09-06-ms10-t02-file-lock-graceful-shutdown`（T02 + Iteration 000 WAL 恢复引擎正确性收口（4 个 Iteration、6 个 Cycle：000-initial → 001-replan → 002-rework → 003-rework → 004-rework → 001-lock-shutdown/000-initial），已归档为 `archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/`，含新增 spec `database-file-lock`（R1 锁语义 / R2 生命周期）、`wal-recovery-frame-parsing`、`wal-recovery-replay-integrity`（各 2 Requirement）与修改 spec `cli-noninteractive-shell`（R1 锁冲突退出码 4 + 新增 Requirement 优雅停机 4 场景）。规划依据：MS10 稳定基线「kill 后 WAL 恢复 e2e」；design D0/D7-D10）
@@ -220,17 +221,17 @@
 
 ### MS11：SQL 表达式与函数层 — planned（分析能力主体，2026-09-06 新增）
 
-- **Status**: planned
+- **Status**: planned（T01 已完成，2026-09-10；T02/T03 待后续 change）
 - **Dependencies**: MS10（CLI 可发现 schema，agent 可验证函数行为）
 - **Outcome**: WHERE/SELECT 支持 `IN / LIKE / BETWEEN / IS NULL / CASE / COALESCE / CAST`；标量函数库第一批（string: upper/lower/length/substr/replace/trim；math: abs/round/floor/ceil）；SQL 级 `BEGIN/COMMIT/ROLLBACK` 语句（复用 MS07-T04 显式事务 API 接线 planner 语句臂）
 - **Rationale**: 分析能力的主体在 SQL 层而非 CLI 命令（R18 主题 7 结论——agent 是写 SQL 的）；事务语句与表达式四件套同为"agent 写 SQL 的日常件"，同域验收；复用已有事务 API，实现面小
 - **Scope**:
 
-| Task | 目标 | 关键前置 |
-|---|---|---|
-| MS11-T01 | 表达式四件套 + CASE/COALESCE/CAST（`parser/planner/expression.rs` 扩展） | 无 |
-| MS11-T02 | SQL 事务语句 `BEGIN/COMMIT/ROLLBACK`（planner 语句臂 + pipeline 事务态接线） | 无（API 已有，MS07-T04） |
-| MS11-T03 | 标量函数库第一批（函数注册机制 + string/math 各 5-7 个） | MS11-T01（表达式层就绪） |
+| Task | 状态 | 目标 | 关键前置 | 关联 change |
+|---|---|---|---|---|
+| MS11-T01 | **completed**（2026-09-10） | 表达式四件套 + CASE/COALESCE/CAST（`parser/planner/expression.rs` 扩展）+ SELECT 派生列 | 无 | `archive/2026-09-10-ms11-t01-sql-expressions/` |
+| MS11-T02 | planned | SQL 事务语句 `BEGIN/COMMIT/ROLLBACK`（planner 语句臂 + pipeline 事务态接线） | 无（API 已有，MS07-T04） | — |
+| MS11-T03 | planned | 标量函数库第一批（函数注册机制 + string/math 各 5-7 个） | MS11-T01（表达式层就绪） | — |
 
 - **Non-goals**: 日期/时间类型与函数（MS13 深水区）；窗口函数（OVER/PARTITION BY）；自定义函数（UDF）；聚合扩展
 - **Workload**: expression builder 扩展 + 函数注册新模块 + planner 事务臂 + 每函数/表达式测试
@@ -238,7 +239,8 @@
 - **Verification boundary**: 每函数/表达式独立测试 + parser/planner 回归（既有 585+ 零修改）
 - **Diagnostic boundary**: `src/parser/planner/expression.rs` + 新函数注册模块 + `src/parser/planner/mod.rs` 事务臂
 - **Split signals**: 单批函数超 1 change 时按 string/math 分两批；CAST 触发类型系统深层改动时拆出
-- **Related changes**: None
+- **Related changes**:
+  - `2026-09-10-ms11-t01-sql-expressions`（T01 SQL 表达式四件套与值表达式（WHERE/SELECT），已归档为 `archive/2026-09-10-ms11-t01-sql-expressions/`，含新增 spec `sql-expression-evaluation` 6 Requirement：R1 谓词四件套 / R2 三值语义 / R3 CASE-COALESCE-CAST / R4 SELECT 派生列 / R5 INSERT 负数字面量 / R6 零回归；I040 并入并标记 promoted。规划依据：R18 主题 7 + tasks MS11-T01（用户 2026-09-10 批准计划）；2 Iteration（000 WHERE 侧表达式 → 001 SELECT 派生列）各 1 Cycle accepted；两轮 Review 各修正 1 项 Plan 侧问题（Iter 000：R3 SELECT 断言归属 Iter 001 + spec R1/S3 笔误；Iter 001：`building_subquery` 子查询抑制为 T8 Preserve 必要面 + spec R6「19 种」与 design D4 矛盾勘误）；769 tests pass / 0 failed / 2 ignored）
 
 ### MS12：整库加密与 sudo 式密钥 — planned（安全域，2026-09-06 新增）
 
@@ -342,6 +344,8 @@ MS00 → MS01 → MS02
 
 | 完成日期 | 内容 | commit |
 |---|---|---|
+| 2026-09-10 | MS11-T01 SQL 表达式四件套与值表达式（WHERE/SELECT）：Iteration 000（T1-T6）三值求值内核 `Ternary`/`evaluate_ternary`（Comparison/Logical 三值重写、`evaluate()`=fold、短路保持式——既有行为逐字节等价）+ `LikePredicate`/`IsNullPredicate`/`NotPredicate` + planner 七个 WHERE 臂（IN→OR 链 / BETWEEN→AND / LIKE / IS NULL / NOT 脱糖；ESCAPE/TRY_CAST/未知 DataType 计划期拒绝）+ `contains_or` 七变体扩展 + `CaseExpression`/`CoalesceExpression`/`CastExpression`（CAST 严格四族 + 转换矩阵）+ I040 负数字面量折叠；Iteration 001（T7-T9）`ProjectionNode`（PhysicalPlan 第 20 变体）+ `ProjectionExecutor`（owned `evaluate` 逐项求值）+ SELECT 表达式项路由（AS 别名 / Display 列名 / 四拒绝面 / 聚合报错保持 / `SELECT 42` 单列怪癖修正）+ `building_subquery` 子查询上下文抑制（R6 回归修复）；新增 `tests/expression_e2e_test.rs` 24 + `tests/projection_expression_test.rs` 16 + predicate/planner/pushdown/cli 追加 24（cli_test 增至 54）；769 tests pass / 0 failed / 2 ignored（Plan Review 独立复跑 + 17 项二进制探针）；clippy/fmt/validate 全 0/PASS；两 Iteration Plan Review 均 accepted | 未 commit（待用户触发）；change 归档至 `openspec/changes/archive/2026-09-10-ms11-t01-sql-expressions/`；新增 spec `sql-expression-evaluation`（6 Requirement）；I040 → promoted |
+| 2026-09-09 | MS10-T05 生命周期子命令：4 Iteration 双轮收口（000：T1 入口重构 Option 位置参数 + `Command` 六子命令分发 + 手动 usage、T2 resolve 目录 helper `rtsql_home()/db_dir()`、T3 new（存在性拒绝 + create_dir_all + 编排复用建库）、T4 list（db_dir 枚举 .db 行集 render 输出）、T5 DDL 生成器 `create_table_sql` + schema（catalog scan → 逐表 DDL 行）；000 001-rework：建库约束持久化通道——`TableManager::create_table_with_constraints`（旧签名委托壳）+ `CreateTableExecutor` 约束透传，NOT NULL/UNIQUE 真实写入 catalog，S1 转绿；001：T6 dump（`sql_literal` 纯函数 + DDL 行 + 全行 INSERT 流）、T7 restore（空库前置 + 静默逐条循环 + `-` stdin + fail-fast 复用 `sql_failure_status`）、T8 import --csv（csv 1.4 + 表头双向匹配 + `csv_value` 类型转换 + 逐条 auto-commit + affected 输出）；001 001-rework：无键行落库语义（用户裁定方向 A）——`InsertExecutor` 键位不可键控行（NULL/非 Int）由静默丢弃改为落库不入索引 + 恢复 Update 重放 keyless 桶回退（`PkVersionMaps` keyed/keyless 双桶，非 deindexed 分支保留 RedoFailed），S3/S4 转绿；新增 `tests/keyless_row_test.rs` 4 + `test_dump_restore_roundtrip_full_shape` 全形状往返；704 tests pass / 0 failed / 2 ignored（独立复跑 2 次）；clippy/fmt/validate 全 0/PASS；两轮 Plan Review accepted（Deviation 1 PLAN-INVALID×2 非阻塞：dump SELECT 原名 + M19 路由断言修正） | 未 commit（待用户触发）；change 归档至 `openspec/changes/archive/2026-09-09-2026-09-09-ms10-t05-lifecycle-subcommands/`；修改 spec `cli-noninteractive-shell`（R1 子命令分发扩展 + 新增 5 Requirement：new/list/schema/dump-restore/import）+ `wal-recovery-replay-integrity`（「重放保持 DML 语义」修改 + 无键行恢复场景）；登记 I036-I040 |
 | 2026-09-09 | MS10-T04 多语句执行修复：`src/cli/mod.rs::run_sql` T01 护栏移除 → 分片逐条循环（每条独立 `plan_stage` 缓存键 = `stmt.to_string()` canonical 文本 D5 → `get_plan_output_columns` → `execute_stage` 逐条 auto-commit D4 → `render`+`emit_stdout` 顺序写出 D2）；`sql_failure_status` 定位模板 `statement {k} of {n} failed: {error}; statement: {stmt_text}`（200 字符截断）+ k>1 追加 `; previous statement(s) were committed`（D3），parse 错误保持透传（零执行+行列文本）；`src/pipeline.rs` `execute_inner`/`execute_in_tx` 对 `len>1` 在 plan_stage/cache put 前返回 `Response::Error`（D6，共享 `multi_statement_rejected` helper）——静默 first() 截断收口；cli_test 护栏用例重写为 `test_multi_statement_executes` + 新增 sequential_render / semicolon_boundaries / fail_fast / parse_error_zero_exec（S5 见证经用户批准修订为含 FROM 等价 SQL）；file_header_test 2 处 `repeat_n` clippy 债务清偿；671 tests pass / 0 failed / 2 ignored；clippy/fmt/validate 全 0/PASS；Plan Review accepted（6 非阻塞 finding：S5 修订×2、数值勘误、裸 DataScan 表头 NEW-EVIDENCE→I034、kind() 重算不处理） | 8827700（实施，含 change 目录）；docs sync 归档至 `openspec/changes/archive/2026-09-09-2026-09-08-ms10-t04-multi-statement-execution/`；修改 spec `cli-noninteractive-shell`（R1 修正 + R5 替换为「多语句分片逐条执行」6 场景）；登记 I034/I035 |
 | 2026-09-08 | MS10-T03 文件 magic/格式版本头：`src/storage/file_header.rs` 新模块（64B 布局 D1：magic `RTSQLDB\0` + version u32 LE=1 + flags u32 LE + page_size u32 LE=4096 + 32B 盐预留 + 12B 保留；encode/decode 纯函数 + 私有 HeaderError 六分类；KNOWN_FLAGS_MASK=0——加密位拒绝至 MS12）；`FileStorage::open` 按 D4 接线（锁原样 → 0 字节写头无 fsync → 分类校验先于页解析/WAL 触碰）；read/write/allocate 3 处页偏移 +HEADER_SIZE（`to_offset` 纯数学不变）；error.rs +NotADatabase/NewerFileVersion/IncompatibleHeader（additive，CLI General 分支 exit 1，锁冲突仍 exit 4 优先）；新增 `tests/file_header_test.rs` 14（头生命周期 + 拒绝矩阵 + Database 级垃圾 8k 干净拒绝——RED 基线 SIGABRT 134 消除 + 锁优先守卫）+ database_file_lock_test 1 + cli_test 4（垃圾 exit 1 内容未改 / newer version 文案 / 零伴生 / 锁优先 exit 4）；665 tests pass / 0 failed / 2 ignored；clippy/fmt/validate 全 0；Plan Review accepted（4 非阻塞 finding，含 Guidance 掩码勘误） | 2eda010；change 归档至 `openspec/changes/archive/2026-09-08-2026-09-08-ms10-t03-file-format-header/`；新增 spec `database-file-format-header`（4 Requirement） |
 | 2026-09-08 | MS10-T02 跨进程文件锁 + 优雅停机 + Iteration 000 WAL 恢复引擎正确性（design D0/D7-D10）：T2 `FileStorage::open` try_lock 独占锁（`StorageError::DatabaseLocked`，先于 WAL 打开与恢复）+ T3 CLI 锁冲突 exit 4（存量收编，hunk 摘除 RED 复现）；T4 两阶段 select 优雅停机（`execute_command_inner`：open/执行各与信号竞争，信号臂 → `close()` checkpoint → `Signaled(signum)` exit 130/143；打开阶段无 close）+ D5-⑤ 库级结构测试（Notify 握手使信号确定落在执行阶段：WAL<1KB 证 close 已执行）+ 打开阶段 WAL>2KB 断言 + 重标定（D10 后 40k→8.86s、160k→40.7s，`WAL_ROWS=40_000`）；Iteration 000 引擎正确性：T0 reader 逐帧无歧义（歧义偏移先新格式 CRC 验证、失败回退旧格式，修复嗅探 derail 79/2046 帧）、T0b 位置寻址重放（redo 按记录 `row_id` 写入：slot 已存在跳过/稠密落位校验/未初始化页 init + Update 版本链重建 + Delete 墓碑，修复 10k 重开 13190≠10000）、G1-G3 B-Tree 规模缺口（`Key::deserialize` 32 字节定长比较修最小键盲区 / delete 重平衡 Page-full / 内部节点 update）、R5 catalog `index_root_page_id` 根变更同步、R6 DataScan 替代集合去重（产出 ⟺ 可见 ∧ 无已提交非墓碑替代者——运行期与恢复同源修复 110→100）、R7/R8 恢复期索引去信任 + 重放后重建（撕裂树修复：中位点 checkpoint 后页驱逐按 LRU 而非树拓扑刷盘致磁盘树含洞/孤儿（裸读实测 184/10000 可达 + 洞页）→ `redo_count > 0` 时恢复零消费磁盘索引树，Update `old_row_id` 由磁盘版本多映射 max-rid 派生 + old_tuple 校验，重放后从最终数据页重建 PK 索引（链尾回溯 + 重复 PK 显式报错保 K05）+ `replace_index_manager` 换入 + catalog root 写回 + 洞容忍释放旧树；`redo_count == 0` 路径零变化）；6 个 Cycle（000-initial → 001-replan → 002-rework → 003-rework → 004-rework；001-lock-shutdown/000-initial），6 轮 Plan Review（2 次 rework 扩面经用户 Gate 2 批准）；636 tests pass / 0 failed（白名单清零）/ clippy 0 / fmt 0 / validate 18 PASS | 5855245；change 归档至 `openspec/changes/archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/`；新增 spec `database-file-lock`（R1 独占锁语义 / R2 生命周期与释放）、`wal-recovery-frame-parsing`（2 Requirement）、`wal-recovery-replay-integrity`（2 Requirement），修改 spec `cli-noninteractive-shell`（R1 锁冲突 exit 4 场景 + 新增 Requirement 优雅停机 4 场景）；登记 I031-I033 + K38 |

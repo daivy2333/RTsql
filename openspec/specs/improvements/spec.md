@@ -30,35 +30,6 @@
 
 ## Phase 3 并发控制
 
-## I009: M40 RowLockTable DashMap
-
-- **分类**: 性能 / 并发
-- **问题**: `Arc<Mutex<HashMap>>` 行锁获取/释放串行化
-- **方案**: `DashMap<RowId, Arc<Mutex<()>>>`
-- **预期**: 行锁争抢 -5-10x
-- **依赖**: M31（已完成）
-- **状态**: planned（P3）
-- **Legacy**: O009
-
-## I010: M34 WAL fsync 合并
-
-- **分类**: 性能 / WAL
-- **问题**: 每事务提交单独 fsync，系统调用开销巨大
-- **方案**: `tokio::time::interval` 定时器 + 累积多条记录一次 fsync
-- **预期**: TPS 3-10x
-- **依赖**: 无（M30 完成后可立即开始）
-- **状态**: planned（P3）
-- **Legacy**: O010
-
-## I011: M32 WAL 写入背压
-
-- **分类**: 性能 / WAL
-- **问题**: WAL 无背压，高并发缓冲区膨胀
-- **方案**: `Semaphore(WAL_MAX_PENDING)` 限制等待刷盘事务数
-- **依赖**: M34（I010）
-- **状态**: planned（P3）
-- **Legacy**: O011
-
 ## I012: M42 消息传递重构
 
 - **分类**: 架构 / 可维护性
@@ -67,15 +38,6 @@
 - **依赖**: M32（I011）
 - **状态**: planned（P3）
 - **Legacy**: O012
-
-## I013: M48 pread/pwrite 替代 seek+read
-
-- **分类**: 性能 / 系统调用
-- **问题**: 文件读写用 `seek()+read()/write()` 两次 syscall
-- **方案**: `FileExt::read_at()` / `write_at()` 单次 syscall
-- **预期**: syscall -50%
-- **状态**: planned（P3，独立）
-- **Legacy**: O013
 
 ## Phase 4 上层功能
 
@@ -117,21 +79,14 @@
 
 ## I018: M28 多层关联子查询
 
+⚠️ STALE [2026-09-09] — 建议在 30 天内确认、更新或归档（无路线图归属，规划时决断）
+
 - **分类**: 功能 / 子查询
 - **问题**: 显式拒绝多层嵌套
 - **方案**: 递归遍历 + 多层注入
 - **依赖**: M27（I017）
 - **状态**: planned（P4）
 - **Legacy**: O018
-
-## I019: M29 PG Extended Query Protocol
-
-- **分类**: 功能 / 协议
-- **问题**: 只有 Simple Query
-- **方案**: Parse/Bind/Describe/Execute + Prepared Statement
-- **依赖**: M38（已完成）
-- **状态**: planned（P4）
-- **Legacy**: O019
 
 ## I020: M37 clone 消除 Arc/Cow
 
@@ -144,6 +99,8 @@
 
 ## I021: M39 INSERT 批量执行
 
+⚠️ STALE [2026-09-09] — 建议在 30 天内确认、更新或归档（无路线图归属，规划时决断）
+
 - **分类**: 性能 / 写入
 - **问题**: 多值 INSERT 逐行执行
 - **方案**: `bulk_insert(keys)` + `append_batch(records)`
@@ -151,26 +108,7 @@
 - **状态**: planned（P4）
 - **Legacy**: O021
 
-## I022: M44 表定义持久化
-
-- **分类**: 功能 / 持久化
-- **问题**: `TableManager` 纯内存，重启丢失
-- **方案**: Schema Page（系统表 `__tables` / `__columns`）
-- **依赖**: 无
-- **状态**: planned（P4）
-- **Legacy**: O022, K05
-
 ## Phase 5 高级优化
-
-## I023: M22 预取 Prefetch
-
-- **分类**: 性能 / I/O
-- **问题**: 顺序扫描逐页读，I/O 延迟未重叠
-- **方案**: `Prefetcher` 双缓冲 + 异步预取下一页
-- **预期**: 大表 ~15-25%
-- **依赖**: M19（已完成）+ M31（已完成）
-- **状态**: planned（P5）
-- **Legacy**: O023, D12 下游
 
 ## I024: M23 Varint Key 编码
 
@@ -202,6 +140,8 @@
 - **Legacy**: O026, D12 下游
 
 ## I027: M43 并行扫描
+
+⚠️ STALE [2026-09-09] — 建议在 30 天内确认、更新或归档（无路线图归属，规划时决断）
 
 - **分类**: 性能 / 并行
 - **问题**: 全表扫描单线程
@@ -280,3 +220,50 @@
 - **影响**: 常量表达式查询、`SELECT current_setting()` 类无表探测不可达；agent/脚本日常探测用法受挫
 - **方案**: planner 增加 no-FROM SELECT 臂（单行虚拟输入），属引擎能力扩展，需独立 change
 - **状态**: planned
+
+## I036: planner 简单 PK 等值 + 非 Int 字面量路由 Filter(Scan) 对无键行不可达
+
+- **分类**: 正确性 / planner 路由
+- **问题**: `WHERE <键列> = <非 Int 字面量>`（如 String 首列隐式 PK 表的 `WHERE s = 'x'`）经 `has_pk_equality` 结构化判定（不问可键控性）生成 Filter(Scan)，`ScanExecutor` 走 `index_manager.scan_all()` 索引遍历——键位不可键控（NULL/非 Int）的行落库不入索引（MS10-T05 001-rework 语义），经该 WHERE 形态不可达；无键行仅经非 PK 谓词或无 WHERE 的 DataScan 路径可见
+- **证据**: MS10-T05 Iteration 001 001-rework Act Deviation 1 真二进制探针 + Plan Review 独立核实 `src/parser/planner/query.rs:430-475`（2026-09-09，归档 change `2026-09-09-2026-09-09-ms10-t05-lifecycle-subcommands`）
+- **影响**: 对含无键行的表按键位等值过滤漏行（静默不完整结果）；此前该形态表恒为空、行为不可观察
+- **方案**: planner 对键位等值 + 不可键控字面量回退 DataScan 行内过滤（`to_key()==None` 时禁用索引路由）；属 planner 路由面，需独立 change
+- **状态**: planned
+
+## I037: UPDATE 键位为无键值后运行期旧键索引条目指向无键版本
+
+- **分类**: 正确性 / update 执行器索引维护
+- **问题**: 键行经 `UPDATE SET <键列> = NULL`（或不可键控值）后，`UpdateExecutor` 以旧 key 无条件 `index_manager.update(&self.key, new_row_id)`（`src/executor/update.rs:130-133`）——旧键条目指向键位已为 NULL 的版本：运行期对该键值 INSERT 被 DuplicateKey 误拒（无行实际持有该键值）、点查可达性语义含混；崩溃恢复后重建自然清除（无键版本不入重建索引），运行期与恢复后两态不一致
+- **证据**: MS10-T05 Iteration 001 001-rework Plan Review Finding 5 代码核实 + `tests/keyless_row_test.rs` 恢复面行为（2026-09-09，归档 change 同上）；修复前该形态 Update 重放 RedoFailed（库不可打开），001-rework 后恢复面正确
+- **影响**: 运行期唯一性检查误拒；运行期/恢复后索引内容不一致（重开自愈）
+- **方案**: update 执行器对新值 `to_key()==None` 改为删除旧键条目（`index_manager.delete`）而非 update；行为变化需回归 `tests/keyless_row_test.rs` 与恢复套件
+- **状态**: planned
+
+## I038: GC 对无键行版本链不可达（gc_table scan_all 盲区）
+
+- **分类**: 资源 / GC 覆盖面
+- **问题**: `TableMeta::gc_table` 经 `index_manager.scan_all()` 枚举版本链，键位不可键控的行（MS10-T05 001-rework 起落库不入索引）不在索引中——其旧版本链永不被 GC 清理
+- **证据**: MS10-T05 Iteration 001 001-rework Plan Context Risks 预判 + 实施后语义成立（2026-09-09，归档 change 同上）；`gc_table` 为可选维护路径（M10）
+- **影响**: 含无键行的表长期频繁 UPDATE 场景下旧版本空间不回收；无正确性影响
+- **方案**: GC 增加数据页链全扫模式（不经索引）或无键链登记结构；需评估成本后独立 change
+- **状态**: planned
+
+## I039: 多代 dump/restore 表名引号膨胀（ObjectName Display 即表名）
+
+- **分类**: 正确性 / dump 保真
+- **问题**: 引擎以 ObjectName 的 Display 形式为表名（`pipeline.rs:950/963`、`query.rs:101`、`ddl_dml.rs:287`）——带引号 DDL restore 重建后表名含引号字符，对该库再 dump 出现引号膨胀（`"items"` → `"""items"""`）；一代往返数据等价（`test_dump_restore_roundtrip_full_shape` 锁定），多代往返表名不保真；schema 命令对带引号建表同病
+- **证据**: MS10-T05 Iteration 001 000-initial Act Deviation 1 探针 + Remaining Issues #2（2026-09-09，归档 change 同上）
+- **影响**: 多代 dump→restore 链路表名逐代膨胀；Display 安全表名（CLI 常规路径）不受影响
+- **方案**: 表名解析侧归一化（去引号）或 DDL 生成侧条件引号；涉引擎表名语义，需独立调查
+- **状态**: planned
+
+## I040: 负数字面量 INSERT 不可达（UnaryOp → UnsupportedValue）
+
+- **分类**: 功能 / SQL 能力边界
+- **问题**: planner `extract_insert_values` 只接受 `Expr::Value`/裸 NULL，负数被 sqlparser 解析为 UnaryOp → `UnsupportedValue`（`src/parser/planner/ddl_dml.rs:119`）——`INSERT INTO t VALUES (-1, ...)` 不可达；import/restore 对含负数的 CSV/dump 文本 exit 3 响亮失败（非静默）
+- **证据**: MS10-T05 Iteration 001 000-initial Act Deviation 2 + Remaining Issues #3（2026-09-09，归档 change 同上）；`sql_literal` 对负数的渲染由 lib 单测锁定（导出侧正确、导入侧受限）
+- **影响**: 负数数据无法经 SQL 面入库；dump 含负数文本的库无法 restore
+- **方案**: `extract_insert_values` 接受 `UnaryOp::Neg(Value)` 折叠为负值；SQL 语义扩展，需独立 change
+- **状态**: promoted（2026-09-10 并入 MS11-T01 实施——`extract_insert_values` +`UnaryOp{Minus, Value}` 臂，dump/restore/import 同函数自动受益；change 归档 `openspec/changes/archive/2026-09-10-ms11-t01-sql-expressions/`，spec `sql-expression-evaluation` R5）
+
+<!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
