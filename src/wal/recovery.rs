@@ -22,11 +22,21 @@ pub struct RecoveryResult {
     pub redo_count: usize,
 }
 
-/// R-T0b-R7 (D10): table name → PK key → ascending row ids of every disk
-/// version of that key. Built from the pre-replay data pages when this open
-/// replays at least one committed data record, extended as records replay.
-/// Update-arm `old_row_id` derivation reads it instead of the on-disk B-Tree.
-type PkVersionMaps = HashMap<String, HashMap<Vec<u8>, Vec<RowId>>>;
+/// R-T0b-R7 (D10) + T8-R2：重放期的磁盘版本多映射，按表分桶。
+///
+/// - `keyed`：table → PK key → 升序 row ids（键位可键控的版本，键 =
+///   `Value::to_key` 字节）。
+/// - `keyless`：table → tuple 原始字节 → 升序 row ids（键位不可键控的
+///   版本——T8-R1 起落库不入索引的行；桶键即 tuple 字节，Update 推导按
+///   old_tuple 字节取候选集）。
+///
+/// Update 臂 `old_row_id` 推导读取对应桶；判重与索引维护由重放后的重建
+/// 统一负责（R-T0b-R8）。
+#[derive(Default)]
+struct PkVersionMaps {
+    keyed: HashMap<String, HashMap<Vec<u8>, Vec<RowId>>>,
+    keyless: HashMap<String, HashMap<Vec<u8>, Vec<RowId>>>,
+}
 
 /// 恢复上下文：跨 `redo_record` 调用追踪每张表的链/tail 状态。
 ///
@@ -67,9 +77,17 @@ fn insert_row_id_sorted(candidates: &mut Vec<RowId>, rid: RowId) {
 }
 
 /// 页扫描闭包产出：`data_page.rs` 页遍历共用形态（build_pk_version_maps）。
-type PreScanPage = crate::storage::Result<(u32, Vec<(Vec<u8>, RowId)>)>;
+/// slot 键：可键控 slot 携带 PK 键；无键 slot 携带 tuple 原始字节（T8-R2
+/// keyless 桶的桶键）。
+type PreScanPage = crate::storage::Result<(u32, Vec<(PrescanSlotKey, RowId)>)>;
 /// 页扫描闭包产出（rebuild_pk_indexes）：(rid, header, PK key)。
 type RebuildScanPage = crate::storage::Result<(u32, Vec<(RowId, VersionHeader, Option<Vec<u8>>)>)>;
+
+/// 预扫描 slot 键（T8-R2）：`Keyed` = PK 键字节；`Keyless` = tuple 原始字节。
+enum PrescanSlotKey {
+    Keyed(Vec<u8>),
+    Keyless(Vec<u8>),
+}
 
 /// 位置寻址写入 helper：把 (vh + tuple_bytes) 落到 WAL 记录的 (page, slot)。
 ///
@@ -170,7 +188,9 @@ async fn redo_tuple_at_row_id(
 ///
 /// 复用 executor 的 `deserialize_tuple`，按 `TableMeta.pk_index` 选列，
 /// 调用 `Value::to_key()` 得到 `Option<Vec<u8>>`。None 表示该 PK 类型
-/// 不支持索引（String/Float/Bool/Null）——重放下应直接报 `RedoFailed`。
+/// 不支持索引（String/Float/Bool/Null）——T8-R2 起无键版本按 tuple 原始
+/// 字节入 keyless 桶追踪（重放路径）；仅 `redo_count == 0` 的既有路径
+/// （对重放记录不可达）保留 RedoFailed 语义。
 fn extract_pk_key(table_meta: &Arc<TableMeta>, tuple_data: &[u8]) -> Option<Vec<u8>> {
     let schema: Vec<_> = table_meta
         .columns
@@ -192,7 +212,7 @@ async fn build_pk_version_maps(
     buffer_pool: &Arc<BufferPool>,
     table_manager: &Arc<TableManager>,
 ) -> Result<PkVersionMaps, WalError> {
-    let mut maps: PkVersionMaps = HashMap::new();
+    let mut maps = PkVersionMaps::default();
     let tables =
         table_manager.catalog().scan_tables().await.map_err(|e| {
             WalError::RedoFailed(format!("recovery pre-scan catalog failed: {}", e))
@@ -206,7 +226,8 @@ async fn build_pk_version_maps(
                 table_name, e
             ))
         })?;
-        let table_map = maps.entry(table_name).or_default();
+        let keyed_map = maps.keyed.entry(table_name.clone()).or_default();
+        let keyless_map = maps.keyless.entry(table_name).or_default();
 
         let mut page_id = Some(meta.data_page_head);
         while let Some(pid) = page_id {
@@ -225,11 +246,13 @@ async fn build_pk_version_maps(
                         if VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE]).is_none() {
                             continue;
                         }
-                        let Some(key) = extract_pk_key(&meta, &slot_data[VersionHeader::SIZE..])
-                        else {
-                            continue;
+                        let slot_tuple = &slot_data[VersionHeader::SIZE..];
+                        // T8-R2: 无键 slot 按 tuple 原始字节入 keyless 桶
+                        let slot_key = match extract_pk_key(&meta, slot_tuple) {
+                            Some(key) => PrescanSlotKey::Keyed(key),
+                            None => PrescanSlotKey::Keyless(slot_tuple.to_vec()),
                         };
-                        entries.push((key, RowId::new(pid.0 as u32, slot.logical_id)));
+                        entries.push((slot_key, RowId::new(pid.0 as u32, slot.logical_id)));
                     }
                     Ok((slotted.header().next_page_id, entries))
                 })
@@ -241,8 +264,12 @@ async fn build_pk_version_maps(
                     ))
                 })?;
 
-            for (key, rid) in entries {
-                table_map.entry(key).or_default().push(rid);
+            for (slot_key, rid) in entries {
+                let bucket = match slot_key {
+                    PrescanSlotKey::Keyed(key) => keyed_map.entry(key).or_default(),
+                    PrescanSlotKey::Keyless(tuple) => keyless_map.entry(tuple).or_default(),
+                };
+                bucket.push(rid);
             }
             page_id = if next_page == 0 {
                 None
@@ -251,7 +278,7 @@ async fn build_pk_version_maps(
             };
         }
 
-        for candidates in table_map.values_mut() {
+        for candidates in keyed_map.values_mut().chain(keyless_map.values_mut()) {
             candidates.sort_by_key(|rid| (rid.page_id, rid.slot_id));
         }
     }
@@ -517,15 +544,28 @@ impl RecoveryManager {
                 // 2. 索引维护——D10 (R-T0b-R7)：重放形态下 B-Tree 自由，
                 // 位置写入后向多映射追加版本；判重职责移至重放后的重建
                 // （R-T0b-R8，K05 保持）。redo_count == 0 维持磁盘树路径。
+                // T8-R2：无键版本按 tuple 原始字节入 keyless 桶。
                 if ctx.is_deindexed() {
                     let maps = ctx.pk_versions.as_mut().expect("deindexed mode");
-                    if let Some(key) = extract_pk_key(&table_meta, tuple_data) {
-                        let candidates = maps
-                            .entry(table_name.clone())
-                            .or_default()
-                            .entry(key)
-                            .or_default();
-                        insert_row_id_sorted(candidates, *row_id);
+                    match extract_pk_key(&table_meta, tuple_data) {
+                        Some(key) => {
+                            let candidates = maps
+                                .keyed
+                                .entry(table_name.clone())
+                                .or_default()
+                                .entry(key)
+                                .or_default();
+                            insert_row_id_sorted(candidates, *row_id);
+                        }
+                        None => {
+                            let candidates = maps
+                                .keyless
+                                .entry(table_name.clone())
+                                .or_default()
+                                .entry(tuple_data.clone())
+                                .or_default();
+                            insert_row_id_sorted(candidates, *row_id);
+                        }
                     }
                     return Ok(());
                 }
@@ -586,27 +626,36 @@ impl RecoveryManager {
 
                 // 1. 从 old_tuple 解 PK → 派生 old_row_id。
                 //    D10 (R-T0b-R7)：重放形态下经多映射派生（max rid <
-                //    record.row_id + old_tuple 逐字节校验，K05）；否则
-                //    磁盘树 search（redo_count == 0 既有路径）。
-                let old_key = match extract_pk_key(&table_meta, old_tuple) {
-                    Some(k) => k,
-                    None => {
-                        return Err(WalError::RedoFailed(format!(
-                            "update redo: table '{}' old PK extraction failed",
-                            table_name
-                        )))
-                    }
-                };
+                //    record.row_id + old_tuple 逐字节校验，K05）；T8-R2：
+                //    old_tuple 无键时按 tuple 原始字节从 keyless 桶取候选集；
+                //    否则磁盘树 search（redo_count == 0 既有路径，无键仍
+                //    RedoFailed——该分支对重放记录不可达）。
+                let old_key = extract_pk_key(&table_meta, old_tuple);
                 let old_row_id = if ctx.is_deindexed() {
                     let maps = ctx.pk_versions.as_ref().expect("deindexed mode");
-                    let candidates = maps
-                        .get(table_name.as_str())
-                        .and_then(|m| m.get(&old_key))
-                        .map(|v| v.as_slice())
-                        .unwrap_or(&[]);
+                    let candidates: &[RowId] = match &old_key {
+                        Some(key) => maps
+                            .keyed
+                            .get(table_name.as_str())
+                            .and_then(|m| m.get(key))
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[]),
+                        None => maps
+                            .keyless
+                            .get(table_name.as_str())
+                            .and_then(|m| m.get(old_tuple))
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[]),
+                    };
                     derive_old_row_id(buffer_pool, table_name, candidates, *row_id, old_tuple)
                         .await?
                 } else {
+                    let old_key = old_key.ok_or_else(|| {
+                        WalError::RedoFailed(format!(
+                            "update redo: table '{}' old PK extraction failed",
+                            table_name
+                        ))
+                    })?;
                     table_meta
                         .index_manager
                         .search(&old_key)
@@ -643,15 +692,28 @@ impl RecoveryManager {
 
                 // 4. 索引维护——D10 (R-T0b-R7)：重放形态下向多映射追加新
                 // 版本，索引由重建统一负责；redo_count == 0 维持磁盘树 update。
+                // T8-R2：无键新版本按 tuple 原始字节入 keyless 桶。
                 if ctx.is_deindexed() {
-                    if let Some(new_key) = extract_pk_key(&table_meta, new_tuple) {
-                        let maps = ctx.pk_versions.as_mut().expect("deindexed mode");
-                        let candidates = maps
-                            .entry(table_name.clone())
-                            .or_default()
-                            .entry(new_key)
-                            .or_default();
-                        insert_row_id_sorted(candidates, *row_id);
+                    let maps = ctx.pk_versions.as_mut().expect("deindexed mode");
+                    match extract_pk_key(&table_meta, new_tuple) {
+                        Some(new_key) => {
+                            let candidates = maps
+                                .keyed
+                                .entry(table_name.clone())
+                                .or_default()
+                                .entry(new_key)
+                                .or_default();
+                            insert_row_id_sorted(candidates, *row_id);
+                        }
+                        None => {
+                            let candidates = maps
+                                .keyless
+                                .entry(table_name.clone())
+                                .or_default()
+                                .entry(new_tuple.clone())
+                                .or_default();
+                            insert_row_id_sorted(candidates, *row_id);
+                        }
                     }
                 } else {
                     let new_key = match extract_pk_key(&table_meta, new_tuple) {

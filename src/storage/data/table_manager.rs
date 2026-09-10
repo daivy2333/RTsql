@@ -212,6 +212,27 @@ impl TableManager {
         columns: Vec<(String, ColumnType)>,
         pk: &str,
     ) -> Result<()> {
+        let columns = columns
+            .into_iter()
+            .map(|(col_name, col_type)| (col_name, col_type, false, false))
+            .collect();
+        self.create_table_with_constraints(name, columns, pk).await
+    }
+
+    /// Register a new table, persisting per-column NOT NULL / UNIQUE flags to
+    /// the catalog (MS10-T05 Iter000 001-rework, T5-R1). The flags are
+    /// metadata only: no INSERT or recovery path enforces them. `create_table`
+    /// delegates here with both flags false, keeping legacy call sites'
+    /// observable behavior identical.
+    ///
+    /// # Errors
+    /// Same as [`TableManager::create_table`].
+    pub async fn create_table_with_constraints(
+        &self,
+        name: &str,
+        columns: Vec<(String, ColumnType, bool, bool)>,
+        pk: &str,
+    ) -> Result<()> {
         // --- reserved name guard (BEFORE duplicate check) ---
         if name == TABLES_SYSTEM_NAME || name == COLUMNS_SYSTEM_NAME {
             return Err(StorageError::ReservedTableName(name.to_string()));
@@ -228,7 +249,7 @@ impl TableManager {
         // --- validate PK column ---
         let pk_index = columns
             .iter()
-            .position(|(col_name, _)| col_name == pk)
+            .position(|(col_name, _, _, _)| col_name == pk)
             .ok_or_else(|| StorageError::ColumnNotFound(pk.to_string()))?;
 
         // --- allocate data page head ---
@@ -250,9 +271,15 @@ impl TableManager {
         let index_root_page_id = index_manager.root_page_id().0 as u32;
 
         // --- build TableMeta ---
+        // TableMeta 只承载 (name, type) 运行时形状：约束是 catalog 元数据，
+        // 不进入内存 schema（open_or_init 恢复路径同形状）。
+        let schema_cols: Vec<(String, ColumnType)> = columns
+            .iter()
+            .map(|(col_name, col_type, _, _)| (col_name.clone(), col_type.clone()))
+            .collect();
         let table_meta = Arc::new(TableMeta {
             name: name.to_string(),
-            columns: columns.clone(),
+            columns: schema_cols,
             pk_column: pk.to_string(),
             pk_index,
             index_manager,
@@ -282,14 +309,16 @@ impl TableManager {
         let catalog_cols: Vec<CatalogColumnRow> = columns
             .iter()
             .enumerate()
-            .map(|(idx, (col_name, col_type))| CatalogColumnRow {
-                table_name: name.to_string(),
-                column_index: idx as u32,
-                column_name: col_name.clone(),
-                column_type: col_type.clone(),
-                not_null: false,
-                unique: false,
-            })
+            .map(
+                |(idx, (col_name, col_type, not_null, unique))| CatalogColumnRow {
+                    table_name: name.to_string(),
+                    column_index: idx as u32,
+                    column_name: col_name.clone(),
+                    column_type: col_type.clone(),
+                    not_null: *not_null,
+                    unique: *unique,
+                },
+            )
             .collect();
         if let Err(e) = self.catalog.insert_table(&catalog_row, &catalog_cols).await {
             // Roll back the in-memory insert to keep state consistent.
@@ -458,5 +487,53 @@ impl TableManager {
                 .await?;
         }
         Ok(row_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::FileStorage;
+    use tempfile::tempdir;
+
+    /// MS10-T05 Iter000 001-rework (T5-R1): 约束经 SQL 建库链写入 catalog 既有
+    /// not_null/unique 字段并经 scan_columns 读回；旧签名委托路径显式 false。
+    #[tokio::test]
+    async fn create_table_with_constraints_persists_flags() {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool, storage).await.unwrap();
+
+        tm.create_table_with_constraints(
+            "t",
+            vec![
+                ("id".to_string(), ColumnType::Int, false, false),
+                ("name".to_string(), ColumnType::String(255), true, true),
+            ],
+            "id",
+        )
+        .await
+        .unwrap();
+
+        let mut cols = tm.catalog().scan_columns("t").await.unwrap();
+        cols.sort_by_key(|c| c.column_index);
+        assert_eq!(cols.len(), 2, "both columns persisted: {cols:?}");
+        assert!(
+            !cols[0].not_null && !cols[0].unique,
+            "flagless column must stay false: {cols:?}"
+        );
+        assert!(cols[1].not_null, "NOT NULL must persist: {cols:?}");
+        assert!(cols[1].unique, "UNIQUE must persist: {cols:?}");
+
+        // 旧签名委托：行为与改造前逐字一致（flags 恒 false）
+        tm.create_table("plain", vec![("a".to_string(), ColumnType::Int)], "a")
+            .await
+            .unwrap();
+        let cols = tm.catalog().scan_columns("plain").await.unwrap();
+        assert!(
+            !cols[0].not_null && !cols[0].unique,
+            "legacy create_table must keep flags false: {cols:?}"
+        );
     }
 }

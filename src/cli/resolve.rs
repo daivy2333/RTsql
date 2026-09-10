@@ -2,6 +2,24 @@
 
 use std::path::PathBuf;
 
+/// 基目录推导：`$RTSQL_HOME`（未设置时 `$HOME/.rtsql`）；双缺失 Err。
+pub(crate) fn rtsql_home() -> Result<PathBuf, String> {
+    match std::env::var("RTSQL_HOME") {
+        Ok(home) => Ok(PathBuf::from(home)),
+        Err(_) => {
+            let home = std::env::var("HOME").map_err(|_| {
+                "neither RTSQL_HOME nor HOME is set; cannot resolve database name".to_string()
+            })?;
+            Ok(PathBuf::from(home).join(".rtsql"))
+        }
+    }
+}
+
+/// 集中存储目录：`<base>/db`。
+pub(crate) fn db_dir() -> Result<PathBuf, String> {
+    Ok(rtsql_home()?.join("db"))
+}
+
 /// 解析 `<db>` 参数为数据库文件路径。
 ///
 /// - 含 `/`：按路径直接使用（相对或绝对路径）。
@@ -13,16 +31,7 @@ pub fn resolve_db_path(arg: &str) -> Result<PathBuf, String> {
     if arg.contains('/') {
         return Ok(PathBuf::from(arg));
     }
-    let base = match std::env::var("RTSQL_HOME") {
-        Ok(home) => PathBuf::from(home),
-        Err(_) => {
-            let home = std::env::var("HOME").map_err(|_| {
-                "neither RTSQL_HOME nor HOME is set; cannot resolve database name".to_string()
-            })?;
-            PathBuf::from(home).join(".rtsql")
-        }
-    };
-    Ok(base.join("db").join(format!("{}.db", arg)))
+    Ok(db_dir()?.join(format!("{}.db", arg)))
 }
 
 #[cfg(test)]
@@ -90,5 +99,30 @@ mod tests {
         std::env::remove_var("RTSQL_HOME");
         std::env::remove_var("HOME");
         assert!(resolve_db_path("foo").is_err());
+    }
+
+    #[test]
+    fn test_db_dir_env_cases() {
+        let _guard = EnvGuard::capture();
+
+        // HOME 默认基目录：base/db
+        std::env::remove_var("RTSQL_HOME");
+        std::env::set_var("HOME", "/home/testuser");
+        assert_eq!(
+            rtsql_home().unwrap(),
+            PathBuf::from("/home/testuser/.rtsql")
+        );
+        assert_eq!(db_dir().unwrap(), PathBuf::from("/home/testuser/.rtsql/db"));
+
+        // RTSQL_HOME 覆盖默认基目录
+        std::env::set_var("RTSQL_HOME", "/tmp/rtshome");
+        assert_eq!(rtsql_home().unwrap(), PathBuf::from("/tmp/rtshome"));
+        assert_eq!(db_dir().unwrap(), PathBuf::from("/tmp/rtshome/db"));
+
+        // HOME 与 RTSQL_HOME 均缺失 → Err
+        std::env::remove_var("RTSQL_HOME");
+        std::env::remove_var("HOME");
+        assert!(rtsql_home().is_err());
+        assert!(db_dir().is_err());
     }
 }
