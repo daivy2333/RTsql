@@ -97,22 +97,6 @@
 - **状态**: active
 - **Legacy**: R003
 
-## 项目测试统计
-
-## R05: 项目测试统计（2026-06-04）
-
-- **类型**: schema
-- **用途**: 当前测试覆盖与基准测试清单
-- **内容**:
-  - 总测试数: 475 tests pass, 0 failures（2026-06-04 统计；M31 完成后 481 tests pass）
-  - Executor 测试: executor_test.rs（29 tests，含 M19 DataScan 8 tests）
-  - 聚合测试: aggregate_test.rs（19 tests）
-  - B-Tree 测试: btree_test.rs + btree_split_test.rs + btree_merge_test.rs（22 tests）
-  - Visibility 测试: visibility_test.rs（5 tests，含 M21 页面级 MVCC）
-  - 基准测试: 8 套（micro/concurrent/scale/sqlite_compare/single/precise_compare/data_scan/visibility）
-- **状态**: active（数值会随实施更新）
-- **Legacy**: R004
-
 ## 已迁移的旧 analysis 文档（指针）
 
 ## R06: M19 DataScan 路径分析（已实施）
@@ -274,3 +258,13 @@
 - **日期**: 2026-09-08（revision `268fa4f`）
 - **用途**: MS10-T03（文件 magic/格式版本头）Plan 的实现调查输入——格式头校验插入点（`FileStorage::open` 锁后、页解析前）、`to_offset` 唯一偏移源与 catalog 保留页 0/1 约束、放置方案对比（前缀头偏移平移 vs 超级页）、非 RTsql 文件实测行为基线（8192B 垃圾文件 panic→abort exit 134）、CLI open 错误映射（exit 1/4）与 MS12-T01 头字段需求、测试影响面（storage_test / drop_table_free_test / file_storage_io_test 裸布局断言）
 - **状态**: active
+
+## R20: MS10-T05 生命周期子命令实现上下文
+
+- **类型**: analysis
+- **路径**: `.claude/analysis/ms10-t05-lifecycle-subcommands.md`
+- **日期**: 2026-09-09（revision `a5b0a5f`；实施代码基线 `8827700`）
+- **用途**: MS10-T05（`new/list/schema/dump/restore/import --csv`）Plan 的实现调查输入——`CliArgs` 扁平入口重构点与裸名/子命令名冲突边界、`execute_command_inner` 两阶段信号编排复用、`Database`/`Catalog` 可复用 API（系统表不可 SQL 查询、schema 必须走 `catalog().scan_tables/scan_columns`）、双 `ColumnType` 体系与 String(255) 固定转换决定的 dump 保真边界、csv 依赖缺口、`resolve_db_path` 目录 helper 提取点、测试模式与退出码矩阵零扩展结论
+- **状态**: active
+
+<!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
