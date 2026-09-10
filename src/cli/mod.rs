@@ -6,9 +6,11 @@ pub mod resolve;
 
 use crate::database::Database;
 use crate::network::protocol::Response;
+use crate::parser::planner::{classify_transaction_statement, TxStatementKind};
 use crate::parser::PlanBuilder;
-use crate::pipeline::{execute_stage, parse_stage, plan_stage};
+use crate::pipeline::{execute_stage, execute_stage_in_tx, parse_stage, plan_stage};
 use crate::storage::StorageError;
+use crate::transaction::TransactionSession;
 use clap::{Parser, Subcommand, ValueEnum};
 use render::{render, OutputKind, QueryPayload};
 use std::future::Future;
@@ -273,54 +275,153 @@ async fn run_sql(db: &Database, sql: &str, format: Option<FormatArg>) -> ExitSta
         Err(e) => return ExitStatus::Sql(e),
     };
 
-    // MS10-T04：分片逐条执行。每条语句独立 plan/execute（auto-commit，逐条生效），
-    // 结果顺序渲染写 stdout；缓存键用该语句自身的 canonical 文本而非完整串
-    // （完整串键会让逐条 SELECT 互相覆盖同一键）。
+    // MS10-T04：分片逐条执行。每条语句独立 plan/execute，结果顺序渲染写
+    // stdout；缓存键用该语句自身的 canonical 文本而非完整串（完整串键会让
+    // 逐条 SELECT 互相覆盖同一键）。
+    // MS11-T02：事务语句（BEGIN/COMMIT/ROLLBACK）驱动本调用的会话事务态；
+    // 事务开启后的普通语句经 execute_stage_in_tx 执行（不再逐条 auto-commit），
+    // 收尾与失败路径显式回滚会话事务（design D5）。
+    let mut session = TransactionSession::new();
+
     let total = statements.len();
     for (index, stmt) in statements.iter().enumerate() {
         let statement_text = stmt.to_string();
-        let plan = match plan_stage(db, &statement_text, stmt, false).await {
-            Ok(plan) => plan,
-            Err(e) => return sql_failure_status(index + 1, total, &e, &statement_text),
-        };
-        let columns = PlanBuilder::new().get_plan_output_columns(&plan);
+        match classify_transaction_statement(stmt) {
+            Ok(Some(tx_kind)) => {
+                let outcome = match tx_kind {
+                    TxStatementKind::Begin => session.begin(db).await,
+                    TxStatementKind::Commit => session.commit(db).await,
+                    TxStatementKind::Rollback => session.rollback(db).await,
+                };
+                match outcome {
+                    // D4：事务语句无行集，直接渲染 Affected(0)（与 DDL 同构形状）
+                    Ok(()) => {
+                        if let Err(e) =
+                            emit_stdout(&render(kind(format), &[], &QueryPayload::Affected(0)))
+                        {
+                            rollback_session(db, &mut session).await;
+                            return ExitStatus::General(e);
+                        }
+                    }
+                    Err(message) => {
+                        return sql_failure_status(
+                            index + 1,
+                            total,
+                            &message,
+                            &statement_text,
+                            rollback_session(db, &mut session).await,
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                let plan = match plan_stage(db, &statement_text, stmt, false).await {
+                    Ok(plan) => plan,
+                    Err(e) => {
+                        return sql_failure_status(
+                            index + 1,
+                            total,
+                            &e,
+                            &statement_text,
+                            rollback_session(db, &mut session).await,
+                        );
+                    }
+                };
+                let columns = PlanBuilder::new().get_plan_output_columns(&plan);
 
-        match execute_stage(db, plan, false).await {
-            Response::QueryResult { rows } => {
-                if let Err(e) =
-                    emit_stdout(&render(kind(format), &columns, &QueryPayload::Rows(rows)))
-                {
-                    return ExitStatus::General(e);
+                let response = match session.tx_id() {
+                    Some(tx_id) => execute_stage_in_tx(db, plan, tx_id).await,
+                    None => execute_stage(db, plan, false).await,
+                };
+                match response {
+                    Response::QueryResult { rows } => {
+                        if let Err(e) =
+                            emit_stdout(&render(kind(format), &columns, &QueryPayload::Rows(rows)))
+                        {
+                            rollback_session(db, &mut session).await;
+                            return ExitStatus::General(e);
+                        }
+                    }
+                    Response::AffectedRows { count } => {
+                        if let Err(e) =
+                            emit_stdout(&render(kind(format), &[], &QueryPayload::Affected(count)))
+                        {
+                            rollback_session(db, &mut session).await;
+                            return ExitStatus::General(e);
+                        }
+                    }
+                    Response::Error { message } => {
+                        return sql_failure_status(
+                            index + 1,
+                            total,
+                            &message,
+                            &statement_text,
+                            rollback_session(db, &mut session).await,
+                        );
+                    }
+                    Response::Pong => {}
                 }
             }
-            Response::AffectedRows { count } => {
-                if let Err(e) =
-                    emit_stdout(&render(kind(format), &[], &QueryPayload::Affected(count)))
-                {
-                    return ExitStatus::General(e);
-                }
+            Err(e) => {
+                return sql_failure_status(
+                    index + 1,
+                    total,
+                    &e.to_string(),
+                    &statement_text,
+                    rollback_session(db, &mut session).await,
+                );
             }
-            Response::Error { message } => {
-                return sql_failure_status(index + 1, total, &message, &statement_text);
-            }
-            Response::Pong => {}
         }
     }
 
+    // D5：调用收尾不允许残留未提交会话事务——显式回滚 + stderr 提示，退出码仍为 0。
+    if session.is_active() {
+        match session.rollback(db).await {
+            Ok(()) => emit_stderr("uncommitted transaction was rolled back at exit"),
+            Err(e) => emit_stderr(&format!("uncommitted transaction rollback failed: {}", e)),
+        }
+    }
     ExitStatus::Success
 }
 
+/// D5 错误路径收尾：会话事务仍开启时先显式回滚再返回（回滚自身失败仅
+/// stderr 记录，不掩盖原始错误）；返回是否处于事务上下文，供
+/// `sql_failure_status` 区分前序语句生效状态后缀。
+async fn rollback_session(db: &Database, session: &mut TransactionSession) -> bool {
+    if !session.is_active() {
+        return false;
+    }
+    if let Err(e) = session.rollback(db).await {
+        emit_stderr(&format!("session rollback failed: {}", e));
+    }
+    true
+}
+
 /// 逐条执行的失败定位（D3）：语句序号 + 失败语句文本（≤200 字符截断），
-/// k > 1 时注明前序语句已生效（逐条 auto-commit 的可观察事实）。
-/// parse 错误不套本模板——parse_stage 全串解析、零执行，文本自带行列定位。
-fn sql_failure_status(k: usize, n: usize, error: &str, statement_text: &str) -> ExitStatus {
+/// k > 1 时注明前序语句生效状态——auto-commit 上下文为已生效（已提交）；
+/// 会话事务上下文（`in_transaction`，返回前已显式回滚）为未提交并已随
+/// 事务回滚。parse 错误不套本模板——parse_stage 全串解析、零执行，文本
+/// 自带行列定位。
+fn sql_failure_status(
+    k: usize,
+    n: usize,
+    error: &str,
+    statement_text: &str,
+    in_transaction: bool,
+) -> ExitStatus {
     let mut display = statement_text.to_string();
     if display.chars().count() > 200 {
         display = format!("{}...", display.chars().take(200).collect::<String>());
     }
     let mut message = format!("statement {k} of {n} failed: {error}; statement: {display}");
     if k > 1 {
-        message.push_str("; previous statement(s) were committed");
+        if in_transaction {
+            message.push_str(
+                "; previous statement(s) were not committed (rolled back with the transaction)",
+            );
+        } else {
+            message.push_str("; previous statement(s) were committed");
+        }
     }
     ExitStatus::Sql(message)
 }

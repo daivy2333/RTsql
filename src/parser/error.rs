@@ -53,6 +53,8 @@ pub enum PlanError {
     CorrelatedParamError(String),
     /// NOT IN 子查询包含 NULL 值
     NotInWithNull,
+    /// 事务语句/边界子句拒绝（MS11-T02；消息即全文）
+    TransactionStatement(String),
 }
 
 impl fmt::Display for PlanError {
@@ -104,6 +106,7 @@ impl fmt::Display for PlanError {
                 write!(f, "Correlated subquery parameter error: {}", msg)
             }
             PlanError::NotInWithNull => write!(f, "NOT IN subquery contains NULL values"),
+            PlanError::TransactionStatement(msg) => write!(f, "{}", msg),
         }
     }
 }
