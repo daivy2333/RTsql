@@ -32,13 +32,17 @@ impl PlanBuilder {
                 let inner_tables = Self::extract_subquery_table_names(subquery);
 
                 self.inner_table_names = Some(inner_tables.clone());
+                let saved_subquery_ctx = self.building_subquery;
+                self.building_subquery = true;
                 let right_plan = match self.build_query(subquery) {
                     Ok(p) => p,
                     Err(e) => {
+                        self.building_subquery = saved_subquery_ctx;
                         self.inner_table_names = None;
                         return Err(e);
                     }
                 };
+                self.building_subquery = saved_subquery_ctx;
                 self.inner_table_names = None;
 
                 let left_column = self.resolve_column_in_plan(left_expr, table_name)?;
@@ -77,13 +81,17 @@ impl PlanBuilder {
                 let inner_tables = Self::extract_subquery_table_names(subquery);
 
                 self.inner_table_names = Some(inner_tables.clone());
+                let saved_subquery_ctx = self.building_subquery;
+                self.building_subquery = true;
                 let right_plan = match self.build_query(subquery) {
                     Ok(p) => p,
                     Err(e) => {
+                        self.building_subquery = saved_subquery_ctx;
                         self.inner_table_names = None;
                         return Err(e);
                     }
                 };
+                self.building_subquery = saved_subquery_ctx;
                 self.inner_table_names = None;
 
                 let output_columns =

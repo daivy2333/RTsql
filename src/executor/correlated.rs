@@ -56,6 +56,17 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
         PhysicalPlan::DerivedScan(node) => {
             inject_correlated_values(&node.subquery, param_values);
         }
+        PhysicalPlan::Projection(node) => {
+            // MS11-T01 Iter001: 表达式项内的 ParameterExpression（相关外层
+            // 引用）经 Expression::set_parameter_value 注入——与谓词操作数
+            // 的传播同链（未注入时 ParameterExpression 求值为 Null，静默错）。
+            for item in &node.items {
+                for (name, value) in param_values {
+                    item.expr.set_parameter_value(name, value);
+                }
+            }
+            inject_correlated_values(&node.input, param_values);
+        }
         // Leaf or DML nodes: no sub-plans, no predicates
         PhysicalPlan::Scan(_)
         | PhysicalPlan::IndexScan(_)

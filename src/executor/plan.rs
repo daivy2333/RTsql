@@ -1,7 +1,7 @@
 //! Physical plan types for query execution
 
 use crate::executor::aggregate::AggregateFunc;
-use crate::executor::predicate::PredicateRef;
+use crate::executor::predicate::{ExpressionRef, PredicateRef};
 use crate::executor::{ColumnType, Value};
 use crate::storage::page_format::Key;
 use std::collections::HashMap;
@@ -54,6 +54,8 @@ pub enum PhysicalPlan {
     SubqueryEval(SubqueryEvalNode),
     /// FROM 子查询（派生表）节点
     DerivedScan(DerivedScanNode),
+    /// 投影表达式节点（MS11-T01 Iter001 — SELECT 派生列）
+    Projection(ProjectionNode),
 }
 
 /// 全表扫描节点
@@ -419,5 +421,30 @@ pub struct DerivedScanNode {
     /// 派生表别名
     pub alias: String,
     /// 输出列名列表
+    pub columns: Vec<String>,
+}
+
+/// 投影项（MS11-T01 Iter001 — SELECT 派生列）
+#[derive(Debug, Clone)]
+pub struct ProjectionItem {
+    /// 逐行求值的值表达式（列引用项 = `ColumnExpression`，表达式项 =
+    /// Iteration 000 的 `CaseExpression`/`CoalesceExpression`/`CastExpression` 等）
+    pub expr: ExpressionRef,
+    /// 输出列名（`AS` 别名或表达式 Display 文本）
+    pub name: String,
+}
+
+/// 投影表达式节点（MS11-T01 Iter001 — SELECT 派生列）
+///
+/// SELECT 列表含表达式项时，planner 在最终 plan 最外层（LIMIT 之上）包装
+/// 此节点：输入按全形状行流出（per-node 投影裁剪置空），执行器对每行逐项
+/// 求值并按 `items` 顺序产出。
+#[derive(Debug, Clone)]
+pub struct ProjectionNode {
+    /// 输入计划（产出全形状行）
+    pub input: Box<PhysicalPlan>,
+    /// SELECT 列表项（与输出列一一对应）
+    pub items: Vec<ProjectionItem>,
+    /// 输出列名（CLI 表头来源，`get_plan_output_columns` 直接返回）
     pub columns: Vec<String>,
 }

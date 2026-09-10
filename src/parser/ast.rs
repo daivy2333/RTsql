@@ -47,6 +47,14 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                 // Aggregate function: return result column name
                 Expr::Function(f) => {
                     let name = f.name.to_string().to_uppercase();
+                    // MS11-T01 Iter001: COALESCE is a value expression
+                    // (projection item), not an aggregate — the item must
+                    // reach the planner's SELECT routing instead of being
+                    // rejected here. Other function names stay rejected
+                    // (scalar function library is MS11-T03 surface).
+                    if name == "COALESCE" {
+                        return Ok(expr.to_string());
+                    }
                     match name.as_str() {
                         "COUNT" => {
                             if f.args.is_empty() {
@@ -85,6 +93,16 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                     }
                 }
                 Expr::Value(v) => Ok(format!("_{}", v)),
+                // MS11-T01 Iter001: 值表达式项放行至 planner 的 SELECT 路由
+                //（聚合检测 / 顶层 Projection 包装），不再在此被拒。返回的
+                // Display 文本对投影解析惰性——表达式查询绕过 per-node 投影。
+                Expr::Case { .. }
+                | Expr::Cast { .. }
+                | Expr::InList { .. }
+                | Expr::Between { .. }
+                | Expr::Like { .. }
+                | Expr::IsNull { .. }
+                | Expr::IsNotNull { .. } => Ok(expr.to_string()),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => Ok(alias.value.to_string().to_lowercase()),
@@ -114,6 +132,10 @@ pub fn extract_qualified_columns(
                 // Aggregate function: return result column name
                 Expr::Function(f) => {
                     let name = f.name.to_string().to_uppercase();
+                    // MS11-T01 Iter001: COALESCE 放行（值表达式投影项，非聚合）
+                    if name == "COALESCE" {
+                        return Ok((None, expr.to_string()));
+                    }
                     match name.as_str() {
                         "COUNT" => {
                             if f.args.is_empty() {
@@ -152,6 +174,15 @@ pub fn extract_qualified_columns(
                     }
                 }
                 Expr::Value(v) => Ok((None, format!("_{}", v))),
+                // MS11-T01 Iter001: 值表达式项放行至 planner 的 SELECT 路由
+                //（Display 文本对 JOIN 输出过滤惰性——表达式项 + JOIN 显式拒绝）
+                Expr::Case { .. }
+                | Expr::Cast { .. }
+                | Expr::InList { .. }
+                | Expr::Between { .. }
+                | Expr::Like { .. }
+                | Expr::IsNull { .. }
+                | Expr::IsNotNull { .. } => Ok((None, expr.to_string())),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => {

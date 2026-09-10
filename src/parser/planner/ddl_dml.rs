@@ -118,6 +118,24 @@ impl PlanBuilder {
                                             Err(PlanError::UnsupportedValue)
                                         }
                                     }
+                                    // MS11-T01 (I040): `-<number>` folds into the
+                                    // negative literal; non-numeric operands keep
+                                    // the existing rejection (same shape as
+                                    // `build_expression`'s UnaryOp::Minus arm).
+                                    Expr::UnaryOp {
+                                        op: sqlparser::ast::UnaryOperator::Minus,
+                                        expr: inner,
+                                    } => {
+                                        if let Expr::Value(v) = inner.as_ref() {
+                                            match value_from_sqlparser(v)? {
+                                                Value::Int(n) => Ok(Value::Int(-n)),
+                                                Value::Float(f) => Ok(Value::Float(-f)),
+                                                _ => Err(PlanError::UnsupportedValue),
+                                            }
+                                        } else {
+                                            Err(PlanError::UnsupportedValue)
+                                        }
+                                    }
                                     _ => Err(PlanError::UnsupportedValue),
                                 }
                             })

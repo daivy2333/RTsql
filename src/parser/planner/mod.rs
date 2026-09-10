@@ -34,6 +34,11 @@ pub struct PlanBuilder {
     /// Set of inner table names when building a subquery (for detecting outer references).
     /// None when building a top-level query.
     pub(crate) inner_table_names: Option<Vec<String>>,
+    /// MS11-T01 Iter001: 正在构建子查询计划（WHERE IN/EXISTS、标量子查询、
+    /// 派生表）。子查询计划形状是 SemiJoin/SubqueryEval/DerivedScan 机制的
+    /// 消费面——SELECT 表达式项的顶层 Projection 路由在子查询上下文抑制，
+    /// 子查询计划保持既有行为。
+    pub(crate) building_subquery: bool,
 }
 
 impl PlanBuilder {
@@ -43,6 +48,7 @@ impl PlanBuilder {
             tables: HashMap::new(),
             primary_keys: HashMap::new(),
             inner_table_names: None,
+            building_subquery: false,
         }
     }
 
