@@ -311,7 +311,13 @@ pub(super) async fn restore(db: &str, file: &str) -> ExitStatus {
                     let plan = match plan_stage(db, &statement_text, stmt, false).await {
                         Ok(plan) => plan,
                         Err(e) => {
-                            return super::sql_failure_status(index + 1, total, &e, &statement_text)
+                            return super::sql_failure_status(
+                                index + 1,
+                                total,
+                                &e,
+                                &statement_text,
+                                false,
+                            )
                         }
                     };
                     match execute_stage(db, plan, false).await {
@@ -321,6 +327,7 @@ pub(super) async fn restore(db: &str, file: &str) -> ExitStatus {
                                 total,
                                 &message,
                                 &statement_text,
+                                false,
                             )
                         }
                         // restore 不渲染：dump 文本面只有 CREATE/INSERT，

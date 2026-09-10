@@ -5,6 +5,7 @@
 mod error;
 mod manager;
 mod row_lock;
+mod session;
 mod snapshot;
 mod tx_id;
 mod version_chain;
@@ -12,6 +13,7 @@ mod version_chain;
 pub use error::{Result, TransactionError};
 pub use manager::{Transaction, TransactionManager, TransactionState};
 pub use row_lock::RowLockTable;
+pub use session::TransactionSession;
 pub use snapshot::Snapshot;
 pub use tx_id::TransactionId;
 pub use version_chain::VersionHeader;
