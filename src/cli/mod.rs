@@ -1,5 +1,6 @@
 //! CLI —— one-shot 命令入口：参数解析、名称解析、三阶段执行、渲染、退出码
 
+pub mod lifecycle;
 pub mod render;
 pub mod resolve;
 
@@ -8,7 +9,7 @@ use crate::network::protocol::Response;
 use crate::parser::PlanBuilder;
 use crate::pipeline::{execute_stage, parse_stage, plan_stage};
 use crate::storage::StorageError;
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use render::{render, OutputKind, QueryPayload};
 use std::future::Future;
 use std::io::{IsTerminal, Write};
@@ -59,7 +60,7 @@ impl From<&ExitStatus> for ExitCode {
     }
 }
 
-/// rtsql 一次性 SQL 执行命令
+/// rtsql 命令行入口：one-shot 主命令 + 生命周期子命令（MS10-T05）
 #[derive(Parser)]
 #[command(
     name = "rtsql",
@@ -67,13 +68,57 @@ impl From<&ExitStatus> for ExitCode {
     about = "One-shot SQL execution against an RTsql database"
 )]
 struct CliArgs {
-    /// 数据库：裸名（集中存储）或含 `/` 的文件路径
-    db: String,
-    /// 要执行的单条 SQL 语句
-    sql: String,
+    /// 数据库：裸名（集中存储）或含 `/` 的文件路径（主命令用）
+    db: Option<String>,
+    /// 要执行的单条 SQL 语句（主命令用）
+    sql: Option<String>,
     /// 输出格式（默认：TTY 用 table，非 TTY 用 json）
-    #[arg(short, long, value_enum)]
+    #[arg(short, long, value_enum, global = true)]
     format: Option<FormatArg>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// 生命周期子命令。首个位置参数命中子命令名即分发（子命令优先）：
+/// 裸名与子命令同名的数据库需以含 `/` 的路径形式经主命令打开。
+#[derive(Subcommand)]
+enum Command {
+    /// 显式创建空数据库（唯一创建入口；目标已存在时报错）
+    New {
+        /// 裸名或含 `/` 的文件路径
+        target: String,
+    },
+    /// 枚举集中存储区的数据库文件（不开库）
+    List,
+    /// 输出各用户表的 CREATE TABLE DDL
+    Schema {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+    },
+    /// 导出 SQL 文本（CREATE TABLE + INSERT）
+    Dump {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+    },
+    /// 从 dump SQL 文本恢复（`-` 读 stdin；目标须为空库）
+    Restore {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+        /// dump 文本文件路径，或 `-` 表示 stdin
+        file: String,
+    },
+    /// 从 CSV 导入数据（目标表必须已存在；首行表头按列名匹配）
+    Import {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+        /// 目标表名
+        table: String,
+        /// CSV 文件路径
+        file: String,
+        /// CSV 格式开关（当前唯一支持格式，必须提供）
+        #[arg(long)]
+        csv: bool,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy)]
@@ -95,12 +140,39 @@ pub async fn run() -> ExitCode {
 }
 
 async fn execute_command(args: &CliArgs) -> ExitStatus {
-    let db_path = match resolve::resolve_db_path(&args.db) {
+    match &args.command {
+        Some(Command::New { target }) => lifecycle::new_db(target).await,
+        Some(Command::List) => lifecycle::list(args.format).await,
+        Some(Command::Schema { db }) => lifecycle::schema(db).await,
+        Some(Command::Dump { db }) => lifecycle::dump(db).await,
+        Some(Command::Restore { db, file }) => lifecycle::restore(db, file).await,
+        Some(Command::Import {
+            db,
+            table,
+            file,
+            csv,
+        }) => lifecycle::import_csv(db, table, file, *csv, args.format).await,
+        None => execute_main_command(args).await,
+    }
+}
+
+/// 主命令臂：db/sql 任一缺失 → 手动 usage（exit 2）；合法输入走既有全链路。
+async fn execute_main_command(args: &CliArgs) -> ExitStatus {
+    let (db, sql) = match (&args.db, &args.sql) {
+        (Some(db), Some(sql)) => (db, sql),
+        _ => {
+            return ExitStatus::Usage(
+                "missing <db> and/or <sql>; usage: rtsql <db> <sql> (or `rtsql --help`)"
+                    .to_string(),
+            )
+        }
+    };
+    let db_path = match resolve::resolve_db_path(db) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
     };
     // sql/format 按值捕获：work future 拥有它们，满足 for<'a> 的 HRTB 工厂约束
-    let sql = args.sql.clone();
+    let sql = sql.clone();
     let format = args.format;
     execute_command_inner(
         &db_path,

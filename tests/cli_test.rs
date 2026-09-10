@@ -9,7 +9,7 @@
 use rtsql::database::Database;
 use rtsql::network::protocol::Response;
 use rtsql::storage::page_format::ColumnType;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -38,6 +38,29 @@ fn spawn_cli(dir: &Path, args: &[&str]) -> Child {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn rtsql binary")
+}
+
+/// 启动 rtsql 二进制且 stdin 为管道（`restore <db> -` 用例向其写入输入）。
+fn spawn_cli_stdin(dir: &Path, args: &[&str]) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_rtsql"))
+        .args(args)
+        .current_dir(dir)
+        .env("RTSQL_HOME", dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rtsql binary with piped stdin")
+}
+
+/// 向 stdin 管道写入输入后等待退出。子进程若在读 stdin 前退出，写入以
+/// EPIPE 失败属预期（退出码断言承载结果），不视为夹具错误。
+fn run_cli_stdin(dir: &Path, args: &[&str], input: &str) -> CliOutput {
+    let mut child = spawn_cli_stdin(dir, args);
+    let mut stdin = child.stdin.take().unwrap();
+    let _ = stdin.write_all(input.as_bytes());
+    drop(stdin); // 关闭写端，子进程 read_to_string 见 EOF
+    wait_cli(child)
 }
 
 /// 等待子进程退出并收集输出；60s 未退出则 kill 并 panic。
@@ -912,3 +935,847 @@ async fn diagnostic_wal_parse() {
         }
     }
 }
+
+// ---- T05 Iteration 000：入口子命令分发（MS10-T05） ----
+
+/// 主命令缺 SQL 参数：退出 2（T1 前由 clap 自动承接；T1 后由手动 usage
+/// 分支承接同一退出码——行为保持见证，非 RED 项）。
+#[test]
+fn test_missing_sql_arg_exit_2() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["app"]);
+    assert_eq!(
+        out.code,
+        Some(2),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+}
+
+/// 子命令分发：`rtsql list` 分发到 list 子命令执行（T4 实现后收紧为
+/// exit 0 + 行集输出），不再落入主命令"缺 SQL"的旧 clap 解析路径。
+#[test]
+fn test_subcommand_dispatch_list_runs() {
+    let dir = fixture();
+    std::fs::write(dir.path().join("db/a.db"), vec![0u8; 16]).unwrap();
+    let out = run_cli(dir.path(), &["list"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("required arguments were not provided"),
+        "must not take the main-command missing-SQL parse path: {:?}",
+        out.stderr
+    );
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([["a.db", 16]]),
+        "list must have executed (not the placeholder): {:?}",
+        out.stdout
+    );
+}
+
+/// R-list-S1：枚举集中区 `*.db` 常规文件（名称排序、字节数），非 `.db` 不出现。
+#[test]
+fn test_list_enumerates_db_files() {
+    let dir = fixture();
+    std::fs::write(dir.path().join("db/a.db"), vec![0u8; 100]).unwrap();
+    std::fs::write(dir.path().join("db/b.db"), vec![0u8; 200]).unwrap();
+    std::fs::write(dir.path().join("db/notes.txt"), b"notes").unwrap();
+
+    let out = run_cli(dir.path(), &["list"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["name", "size_bytes"]));
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([["a.db", 100], ["b.db", 200]]),
+        "sorted by name; non-.db files excluded: {:?}",
+        out.stdout
+    );
+}
+
+/// R-list-S2：`db/` 目录不存在或不含任何 `*.db` → 空行集，exit 0。
+#[test]
+fn test_list_empty_or_missing_dir() {
+    let dir = TempDir::new().unwrap(); // 无 db/ 目录
+    let out = run_cli(dir.path(), &["list"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([]));
+
+    // 空目录变体
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["list"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([]));
+}
+
+/// R-schema-S1：表结构 DDL 输出（列、类型、PRIMARY KEY、NOT NULL）。
+#[test]
+fn test_schema_outputs_ddl() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE items (id INT PRIMARY KEY, label STRING NOT NULL)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create table failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["schema", "app"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("CREATE TABLE \"items\""),
+        "table ident must be quoted: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("\"id\" INT PRIMARY KEY"),
+        "PK column must be rendered: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("\"label\" STRING NOT NULL"),
+        "NOT NULL constraint must be rendered: {:?}",
+        out.stdout
+    );
+}
+
+/// R-schema-S1 补充：UNIQUE 约束经 SQL 建库 → schema 输出往返（catalog 真实值）。
+#[test]
+fn test_schema_unique_roundtrip() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE tags (id INT PRIMARY KEY, name STRING UNIQUE)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create table failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["schema", "app"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("\"name\" STRING UNIQUE"),
+        "UNIQUE constraint must be rendered: {:?}",
+        out.stdout
+    );
+}
+
+/// R-schema-S3：库文件不存在 → exit 1 + stderr 含 `does not exist`，不创建文件。
+#[test]
+fn test_schema_missing_db_errors() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["schema", "missing"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("does not exist"),
+        "stderr must say the db does not exist: {:?}",
+        out.stderr
+    );
+    assert!(
+        !dir.path().join("db/missing.db").exists(),
+        "schema must not create any file"
+    );
+}
+
+/// R-schema-S2：空库（无用户表）→ 无输出，exit 0。
+#[test]
+fn test_schema_empty_db_no_output() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["schema", "app"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "empty db must produce no output: {:?}",
+        out.stdout
+    );
+}
+
+/// R-new-S1：裸名新建 + 缺失 `db/` 目录自动创建；静默 exit 0；
+/// 建库结果紧接主命令立即可用。
+#[test]
+fn test_new_creates_db_and_dirs() {
+    let dir = TempDir::new().unwrap(); // 不预建 db/ 子目录
+    assert!(!dir.path().join("db").exists());
+
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stdout.is_empty(), "new must be silent on success");
+    assert!(
+        dir.path().join("db/app.db").exists(),
+        "db/ directory and app.db must be created"
+    );
+
+    let out = run_cli(dir.path(), &["app", "CREATE TABLE t (id INT)"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "newly created db must be immediately usable: {}",
+        out.stderr
+    );
+}
+
+/// R-new-S2：含 `/` 路径新建 + 缺失父目录创建。
+#[test]
+fn test_new_path_creates_parents() {
+    let dir = TempDir::new().unwrap();
+    let out = run_cli(dir.path(), &["new", "x/y/data.db"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        dir.path().join("x/y/data.db").exists(),
+        "parent directories and target file must be created"
+    );
+}
+
+/// R-new-S3：目标已存在（含 0 字节）→ exit 1 + stderr 含 `already exists`，
+/// 文件内容不变。
+#[test]
+fn test_new_existing_file_rejected() {
+    let dir = fixture();
+    let target = dir.path().join("db/app.db");
+    std::fs::write(&target, b"payload").unwrap();
+
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("already exists"),
+        "stderr must say the target already exists: {:?}",
+        out.stderr
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"payload",
+        "existing file must not be modified"
+    );
+
+    // 0 字节文件变体：同样拒绝且保持 0 字节
+    std::fs::write(&target, b"").unwrap();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(1), "0-byte file must also be rejected");
+    assert!(
+        out.stderr.contains("already exists"),
+        "stderr must say the target already exists: {:?}",
+        out.stderr
+    );
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().len(),
+        0,
+        "0-byte file must stay untouched"
+    );
+}
+
+// ---- T05 Iteration 001：数据面子命令（dump/restore/import） ----
+
+/// R-dump-restore-S2：空库 dump 无输出，exit 0。
+#[test]
+fn test_dump_empty_db_no_output() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "empty db dump must produce no output: {:?}",
+        out.stdout
+    );
+}
+
+/// R-dump-restore-S1：dump-restore 往返等价。dump 产物为 SQL 文本
+/// （DDL + 逐行 INSERT，字符串单引号加倍、NULL/TRUE/FALSE 字面量）。
+/// （T6 交付 dump 产物断言；restore 执行与 SELECT 比对随 T7 扩展转绿。）
+#[test]
+fn test_dump_restore_roundtrip() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE items (id INT PRIMARY KEY, label STRING, price FLOAT, in_stock BOOL)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create table failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            // 种子取引擎 INSERT 通道可达值：planner extract_insert_values 只接受
+            // Expr::Value/裸 NULL（负数字面量为 UnaryOp → UnsupportedValue，既有限制）
+            "INSERT INTO items VALUES (1, 'it''s ok', 3.5, TRUE); INSERT INTO items VALUES (2, NULL, 0.25, FALSE)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    let dump_out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(
+        dump_out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        dump_out.stdout,
+        dump_out.stderr
+    );
+    assert!(
+        dump_out.stdout.contains("CREATE TABLE \"items\""),
+        "dump must contain DDL: {:?}",
+        dump_out.stdout
+    );
+    assert!(
+        dump_out.stdout.contains("INSERT INTO \"items\" VALUES"),
+        "dump must contain INSERT statements: {:?}",
+        dump_out.stdout
+    );
+    assert!(
+        dump_out.stdout.contains("'it''s ok'"),
+        "string literals must escape single quotes: {:?}",
+        dump_out.stdout
+    );
+    assert!(
+        dump_out.stdout.contains("NULL"),
+        "NULL must render as SQL literal: {:?}",
+        dump_out.stdout
+    );
+    assert!(
+        dump_out.stdout.contains("TRUE") && dump_out.stdout.contains("FALSE"),
+        "booleans must render as SQL literals: {:?}",
+        dump_out.stdout
+    );
+
+    // restore 侧（T7）：dump 文本 → new b → restore b → SELECT 比对
+    let dump_file = dir.path().join("dump.sql");
+    std::fs::write(&dump_file, &dump_out.stdout).unwrap();
+
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["restore", "b", dump_file.to_str().unwrap()]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stdout.is_empty(), "restore must be silent on success");
+
+    // 库 b 数据比对。表名经 dump 的带引号 DDL 重建后为 Display 形式（引擎以
+    // ObjectName to_string 为表名，见 lifecycle.rs select_all_rows 注记），
+    // 因此比对 SELECT 用带引号形式。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "b",
+            "SELECT id, label, price, in_stock FROM \"items\"",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1, "it's ok", 3.5, true], [2, null, 0.25, false]])
+    );
+}
+
+/// R-dump-restore-S1 全形状 + R-import-S3/S4 上游数据面（001-rework T8-R3）：
+/// 含无键行（键位 NULL / String 首列隐式 PK）的库 dump → new → restore →
+/// SELECT 比对等价。T8-R1 前：无键行在 INSERT 通道被静默丢弃，restore 后
+/// 丢失；T8-R2 前：无键行版本链使重开 RedoFailed。
+#[test]
+fn test_dump_restore_roundtrip_full_shape() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE mixed (a INT, b FLOAT, c BOOL, d STRING); CREATE TABLE notes (s STRING, v INT)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create tables failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            // mixed：(NULL,…) 键位 NULL 行 + 键位 Int 行（含 NULL 非键字段、
+            // String 空串）；notes：String 首列隐式 PK，全部行无键
+            "INSERT INTO mixed VALUES (NULL, 2.5, TRUE, 'keep'); INSERT INTO mixed VALUES (7, NULL, FALSE, ''); INSERT INTO notes VALUES ('x', 1); INSERT INTO notes VALUES ('y', 2)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    let dump_out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(
+        dump_out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        dump_out.stdout,
+        dump_out.stderr
+    );
+    assert!(
+        dump_out
+            .stdout
+            .contains("INSERT INTO \"mixed\" VALUES (NULL, 2.5, TRUE, 'keep')"),
+        "keyless row must survive in dump: {:?}",
+        dump_out.stdout
+    );
+
+    let dump_file = dir.path().join("dump_full.sql");
+    std::fs::write(&dump_file, &dump_out.stdout).unwrap();
+
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["restore", "b", dump_file.to_str().unwrap()]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stdout.is_empty(), "restore must be silent on success");
+
+    // 比对 1：mixed 两行全在（无键行 + 键位 Int 行），空字段语义保持
+    let out = run_cli(
+        dir.path(),
+        &["b", "SELECT a, b, c, d FROM \"mixed\"", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[null, 2.5, true, "keep"], [7, null, false, ""]]),
+        "keyless row and keyed row must round-trip"
+    );
+
+    // 比对 2：String 首列表全部行（无键）往返等价
+    let out = run_cli(
+        dir.path(),
+        &["b", "SELECT s, v FROM \"notes\"", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([["x", 1], ["y", 2]]),
+        "String-first-column rows must round-trip"
+    );
+}
+
+/// R-dump-restore-S4：目标库已含用户表 → exit 1 拒绝，库内容不变。
+#[test]
+fn test_restore_rejects_nonempty_target() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let dump_file = dir.path().join("dump.sql");
+    std::fs::write(&dump_file, "CREATE TABLE t (id INT);\n").unwrap();
+
+    let out = run_cli(dir.path(), &["restore", "app", dump_file.to_str().unwrap()]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(!out.stderr.is_empty(), "rejection must go to stderr");
+
+    // 库内容不变：users 仍只有种子一行
+    let out = run_cli(dir.path(), &["app", "SELECT COUNT(*) FROM users"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[1]]));
+}
+
+/// R-dump-restore-S5：执行期语句失败 fail-fast → exit 3 + stderr 含失败语句
+/// 序号与前序已生效注记；失败前语句重开可见，其后语句未执行。
+#[test]
+fn test_restore_fail_fast() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+
+    let sql_file = dir.path().join("dup.sql");
+    std::fs::write(
+        &sql_file,
+        "CREATE TABLE t (id INT PRIMARY KEY);\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (3);\n",
+    )
+    .unwrap();
+
+    let out = run_cli(dir.path(), &["restore", "b", sql_file.to_str().unwrap()]);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("statement 3 of 4"),
+        "error must locate the failing statement: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("previous statement(s) were committed"),
+        "error must note prior statements took effect: {:?}",
+        out.stderr
+    );
+
+    // 第 1、2 条已生效（表 + 1 行），第 4 条未执行。
+    // SQL 文件用裸名 CREATE，故表名无引号（与 dump 带引号 DDL 重建的场景相反）
+    let out = run_cli(dir.path(), &["b", "SELECT COUNT(*) FROM t"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1]]),
+        "only the first two statements may take effect"
+    );
+}
+
+/// R-dump-restore-S3：`dump a | restore b -` stdin 管道往返，数据等价。
+#[test]
+fn test_restore_stdin_pipe() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let dump_out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(dump_out.code, Some(0), "dump failed: {}", dump_out.stderr);
+
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+
+    let out = run_cli_stdin(dir.path(), &["restore", "b", "-"], &dump_out.stdout);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    let out = run_cli(
+        dir.path(),
+        &["b", "SELECT id, name FROM \"users\"", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1, "Alice"]]),
+        "restored db must equal source"
+    );
+}
+
+// ---- T05 Iteration 001：import --csv（R-import） ----
+
+/// R-import-S1/S2：基本导入 + 乱序表头按列名映射；成功输出 affected_rows；
+/// 缺 `--csv` flag → Usage exit 2（先于一切 IO）。
+#[test]
+fn test_import_basic_and_header_order() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    // 缺 --csv：Usage exit 2
+    let out = run_cli(dir.path(), &["import", "app", "users", "data.csv"]);
+    assert_eq!(
+        out.code,
+        Some(2),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    // 乱序表头：name,id 与表定义 (id, name) 相反，按列名映射
+    std::fs::write(dir.path().join("data.csv"), "name,id\nBob,2\nCarol,3\n").unwrap();
+    let out = run_cli(dir.path(), &["import", "app", "users", "data.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["affected_rows"],
+        serde_json::json!(2),
+        "import must report affected rows: {:?}",
+        out.stdout
+    );
+
+    // 按列名正确映射入库
+    let out = run_cli(dir.path(), &["app", "SELECT id, name FROM users"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1, "Alice"], [2, "Bob"], [3, "Carol"]]),
+        "values must map by column name, not position: {:?}",
+        out.stdout
+    );
+}
+
+/// R-import-S3：类型转换与空字段语义（Int 空→NULL、Float/Bool 按类型、
+/// String 空→空串），SELECT 比对验证。
+#[test]
+fn test_import_types_and_empty_fields() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE t (a INT, b FLOAT, c BOOL, d STRING)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    std::fs::write(
+        dir.path().join("data.csv"),
+        "a,b,c,d\n,2.5,TRUE,keep\n7,,false,\n",
+    )
+    .unwrap();
+    let out = run_cli(dir.path(), &["import", "app", "t", "data.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    let out = run_cli(dir.path(), &["app", "SELECT a, b, c, d FROM t"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[null, 2.5, true, "keep"], [7, null, false, ""]]),
+        "empty fields must map to NULL (non-String) / empty string (String): {:?}",
+        out.stdout
+    );
+}
+
+/// R-import-S5：转换失败 fail-fast → exit 1 + stderr 含数据行定位与原值；
+/// 失败前已提交的行保留（重开可见）。
+#[test]
+fn test_import_conversion_fail_fast() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["app", "CREATE TABLE t (a INT)"]);
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    std::fs::write(dir.path().join("data.csv"), "a\n1\nabc\n").unwrap();
+    let out = run_cli(dir.path(), &["import", "app", "t", "data.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("row 2") && out.stderr.contains("abc"),
+        "error must locate the failing data row and original value: {:?}",
+        out.stderr
+    );
+
+    // 第 1 行已入库（逐条 auto-commit）
+    let out = run_cli(dir.path(), &["app", "SELECT COUNT(*) FROM t"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[1]]));
+}
+
+/// R-import-S6：表头不匹配（缺表列 / 含表外列）→ exit 1，表内无新行。
+#[test]
+fn test_import_header_mismatch_rejected() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["app", "CREATE TABLE t (a INT, b INT)"]);
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    // 表头缺 b 列
+    std::fs::write(dir.path().join("missing.csv"), "a\n1\n").unwrap();
+    let out = run_cli(dir.path(), &["import", "app", "t", "missing.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains('b'),
+        "error must name the missing column: {:?}",
+        out.stderr
+    );
+
+    // 表头含表外列
+    std::fs::write(dir.path().join("extra.csv"), "a,b,c\n1,2,3\n").unwrap();
+    let out = run_cli(dir.path(), &["import", "app", "t", "extra.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains('c'),
+        "error must name the unknown column: {:?}",
+        out.stderr
+    );
+
+    // 表内无新行
+    let out = run_cli(dir.path(), &["app", "SELECT COUNT(*) FROM t"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[0]]));
+}
+
+/// R-import-S7：目标表不存在 / 目标库不存在 → exit 1（库缺失文案含
+/// `does not exist`）。
+#[test]
+fn test_import_missing_table_or_db() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+
+    std::fs::write(dir.path().join("data.csv"), "id\n1\n").unwrap();
+
+    // 表不存在
+    let out = run_cli(dir.path(), &["import", "app", "t", "data.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(!out.stderr.is_empty(), "missing table must go to stderr");
+
+    // 库不存在
+    let out = run_cli(dir.path(), &["import", "missing", "t", "data.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("does not exist"),
+        "missing db error must follow the shared wording: {:?}",
+        out.stderr
+    );
+}
+
+/// R-import-S8：RFC4180 引号转义——字段含逗号、双引号、跨行文本完整入库。
+#[test]
+fn test_import_quoted_fields() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["app", "CREATE TABLE t (id INT, note STRING)"]);
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    std::fs::write(
+        dir.path().join("data.csv"),
+        "id,note\n1,\"has,comma\"\n2,\"has\"\"quote\"\n3,\"line1\nline2\"\n",
+    )
+    .unwrap();
+    let out = run_cli(dir.path(), &["import", "app", "t", "data.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    let out = run_cli(dir.path(), &["app", "SELECT id, note FROM t"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1, "has,comma"], [2, "has\"quote"], [3, "line1\nline2"]]),
+        "quoted fields must survive RFC4180 unescaping: {:?}",
+        out.stdout
+    );
+}
+

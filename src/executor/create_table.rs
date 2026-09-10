@@ -43,13 +43,16 @@ impl Executor for CreateTableExecutor {
             return Err(StorageError::TableAlreadyExists(node.table_name.clone()));
         }
 
-        // 转换 ColumnDef -> ColumnSchema
-        let columns: Vec<(String, crate::storage::page_format::ColumnType)> = node
+        // 转换 ColumnDef -> (name, type, not_null, unique)。约束经
+        // to_schema_column 既有解析取得；PRIMARY KEY 不在此通道（planner 对
+        // PK 列不产出 Unique 约束，pk 独立持久化于 catalog pk_column）。
+        let columns: Vec<(String, crate::storage::page_format::ColumnType, bool, bool)> = node
             .columns
             .iter()
             .map(|col| {
                 let schema_col = col.to_schema_column();
-                schema_col.to_tuple()
+                let (name, col_type) = schema_col.to_tuple();
+                (name, col_type, schema_col.not_null, schema_col.unique)
             })
             .collect();
 
@@ -60,15 +63,15 @@ impl Executor for CreateTableExecutor {
                 // 如果没有指定主键，使用第一列作为主键
                 columns
                     .first()
-                    .map(|(name, _)| name.clone())
+                    .map(|(name, _, _, _)| name.clone())
                     .unwrap_or_else(|| "id".to_string())
             }
         };
 
-        // 调用 TableManager::create_table
+        // 调用 TableManager::create_table_with_constraints
         self.database
             .table_manager
-            .create_table(&node.table_name, columns, &pk)
+            .create_table_with_constraints(&node.table_name, columns, &pk)
             .await?;
 
         Ok(Some(ExecResult::AffectedRows(0)))

@@ -93,19 +93,22 @@ impl Executor for InsertExecutor {
         for row_values in &self.values {
             let pk_value = &row_values[self.pk_index];
 
-            let key = match pk_value.to_key() {
-                Some(k) => k,
-                None => continue,
-            };
+            // MS10-T05 001-rework (T8-R1): rows whose key-position value has
+            // no B-Tree key (NULL / non-Int) are stored but not indexed —
+            // no duplicate check and no index entry (documented semantics,
+            // SQLite NULL-PK precedent). Keyed rows keep the exact path below.
+            let key = pk_value.to_key();
 
-            if self
-                .table_meta
-                .index_manager
-                .search(key.as_bytes())
-                .await?
-                .is_some()
-            {
-                return Err(StorageError::DuplicateKey);
+            if let Some(key) = key.as_ref() {
+                if self
+                    .table_meta
+                    .index_manager
+                    .search(key.as_bytes())
+                    .await?
+                    .is_some()
+                {
+                    return Err(StorageError::DuplicateKey);
+                }
             }
 
             let size = compute_tuple_size(row_values, &self.schema);
@@ -149,10 +152,13 @@ impl Executor for InsertExecutor {
                 .record_version(self.tx_id, &self.table_meta.name, row_id)
                 .await;
 
-            self.table_meta
-                .index_manager
-                .insert(key.as_bytes(), row_id)
-                .await?;
+            // T8-R1: keyless rows skip the index insert (stored, not indexed)
+            if let Some(key) = key.as_ref() {
+                self.table_meta
+                    .index_manager
+                    .insert(key.as_bytes(), row_id)
+                    .await?;
+            }
 
             count += 1;
         }
