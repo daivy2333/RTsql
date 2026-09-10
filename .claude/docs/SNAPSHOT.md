@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-10（MS11-T01 实施并收尾归档；MS10-T05 与 MS11-T01 实施及本次 docs sync 均**未 commit**——工作树现场基线 `a5b0a5f`）
+> 最后更新：2026-09-10（MS10-T05 + MS11-T01 实施与 docs sync 已 commit（b51985f / 4813374 / 046a76c）；push 待用户触发）
 > 同步状态：current
 
 ## 项目身份
@@ -68,15 +68,15 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **最新 revision**: a5b0a5f（MS10-T04 docs sync；MS10-T05 实施与本次 docs sync 未 commit——工作树现场）
-- **ahead of origin**: 7 commits（590fdc6 WIP + 5855245 MS10-T02 实施 + 268fa4f docs sync + 2eda010 MS10-T03 实施 + 5c42ec8 docs sync + 8827700 MS10-T04 实施 + a5b0a5f docs sync）
+- **最新 revision**: 046a76c（docs sync：MS10-T05 实施 b51985f + MS11-T01 实施 4813374 + 平台 chore 73d4864；详见 commit log）
+- **ahead of origin**: 11 commits（原 7 + MS10-T05 实施 + MS11-T01 实施 + docs sync + 平台 chore）
 - **最新 tag**: M11
 - **测试**: 769 tests pass, 0 failures, 2 ignored（2026-09-10 MS11-T01 收尾，Plan Review 独立复跑；基线 704 + expression_e2e 24 + projection_expression 16 + predicate/planner/pushdown/cli 追加 25；2 ignored 为信号标定设计项）
 - **OpenSpec**: 20 capability specs validate PASS（2026-09-10 归档 ms11-t01 change 后；新增 sql-expression-evaluation，6 Requirement）
 
 ## 同步状态
 
-- `current` — 文档与代码一致（MS11-T01 收尾归档后增量刷新；MS10-T05 与 MS11-T01 实施均未 commit，commit 待用户触发）
+- `current` — 文档与代码一致（MS10-T05 / MS11-T01 实施与 docs sync 已 commit（2026-09-10）；push 待用户触发）
 
 ## 权威文档
 
