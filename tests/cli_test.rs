@@ -1779,3 +1779,127 @@ fn test_import_quoted_fields() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// MS11-T01 Iteration 001（R4/S1-S4）：SELECT 派生列表头与渲染兼容。
+// 值语义见 tests/projection_expression_test.rs；此处断言 lib Response 不
+// 携带的表头（Display 文本命名）与四格式渲染。
+// ---------------------------------------------------------------------------
+
+/// R4/S1：AS 别名表头 + 逐行求值（默认非 TTY JSON）
+#[test]
+fn test_projection_derived_column_alias_header() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT name, CASE WHEN id >= 1 THEN 'Y' ELSE 'N' END AS passed FROM users",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["name", "passed"]));
+    assert_eq!(parsed["rows"], serde_json::json!([["Alice", "Y"]]));
+}
+
+/// R4/S1（后半）：无别名派生列表头 = CASE 表达式 Display 文本
+#[test]
+fn test_projection_derived_column_display_header() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT name, CASE WHEN id >= 1 THEN 'Y' ELSE 'N' END FROM users",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["columns"],
+        serde_json::json!(["name", "CASE WHEN id >= 1 THEN 'Y' ELSE 'N' END"])
+    );
+}
+
+/// R4/S2：混合列 + COALESCE 表头（Display 原文）与行值
+#[test]
+fn test_projection_coalesce_header() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &["app", "SELECT id, COALESCE(NULL, id) FROM users"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["columns"],
+        serde_json::json!(["id", "COALESCE(NULL, id)"])
+    );
+    assert_eq!(parsed["rows"], serde_json::json!([[1, 1]]));
+}
+
+/// 怪癖修正：`SELECT 42 FROM t` 单列常量（表头 `42`），不再恒等回退全 schema
+#[test]
+fn test_projection_constant_single_column() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(dir.path(), &["app", "SELECT 42 FROM users"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["42"]));
+    assert_eq!(parsed["rows"], serde_json::json!([[42]]));
+}
+
+/// R4/S4：csv 渲染兼容（派生列值均为既有 Value 变体）
+#[test]
+fn test_projection_csv_render() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT name, CASE WHEN id >= 1 THEN 'Y' ELSE 'N' END AS passed FROM users",
+            "--format",
+            "csv",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "name,passed\nAlice,Y\n");
+}
+
+/// R4/S4：table 渲染兼容（表头 + 行值）
+#[test]
+fn test_projection_table_render() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT name, CASE WHEN id >= 1 THEN 'Y' ELSE 'N' END AS passed FROM users",
+            "--format",
+            "table",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("name") && out.stdout.contains("passed"),
+        "missing derived column headers in table output: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("Alice") && out.stdout.contains("Y"),
+        "missing derived column values in table output: {:?}",
+        out.stdout
+    );
+}

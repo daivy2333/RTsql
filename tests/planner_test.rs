@@ -630,3 +630,140 @@ fn test_join_ambiguous_column_error() {
     // 应该报错（id 列在两表都存在）
     assert!(result.is_err());
 }
+
+// ===========================================================================
+// MS11-T01 T3: 新 WHERE 形态的路由形态断言（追加段）
+// - BETWEEN/LIKE/IS NULL：无 OR、非 PK 等值 → 谓词下推 DataScan
+// - IN/NOT IN：脱糖构造即含 OR → 保留 Filter 包装（保守基线）
+// ===========================================================================
+
+/// BETWEEN 纯 AND 脱糖 → DataScan 装入谓词（无 Filter 节点）
+#[test]
+fn test_between_pushes_predicate_into_datascand() {
+    let sql = "SELECT id, name FROM users WHERE name BETWEEN 'a' AND 'z'";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::DataScan(node) => {
+            assert!(
+                node.predicate.is_some(),
+                "BETWEEN 脱糖为纯 AND，必须下推进 DataScan"
+            );
+        }
+        other => panic!("Expected DataScan with pushed BETWEEN, got {:?}", other),
+    }
+}
+
+/// IN 常量列表脱糖为 OR 链 → Filter(DataScan) 包装，谓词不下推
+#[test]
+fn test_in_keeps_filter_over_datascand() {
+    let sql = "SELECT id, name FROM users WHERE id IN (1, 2)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Filter(node) => match node.input.as_ref() {
+            PhysicalPlan::DataScan(inner) => {
+                assert!(inner.predicate.is_none(), "IN 含 OR，谓词必须留在 Filter");
+            }
+            other => panic!("Expected Filter over DataScan, got {:?}", other),
+        },
+        other => panic!("Expected Filter for IN, got {:?}", other),
+    }
+}
+
+/// NOT IN = Not 包装 OR 链 → 同样保留 Filter
+#[test]
+fn test_not_in_keeps_filter() {
+    let sql = "SELECT id, name FROM users WHERE id NOT IN (1, 2)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Filter(node) => match node.input.as_ref() {
+            PhysicalPlan::DataScan(inner) => {
+                assert!(inner.predicate.is_none());
+            }
+            other => panic!("Expected Filter over DataScan, got {:?}", other),
+        },
+        other => panic!("Expected Filter for NOT IN, got {:?}", other),
+    }
+}
+
+/// LIKE 无 OR → 下推 DataScan
+#[test]
+fn test_like_pushes_predicate_into_datascand() {
+    let sql = "SELECT id, name FROM users WHERE name LIKE 'A%'";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::DataScan(node) => assert!(node.predicate.is_some()),
+        other => panic!("Expected DataScan with pushed LIKE, got {:?}", other),
+    }
+}
+
+/// IS NULL / IS NOT NULL → 下推 DataScan
+#[test]
+fn test_is_null_pushes_predicate_into_datascand() {
+    for sql in [
+        "SELECT id, name FROM users WHERE name IS NULL",
+        "SELECT id, name FROM users WHERE name IS NOT NULL",
+    ] {
+        let stmts = parse_sql(sql).unwrap();
+        let mut builder = setup_builder();
+        let plan = builder.build_plan(&stmts[0]).unwrap();
+        match plan {
+            PhysicalPlan::DataScan(node) => assert!(node.predicate.is_some(), "{sql}"),
+            other => panic!(
+                "Expected DataScan with pushed IS [NOT] NULL for {sql}, got {:?}",
+                other
+            ),
+        }
+    }
+}
+
+// ===========================================================================
+// MS11-T01 T5 (I040): INSERT 负数字面量（追加段）
+// ===========================================================================
+
+/// `-<number>` 字面量折叠为负值入库
+#[test]
+fn test_insert_negative_number_literal_folds() {
+    let sql = "INSERT INTO users (id, name) VALUES (-1, 'Bob')";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Insert(node) => {
+            assert_eq!(node.values[0][0], rtsql::executor::Value::Int(-1));
+        }
+        other => panic!(
+            "Expected Insert with folded negative literal, got {:?}",
+            other
+        ),
+    }
+}
+
+/// 非字面量（列引用）取负维持 UnsupportedValue 拒绝
+#[test]
+fn test_insert_non_literal_negation_rejected() {
+    let sql = "INSERT INTO users (id, name) VALUES (-id, 'Bob')";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("Unsupported value type"),
+            "列引用取负必须维持拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected UnsupportedValue rejection, got {:?}", plan),
+    }
+}

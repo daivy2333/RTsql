@@ -23,6 +23,7 @@ mod join;
 mod limit;
 mod plan;
 mod predicate;
+mod projection;
 mod result;
 mod scan;
 mod semi_join;
@@ -55,13 +56,16 @@ pub use plan::{
     AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, CorrelatedParam,
     CreateTableNode, DataScanNode, DeleteNode, DerivedScanNode, DropTableNode, FilterNode,
     HavingNode, IndexScanAllNode, IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode,
-    OrderByColumn, OutputColumn, PhysicalPlan, ScanNode, SemiJoinNode, SortNode, SubqueryEvalNode,
-    UpdateNode,
+    OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode, ScanNode,
+    SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode,
 };
 pub use predicate::{
-    ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,
-    ExpressionRef, LogicalOp, LogicalPredicate, ParameterExpression, Predicate, PredicateRef,
+    CaseExpression, CastExpression, CastType, CoalesceExpression, ColumnExpression, ComparisonOp,
+    ComparisonPredicate, ConstantExpression, Expression, ExpressionRef, IsNullPredicate,
+    LikePredicate, LogicalOp, LogicalPredicate, NotPredicate, ParameterExpression, Predicate,
+    PredicateRef, Ternary,
 };
+pub use projection::ProjectionExecutor;
 pub use result::ExecResult;
 pub use scan::ScanExecutor;
 pub use semi_join::SemiJoinExecutorV2;

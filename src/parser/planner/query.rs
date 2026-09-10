@@ -8,13 +8,13 @@ use super::aggregate::{extract_aggregate_func, is_aggregate_expr};
 use super::expression::expr_to_column_name;
 use super::PlanBuilder;
 use crate::executor::{
-    DataScanNode, FilterNode, IndexScanNode, OrderByColumn, OutputColumn, PhysicalPlan, ScanNode,
-    SortNode,
+    DataScanNode, FilterNode, IndexScanNode, OrderByColumn, OutputColumn, PhysicalPlan,
+    ProjectionItem, ProjectionNode, ScanNode, SortNode,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
-use sqlparser::ast::{Expr, Query, TableFactor};
+use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Query, TableFactor};
 use std::collections::HashMap;
 
 impl PlanBuilder {
@@ -75,6 +75,7 @@ impl PlanBuilder {
                 .map(|c| c.column.clone())
                 .collect(),
             PhysicalPlan::SubqueryEval(node) => self.get_plan_output_columns(&node.input),
+            PhysicalPlan::Projection(node) => node.columns.clone(),
             PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => {
                 Vec::new()
             }
@@ -111,7 +112,16 @@ impl PlanBuilder {
             TableFactor::Derived {
                 subquery, alias, ..
             } => {
-                let subquery_plan = self.build_query(subquery)?;
+                let saved_subquery_ctx = self.building_subquery;
+                self.building_subquery = true;
+                let subquery_plan = match self.build_query(subquery) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.building_subquery = saved_subquery_ctx;
+                        return Err(e);
+                    }
+                };
+                self.building_subquery = saved_subquery_ctx;
                 let alias_name = alias
                     .as_ref()
                     .map(|a| a.name.value.to_lowercase())
@@ -233,6 +243,10 @@ impl PlanBuilder {
 
     /// Build PhysicalPlan for SELECT query
     pub(crate) fn build_query(&mut self, query: &Query) -> Result<PhysicalPlan, PlanError> {
+        // MS11-T01 Iter001: 子查询上下文（WHERE IN/EXISTS、标量子查询、派生表）
+        // 抑制 SELECT 表达式项路由——子查询计划形状是 SemiJoin/SubqueryEval/
+        // DerivedScan 机制的消费面，保持既有行为（R6 零回归）。
+        let building_subquery = self.building_subquery;
         // Extract Select body
         let select = extract_select_body(query)?;
 
@@ -260,13 +274,17 @@ impl PlanBuilder {
             let inner_tables = Self::extract_subquery_table_names(expr);
             self.inner_table_names = Some(inner_tables.clone());
             let correlated_params = self.extract_correlated_params(expr, &inner_tables)?;
+            let saved_subquery_ctx = self.building_subquery;
+            self.building_subquery = true;
             let subquery_plan = match self.build_query(expr) {
                 Ok(p) => p,
                 Err(e) => {
+                    self.building_subquery = saved_subquery_ctx;
                     self.inner_table_names = None;
                     return Err(e);
                 }
             };
+            self.building_subquery = saved_subquery_ctx;
             self.inner_table_names = None;
             subquery_evals.push((idx, subquery_plan, col_name, correlated_params));
         }
@@ -317,6 +335,10 @@ impl PlanBuilder {
         let mut aggregates = Vec::new();
         let mut non_agg_columns = Vec::new();
         let mut agg_output_columns = Vec::new();
+        // MS11-T01 Iter001: SELECT 表达式项（非普通列引用的项）。此处只标记
+        // 不报错——路由在下文统一裁决：非聚合 → 顶层 Projection；聚合 →
+        // 保持聚合路径报错（design D4：检测循环裁决顺序不变）。
+        let mut has_expression_items = false;
 
         for (item_idx, item) in select.projection.iter().enumerate() {
             // Skip subquery items (handled by SubqueryEval plan node later)
@@ -333,6 +355,8 @@ impl PlanBuilder {
                         })?;
                         agg_output_columns.push(func.result_column_name());
                         aggregates.push(func);
+                    } else if !building_subquery && !is_plain_column_expr(expr) {
+                        has_expression_items = true;
                     } else {
                         let col = expr_to_column_name(expr)?;
                         non_agg_columns.push(col.clone());
@@ -348,6 +372,8 @@ impl PlanBuilder {
                         })?;
                         agg_output_columns.push(alias.value.clone());
                         aggregates.push(func);
+                    } else if !building_subquery && !is_plain_column_expr(expr) {
+                        has_expression_items = true;
                     } else {
                         let col = expr_to_column_name(expr)?;
                         non_agg_columns.push(col.clone());
@@ -359,6 +385,70 @@ impl PlanBuilder {
         }
 
         let has_aggregates = !aggregates.is_empty();
+
+        // === MS11-T01 Iter001: SELECT 表达式项路由 ===
+        let projection_items = if has_expression_items {
+            // 聚合查询保持聚合路径报错（非聚合项不可与聚合混用）
+            if has_aggregates {
+                return Err(PlanError::InvalidAggregateArgument(
+                    "Expected column name".to_string(),
+                ));
+            }
+            // 标量子查询项会追加一列（SubqueryEval 移位输出形状），与表达式
+            // 项混用显式拒绝；子查询单独出现维持现状
+            if !subquery_evals.is_empty() {
+                return Err(PlanError::ParseError(
+                    "Expression projection items cannot be mixed with scalar subquery items"
+                        .to_string(),
+                ));
+            }
+            // JOIN 输出形状是列过滤而非逐项求值，表达式项 + JOIN 显式拒绝
+            if matches!(base_plan, PhysicalPlan::Join(_)) {
+                return Err(PlanError::ParseError(
+                    "Expression projection items are not supported with JOIN queries".to_string(),
+                ));
+            }
+            // `SELECT *, expr` 通配混用拒绝（通配单独出现维持现状）
+            if select
+                .projection
+                .iter()
+                .any(|item| matches!(item, sqlparser::ast::SelectItem::Wildcard(_)))
+            {
+                return Err(PlanError::ParseError(
+                    "SELECT * cannot be mixed with expression projection items".to_string(),
+                ));
+            }
+            // 顶层 Projection 项：列引用经 build_expression 解析为全 schema
+            // 的 ColumnExpression（与谓词同源索引）；表达式项复用 Iteration
+            // 000 值表达式。输入行全形状流出，索引稳定。
+            let mut items = Vec::with_capacity(select.projection.len());
+            for item in &select.projection {
+                match item {
+                    sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
+                        let built = self.build_expression(&table_name, expr)?;
+                        items.push(ProjectionItem {
+                            expr: built,
+                            name: expr.to_string(),
+                        });
+                    }
+                    sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
+                        let built = self.build_expression(&table_name, expr)?;
+                        items.push(ProjectionItem {
+                            expr: built,
+                            name: alias.value.clone(),
+                        });
+                    }
+                    _ => {
+                        return Err(PlanError::ParseError(
+                            "Unsupported projection item".to_string(),
+                        ))
+                    }
+                }
+            }
+            Some(items)
+        } else {
+            None
+        };
 
         // === Projection resolution (MS10-T01 Iter001) ===
         // Resolve the SELECT list to base-schema column indices (projection
@@ -372,6 +462,11 @@ impl PlanBuilder {
         };
         let sort_due = !query.order_by.is_empty();
         let projection_indices = if has_aggregates || !subquery_evals.is_empty() {
+            None
+        } else if has_expression_items {
+            // MS11-T01 Iter001: 表达式查询禁用 per-node 裁剪——输入全形状
+            // 流出，顶层 ProjectionNode 统一求值 + 裁剪（含 ORDER BY 时
+            // Sort 的排序键基础列始终可达，design D10 精神）
             None
         } else {
             base_schema
@@ -668,6 +763,17 @@ impl PlanBuilder {
             });
         }
 
+        // === MS11-T01 Iter001: 顶层 Projection 包装（LIMIT 与 SubqueryEval
+        // 之上）——SELECT 列表表达式项逐行求值并按项输出 ===
+        if let Some(items) = projection_items {
+            let columns = items.iter().map(|i| i.name.clone()).collect();
+            plan = PhysicalPlan::Projection(ProjectionNode {
+                input: Box::new(plan),
+                items,
+                columns,
+            });
+        }
+
         Ok(plan)
     }
 
@@ -825,6 +931,17 @@ fn is_base_scan_chain(plan: &PhysicalPlan) -> bool {
     }
 }
 
+/// MS11-T01 Iter001: SELECT 列表表达式是否为普通列引用（裸标识符或两段限定
+/// 标识符）。裸 `NULL` 是字面量（`build_expression` 映射为常量），不是列；
+/// 两段以外的 CompoundIdentifier 在 extract_columns 处已被拒，到不了这里。
+fn is_plain_column_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(ident) => !ident.value.eq_ignore_ascii_case("NULL"),
+        Expr::CompoundIdentifier(parts) => parts.len() == 2,
+        _ => false,
+    }
+}
+
 /// Resolve select-list column names to base-schema indices (projection order).
 ///
 /// Returns `None` for the identity projection: an empty list, a wildcard
@@ -865,6 +982,38 @@ fn contains_or(expr: &Expr) -> bool {
         Expr::BinaryOp { left, right, .. } => contains_or(left) || contains_or(right),
         Expr::UnaryOp { expr, .. } => contains_or(expr),
         Expr::Nested(expr) => contains_or(expr),
+        // MS11-T01: the new predicate forms only carry an OR when a
+        // sub-expression does — except InList, whose desugaring IS an OR
+        // chain, so it is conservatively true (IN keeps the Filter path).
+        Expr::InList { .. } => true,
+        Expr::Between {
+            expr, low, high, ..
+        } => contains_or(expr) || contains_or(low) || contains_or(high),
+        Expr::Like { expr, pattern, .. } => contains_or(expr) || contains_or(pattern),
+        Expr::IsNull(expr) | Expr::IsNotNull(expr) => contains_or(expr),
+        Expr::Cast { expr, .. } => contains_or(expr),
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand.as_ref().map(|e| contains_or(e)).unwrap_or(false)
+                || conditions.iter().any(contains_or)
+                || results.iter().any(contains_or)
+                || else_result
+                    .as_ref()
+                    .map(|e| contains_or(e))
+                    .unwrap_or(false)
+        }
+        Expr::Function(func) => func.args.iter().any(|arg| match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => contains_or(e),
+            FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(e),
+                ..
+            } => contains_or(e),
+            _ => false,
+        }),
         _ => false,
     }
 }

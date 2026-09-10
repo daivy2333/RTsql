@@ -411,3 +411,54 @@ async fn or_filter_limit_no_cap_under_filter() {
     );
     assert_eq!(rows, vec![vec![json!(2), json!(20), json!("y")]]);
 }
+
+// ===========================================================================
+// MS11-T01 T3: 新谓词的下推/Filter 双路径等价（spec R1/S6，追加段）
+// ===========================================================================
+
+#[tokio::test]
+async fn between_pushdown_and_filter_paths_equivalent() {
+    let (db, _dir) = open_db().await;
+    exec_ok(&db, "CREATE TABLE e (id INT PRIMARY KEY, v INT)").await;
+    for (id, v) in [(1, 10), (2, 20), (3, 30), (4, 40)] {
+        exec_ok(&db, &format!("INSERT INTO e VALUES ({id}, {v})")).await;
+    }
+
+    // DataScan 下推路径：纯 BETWEEN（无 OR、非 PK 等值形态）
+    let rows_pushed = query_rows(
+        db.execute_sql("SELECT id FROM e WHERE v BETWEEN 10 AND 30")
+            .await,
+    );
+    // Filter 等价路径：OR 组合保留 Filter 包装（同一 BETWEEN 比较经共享内核求值）
+    let rows_filter = query_rows(
+        db.execute_sql("SELECT id FROM e WHERE v BETWEEN 10 AND 20 OR v = 30")
+            .await,
+    );
+    assert_eq!(
+        rows_pushed,
+        vec![vec![json!(1)], vec![json!(2)], vec![json!(3)]]
+    );
+    assert_eq!(rows_pushed, rows_filter, "下推与 Filter 两路径行集必须等价");
+
+    // PK 等值 AND 组合保留 Filter（谓词在 FilterNode 内），NULL 语义不变：
+    // id=1 且 v BETWEEN → 仅 id 1
+    let rows_pk = query_rows(
+        db.execute_sql("SELECT id FROM e WHERE id = 1 AND v BETWEEN 10 AND 30")
+            .await,
+    );
+    assert_eq!(rows_pk, vec![vec![json!(1)]]);
+
+    // plan 断言：谓词分别位于 DataScanNode.predicate 与 FilterNode
+    let plan = plan_of(&db, "SELECT id FROM e WHERE v BETWEEN 10 AND 30").await;
+    match plan {
+        PhysicalPlan::DataScan(node) => {
+            assert!(node.predicate.is_some(), "BETWEEN 必须下推 DataScan");
+        }
+        other => panic!("Expected DataScan, got {other:?}"),
+    }
+    let plan = plan_of(&db, "SELECT id FROM e WHERE v BETWEEN 10 AND 20 OR v = 30").await;
+    match plan {
+        PhysicalPlan::Filter(_) => {}
+        other => panic!("Expected Filter, got {other:?}"),
+    }
+}

@@ -3,8 +3,8 @@ use crate::executor::{
     AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DataScanExecutor,
     DeleteExecutor, DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
     HavingExecutor, IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig,
-    JoinExecutor, JoinRelatedConfig, LimitExecutor, PhysicalPlan, ScanExecutor, SemiJoinExecutorV2,
-    SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
+    JoinExecutor, JoinRelatedConfig, LimitExecutor, PhysicalPlan, ProjectionExecutor, ScanExecutor,
+    SemiJoinExecutorV2, SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
@@ -703,6 +703,14 @@ pub(crate) fn create_executor_from_plan(
                     }
                 }
                 Ok(Box::new(DerivedScanExecutor::new(rows)) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Projection(node) => {
+                // MS11-T01 Iter001: 逐项求值走 owned `Expression::evaluate`
+                // 路径（新值表达式的 evaluate_ref 对 String 结果报错，禁用）
+                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
+                let items = node.items.into_iter().map(|item| item.expr).collect();
+                Ok(Box::new(ProjectionExecutor::new(input, items)) as Box<dyn Executor + Send>)
             }
         }
     })
