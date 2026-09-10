@@ -266,4 +266,22 @@
 - **方案**: `extract_insert_values` 接受 `UnaryOp::Neg(Value)` 折叠为负值；SQL 语义扩展，需独立 change
 - **状态**: promoted（2026-09-10 并入 MS11-T01 实施——`extract_insert_values` +`UnaryOp{Minus, Value}` 臂，dump/restore/import 同函数自动受益；change 归档 `openspec/changes/archive/2026-09-10-ms11-t01-sql-expressions/`，spec `sql-expression-evaluation` R5）
 
+## I041: cli::resolve 两个 env 测试并发改写进程全局 HOME/RTSQL_HOME 竞态
+
+- **分类**: 稳定性 / 测试基建
+- **问题**: `src/cli/resolve.rs` 的 `test_db_dir_env_cases` 与 `test_bare_name_env_cases` 为两个并发运行、各自持有独立 `EnvGuard` 改写进程全局 `HOME`/`RTSQL_HOME` 的测试（`src/cli/resolve.rs:79-127`）——guard drop 恢复 HOME 的窗口可撞上对方断言窗口，全量 `cargo test` 偶发失败（观察约 6 次全量 1 次）；单独 `--lib` 稳定通过
+- **证据**: MS11-T02 Iteration 001 Act Remaining Issue #1（2026-09-10，change `2026-09-10-ms11-t02-sql-transaction-statements`）；新增 16 个子进程型 e2e 测试提高全量并行负载放大该既有窗口；Plan Review 独立全量复跑未复现（偶发）；本 change 未触碰 resolve.rs 且 diff 无 env 变更
+- **影响**: 全量回归假失败（重跑即绿），干扰 CI/收尾判定；无产品影响
+- **方案**: 两 env 用例合并为单测试顺序执行，或 env 用例串行化（同一测试线程内执行）；属测试基建修改，需独立小 change
+- **状态**: planned
+
+## I042: 边界子句拒绝 × 活跃会话事务组合路径无 e2e 锁定
+
+- **分类**: 测试覆盖 / CLI 会话
+- **问题**: spec `sql-transaction-statements` R2 各拒绝场景均为独立调用、空闲会话；「会话事务活跃中遇边界子句」（如 `BEGIN; INSERT ...; SAVEPOINT sp1`）的组合路径无 spec 场景与 e2e 用例——该路径行为由 `run_sql` Err 分支 + D5 收尾规则组合产生（拒绝不改变会话态、回滚属收尾），已由 Plan Review 二进制探针验证正确（exit 3 + D3 点名文案 + 事务上下文后缀 + 重开无残留）但无回归锁定
+- **证据**: MS11-T02 Plan Review Finding F3 探针（2026-09-10，change `2026-09-10-ms11-t02-sql-transaction-statements`，iterations/001-cli-session/000-initial.md）
+- **影响**: 未来重构 `run_sql` 错误路径时该组合语义可能静默回归；无当前正确性问题
+- **方案**: `tests/tx_statement_test.rs` 增加组合场景 e2e（可选测试加固，随下一次触碰 CLI 会话面的 change 顺带实施即可）
+- **状态**: planned
+
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
