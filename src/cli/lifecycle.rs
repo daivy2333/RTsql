@@ -194,17 +194,18 @@ pub(super) async fn dump(db: &str) -> ExitStatus {
     .await
 }
 
-/// `SELECT * FROM <t>` 经 pipeline 三 stage 取行集。表名用 catalog 原名而非
-/// quote_ident：引擎以 ObjectName 的 Display 形式为表名（pipeline/planner 各
-/// 提取点直接 to_string 查表），裸名建表的目录名不含引号、带引号建表的目录名
-/// 本身含引号——原名写入 SQL 经 sqlparser Display 往返后与目录名恒等，两种
-/// 来源都正确解析（quote_ident 反而会给裸名表附加引号致查表失败）。SELECT *
-/// 恒等投影保证行形状 = schema 列序（MS10-T01 R6，projection_test 锁定）。
+/// `SELECT * FROM <t>` 经 pipeline 三 stage 取行集。表名经 quote_ident
+/// 转义后写入扫描 SQL（与 dump CREATE/INSERT 输出面同一转义 helper）：
+/// 解析归一化后裸名与带引号拼写汇聚同一 catalog 名，quote_ident 对裸名
+/// 无害（"items" 解析回 items），对 catalog 名含引号字符的表（历史带引号
+/// 表名的 restore 产物）必需——裸插值会被解析为去引号名而查表失败。
+/// SELECT * 恒等投影保证行形状 = schema 列序（MS10-T01 R6，projection_test
+/// 锁定）。
 async fn select_all_rows(
     db: &Database,
     table: &str,
 ) -> Result<Vec<Vec<serde_json::Value>>, ExitStatus> {
-    let sql = format!("SELECT * FROM {}", table);
+    let sql = format!("SELECT * FROM {}", quote_ident(table));
     let statements = match parse_stage(&sql).await {
         Ok(statements) => statements,
         Err(e) => {

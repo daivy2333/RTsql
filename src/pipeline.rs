@@ -864,7 +864,9 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
 fn extract_all_table_names(stmt: &Statement) -> Vec<String> {
     match stmt {
         Statement::Query(query) => extract_all_query_table_names(query),
-        Statement::Insert { table_name, .. } => vec![table_name.to_string().to_lowercase()],
+        Statement::Insert { table_name, .. } => {
+            vec![crate::parser::ast::object_name_to_table_name(table_name)]
+        }
         Statement::Update { table, .. } => extract_all_from_table_with_joins_item(table),
         Statement::Delete { from, .. } => {
             let tables = match from {
@@ -955,7 +957,7 @@ fn extract_all_from_table_with_joins_item(twj: &TableWithJoins) -> Vec<String> {
     // Main table
     match &twj.relation {
         TableFactor::Table { name, .. } => {
-            tables.push(name.to_string().to_lowercase());
+            tables.push(crate::parser::ast::object_name_to_table_name(name));
         }
         TableFactor::Derived { subquery, .. } => {
             // Recursively extract table names from the derived subquery
@@ -968,7 +970,7 @@ fn extract_all_from_table_with_joins_item(twj: &TableWithJoins) -> Vec<String> {
     for join in &twj.joins {
         match &join.relation {
             TableFactor::Table { name, .. } => {
-                tables.push(name.to_string().to_lowercase());
+                tables.push(crate::parser::ast::object_name_to_table_name(name));
             }
             TableFactor::Derived { subquery, .. } => {
                 tables.extend(extract_all_query_table_names(subquery));

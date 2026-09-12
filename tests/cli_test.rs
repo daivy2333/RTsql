@@ -285,9 +285,9 @@ fn test_multi_statement_executes() {
 
 /// ④（S2）顺序渲染：INSERT 的受影响行文档在前，SELECT 的 rows 文档在后，
 /// json 格式下为两个独立 JSON 文档（逐行 JSONL 风格）。
-/// （SELECT 取两列投影：与既有单语句渲染语义逐字一致——见 test_piped_default_json；
-/// Act 校准：全表扫描子集单列投影的表头为全 schema，属既有单语句行为，
-/// 不在本 change 契约内，避免在多语句用例中锁死该形状。）
+/// （SELECT id, name 恰为 users 全 schema；I034 修复后 scan 路径表头 =
+/// 投影列名（与 test_piped_default_json 同契约），断言在投影语义下成立，
+/// 避免在多语句用例中锁死子集投影形状。）
 #[test]
 fn test_multi_statement_sequential_render() {
     let dir = fixture();
@@ -1928,4 +1928,426 @@ fn test_projection_table_render() {
         "missing derived column values in table output: {:?}",
         out.stdout
     );
+}
+
+// MS15-Rest Iteration 000（I034 / R1）：CLI 表头与投影行形状一致。
+// 裸 DataScan 与下推 DataScan 路径的表头必须等于投影列名——修复前
+// `get_plan_output_columns` 对 scan 臂返回全 schema 列名，而执行器已按
+// 投影裁剪行，json `columns` 与 `rows` 字段数不一致（表头错位）。
+
+/// R1/S2：裸 DataScan 子集投影 CLI 表头按投影裁剪（json 字段数一致）
+#[test]
+fn test_bare_datascans_projection_header_matches_rows() {
+    let dir = fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &["s", "CREATE TABLE s (id INT PRIMARY KEY, name STRING)"],
+    );
+    assert_eq!(out.code, Some(0), "create s failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["s", "INSERT INTO s VALUES (1, 'Alice')"]);
+    assert_eq!(out.code, Some(0), "insert failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["s", "SELECT name FROM s", "--format", "json"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["columns"],
+        serde_json::json!(["name"]),
+        "header must be the projection columns: {}",
+        out.stdout
+    );
+    let rows = parsed["rows"].as_array().unwrap();
+    assert_eq!(rows, &vec![serde_json::json!(["Alice"])]);
+    assert_eq!(
+        parsed["columns"].as_array().unwrap().len(),
+        rows[0].as_array().unwrap().len(),
+        "header/row field count mismatch: {}",
+        out.stdout
+    );
+}
+
+/// R1/S3：下推 DataScan 子集投影 CLI 表头按投影裁剪（谓词下推路径同契约）
+#[test]
+fn test_pushdown_datascans_projection_header_matches_rows() {
+    let dir = fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &["t", "CREATE TABLE t (id INT, n INT, s STRING)"],
+    );
+    assert_eq!(out.code, Some(0), "create t failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["t", "INSERT INTO t VALUES (1, 10, 'a')"]);
+    assert_eq!(out.code, Some(0), "insert failed: {}", out.stderr);
+
+    let out = run_cli(
+        dir.path(),
+        &["t", "SELECT s FROM t WHERE n > 5", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["columns"],
+        serde_json::json!(["s"]),
+        "header must be the projection columns: {}",
+        out.stdout
+    );
+    let rows = parsed["rows"].as_array().unwrap();
+    assert_eq!(rows, &vec![serde_json::json!(["a"])]);
+    assert_eq!(
+        parsed["columns"].as_array().unwrap().len(),
+        rows[0].as_array().unwrap().len(),
+        "header/row field count mismatch: {}",
+        out.stdout
+    );
+}
+
+/// R1/S4 锚点：聚合与表达式路径表头零回归——聚合表头来自 Aggregate
+/// `output_columns`、表达式路径来自顶层 Projection 节点 `columns`；
+/// 两条路径的 scan 输入投影恒为空，本 change 的 scan 臂裁剪不触及。
+/// （Act 契约内等价调整：Plan 命名的 `n + 1` 形态不在 SELECT 表达式
+/// 项支持面（MS11-T01 七变体，二元算术预存不支持），改用同为
+/// Projection 定形的 COALESCE 形态锁定同一锚点。）
+#[test]
+fn test_aggregate_and_expression_header_anchors() {
+    let dir = fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &["t", "CREATE TABLE t (id INT, n INT, s STRING)"],
+    );
+    assert_eq!(out.code, Some(0), "create t failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["t", "INSERT INTO t VALUES (1, 10, 'a')"]);
+    assert_eq!(out.code, Some(0), "insert failed: {}", out.stderr);
+
+    let out = run_cli(
+        dir.path(),
+        &["t", "SELECT COUNT(*) AS cnt FROM t", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["cnt"]));
+
+    let out = run_cli(
+        dir.path(),
+        &["t", "SELECT COALESCE(n, 0) AS x FROM t", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["x"]));
+}
+
+// MS15-Rest Iteration 002（I039 / R3）：表名解析归一化与 dump 保真。
+// 引擎以 ObjectName Display（含引号字符）为表名——带引号建表后裸名
+// 互访报表不存在，dump→restore→dump 逐代引号膨胀。目标语义：表名取
+// 标识符去引号值（小写），带引号与裸名拼写等价，多代 dump 恒等。
+
+/// R1/S「带引号建表后裸名访问命中」：CREATE TABLE "items" 后裸名
+/// INSERT/SELECT 命中同一表（修复前报表不存在，exit 3）。
+#[test]
+fn test_quoted_create_then_bare_name_access() {
+    let dir = fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &["s", "CREATE TABLE \"items\" (id INT PRIMARY KEY, n INT)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["s", "INSERT INTO items VALUES (1, 10)"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "bare-name insert must hit the quoted-created table: {}",
+        out.stderr
+    );
+
+    let out = run_cli(
+        dir.path(),
+        &["s", "SELECT n FROM items WHERE id = 1", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[10]]));
+}
+
+/// R1/S「带引号与裸名拼写等价互访」：裸名建表后 SELECT/INSERT/UPDATE/
+/// DELETE/DROP 经带引号拼写逐一命中同一表，行为与裸名拼写一致。
+#[test]
+fn test_quoted_bare_spelling_equivalence() {
+    let dir = fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &["s", "CREATE TABLE items (id INT PRIMARY KEY, n INT)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["s", "INSERT INTO items VALUES (1, 10)"]);
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    // SELECT 经带引号拼写命中
+    let out = run_cli(
+        dir.path(),
+        &["s", "SELECT * FROM \"items\"", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "quoted select: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[1, 10]]));
+
+    // INSERT 经带引号拼写命中
+    let out = run_cli(dir.path(), &["s", "INSERT INTO \"items\" VALUES (5, 50)"]);
+    assert_eq!(out.code, Some(0), "quoted insert: {}", out.stderr);
+
+    // DELETE 经带引号拼写命中（删未被更新触及的键 5——同键跨进程
+    // UPDATE→DELETE 组合存在预存引擎缺陷，本 change 范围外，见证
+    // 不得依赖其行级语义）
+    let out = run_cli(dir.path(), &["s", "DELETE FROM \"items\" WHERE id = 5"]);
+    assert_eq!(out.code, Some(0), "quoted delete: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["s", "SELECT * FROM items", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[1, 10]]));
+
+    // UPDATE 经带引号拼写命中（非键列 SET——键列 rekey 形态属 I037 邻接
+    // 缺陷，同在范围外）
+    let out = run_cli(
+        dir.path(),
+        &["s", "UPDATE \"items\" SET n = 99 WHERE id = 1"],
+    );
+    assert_eq!(out.code, Some(0), "quoted update: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["s", "SELECT * FROM items", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[1, 99]]));
+
+    // DROP 经带引号拼写命中同一表：删后两种拼写均报表不存在
+    let out = run_cli(dir.path(), &["s", "DROP TABLE \"items\""]);
+    assert_eq!(out.code, Some(0), "quoted drop: {}", out.stderr);
+    let out = run_cli(dir.path(), &["s", "SELECT * FROM items"]);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "dropped table must be gone: {}",
+        out.stderr
+    );
+    let out = run_cli(dir.path(), &["s", "SELECT * FROM \"items\""]);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "dropped table must be gone: {}",
+        out.stderr
+    );
+}
+
+/// R1/S「UPDATE/DELETE 表名解析归一化」：带引号建表 "logs" 后裸名
+/// UPDATE/DELETE 命中（修复前报表不存在）。
+#[test]
+fn test_update_delete_bare_names_on_quoted_created_table() {
+    let dir = fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &["s", "CREATE TABLE \"logs\" (id INT PRIMARY KEY, n INT)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["s", "INSERT INTO \"logs\" VALUES (1, 100)"]);
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["s", "INSERT INTO \"logs\" VALUES (2, 200)"]);
+    assert_eq!(out.code, Some(0), "seed 2 failed: {}", out.stderr);
+
+    // 裸名 DELETE 命中（删键 2——避免同键 UPDATE→DELETE 跨进程预存缺陷，
+    // 见证不得依赖其行级语义）
+    let out = run_cli(dir.path(), &["s", "DELETE FROM logs WHERE id = 2"]);
+    assert_eq!(out.code, Some(0), "bare delete must hit: {}", out.stderr);
+
+    // 裸名 UPDATE 命中（非键列 SET——键列 rekey 形态属 I037 邻接缺陷）
+    let out = run_cli(dir.path(), &["s", "UPDATE logs SET n = 101 WHERE id = 1"]);
+    assert_eq!(out.code, Some(0), "bare update must hit: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["s", "SELECT * FROM logs", "--format", "json"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[1, 101]]));
+}
+
+/// R2/S「dump-restore-dump 表名恒等」：裸名建表库两代 dump 的 CREATE
+/// TABLE 行文本一致（修复前 restore 把带引号 DDL 存成 Display 名，
+/// 二代膨胀为 """mixed"""）；restore 后经两种拼写均可访问。
+#[test]
+fn test_dump_restore_dump_table_name_stable() {
+    let dir = fixture();
+
+    let out = run_cli(dir.path(), &["a", "CREATE TABLE mixed (a INT, v STRING)"]);
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "a",
+            "INSERT INTO mixed VALUES (1, 'x'); INSERT INTO mixed VALUES (2, 'y')",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    let dump1 = run_cli(dir.path(), &["dump", "a"]);
+    assert_eq!(dump1.code, Some(0), "dump a failed: {}", dump1.stderr);
+    let create_line_1 = dump1
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("CREATE TABLE"))
+        .expect("dump must contain a CREATE TABLE line");
+
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+    let dump_file = dir.path().join("gen1.sql");
+    std::fs::write(&dump_file, &dump1.stdout).unwrap();
+    let out = run_cli(dir.path(), &["restore", "b", dump_file.to_str().unwrap()]);
+    assert_eq!(out.code, Some(0), "restore failed: {}", out.stderr);
+    assert!(out.stdout.is_empty(), "restore must be silent on success");
+
+    let dump2 = run_cli(dir.path(), &["dump", "b"]);
+    assert_eq!(dump2.code, Some(0), "dump b failed: {}", dump2.stderr);
+    let create_line_2 = dump2
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("CREATE TABLE"))
+        .expect("second-generation dump must contain a CREATE TABLE line");
+    assert_eq!(
+        create_line_1, create_line_2,
+        "CREATE TABLE line must be identical across dump generations"
+    );
+
+    for spelling in ["mixed", "\"mixed\""] {
+        let sql = format!("SELECT a FROM {}", spelling);
+        let out = run_cli(dir.path(), &["b", sql.as_str(), "--format", "json"]);
+        assert_eq!(
+            out.code,
+            Some(0),
+            "select {} failed: {}",
+            spelling,
+            out.stderr
+        );
+        let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+        assert_eq!(parsed["rows"], serde_json::json!([[1], [2]]));
+    }
+}
+
+/// R2/S「schema 输出可重建同名表」：带引号建表库的 schema DDL 在空库
+/// 执行后重建出同名表（归一化名），源库与重建库裸名访问一致。
+#[test]
+fn test_schema_output_rebuilds_same_table_name() {
+    let dir = fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &["a", "CREATE TABLE \"items\" (id INT PRIMARY KEY, n INT)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["a", "INSERT INTO \"items\" VALUES (1, 10)"]);
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["schema", "a"]);
+    assert_eq!(out.code, Some(0), "schema failed: {}", out.stderr);
+    let ddl = out.stdout.trim().to_string();
+    assert!(
+        ddl.starts_with("CREATE TABLE"),
+        "schema must emit CREATE TABLE DDL: {:?}",
+        ddl
+    );
+
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["b", ddl.as_str()]);
+    assert_eq!(out.code, Some(0), "apply schema ddl failed: {}", out.stderr);
+
+    // 重建库与源库均以裸名访问同一表名（与源库目录名一致）；
+    // b 只应用了 DDL 未插数据——断言表可达（空行集），a 断言数据
+    for (db, expected) in [
+        ("a", serde_json::json!([[10]])),
+        ("b", serde_json::json!([])),
+    ] {
+        let out = run_cli(
+            dir.path(),
+            &[db, "SELECT n FROM items WHERE id = 1", "--format", "json"],
+        );
+        assert_eq!(
+            out.code,
+            Some(0),
+            "bare select in {} failed: {}",
+            db,
+            out.stderr
+        );
+        let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+        assert_eq!(parsed["rows"], expected, "rows in {}", db);
+    }
+}
+
+/// R1/S3「引号转义按标识符语义解析」（T9-R1）：catalog 名含引号字符的表
+/// （`CREATE TABLE """items"""` → catalog 名 `"items"`，含历史 restore 产物）
+/// dump 可用，且 dump→restore→dump 两代 CREATE 行恒等（均 """items"""，不
+/// 继续膨胀）；b 库经 """items""" 拼写可见行。修复前 dump 报 Table not
+/// found——行扫描 SQL 裸插值经归一化解析为去引号名，与 catalog 名不等。
+#[test]
+fn test_escaped_name_dump_restore_identity() {
+    let dir = fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "a",
+            "CREATE TABLE \"\"\"items\"\"\" (id INT PRIMARY KEY, n INT)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["a", "INSERT INTO \"\"\"items\"\"\" VALUES (1, 10)"],
+    );
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    let dump1 = run_cli(dir.path(), &["dump", "a"]);
+    assert_eq!(dump1.code, Some(0), "dump a failed: {}", dump1.stderr);
+    let create_line_1 = dump1
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("CREATE TABLE"))
+        .expect("dump must contain a CREATE TABLE line");
+    assert!(
+        create_line_1.contains("\"\"\"items\"\"\""),
+        "dump DDL must spell the escaped name: {}",
+        create_line_1
+    );
+
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+    let dump_file = dir.path().join("gen1.sql");
+    std::fs::write(&dump_file, &dump1.stdout).unwrap();
+    let out = run_cli(dir.path(), &["restore", "b", dump_file.to_str().unwrap()]);
+    assert_eq!(out.code, Some(0), "restore failed: {}", out.stderr);
+    assert!(out.stdout.is_empty(), "restore must be silent on success");
+
+    let dump2 = run_cli(dir.path(), &["dump", "b"]);
+    assert_eq!(dump2.code, Some(0), "dump b failed: {}", dump2.stderr);
+    let create_line_2 = dump2
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("CREATE TABLE"))
+        .expect("second-generation dump must contain a CREATE TABLE line");
+    assert_eq!(
+        create_line_1, create_line_2,
+        "CREATE TABLE line must be identical across dump generations"
+    );
+
+    let out = run_cli(
+        dir.path(),
+        &["b", "SELECT * FROM \"\"\"items\"\"\"", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "escaped select failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[1, 10]]));
 }

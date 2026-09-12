@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-09-11（milestone-planner 路线重排（用户批准）：MS13 拆分——分发收口独立为 MS14；新增 MS15 初版前正确性收口（I034/I036/I037/I039）；批准执行序 MS15 → MS14 → ★初版达成★ → MS13 → MS12 → MS08 剩余 → MS09。前次：MS11-T03 完成收尾，MS11 转 completed）
+> 最后更新：2026-09-12（MS15-Rest 收尾——I034/I037/I039 三项正确性缺陷清零，**MS15 completed**；聚合 change 归档 `2026-09-12-ms15-rest-correctness-batch`（867 tests / Plan Review accepted），specs `cli-noninteractive-shell` 修改 + `update-index-maintenance` / `table-name-resolution` 新增（25 specs validate PASS），I034/I037/I039 转 promoted + I033 证据强化（跨进程同键 UPDATE→DELETE 实证）+ 登记 I047（rekey）/I048（import 边界）；前次：MS15-T01（I036）实施收尾 + milestone-planner 路线重排：MS13 拆分——分发收口独立为 MS14；批准执行序 MS15 → MS14 → ★初版达成★ → MS13 → MS12 → MS08 剩余 → MS09）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,11 +12,11 @@
 
 ## 路线图结构
 
-16 个 Milestone：7 completed（MS00-MS02 历史 + MS06/MS07/MS10/MS11）+ 3 旧 superseded + 6 planned/ready（初版路径 ready：MS15 正确性收口、MS14 分发收口；初版后 planned：MS08 剩余、MS09、MS12、MS13）。
+16 个 Milestone：8 completed（MS00-MS02 历史 + MS06/MS07/MS10/MS11/MS15）+ 3 旧 superseded + 5 planned/ready（初版路径 ready：MS14 分发收口；初版后 planned：MS08 剩余、MS09、MS12、MS13）。
 
 规划理念：**先收口正确性 → 建设基础能力 → 实测驱动性能 → 引擎能力收尾 → 应用层可用好用（非交互 CLI / 密钥 / 分析 / 分发）**（2026-09-06 依据 R18 分析扩展应用层轨道）。2026-09-11 按「尽早达成 CLI 数据库初版」重排：分发收口自 MS13 拆出前移（MS14），初版前收口 4 项正确性缺陷（MS15），分析函数/加密/性能后置。
 
-执行顺序（用户批准 2026-09-11）：**MS15 正确性收口 → MS14 分发收口（★初版达成）→ MS13 分析函数 → MS12 加密 → MS08 剩余 T03-T06 → MS09**。初版 = 既有能力 + 分发收口（用户裁定：分析函数与加密后置）。旧执行序（2026-09-06：MS10 优先于 MS08 剩余；MS11/MS12 可互换）已被本序取代。
+执行顺序（用户批准 2026-09-11）：**MS15 正确性收口（✅ 2026-09-12 完成）→ MS14 分发收口（★初版达成，下一步）→ MS13 分析函数 → MS12 加密 → MS08 剩余 T03-T06 → MS09**。初版 = 既有能力 + 分发收口（用户裁定：分析函数与加密后置）。旧执行序（2026-09-06：MS10 优先于 MS08 剩余；MS11/MS12 可互换）已被本序取代。
 旧优化项已重新分类：见各 superseded MS 的"原范围"段与 D-candidates 列表。
 
 ## 已完成历史
@@ -307,9 +307,9 @@
 - **Split signals**: macOS 矩阵需专门修复时拆出独立 MS；crates.io 发布受阻时 CI/Releases 先行收口
 - **Related changes**: None
 
-### MS15：初版前正确性收口 — ready（2026-09-11 新增）
+### MS15：初版前正确性收口 — completed（2026-09-12）
 
-- **Status**: ready（依赖已满足；用户 2026-09-11 批准为初版前必做）
+- **Status**: completed（T01 独立 change + T02-T04 聚合 change `2026-09-12-ms15-rest-correctness-batch`，2026-09-12 全部完成；用户 2026-09-11 批准为初版前必做）
 - **Dependencies**: MS10（缺陷全部在 MS10-T04/T05 与 MS11-T03 验收面发现）
 - **Outcome**: 4 项用户可见正确性缺陷清零——键位等值不再静默漏行、CLI 表头与行形状一致、UPDATE 键位置 NULL 不再唯一性误拒、多代 dump/restore 表名保真
 - **Rationale**: 首次对外发布不带已知静默错误结果。4 项均为小改动但分属 planner 路由 / CLI 渲染 / update 执行器索引维护 / dump 命名面，聚合为同一成果「初版前正确性积压清零」；每项独立 change 独立验证，单项失败不阻塞其余
@@ -317,10 +317,10 @@
 
 | Task | 目标 | 缺陷依据 |
 |---|---|---|
-| MS15-T01 | I036：键位等值过滤对无键行可达（不可键控字面量禁用索引路由，消除静默漏行） | MS10-T05 001-rework + MS11-T03 双重实证（improvements I036） |
-| MS15-T02 | I034：裸 DataScan 子集投影 CLI 表头与行形状一致（表头按 projection 裁剪） | MS10-T04 Plan Review finding（improvements I034） |
-| MS15-T03 | I037：UPDATE 键位置 NULL/非 Int 后旧键索引条目清理（消除唯一性误拒与运行期/恢复两态不一致） | MS10-T05 001-rework Plan Review（improvements I037） |
-| MS15-T04 | I039：dump/restore 表名保真（解析归一化或 DDL 条件引号，多代往返无引号膨胀） | MS10-T05 Iter001 Act（improvements I039） |
+| MS15-T01 | **completed**（2026-09-12）I036：键位等值过滤对无键行可达（不可键控字面量禁用索引路由，消除静默漏行） | MS10-T05 001-rework + MS11-T03 双重实证（improvements I036，已 promoted）；change `archive/2026-09-12-ms15-t01-keyless-eq-routing/` |
+| MS15-T02 | **completed**（2026-09-12，聚合 change Iter 000）I034：裸 DataScan 子集投影 CLI 表头与行形状一致（`get_plan_output_columns` scan 臂应用 projection 裁剪表头） | MS10-T04 Plan Review finding（improvements I034，已 promoted） |
+| MS15-T03 | **completed**（2026-09-12，聚合 change Iter 001，经 001-replan 校准）I037：UPDATE 键位置 NULL/非 Int 后旧键索引条目清理（Step 7 分支化，消除唯一性误拒与两态不一致） | MS10-T05 001-rework Plan Review（improvements I037，已 promoted） |
+| MS15-T04 | **completed**（2026-09-12，聚合 change Iter 002，经 001-rework 收口转义名 dump）I039：dump/restore 表名保真（解析侧归一化，11 处消费点去引号 + `select_all_rows` 经 `quote_ident`） | MS10-T05 Iter001 Act（improvements I039，已 promoted） |
 
 - **Non-goals**: I035 no-FROM SELECT（能力扩展，初版后）；I032/I038（无当前正确性影响）；I041/I042/I044 测试加固（随相应面顺带）；I043 标量函数极端输入（需用户裁定语义方向）；性能优化
 - **Workload**: 4 个独立小 change（planner 路由 / CLI 渲染 / update 执行器 / lifecycle DDL 生成）
@@ -328,7 +328,7 @@
 - **Verification boundary**: 每项独立测试 + 全量回归零修改通过
 - **Diagnostic boundary**: planner query 路由（`src/parser/planner/query.rs`）/ CLI 渲染（`src/cli/render.rs` + `get_plan_output_columns`）/ `src/executor/update.rs` / `src/cli/lifecycle.rs` DDL 生成
 - **Split signals**: 单项实施触发磁盘格式变更或跨子系统重构时，拆出独立 MS
-- **Related changes**: None
+- **Related changes**: `2026-09-12-ms15-rest-correctness-batch`（T02/T03/T04 聚合 change：3 Iteration 各 1-2 Cycle 全部 accepted，2026-09-12 归档，spec `cli-noninteractive-shell`「扫描执行器真投影」修改 + 新增 `update-index-maintenance` / `table-name-resolution`；I034/I037/I039 转 promoted，范围外登记 I047/I048 + I033 证据强化）；T01 关联 change 见上表 `archive/2026-09-12-ms15-t01-keyless-eq-routing/`
 
 ## D-candidates（不归入当前 MS，待后续决定）
 
@@ -366,7 +366,7 @@ MS00 → MS01 → MS02
               ┌──────────────┬────────────┼──────────────┐
               ↓              ↓            ↓              ↓
          MS12 加密      MS15 正确性收口  MS14 分发收口   MS11 表达式函数
-         (planned)      (ready)          (ready)        (completed)
+         (planned)      (completed)      (ready)        (completed)
                                                              ↓
                                                      MS13 分析函数
                                                      (planned)
@@ -390,6 +390,8 @@ MS00 → MS01 → MS02
 
 | 完成日期 | 内容 | commit |
 |---|---|---|
+| 2026-09-12 | MS15-Rest 初版前正确性收口第二批（T02/T03/T04 聚合 change，I034/I037/I039）：3 Iteration——000（I034）：`get_plan_output_columns` 新增 `projected_columns`，DataScan 臂必需应用 projection（Scan/IndexScanAll 恒等加固、IndexScan 保持构造期收窄），CLI 表头与行形状一致（json `columns`/`rows` 字段数一致），cli_test +3；001（I037）：`UpdateExecutor` Step 7 分支化（新值 `to_key()==None` → `index_manager.delete(&self.key)`），旧键 INSERT 误拒消除、点查空集、运行期/恢复两态一致，新增 `tests/update_index_maintenance_test.rs` 5 测试 + `keyless_row_test` T8-R2 校准（000-initial Gate 6 阻塞 → 001-replan 用户批准）；002（I039）：`ast.rs` 新增 `object_name_to_table_name`（`Ident.value` + lowercase + `.` 连接）统一 11 处表名消费点，带引号与裸名拼写全语句等价 + dump→restore→dump 恒等 + schema 同名重建，cli_test +5；转义名 dump 探针（R1-S3）Gate 6 阻塞（`select_all_rows` 裸插值 × T8 契约 Forbidden 冲突）→ Plan Review rework-required → 001-rework T9-R1：`select_all_rows` 经既有 `quote_ident` 包裹 + 注释按归一化语义改写 + 转义名 dump 往返测试（cli_test +1 至 65）；**867 tests pass / 0 failed / 2 ignored**（Plan Review 两轮独立复跑：blocked 审计 866/0/2、收口 867/0/2）；clippy/fmt/validate 全 0/PASS（specs 25）；I034/I037/I039 转 promoted + I033 证据强化（跨进程同键 UPDATE→DELETE 丢失实证，同根去重）+ 登记 I047（rekey 旧键残留）/I048（import 实参边界） | 实施未提交（待用户触发；对照基线 f9e1e1f）；docs sync 本次写入（归档 + spec 合并 + I 登记 + tasks/SNAPSHOT 同步），同工作区待用户一并 commit |
+| 2026-09-12 | MS15-T01 I036 键位等值路由修复：单 Iteration 000（T1-T4）——`src/parser/planner/query.rs` 新增 `has_non_keyable_pk_literal_leg` 分类 helper（镜像 `has_pk_equality` 遍历：Eq 腿键列 Identifier + 另一侧 `Expr::Value` → `value_from_sqlparser(...).to_key().is_none()`；AND 递归、OR 保守 false、转换失败 `?` 传播）+ `build_select` WHERE 路由 `has_pk_eq` 分支条件收窄为 `has_pk_eq && !has_non_keyable_pk_literal_leg(..)?`，非键控腿（String/Float/Bool/NULL 字面量）落入既有 OR 臂（`Filter(DataScan)`）/ 谓词下推臂（`DataScan`），未新增第三条 plan 路径；`extract_pk_from_where`/`is_simple_pk_equality`/`has_pk_equality` 本体/执行器/存储层零改动，形态 2（Int 字面量 + Float 键列，登记 I046）按批准范围保留；新增 `tests/keyless_eq_routing_test.rs` 8 测试（R1 四行为场景 + 简单非键控/OR plan 形状 + R3-S1 空集不变 + R1-S5 restart；RED 5 failed/1 passed → GREEN 8 passed）；853 tests pass / 0 failed / 2 ignored（基线 845 只增不减，Plan Review 独立复跑全量 + clippy --all-targets/fmt/validate 全 0/PASS + CLI 三探针行集逐字节一致）；Plan Review accepted（4 偏差全非阻塞：BASELINE-CHANGED 基线前移、PLAN-INVALID OR 形态 RED 预测与自家调查事实矛盾、平行 helper 属 Plan 留白、clippy 范围增强；3 findings：F1 Bool/NULL 无场景级见证 Minor、F2 同 I041 既有项、F3 形态 2 残差）；I036 转 promoted + 登记 I046；spec `planner-key-equality-routing` 合并（3 Requirement 9 场景） | 实施未提交（待用户触发；对照基线 f9e1e1f）；docs sync 本次写入（归档 + spec 合并 + I036 promoted/I046 登记 + tasks/SNAPSHOT 同步），同工作区待用户一并 commit |
 | 2026-09-11 | MS11-T03 标量函数库第一批（string 6 + math 4）：Iteration 000（T1-T3）——`src/executor/function.rs` 新模块单点注册表（`REGISTRY` 元数据 + planner 校验入口 `is_scalar_function`/`check_scalar_function` + `FunctionExpression` 统一节点，D3 求值顺序：全部参数求值→错误先传播→任一 NULL→NULL 跳过类型校验；`evaluate_ref` 三先例模式 String 结果报错、`set_parameter_value` 递归）+ planner `Expr::Function` 臂扩展（COALESCE 逐字节保持 → OVER/DISTINCT/FILTER/NULL treatment/ORDER BY/命名/通配符点名拒绝 → arity 校验 → 构造；未注册名维持既有文案）+ `Expr::Trim` 独立变体臂（仅纯 `trim(s)`，规格化形态点名拒绝）+ `ast.rs` 两放行门（注册名/`Expr::Trim` 放行，未知名维持既有拒绝）+ string 六函数语义（upper/lower ASCII、length Unicode 字符计数、substr SQLite 边缘五断言、replace 空 from 原样、trim 仅 U+0020）+ 严格类型；Iteration 001（T4-T6）——REGISTRY +4（ABS/ROUND/FLOOR/CEIL）+ eval_scalar 四臂（abs 同型、round `f64::round` 半数远离零 + `10^digits` 乘除（digits Int/Float 向零截断、负 digits 整数位）、floor/ceil 返回 Float）+ `float_arg` 严格 Int|Float + `Expr::Ceil/Floor` 独立变体接线（`build_ceil_floor` 共享 helper，TO DateTimeField 点名拒绝——PLAN-OMISSION 按 TRIM 先例补救）+ R5 六调用面场景（下推/OR/聚合混用/HAVING/ORDER BY 别名静默锁/PK+函数）+ cli_test 2 表头用例；新增 `tests/scalar_function_test.rs` 28 测试 + function.rs 18 单测 + cli_test 增至 56；845 tests pass / 0 failed / 2 ignored（Plan Review 独立复跑全量 + 三目标套件精确数 + clippy/fmt/validate 全 0/PASS）；两 Iteration Plan Review 均 accepted（000 轮 7 偏差含 spec R1/S1 文案勘误——SELECT 位置实为 `Unsupported statement type`、ast.rs 放行门 PLAN-OMISSION；001 轮 5 偏差含 CEIL/FLOOR 接线）；登记 I043/I044/I045 + I036 佐证（预存缺陷 A 同根去重） | 实施未提交（待用户触发；对照基线 179228b）；docs sync 本次写入（归档 + spec 合并 + I 登记 + tasks/SNAPSHOT 同步），同工作区待用户一并 commit |
 | 2026-09-10 | MS11-T02 SQL 事务语句 BEGIN/COMMIT/ROLLBACK：Iteration 000（T1-T3 lib 事务语句层）——`TxStatementKind` + `classify_transaction_statement`（`src/parser/planner/mod.rs`，`build_plan` 函数首行前置分类：边界子句 D3 点名文案直达、干净事务语句 session-only 拒绝、其余逐字节不变）+ `PlanError::TransactionStatement`（消息即全文）+ `TransactionSession`（`src/transaction/session.rs` 新模块，begin/commit/rollback/is_active/tx_id/tx，错误文案即契约，5 单测）+ `tests/tx_statement_test.rs` lib 段 3 测试（execute_sql/execute_in_tx/SqlHandler 三路径拒绝 + plan cache 不变 + 拒绝不终结事务）；Iteration 001（T4-T6 CLI 会话接线与 e2e）——`run_sql` 分类三臂分派（事务语句驱动会话 + `Affected(0)` 直渲染不经 executor；`Ok(None)` 会话活跃走 `execute_stage_in_tx`、空闲走既有 `execute_stage`）+ `rollback_session` helper 覆盖全部错误返回路径 + 收尾回滚 + stderr `uncommitted transaction was rolled back at exit`（exit 0）+ `sql_failure_status` 增 `in_transaction` 上下文后缀（lifecycle.rs 2 调用点补 `false`）；CLI e2e 16 测试（R1 提交可见/回滚无残留/事务内 SELECT 三文档化场景 + R2 五拒绝含 `AND NO CHAIN` 等价 + R3 边界四场景 + S7/S8）；797 tests pass / 0 failed / 2 ignored（Plan Review 独立复跑全量 + clippy/fmt/validate 全 0/PASS + 组合路径探针）；两 Iteration Plan Review 均 accepted（000 轮修正 spec R2 NO CHAIN 不可实现 + R3/S4 病句；001 轮零返工，F1-F5 全非实质） | 179228b（实施，含 change 目录）；docs sync 本提交（归档 + spec 合并 + I041/I042 登记） |
 | 2026-09-10 | MS11-T01 SQL 表达式四件套与值表达式（WHERE/SELECT）：Iteration 000（T1-T6）三值求值内核 `Ternary`/`evaluate_ternary`（Comparison/Logical 三值重写、`evaluate()`=fold、短路保持式——既有行为逐字节等价）+ `LikePredicate`/`IsNullPredicate`/`NotPredicate` + planner 七个 WHERE 臂（IN→OR 链 / BETWEEN→AND / LIKE / IS NULL / NOT 脱糖；ESCAPE/TRY_CAST/未知 DataType 计划期拒绝）+ `contains_or` 七变体扩展 + `CaseExpression`/`CoalesceExpression`/`CastExpression`（CAST 严格四族 + 转换矩阵）+ I040 负数字面量折叠；Iteration 001（T7-T9）`ProjectionNode`（PhysicalPlan 第 20 变体）+ `ProjectionExecutor`（owned `evaluate` 逐项求值）+ SELECT 表达式项路由（AS 别名 / Display 列名 / 四拒绝面 / 聚合报错保持 / `SELECT 42` 单列怪癖修正）+ `building_subquery` 子查询上下文抑制（R6 回归修复）；新增 `tests/expression_e2e_test.rs` 24 + `tests/projection_expression_test.rs` 16 + predicate/planner/pushdown/cli 追加 24（cli_test 增至 54）；769 tests pass / 0 failed / 2 ignored（Plan Review 独立复跑 + 17 项二进制探针）；clippy/fmt/validate 全 0/PASS；两 Iteration Plan Review 均 accepted | 4813374（实施，含 change 目录）；docs sync 046a76c（归档 + spec 合并 + I040 promoted）；c468055（SNAPSHOT hash 记录勘误） |

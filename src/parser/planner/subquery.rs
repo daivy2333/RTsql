@@ -133,11 +133,11 @@ impl PlanBuilder {
                 .flat_map(|twj| {
                     let mut names = Vec::new();
                     if let TableFactor::Table { name, .. } = &twj.relation {
-                        names.push(name.to_string().to_lowercase());
+                        names.push(crate::parser::ast::object_name_to_table_name(name));
                     }
                     for join in &twj.joins {
                         if let TableFactor::Table { name, .. } = &join.relation {
-                            names.push(name.to_string().to_lowercase());
+                            names.push(crate::parser::ast::object_name_to_table_name(name));
                         }
                     }
                     names

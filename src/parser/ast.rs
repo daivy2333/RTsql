@@ -24,7 +24,7 @@ pub fn extract_table_name(from: &[TableWithJoins]) -> Result<String, PlanError> 
     }
     let table_factor = &from[0].relation;
     match table_factor {
-        TableFactor::Table { name, .. } => Ok(name.to_string().to_lowercase()),
+        TableFactor::Table { name, .. } => Ok(object_name_to_table_name(name)),
         _ => Err(PlanError::UnsupportedStatement),
     }
 }
@@ -214,13 +214,25 @@ pub fn extract_qualified_columns(
 
 /// 从 ObjectName 提取表名（lowercase）
 pub fn extract_name_from_object(obj: &ObjectName) -> String {
-    obj.to_string().to_lowercase()
+    object_name_to_table_name(obj)
+}
+
+/// MS15-Rest (I039): resolve a table name from its ObjectName by the
+/// identifiers' unquoted values (quote_style-insensitive), lowercased —
+/// quoted and bare spellings resolve to the same table. Multi-part names
+/// join with '.', matching the previous Display shape.
+pub fn object_name_to_table_name(name: &ObjectName) -> String {
+    name.0
+        .iter()
+        .map(|id| id.value.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// 从 JOIN 关系的 TableFactor 提取表名
 pub fn extract_join_table_name(relation: &TableFactor) -> Result<String, PlanError> {
     match relation {
-        TableFactor::Table { name, .. } => Ok(name.to_string().to_lowercase()),
+        TableFactor::Table { name, .. } => Ok(object_name_to_table_name(name)),
         _ => Err(PlanError::UnsupportedStatement),
     }
 }
