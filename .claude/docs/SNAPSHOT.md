@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-11（MS11-T03 实施完成 + docs sync 收尾：spec 合并（新增 sql-scalar-functions）、change 归档、I043/I044/I045 登记 + I036 佐证；实施与 docs sync 均在工作区未提交，commit 待用户触发）
+> 最后更新：2026-09-12（MS11-T03 实施与 docs sync 提交入库（0708427 / e75003e）；模板退役 chore（97177a9）；新增活跃 change 2026-09-12-ms15-t01-keyless-eq-routing——MS15-T01/I036 键位等值路由修复规划完成（Gate 1 已批准，Plan Context ready），待实施）
 > 同步状态：current
 
 ## 项目身份
@@ -67,15 +67,15 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **最新 revision**: 179228b（master 最后 commit；MS11-T03 实施 + 本次 docs sync 在工作区未提交——4 modified + 2 新增源码/测试 + change 归档移动，commit 待用户触发）
-- **ahead of origin**: 14 commits
+- **最新 revision**: 97177a9（master 最后 commit；MS11-T03 实施 0708427 + docs sync e75003e + 模板退役 97177a9；工作区含活跃 change 2026-09-12-ms15-t01-keyless-eq-routing 规划产物（未跟踪，随实施 commit 入库））
+- **ahead of origin**: 17 commits
 - **最新 tag**: M11
 - **测试**: 845 tests pass, 0 failures, 2 ignored（2026-09-11 MS11-T03 收尾，Plan Review 独立复跑；基线 797 + scalar_function_test 28 + function 单测 18 + cli_test 2；2 ignored 为信号标定设计项）
 - **OpenSpec**: 22 capability specs validate PASS（2026-09-11 归档 ms11-t03 change 后；新增 sql-scalar-functions，6 Requirement）
 
 ## 同步状态
 
-- `current` — 文档与代码一致（MS11-T03 实施与 docs sync 完成于工作区，commit 待用户触发）
+- `current` — 文档与代码一致（MS11-T03 已提交入库；MS15-T01 change 规划就绪待实施）
 
 ## 权威文档
 
@@ -86,7 +86,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 参考: `openspec/specs/references/spec.md` (Rxx)
 - 改进: `openspec/specs/improvements/spec.md` (Ixx)
 - 任务与路线: `.claude/docs/tasks.md`
-- 变更: `openspec/changes/`（当前无活跃 change；归档目录含 MS06-T01 + MS06-T02 + MS06-T03-T04 + MS07-T01 + MS07-T02 + MS07-T03 + ms07-rest + ms08-t01-t02 + ms10-t01-cli-shell + ms10-t02-file-lock-graceful-shutdown + ms10-t03-file-format-header + ms10-t04-multi-statement-execution + ms10-t05-lifecycle-subcommands + ms11-t01-sql-expressions + ms11-t02-sql-transaction-statements + ms11-t03-scalar-functions carrier）
+- 变更: `openspec/changes/`（活跃：2026-09-12-ms15-t01-keyless-eq-routing——MS15-T01 键位等值路由修复，规划就绪待实施；归档目录含 MS06-T01 + MS06-T02 + MS06-T03-T04 + MS07-T01 + MS07-T02 + MS07-T03 + ms07-rest + ms08-t01-t02 + ms10-t01-cli-shell + ms10-t02-file-lock-graceful-shutdown + ms10-t03-file-format-header + ms10-t04-multi-statement-execution + ms10-t05-lifecycle-subcommands + ms11-t01-sql-expressions + ms11-t02-sql-transaction-statements + ms11-t03-scalar-functions carrier）
 - Legacy migration carrier: `.claude/legacy/2026-08-25-openspec-init-migration/`
 - 新增能力 spec:
   - `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）
