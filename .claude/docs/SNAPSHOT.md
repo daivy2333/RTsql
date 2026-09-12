@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-12（MS15 全部收尾——T01（I036）+ T02/T03/T04 聚合 change `2026-09-12-ms15-rest-correctness-batch`（I034 CLI 表头/I037 键位索引清理/I039 表名归一化）实施与 docs sync 同工作区待 commit；specs 25，测试 867，I034/I036/I037/I039 转 promoted + I033 证据强化 + 登记 I046/I047/I048）
+> 最后更新：2026-09-12（MS15 全部收尾——T01（I036）+ T02/T03/T04 聚合 change `2026-09-12-ms15-rest-correctness-batch`（I034 CLI 表头/I037 键位索引清理/I039 表名归一化）实施与 docs sync 已提交 d8a244f；specs 25，测试 867，I034/I036/I037/I039 转 promoted + I033 证据强化 + 登记 I046/I047/I048）
 > 同步状态：current
 
 ## 项目身份
@@ -67,15 +67,15 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **最新 revision**: f9e1e1f（master 最后 commit；工作区含 MS15-T01 + MS15-Rest 实施与 docs sync 产物未提交——planner/ast/pipeline/update/lifecycle 修改 + `tests/keyless_eq_routing_test.rs`/`tests/update_index_maintenance_test.rs` 新增 + cli_test 扩充 + 两个 change 归档移动 + tasks/SNAPSHOT/improvements 更新 + specs 25，待用户 commit）
-- **ahead of origin**: 17 commits
+- **最新 revision**: d8a244f（master 最后 commit，MS15 close-out 单提交：T01 + T02/T03/T04 实施 + 2 change 归档 + specs 25 + docs sync；工作区干净）
+- **ahead of origin**: 18 commits
 - **最新 tag**: M11
 - **测试**: 867 tests pass, 0 failures, 2 ignored（2026-09-12 MS15-Rest 收尾，Plan Review 独立复跑；基线 845 + keyless_eq_routing_test 8 + update_index_maintenance_test 5 + cli_test 9；2 ignored 为信号标定设计项）
 - **OpenSpec**: 25 capability specs validate PASS（2026-09-12 新增 update-index-maintenance 2 Requirement / table-name-resolution 3 Requirement + cli-noninteractive-shell 修改；无活跃 change）
 
 ## 同步状态
 
-- `current` — 文档与代码一致（MS15 全部实施与 docs sync 同工作区，待用户 commit 入库）
+- `current` — 文档与代码一致（MS15 全部实施与 docs sync 已提交 d8a244f 入库）
 
 ## 权威文档
 
