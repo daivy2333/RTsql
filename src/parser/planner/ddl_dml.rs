@@ -302,7 +302,7 @@ impl PlanBuilder {
         constraints: &[sqlparser::ast::TableConstraint],
     ) -> Result<PhysicalPlan, PlanError> {
         // Extract table name
-        let table_name = name.to_string().to_lowercase();
+        let table_name = object_name_to_table_name(name);
 
         // Check for empty columns
         if columns.is_empty() {
@@ -345,7 +345,7 @@ impl PlanBuilder {
             return Err(PlanError::MissingField("table name".into()));
         }
 
-        let table_name = names[0].to_string().to_lowercase();
+        let table_name = object_name_to_table_name(&names[0]);
 
         Ok(PhysicalPlan::DropTable(DropTableNode {
             table_name,

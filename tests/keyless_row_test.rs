@@ -14,13 +14,17 @@
 //! - R1 见证：String 首列隐式 PK 表整表可插；NULL 键位行落库可见；
 //!   可键控重复插入守卫（DuplicateKey 保持）。
 //! - R2 见证：无键行 INSERT + UPDATE 链 + 崩溃（drop 不 close）重开——
-//!   修复前 `RedoFailed` 使 `Database::open` 失败；修复后恢复成功、
-//!   行数精确、更新值可见、可键控行不受影响。
+//!   MS10-T05 修复前 `RedoFailed` 使 `Database::open` 失败；修复后恢复
+//!   成功、行数精确、键位转无键行可见、可键控行不受影响（MS15-Rest
+//!   按 I037 修复语义校准：第二次键位等值 UPDATE 改断言 KeyNotFound）。
 //!
 //! UPDATE 可达性注记：`build_update` 要求 WHERE 为 `pk = 可键控值` 且经索引
-//! 定位，INSERT 的无键行无法被 UPDATE 直接命中；产生「old_tuple 无键」的
-//! Update WAL 记录的 SQL 可达路径是 SET 键列为 NULL 的链式更新
-//! （keyed → keyless → 再次 UPDATE）。
+//! 定位，INSERT 的无键行无法被 UPDATE 直接命中；产生「new_tuple 无键」的
+//! Update WAL 记录的 SQL 可达路径是 SET 键列为 NULL 的更新
+//! （keyed → keyless）。I037 修复后旧键索引条目随之删除，对无键版本的
+//! 再次键位等值 UPDATE 在执行器 Step 1 即 KeyNotFound——「old_tuple 无键」
+//! 的 old-lookup 重放子路径自此无 SQL 运行期生产者（legacy WAL 兼容面，
+//! 恢复侧语义保持）。
 
 use rtsql::database::Database;
 use rtsql::network::protocol::Response;
@@ -124,18 +128,20 @@ async fn keyed_duplicate_still_rejected() {
     db.wal_buffer.shutdown().await;
 }
 
-/// T8-R2：无键行 INSERT + UPDATE 链 + 崩溃重开。
+/// T8-R2：无键行 INSERT + UPDATE 链 + 崩溃重开（MS15-Rest 001-replan 按
+/// I037 修复语义校准）。
 ///
 /// 流程：CREATE TABLE t (a INT, v INT)（隐式 PK = a）→ flush_all 持久化
 /// catalog（DDL 无 WAL 记录）→ INSERT 无键行 (NULL,1) + 可键控行 (5,0)、
-/// (7,100) → UPDATE 键行为无键（SET a = NULL）→ 再次 UPDATE 该行
-/// （old_tuple 无键，产生 RedoFailed 形态的 Update 记录）→ shutdown +
-/// drop 不 close → 重开。
+/// (7,100) → UPDATE 键位转无键（SET a = NULL：old_tuple 键控、new_tuple
+/// 无键，旧键条目删除——恢复侧 keyless 桶 NEW 版本重放见证）→ 对无键版本
+/// 的再次键位等值 UPDATE 被拒（KeyNotFound：残留条目已消除，键位等值
+/// 不可达）→ shutdown + drop 不 close → 重开。
 ///
-/// RED（修复前实测）：Update 重放 `extract_pk_key(old_tuple)` None →
-/// `RedoFailed` → `Database::open` Err。
-/// GREEN：恢复成功；COUNT 精确 3（无键插入行 + 更新后的无键行 + 可键控行）；
-/// 更新值 v=42 可见；无键插入行 v=1 可见；可键控行点查与重复拒绝守卫保持。
+/// GREEN：恢复成功；COUNT 精确 3（无键插入行 + 键位转无键行 + 可键控行）；
+/// 键位转无键行 (NULL,0) 经非键谓词可见（keyless NEW_tuple 重放见证）；
+/// 无键插入行 v=1 可见；可键控行点查与重复拒绝守卫保持；重开后旧键 5
+/// INSERT 成功（恢复侧索引无残留条目，与运行期 delete 分支一致）。
 #[tokio::test]
 async fn keyless_row_update_recovery_after_crash() {
     let dir = TempDir::new().unwrap();
@@ -160,21 +166,29 @@ async fn keyless_row_update_recovery_after_crash() {
         other => panic!("可键控行 INSERT 应 affected 1，实际 {:?}", other),
     }
 
-    // 键行 → 无键：v2 (NULL, 0)，索引 key5 → v2
+    // 键行 → 无键：v2 (NULL, 0)；I037 修复后旧键 5 条目删除（new_tuple
+    // 无键 → 恢复侧 keyless 桶 NEW 版本重放见证）
     match db.execute_sql("UPDATE t SET a = NULL WHERE a = 5").await {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("UPDATE SET a = NULL 应成功，实际 {:?}", other),
     }
-    // 对无键版本的再次 UPDATE：old_tuple 无键（恢复侧 RedoFailed 形态）
+    // 对无键版本的再次键位等值 UPDATE：残留条目已消除，执行器 Step 1
+    // search(5) → None → KeyNotFound（I037 修复语义——键位无键行对键位
+    // 等值不可达，R1 新场景直接见证）
     match db.execute_sql("UPDATE t SET v = 42 WHERE a = 5").await {
-        Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
-        other => panic!("对无键版本的 UPDATE 应成功，实际 {:?}", other),
+        Response::Error { message } => {
+            assert!(
+                message.contains("Key not found"),
+                "对无键版本的键位等值 UPDATE 应 KeyNotFound，实际 {message}"
+            );
+        }
+        other => panic!("对无键版本的键位等值 UPDATE 应被拒，实际 {:?}", other),
     }
 
     db.wal_buffer.shutdown().await;
     drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
 
-    // 修复前：Update 重放 RedoFailed → open Err（RED 见证）
+    // 恢复重放 keyed→keyless Update 记录（keyless 桶 NEW 版本追踪）
     let db2 = Database::open(&path).await.unwrap();
 
     // 行数精确：无键插入行 + 更新后的无键行 + 可键控行
@@ -185,10 +199,15 @@ async fn keyless_row_update_recovery_after_crash() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    // 更新值可见（v 无索引 → DataScan + 谓词全扫描）
-    match db2.execute_sql("SELECT COUNT(*) FROM t WHERE v = 42").await {
+    // 键位转无键行 (NULL,0) 可见（v 无索引 → DataScan + 谓词全扫描，
+    // keyless NEW_tuple 重放见证；第二次 UPDATE 已 KeyNotFound，无 v=42 行）
+    match db2.execute_sql("SELECT COUNT(*) FROM t WHERE v = 0").await {
         Response::QueryResult { rows } => {
-            assert_eq!(rows[0][0], serde_json::json!(1), "更新值 v=42 必须可见");
+            assert_eq!(
+                rows[0][0],
+                serde_json::json!(1),
+                "键位转无键行 (NULL,0) 必须可见"
+            );
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
@@ -216,6 +235,12 @@ async fn keyless_row_update_recovery_after_crash() {
     match db2.execute_sql("INSERT INTO t VALUES (8, 0)").await {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("恢复后新键 INSERT 应成功，实际 {:?}", other),
+    }
+    // 旧键 5 重开 INSERT 成功：恢复侧索引无残留条目（与运行期 delete
+    // 分支一致——R1-S3 一致性收口）
+    match db2.execute_sql("INSERT INTO t VALUES (5, 200)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
+        other => panic!("重开后旧键 5 INSERT 应成功，实际 {:?}", other),
     }
 
     db2.wal_buffer.shutdown().await;

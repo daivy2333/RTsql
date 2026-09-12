@@ -126,11 +126,18 @@ impl Executor for UpdateExecutor {
             .record_version(self.tx_id, &self.table_meta.name, new_row_id)
             .await;
 
-        // Step 7: Update index → new RowId
-        self.table_meta
-            .index_manager
-            .update(&self.key, new_row_id)
-            .await?;
+        // Step 7: Maintain the PK index. A key column set to a value with no
+        // B-Tree key (NULL / non-Int) must not keep the old key entry pointing
+        // at the keyless new version: delete it so runtime state matches the
+        // recovery-side rebuild (keyless versions are never indexed).
+        if self.column_name == self.table_meta.pk_column && self.new_value.to_key().is_none() {
+            self.table_meta.index_manager.delete(&self.key).await?;
+        } else {
+            self.table_meta
+                .index_manager
+                .update(&self.key, new_row_id)
+                .await?;
+        }
 
         Ok(Some(ExecResult::AffectedRows(1)))
     }

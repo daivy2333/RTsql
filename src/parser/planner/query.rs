@@ -17,13 +17,25 @@ use crate::parser::value::value_from_sqlparser;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Query, TableFactor};
 use std::collections::HashMap;
 
+/// MS15-Rest (I034): describe a scan node's real output shape. The scan
+/// executors trim rows by `projection` after predicate evaluation, so the
+/// column metadata must be trimmed the same way (same mapping as the
+/// Filter/Sort arms in `get_plan_output_columns`). Empty = identity.
+fn projected_columns(columns: &[String], projection: &[usize]) -> Vec<String> {
+    if projection.is_empty() {
+        columns.to_vec()
+    } else {
+        projection.iter().map(|&i| columns[i].clone()).collect()
+    }
+}
+
 impl PlanBuilder {
     /// 从 PhysicalPlan 中提取输出列名（用于派生表的列注册）
     #[allow(clippy::only_used_in_recursion)]
     pub(crate) fn get_plan_output_columns(&self, plan: &PhysicalPlan) -> Vec<String> {
         match plan {
-            PhysicalPlan::Scan(node) => node.columns.clone(),
-            PhysicalPlan::DataScan(node) => node.columns.clone(),
+            PhysicalPlan::Scan(node) => projected_columns(&node.columns, &node.projection),
+            PhysicalPlan::DataScan(node) => projected_columns(&node.columns, &node.projection),
             PhysicalPlan::DerivedScan(node) => node.columns.clone(),
             PhysicalPlan::Filter(node) => {
                 let mut columns = self.get_plan_output_columns(&node.input);
@@ -54,8 +66,14 @@ impl PlanBuilder {
             PhysicalPlan::Limit(node) => self.get_plan_output_columns(&node.input),
             PhysicalPlan::Aggregate(node) => node.output_columns.clone(),
             PhysicalPlan::Having(node) => self.get_plan_output_columns(&node.input),
-            PhysicalPlan::IndexScan(node) => node.columns.clone(),
-            PhysicalPlan::IndexScanAll(node) => node.columns.clone(),
+            PhysicalPlan::IndexScan(node) => {
+                // MS15-Rest (I034): IndexScan columns are already narrowed to
+                // the projected shape at construction (WHERE routing below)
+                // and its `projection` indexes point into the base schema —
+                // applying them here would double-trim / go out of bounds.
+                node.columns.clone()
+            }
+            PhysicalPlan::IndexScanAll(node) => projected_columns(&node.columns, &node.projection),
             PhysicalPlan::Join(node) => {
                 // JOIN 行组装严格按 output_columns 顺序（见 executor/join.rs），
                 // 列名直接取自节点，不递归合并左右子计划。
@@ -99,7 +117,7 @@ impl PlanBuilder {
         // 基础表 — 支持 TableFactor::Table（普通表）和 TableFactor::Derived（派生表）
         let (base_plan, base_table) = match &from[0].relation {
             TableFactor::Table { name, .. } => {
-                let table_name = name.to_string().to_lowercase();
+                let table_name = object_name_to_table_name(name);
                 self.validate_table(&table_name)?;
                 let base_columns = self.tables.get(&table_name).cloned().unwrap_or_default();
                 let plan = PhysicalPlan::Scan(ScanNode {
@@ -534,7 +552,12 @@ impl PlanBuilder {
                 //   (row-level filtering) and no Filter node is generated.
                 let predicate = self.build_where(&table_name, where_expr)?;
                 let has_pk_eq = self.has_pk_equality(&table_name, where_expr)?;
-                if has_pk_eq {
+                // MS15-T01 (I036): a PK-equality leg with a non-keyable literal
+                // (String/Float/Bool/NULL) must not route to the index — keyless
+                // rows (stored, not indexed) are invisible to Scan's index
+                // traversal and would be silently dropped. Fall through to the
+                // OR / pushdown arms for data-page evaluation instead.
+                if has_pk_eq && !self.has_non_keyable_pk_literal_leg(&table_name, where_expr)? {
                     // PK equality present but in a non-simple form (e.g. AND-combined
                     // with another predicate). Keep base_plan as-is.
                     PhysicalPlan::Filter(FilterNode {
@@ -841,6 +864,61 @@ impl PlanBuilder {
                 right,
             } => Ok(self.has_pk_equality(table_name, left)?
                 || self.has_pk_equality(table_name, right)?),
+            _ => Ok(false),
+        }
+    }
+
+    /// MS15-T01 (I036): Check whether any PK-equality leg compares the key
+    /// column against a non-keyable literal (String/Float/Bool/NULL —
+    /// `Value::to_key()` is `None`). Those legs make index routing unsound:
+    /// keyless rows never enter the index, so `Filter(Scan)` traversal
+    /// silently drops them and the predicate must be evaluated on the data
+    /// page instead.
+    ///
+    /// Traversal mirrors `has_pk_equality` (Eq legs + AND recursion; OR is
+    /// conservative `false`). A leg whose non-key side is not an
+    /// `Expr::Value` (column-column, unary negation) is not a literal leg.
+    /// Conversion failures propagate like `extract_pk_from_where`.
+    fn has_non_keyable_pk_literal_leg(
+        &self,
+        table_name: &str,
+        expr: &Expr,
+    ) -> Result<bool, PlanError> {
+        let pk_column = match self.primary_keys.get(table_name) {
+            Some(pk) => pk.clone(),
+            None => return Ok(false),
+        };
+
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: sqlparser::ast::BinaryOperator::Eq,
+                right,
+            } => {
+                let literal = if matches!(
+                    left.as_ref(),
+                    Expr::Identifier(i) if i.value.to_lowercase() == pk_column
+                ) {
+                    right.as_ref()
+                } else if matches!(
+                    right.as_ref(),
+                    Expr::Identifier(i) if i.value.to_lowercase() == pk_column
+                ) {
+                    left.as_ref()
+                } else {
+                    return Ok(false);
+                };
+                if let Expr::Value(v) = literal {
+                    return Ok(value_from_sqlparser(v)?.to_key().is_none());
+                }
+                Ok(false)
+            }
+            Expr::BinaryOp {
+                left,
+                op: sqlparser::ast::BinaryOperator::And,
+                right,
+            } => Ok(self.has_non_keyable_pk_literal_leg(table_name, left)?
+                || self.has_non_keyable_pk_literal_leg(table_name, right)?),
             _ => Ok(false),
         }
     }

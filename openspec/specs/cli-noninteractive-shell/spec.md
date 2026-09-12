@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change 2026-09-06-ms10-t01-cli-shell. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: 参数化 CLI 入口与主命令
 
 `rtsql` 二进制 SHALL 提供 `rtsql <db> <sql>` one-shot 主命令：解析参数、打开数据库、执行 SQL（单条语句，或以 `;` 分隔的多条语句逐条执行）、渲染结果到 stdout、以分类退出码退出。进程正常退出前 SHALL 调用 `Database::close()`（checkpoint + WAL 截断）。主命令参数缺失或非法时 SHALL 以退出码 2 报用法错误。打开时遇跨进程锁冲突 SHALL 以退出码 4 报 `database is locked`。
@@ -151,12 +153,26 @@ CLI SHALL 支持 `--format table|json|csv|tsv`；未指定时 TTY stdout 默认 
 
 `SELECT` 的投影列表 SHALL 决定扫描路径返回行的形状：四个扫描执行器（Scan / DataScan / IndexScan / IndexScanAll）SHALL 按投影裁剪产出行，plan 节点的 `columns` 元数据与行形状一致。谓词求值（WHERE / 下推谓词 / MVCC 可见性）SHALL 在全 schema 行上先行完成，投影只发生在行产出最后一步。`SELECT *` 的投影等于全 schema，行为不变。
 
+CLI 表头 SHALL 与行形状一致：`get_plan_output_columns` 对携带投影的 plan 节点 SHALL 返回投影后的列名（含 DataScan / Scan / IndexScanAll 节点自身的 `projection` 裁剪，与 Filter / Sort 臂既有模式一致）；任何查询路径下 CLI 输出的表头列数 SHALL 等于每行字段数（table / json / csv / tsv 各格式同契约）。
+
 #### Scenario: 子集投影在全部扫描路径返回投影列
 
 - **GIVEN** 表 `s(id INT PRIMARY KEY, name STRING)` 含一行 `(1, 'Alice')`
 - **WHEN** 分别执行 `SELECT name FROM s`（DataScan 路径）与 `SELECT name FROM s WHERE id = 1`（IndexScan 路径）
 - **THEN** 两条查询都返回单列：表头 `["name"]`、行 `[["Alice"]]`
 - **AND** 表头列数与每行字段数一致（任何路径无错位）
+
+#### Scenario: 裸 DataScan 子集投影 CLI 表头按投影裁剪
+
+- **GIVEN** 表 `s(id INT PRIMARY KEY, name STRING)` 含一行 `(1, 'Alice')`（修复前表头为 `["id","name"]`、行 `[["Alice"]]`）
+- **WHEN** `rtsql <db> "SELECT name FROM s"`（`--format json`）
+- **THEN** 输出 `{"columns":["name"],"rows":[["Alice"]]}`（修复前 `columns` 为 `["id","name"]`，与 `rows` 字段数不一致）
+
+#### Scenario: 下推 DataScan 子集投影 CLI 表头按投影裁剪
+
+- **GIVEN** 表 `t(id INT, n INT, s STRING)` 含行 `(1, 10, 'a')`
+- **WHEN** `rtsql <db> "SELECT s FROM t WHERE n > 5"`（谓词下推 DataScan 路径，`--format json`）
+- **THEN** 输出 `{"columns":["s"],"rows":[["a"]]}`，表头列数与行字段数一致
 
 #### Scenario: PK 点查聚合返回正确值
 
@@ -176,6 +192,12 @@ CLI SHALL 支持 `--format table|json|csv|tsv`；未指定时 TTY stdout 默认 
 - **GIVEN** 任意含数据的表
 - **WHEN** `SELECT * FROM t` 或投影覆盖全部列
 - **THEN** 返回行与投影改造前的全 schema 行完全一致（旧行为保留）
+
+#### Scenario: 聚合与表达式路径表头零回归
+
+- **GIVEN** 聚合查询（`SELECT COUNT(*) AS cnt FROM t`）与表达式投影查询（`SELECT COALESCE(n, 0) AS x FROM t`；表达式项支持面见 `sql-expression-evaluation`——二元算术不在 SELECT 表达式项之列，本场景以受支持的 Projection 定形形态为锚）
+- **WHEN** 渲染结果
+- **THEN** 表头分别来自 Aggregate `output_columns` 与 Projection 节点 `columns`，与本 change 前一致（聚合查询 scan 输入投影恒为空、表达式路径由顶层 Projection 节点定形，本 change 的 scan 臂投影裁剪不触及）
 
 #### Scenario: 既有测试按投影语义校准
 
@@ -452,4 +474,3 @@ CLI SHALL 对以 `;` 分隔的多条 SQL 语句逐条执行：每条语句独立
 - **GIVEN** 某持有者已锁定目标库文件
 - **WHEN** `rtsql import <db> <table> data.csv --csv`
 - **THEN** stderr 输出以 `database is locked` 开头的错误信息，退出码 4
-

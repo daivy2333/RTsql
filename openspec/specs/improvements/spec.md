@@ -199,7 +199,8 @@
 
 - **分类**: 正确性 / 执行器
 - **问题**: 版本链 T→A（update）→ tombstone（delete）中，墓碑替代者不抑制前驱（`superseder_suppresses` 对 `is_deleted` 恒 false，MS10-T02 R6 精确保留既有语义）→ 无快照扫描产出已删除行的旧版本 T
-- **影响**: 语义为「既有行为未扩大」（R6 前同样重现）；MS10-T02 验收夹具 UPDATE/DELETE 域不相交故未触发；未来混合负载计数会虚高
+- **证据**: MS15-Rest Iteration 002 Act Remaining Issues 2 跨进程探针 + Plan Review 独立复现（2026-09-12，归档 change `2026-09-12-ms15-rest-correctness-batch`）——`INSERT (1,10)` → 进程 A `UPDATE SET n=99 WHERE id=1`（affected 1）→ 进程 B `DELETE WHERE id=1`（affected 1）→ 进程 C 扫描 `[[1,10]]`、点查 `id=1` 空集（两步变更从扫描面消失）；对照 Z1 异键 update→delete、Z2 delete→update 均正常（`[[1,99]]`）；全裸名序列同样复现（与表名归一化无关，预存缺陷）；未被既有 867 测试覆盖
+- **影响**: 语义为「既有行为未扩大」（R6 前同样重现）；MS10-T02 验收夹具 UPDATE/DELETE 域不相交故未触发；MS15-Rest 收尾探针实证该形态在真实跨进程 CLI 序列下两步变更丢失（原「未来混合负载」预判已现实化）
 - **方案**: 抑制谓词区分「已提交墓碑」（应抑制整条链）与「未提交墓碑」（不抑制、回溯前驱）——需对照 WAL committed 集合或 header 编码扩展
 - **状态**: planned（与 MS09-T01 隔离级别工作同域，届时一并处理）
 
@@ -210,7 +211,7 @@
 - **证据**: MS10-T04 Plan Review finding 5 独立探针复现（2026-09-09，revision `8827700`）；`tests/projection_test.rs`（MS10-T01）只断言 lib 行形状，未覆盖 CLI 表头
 - **影响**: json 输出 `columns` 与 `rows` 字段数不一致，机器消费需二次裁剪；表格输出表头错位
 - **方案**: `get_plan_output_columns` 对裸 DataScan 节点按 `projection` 索引裁剪表头；修正后同步校准 `tests/cli_test.rs::test_multi_statement_sequential_render` 的注释登记
-- **状态**: planned
+- **状态**: promoted（2026-09-12 并入 MS15-Rest 实施——`get_plan_output_columns` 新增 `projected_columns` helper：DataScan 臂必需应用 projection、Scan/IndexScanAll 恒等加固、IndexScan 保持构造期收窄；change 归档 `openspec/changes/archive/2026-09-12-ms15-rest-correctness-batch/`，spec `cli-noninteractive-shell`「扫描执行器真投影」修改 + cli_test 表头用例）
 
 ## I035: no-FROM SELECT 不受支持
 
@@ -228,7 +229,7 @@
 - **证据**: MS10-T05 Iteration 001 001-rework Act Deviation 1 真二进制探针 + Plan Review 独立核实 `src/parser/planner/query.rs:430-475`（2026-09-09，归档 change `2026-09-09-2026-09-09-ms10-t05-lifecycle-subcommands`）；MS11-T03 双重实证同一根因的全空结果形态（2026-09-11，归档 change `2026-09-10-ms11-t03-scalar-functions`——无声明 PK 表首列字符串 Eq 经 `has_pk_equality`→Filter(Scan) 回退返回空行集 exit 0，pristine master 源码级探针 Eq→rows:[] vs Ne/Gt 正常 + CLI 探针，Plan Review 独立复现；测试以声明 PK 表形规避并注记）
 - **影响**: 对含无键行的表按键位等值过滤漏行（静默不完整结果）；此前该形态表恒为空、行为不可观察
 - **方案**: planner 对键位等值 + 不可键控字面量回退 DataScan 行内过滤（`to_key()==None` 时禁用索引路由）；属 planner 路由面，需独立 change
-- **状态**: planned
+- **状态**: promoted（2026-09-12 并入 MS15-T01 实施——`has_pk_equality` 分支条件收窄 + 新增 `has_non_keyable_pk_literal_leg` 分类 helper，不可键控字面量腿落入既有 OR/下推臂；change 归档 `openspec/changes/archive/2026-09-12-ms15-t01-keyless-eq-routing/`，spec `planner-key-equality-routing`）
 
 ## I037: UPDATE 键位为无键值后运行期旧键索引条目指向无键版本
 
@@ -237,7 +238,7 @@
 - **证据**: MS10-T05 Iteration 001 001-rework Plan Review Finding 5 代码核实 + `tests/keyless_row_test.rs` 恢复面行为（2026-09-09，归档 change 同上）；修复前该形态 Update 重放 RedoFailed（库不可打开），001-rework 后恢复面正确
 - **影响**: 运行期唯一性检查误拒；运行期/恢复后索引内容不一致（重开自愈）
 - **方案**: update 执行器对新值 `to_key()==None` 改为删除旧键条目（`index_manager.delete`）而非 update；行为变化需回归 `tests/keyless_row_test.rs` 与恢复套件
-- **状态**: planned
+- **状态**: promoted（2026-09-12 并入 MS15-Rest 实施——`UpdateExecutor` Step 7 分支化：新值不可键控改 `index_manager.delete(&self.key)`，运行期/恢复两态一致；change 归档 `openspec/changes/archive/2026-09-12-ms15-rest-correctness-batch/`，新 spec `update-index-maintenance`；邻接 rekey 形态登记 I047）
 
 ## I038: GC 对无键行版本链不可达（gc_table scan_all 盲区）
 
@@ -255,7 +256,7 @@
 - **证据**: MS10-T05 Iteration 001 000-initial Act Deviation 1 探针 + Remaining Issues #2（2026-09-09，归档 change 同上）
 - **影响**: 多代 dump→restore 链路表名逐代膨胀；Display 安全表名（CLI 常规路径）不受影响
 - **方案**: 表名解析侧归一化（去引号）或 DDL 生成侧条件引号；涉引擎表名语义，需独立调查
-- **状态**: planned
+- **状态**: promoted（2026-09-12 并入 MS15-Rest 实施——方案 A 解析侧归一化：`ast.rs` 新增 `object_name_to_table_name`（`Ident.value` 去引号 + lowercase + `.` 连接），11 处表名消费点统一经 helper，带引号与裸名拼写等价；change 归档 `openspec/changes/archive/2026-09-12-ms15-rest-correctness-batch/`，新 spec `table-name-resolution`；dump 侧 `select_all_rows` 随之经 `quote_ident` 包裹（转义名 catalog dump 可用 + 多代恒等，同 change Iter 002 001-rework T9-R1））
 
 ## I040: 负数字面量 INSERT 不可达（UnaryOp → UnsupportedValue）
 
@@ -309,6 +310,33 @@
 - **证据**: MS11-T03 Iteration 001 Act Remaining Issue #3 + Plan Review 复跑 validate 输出（2026-09-11，归档 change 同上）
 - **影响**: 语料库能力入口可读性下降；validate 输出噪声持续
 - **方案**: 逐 spec 补写真实 Purpose（一句能力定位 + 来源 change 引用，格式对齐 `sql-transaction-statements`/`sql-scalar-functions` 先例）；纯文档工作，可一次性小 change 或随下一次 docs 收尾顺带
+- **状态**: planned
+
+## I046: 可键控 Int 字面量 + 非 Int 键列等值经 IndexScan 静默漏行（形态 2）
+
+- **分类**: 正确性 / planner 路由
+- **问题**: 键位等值腿字面量可键控但键列类型不容纳该键时，`extract_pk_from_where` 成功返回索引键 → `IndexScan` 点查空索引 → 静默漏行。实锤形态：Float 隐式 PK 表 `t(f FLOAT, n INT)` 行 `(5.0, 1)`，`WHERE f = 5`——Int 字面量 `to_key()==Some(5)`，行值 5.0 按 `Value::equals` Int↔Float 隐式转换本应匹配，实测 `rows:[]` exit 0（2026-09-12 探针）。String/Bool 键列 + Int 字面量因跨类型 equals 恒 false 而巧合正确，仅 Float（Int↔Float 隐式转换）真实漏行
+- **证据**: MS15-T01 调查新发现（2026-09-12，归档 change `openspec/changes/archive/2026-09-12-ms15-t01-keyless-eq-routing/` proposal Out of Scope 形态 2 + design D4 残差 1；用户裁定采纳独立后续 change、方向 B 为候选）
+- **影响**: 对含无键行的 Float 键列表按 Int 字面量等值过滤漏行（静默不完整结果）；MS15-T01 修复（按字面量可键控性判定）不覆盖此形态
+- **方案**: 方向 B 键列类型感知路由——planner `register_table` 加性传递列类型（`pipeline.rs:996-1001` 调用点已有 `ColumnType` 可用），键列非 Int 时键位等值形态统一回退 DataScan；MS15-T01 的路由判定点即方向 B 将来落点，扩展不冲突
+- **状态**: planned
+
+## I047: UPDATE 键列 SET 为另一可键控值（rekey）旧键条目残留且新键不可达
+
+- **分类**: 正确性 / update 执行器索引维护
+- **问题**: `UPDATE SET <键列> = <另一可键控 Int>`（如 5→7）时 `UpdateExecutor` 仅 `index_manager.update(&old_key, new_row_id)`——旧键条目残留指向新版本、新键 7 无索引条目：新键点查经索引不可达（静默空集）、旧键 INSERT 被 DuplicateKey 误拒（无行实际持有旧键值）、崩溃恢复重建索引后两态不一致（重建后旧键条目消失，以数据页为准）
+- **证据**: MS15-Rest 调查新发现 + Iteration 002 T7 等价用例初稿同键 rekey 形态探针实证（2026-09-12，归档 change `2026-09-12-ms15-rest-correctness-batch` proposal 默认假设 2 + design D2 + Act Deviation 1——同键 rekey 后 `SELECT WHERE id=2` 空集；用户批准排除出该 change 范围）
+- **影响**: rekey 后新键不可达、旧键误拒；与 I037（键位无键值清理，已实施）同面相邻——I037 修复只覆盖新值不可键控分支，rekey（新值可键控且 ≠ 旧键）行为不变
+- **方案**: rekey 判定（新旧键均可键控且不等）改为删旧键条目 + 插新键条目；新键撞已有行 DuplicateKey 拒绝（与恢复侧重建重复 PK 显式报错一致）；需独立 change
+- **状态**: planned
+
+## I048: import 实参插值对历史带引号表名不可达
+
+- **分类**: 正确性边界 / lifecycle import
+- **问题**: `import` 以 CLI 实参原文插值构造 `INSERT INTO {table}`（`src/cli/lifecycle.rs:467`）——表名解析归一化（I039 实施）后，catalog 名含引号字符的表（历史带引号 restore 产物）经 import 实参约定不可达：实参需与 catalog 名逐字比对（含引号），而带引号实参写入 SQL 经解析去引号后与 catalog 名不符（实参比对与解析文本双重转义矛盾）
+- **证据**: MS15-Rest Plan Review Finding 7 代码核实（2026-09-12，归档 change 同上）；spec `table-name-resolution` R2 仅覆盖 dump/schema，import 无 requirement 面；归一化前该形态经 Display 凑巧可达
+- **影响**: 极窄角落（历史带引号表名 × import）；design D3「历史带引号表名可达性收缩」预发布边界内，新库无影响
+- **方案**: import 表名实参经 `quote_ident` 包裹或文档化该边界；随下次触碰 lifecycle/import 面的 change 顺带
 - **状态**: planned
 
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
