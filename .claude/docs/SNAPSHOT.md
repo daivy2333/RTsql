@@ -54,7 +54,6 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 基准测试: `benches/` (8 套: micro / concurrent / scale / sqlite_compare / single / precise_compare / data_scan / visibility)
 - OpenSpec: `openspec/`
 - 状态文档: `.claude/docs/`
-- 模板: `.claude/docs/templates/`
 - 分析: `.claude/analysis/`（按需）
 - Runbook: `.claude/runbooks/`（按需）
 - Incident: `.claude/incidents/`（按需）
