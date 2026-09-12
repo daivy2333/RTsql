@@ -1844,6 +1844,32 @@ fn test_projection_coalesce_header() {
     assert_eq!(parsed["rows"], serde_json::json!([[1, 1]]));
 }
 
+/// MS11-T03 R2/S1：函数项默认表头按书写形态回放（`upper(name)`）与行值
+#[test]
+fn test_scalar_function_display_header() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(dir.path(), &["app", "SELECT id, upper(name) FROM users"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["id", "upper(name)"]));
+    assert_eq!(parsed["rows"], serde_json::json!([[1, "ALICE"]]));
+}
+
+/// MS11-T03 R2/S2：函数项 AS 别名表头
+#[test]
+fn test_scalar_function_alias_header() {
+    let dir = fixture();
+    seed_users(dir.path());
+
+    let out = run_cli(dir.path(), &["app", "SELECT upper(name) AS u FROM users"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["u"]));
+    assert_eq!(parsed["rows"], serde_json::json!([["ALICE"]]));
+}
+
 /// 怪癖修正：`SELECT 42 FROM t` 单列常量（表头 `42`），不再恒等回退全 schema
 #[test]
 fn test_projection_constant_single_column() {

@@ -50,9 +50,14 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                     // MS11-T01 Iter001: COALESCE is a value expression
                     // (projection item), not an aggregate — the item must
                     // reach the planner's SELECT routing instead of being
-                    // rejected here. Other function names stay rejected
-                    // (scalar function library is MS11-T03 surface).
+                    // rejected here.
                     if name == "COALESCE" {
+                        return Ok(expr.to_string());
+                    }
+                    // MS11-T03: registered scalar functions are value
+                    // expressions too and take the same pass-through; other
+                    // (unregistered) function names stay rejected here.
+                    if crate::executor::is_scalar_function(&name) {
                         return Ok(expr.to_string());
                     }
                     match name.as_str() {
@@ -96,13 +101,18 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                 // MS11-T01 Iter001: 值表达式项放行至 planner 的 SELECT 路由
                 //（聚合检测 / 顶层 Projection 包装），不再在此被拒。返回的
                 // Display 文本对投影解析惰性——表达式查询绕过 per-node 投影。
+                // MS11-T03: TRIM/CEIL/FLOOR 是独立 sqlparser 变体（非
+                // Expr::Function），同门放行，由 planner 臂校验其形态。
                 Expr::Case { .. }
                 | Expr::Cast { .. }
                 | Expr::InList { .. }
                 | Expr::Between { .. }
                 | Expr::Like { .. }
                 | Expr::IsNull { .. }
-                | Expr::IsNotNull { .. } => Ok(expr.to_string()),
+                | Expr::IsNotNull { .. }
+                | Expr::Trim { .. }
+                | Expr::Ceil { .. }
+                | Expr::Floor { .. } => Ok(expr.to_string()),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => Ok(alias.value.to_string().to_lowercase()),
@@ -134,6 +144,10 @@ pub fn extract_qualified_columns(
                     let name = f.name.to_string().to_uppercase();
                     // MS11-T01 Iter001: COALESCE 放行（值表达式投影项，非聚合）
                     if name == "COALESCE" {
+                        return Ok((None, expr.to_string()));
+                    }
+                    // MS11-T03: 注册标量函数同门放行；未知名维持此处既有拒绝
+                    if crate::executor::is_scalar_function(&name) {
                         return Ok((None, expr.to_string()));
                     }
                     match name.as_str() {
@@ -176,13 +190,17 @@ pub fn extract_qualified_columns(
                 Expr::Value(v) => Ok((None, format!("_{}", v))),
                 // MS11-T01 Iter001: 值表达式项放行至 planner 的 SELECT 路由
                 //（Display 文本对 JOIN 输出过滤惰性——表达式项 + JOIN 显式拒绝）
+                // MS11-T03: TRIM/CEIL/FLOOR 独立变体同门放行。
                 Expr::Case { .. }
                 | Expr::Cast { .. }
                 | Expr::InList { .. }
                 | Expr::Between { .. }
                 | Expr::Like { .. }
                 | Expr::IsNull { .. }
-                | Expr::IsNotNull { .. } => Ok((None, expr.to_string())),
+                | Expr::IsNotNull { .. }
+                | Expr::Trim { .. }
+                | Expr::Ceil { .. }
+                | Expr::Floor { .. } => Ok((None, expr.to_string())),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => {

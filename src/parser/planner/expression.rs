@@ -7,10 +7,10 @@
 
 use super::PlanBuilder;
 use crate::executor::{
-    CaseExpression, CastExpression, CastType, CoalesceExpression, ColumnExpression, ColumnRef,
-    ComparisonOp, ComparisonPredicate, ConstantExpression, ExpressionRef, IsNullPredicate,
-    LikePredicate, LogicalOp, LogicalPredicate, NotPredicate, ParameterExpression, PredicateRef,
-    Value,
+    check_scalar_function, is_scalar_function, CaseExpression, CastExpression, CastType,
+    CoalesceExpression, ColumnExpression, ColumnRef, ComparisonOp, ComparisonPredicate,
+    ConstantExpression, ExpressionRef, FunctionExpression, IsNullPredicate, LikePredicate,
+    LogicalOp, LogicalPredicate, NotPredicate, ParameterExpression, PredicateRef, Value,
 };
 use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
@@ -145,6 +145,27 @@ impl PlanBuilder {
         })
     }
 
+    /// MS11-T03: shared body of the CEIL/FLOOR dedicated-variant arms. Only
+    /// the plain `fn(x)` form is supported; `fn(x TO field)` is rejected by
+    /// name (mirrors the TRIM specification-form rejection).
+    fn build_ceil_floor(
+        &self,
+        name: &str,
+        expr: &Expr,
+        field: &sqlparser::ast::DateTimeField,
+        table_name: &str,
+    ) -> Result<ExpressionRef, PlanError> {
+        if !matches!(field, sqlparser::ast::DateTimeField::NoDateTime) {
+            return Err(PlanError::ParseError(format!(
+                "{name} with a TO date-time field is not supported; only {name}(x) is supported"
+            )));
+        }
+        Ok(Arc::new(FunctionExpression {
+            name: name.to_string(),
+            args: vec![self.build_expression(table_name, expr)?],
+        }))
+    }
+
     /// Build ExpressionRef from Expr
     pub(crate) fn build_expression(
         &self,
@@ -267,10 +288,12 @@ impl PlanBuilder {
                 Ok(Arc::new(CaseExpression { whens, else_ }))
             }
             // MS11-T01: COALESCE has no dedicated sqlparser variant — it parses
-            // as Expr::Function. Other function names stay unsupported
-            // (scalar function library is MS11-T03 surface).
+            // as Expr::Function. MS11-T03: registered scalar functions build a
+            // FunctionExpression after plan-time validation; unregistered names
+            // keep the existing rejection below.
             Expr::Function(func) => {
-                if func.name.to_string().to_uppercase() == "COALESCE" {
+                let func_name = func.name.to_string().to_uppercase();
+                if func_name == "COALESCE" {
                     let mut args = Vec::with_capacity(func.args.len());
                     for arg in &func.args {
                         match arg {
@@ -288,10 +311,102 @@ impl PlanBuilder {
                         ));
                     }
                     Ok(Arc::new(CoalesceExpression { args }))
+                } else if is_scalar_function(&func_name) {
+                    // MS11-T03: window / qualifier forms are rejected by name,
+                    // never silently degraded.
+                    if func.over.is_some() {
+                        return Err(PlanError::ParseError(format!(
+                            "OVER (window function) is not supported for scalar function '{}'",
+                            func_name
+                        )));
+                    }
+                    if func.distinct {
+                        return Err(PlanError::ParseError(format!(
+                            "DISTINCT is not supported for scalar function '{}'",
+                            func_name
+                        )));
+                    }
+                    if func.filter.is_some() {
+                        return Err(PlanError::ParseError(format!(
+                            "FILTER clause is not supported for scalar function '{}'",
+                            func_name
+                        )));
+                    }
+                    if func.null_treatment.is_some() {
+                        return Err(PlanError::ParseError(format!(
+                            "NULL treatment (IGNORE/RESPECT NULLS) is not supported for scalar function '{}'",
+                            func_name
+                        )));
+                    }
+                    if !func.order_by.is_empty() {
+                        return Err(PlanError::ParseError(format!(
+                            "ORDER BY is not supported for scalar function '{}'",
+                            func_name
+                        )));
+                    }
+                    let mut args = Vec::with_capacity(func.args.len());
+                    for arg in &func.args {
+                        match arg {
+                            sqlparser::ast::FunctionArg::Unnamed(
+                                sqlparser::ast::FunctionArgExpr::Expr(e),
+                            ) => {
+                                args.push(self.build_expression(table_name, e)?);
+                            }
+                            sqlparser::ast::FunctionArg::Unnamed(_) => {
+                                return Err(PlanError::ParseError(format!(
+                                    "'*' wildcard argument is not supported for scalar function '{}'",
+                                    func_name
+                                )));
+                            }
+                            sqlparser::ast::FunctionArg::Named { .. } => {
+                                return Err(PlanError::ParseError(format!(
+                                    "Named arguments are not supported for scalar function '{}'",
+                                    func_name
+                                )));
+                            }
+                        }
+                    }
+                    check_scalar_function(&func_name, args.len()).map_err(PlanError::ParseError)?;
+                    Ok(Arc::new(FunctionExpression {
+                        name: func_name,
+                        args,
+                    }))
                 } else {
                     Err(PlanError::UnsupportedExpression)
                 }
             }
+            // MS11-T03: TRIM parses as a dedicated sqlparser variant, not
+            // Expr::Function. Only the plain `trim(s)` form is supported
+            // (space-only semantics, spec R2); the BOTH/LEADING/TRAILING and
+            // custom-character forms are rejected by name.
+            Expr::Trim {
+                expr,
+                trim_where,
+                trim_what,
+                trim_characters,
+            } => {
+                if trim_where.is_some()
+                    || trim_what.is_some()
+                    || trim_characters
+                        .as_ref()
+                        .is_some_and(|chars| !chars.is_empty())
+                {
+                    return Err(PlanError::ParseError(
+                        "TRIM with a trim specification (BOTH/LEADING/TRAILING or custom characters) is not supported; only trim(s) is supported"
+                            .to_string(),
+                    ));
+                }
+                Ok(Arc::new(FunctionExpression {
+                    name: "TRIM".to_string(),
+                    args: vec![self.build_expression(table_name, expr)?],
+                }))
+            }
+            // MS11-T03: CEIL/FLOOR also parse as dedicated sqlparser variants
+            // (like TRIM), not Expr::Function. Only the plain `ceil(x)` /
+            // `floor(x)` form is supported; the `TO DateTimeField` scale form
+            // is rejected by name.
+            Expr::Ceil { expr, field } => self.build_ceil_floor("CEIL", expr, field, table_name),
+            Expr::Floor { expr, field } => self.build_ceil_floor("FLOOR", expr, field, table_name),
             // Handle negative numbers: -42
             Expr::UnaryOp {
                 op: sqlparser::ast::UnaryOperator::Minus,
