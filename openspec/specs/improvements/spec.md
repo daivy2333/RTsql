@@ -225,7 +225,7 @@
 
 - **分类**: 正确性 / planner 路由
 - **问题**: `WHERE <键列> = <非 Int 字面量>`（如 String 首列隐式 PK 表的 `WHERE s = 'x'`）经 `has_pk_equality` 结构化判定（不问可键控性）生成 Filter(Scan)，`ScanExecutor` 走 `index_manager.scan_all()` 索引遍历——键位不可键控（NULL/非 Int）的行落库不入索引（MS10-T05 001-rework 语义），经该 WHERE 形态不可达；无键行仅经非 PK 谓词或无 WHERE 的 DataScan 路径可见
-- **证据**: MS10-T05 Iteration 001 001-rework Act Deviation 1 真二进制探针 + Plan Review 独立核实 `src/parser/planner/query.rs:430-475`（2026-09-09，归档 change `2026-09-09-2026-09-09-ms10-t05-lifecycle-subcommands`）
+- **证据**: MS10-T05 Iteration 001 001-rework Act Deviation 1 真二进制探针 + Plan Review 独立核实 `src/parser/planner/query.rs:430-475`（2026-09-09，归档 change `2026-09-09-2026-09-09-ms10-t05-lifecycle-subcommands`）；MS11-T03 双重实证同一根因的全空结果形态（2026-09-11，归档 change `2026-09-10-ms11-t03-scalar-functions`——无声明 PK 表首列字符串 Eq 经 `has_pk_equality`→Filter(Scan) 回退返回空行集 exit 0，pristine master 源码级探针 Eq→rows:[] vs Ne/Gt 正常 + CLI 探针，Plan Review 独立复现；测试以声明 PK 表形规避并注记）
 - **影响**: 对含无键行的表按键位等值过滤漏行（静默不完整结果）；此前该形态表恒为空、行为不可观察
 - **方案**: planner 对键位等值 + 不可键控字面量回退 DataScan 行内过滤（`to_key()==None` 时禁用索引路由）；属 planner 路由面，需独立 change
 - **状态**: planned
@@ -282,6 +282,33 @@
 - **证据**: MS11-T02 Plan Review Finding F3 探针（2026-09-10，change `2026-09-10-ms11-t02-sql-transaction-statements`，iterations/001-cli-session/000-initial.md）
 - **影响**: 未来重构 `run_sql` 错误路径时该组合语义可能静默回归；无当前正确性问题
 - **方案**: `tests/tx_statement_test.rs` 增加组合场景 e2e（可选测试加固，随下一次触碰 CLI 会话面的 change 顺带实施即可）
+- **状态**: planned
+
+## I043: 标量函数极端输入边界（abs i64::MIN 溢出 / round 极端 digits 非有限值）
+
+- **分类**: 健壮性 / 标量函数
+- **问题**: `abs(-9223372036854775808)`（i64::MIN）按契约实现为 `i64::abs()`（`src/executor/function.rs` ABS 臂），debug 构建溢出 panic、release 回绕为负；`round(x, digits)` 按 `10f64.powi(digits)` 乘除实现，|digits|>308 时 factor 溢出为 inf/0，结果 inf/NaN（SQLite `round(1,1000)=1.0`）。spec `sql-scalar-functions` R3 仅锁定常规值（`abs(-5)`/`round(123.4,-1)` 等），两边界均不在锁定面
+- **证据**: MS11-T03 Iteration 001 Act Remaining Issues #1/#2（2026-09-11，归档 change `2026-09-10-ms11-t03-scalar-functions`；Plan Review 独立核实实现契约与公式）
+- **影响**: 极端输入下 panic/非有限值；常规分析负载不可达，无当前正确性问题
+- **方案**: abs 改 `checked_abs` 显式溢出报 `ValueError` 或文档化回绕语义；round 对 |digits| 设上限截断或文档化——随下次触碰 `function.rs` 的 change 顺带评估，需用户裁定方向
+- **状态**: planned
+
+## I044: 标量函数名大小写不敏感缺 SQL 层测试见证
+
+- **分类**: 测试覆盖 / SQL 函数层
+- **问题**: spec `sql-scalar-functions` R1「函数名匹配 SHALL 大小写不敏感」无 SQL 层 e2e 见证——`tests/` 全部使用小写形态，无 `UPPER(...)`/`Abs(...)` 等大写/混合变体用例（tests/ 全目录 grep 实证）；实现层成立（`ast.rs` 两放行门与 planner 函数臂均先 `to_uppercase()` 规范化再查注册表，Plan Review 代码核实），但该 SHALL 子句在 23 场景集与两轮 RTM 中均无对应场景
+- **证据**: MS11-T03 Plan Review Finding F1（2026-09-11，归档 change 同上；大写变体 grep + 两处规范化点核实）
+- **影响**: 未来重构函数名匹配路径时大小写语义可能静默回归；无当前正确性问题
+- **方案**: `tests/scalar_function_test.rs` 增加大写/混合大小写变体用例（可选测试加固，随下次触碰函数面的 change 顺带实施）
+- **状态**: planned
+
+## I045: 主 specs Purpose 占位与 TBD/TODO 残留（validate --specs 持续 WARNING）
+
+- **分类**: 文档质量 / OpenSpec 语料库
+- **问题**: 多个主 spec 的 `## Purpose` 仍为 `openspec archive` 自动写入的占位句或含 TBD/TODO 标记（grep 实证 10 文件：database-file-format-header、planner-module-decomposition、dml-transaction-lifecycle、drop-table-physical-free、wal-recovery-replay-integrity、pipeline-stage-decomposition、wal-writer-handle-reuse、database-file-lock、cli-noninteractive-shell、storage-io-optimization 等）——`openspec validate --specs` 持续 WARNING（passed/failed 不受影响）；2026-09-11 起新 spec `sql-scalar-functions` 已补真实 Purpose，不再新增占位
+- **证据**: MS11-T03 Iteration 001 Act Remaining Issue #3 + Plan Review 复跑 validate 输出（2026-09-11，归档 change 同上）
+- **影响**: 语料库能力入口可读性下降；validate 输出噪声持续
+- **方案**: 逐 spec 补写真实 Purpose（一句能力定位 + 来源 change 引用，格式对齐 `sql-transaction-statements`/`sql-scalar-functions` 先例）；纯文档工作，可一次性小 change 或随下一次 docs 收尾顺带
 - **状态**: planned
 
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
