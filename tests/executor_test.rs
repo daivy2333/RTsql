@@ -274,29 +274,37 @@ async fn test_update_executor() -> Result<()> {
 
 #[tokio::test]
 async fn test_delete_executor() -> Result<()> {
-    use rtsql::storage::{btree::IndexManager, page_format::RowId};
+    use rtsql::storage::write_tuple_to_data_page;
+    use rtsql::transaction::VersionHeader;
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
     let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
 
-    let buffer_pool_clone = buffer_pool.clone();
-    let index_manager = tokio::task::spawn_blocking(move || {
-        Arc::new(IndexManager::new(buffer_pool_clone).unwrap())
-    })
-    .await
-    .unwrap();
+    let table_mgr = TableManager::new(buffer_pool.clone(), storage).await?;
+    table_mgr
+        .create_table("test", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await?;
+    let table_meta = table_mgr.get_table("test").await?;
 
+    // A real committed tuple + index entry, so the delete writes an
+    // independent tombstone slot (MS09 Iter000 T2) instead of an in-place
+    // header overwrite.
     let key = 1i64.to_be_bytes();
-    let row_id = RowId::new(0, 1);
-    index_manager.insert(&key, row_id).await.unwrap();
+    let row_id = write_tuple_to_data_page(
+        &buffer_pool,
+        &table_meta,
+        &VersionHeader::new(0, Some(0)),
+        &1i64.to_le_bytes(),
+    )
+    .await?;
+    table_meta.index_manager.insert(&key, row_id).await.unwrap();
 
     let tx_manager = Arc::new(TransactionManager::new());
     let mut executor = DeleteExecutor::new(
-        index_manager.clone(),
+        table_meta.clone(),
         buffer_pool.clone(),
         tx_manager,
-        "test".to_string(),
         key.to_vec(),
         0,
         None,
@@ -308,8 +316,17 @@ async fn test_delete_executor() -> Result<()> {
     let result = executor.next().await?;
     assert_eq!(result, None);
 
-    let found = index_manager.search(&key).await?;
+    let found = table_meta.index_manager.search(&key).await?;
     assert_eq!(found, None);
+
+    // T2 GREEN condition: the deleted row's header stays untouched (the
+    // tombstone lives in its own slot; end-to-end tombstone suppression is
+    // covered by tests/mvcc_tombstone_visibility_test.rs).
+    let deleted_header = buffer_pool.read_version_header(row_id).await?;
+    assert!(
+        !deleted_header.is_deleted(),
+        "deleted row header must not be tombstoned in place"
+    );
 
     Ok(())
 }
@@ -736,6 +753,7 @@ async fn test_create_table_executor_success() -> Result<()> {
         )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
+        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
     });
 
     let plan = PhysicalPlan::CreateTable(rtsql::executor::CreateTableNode {
@@ -783,6 +801,7 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
         )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
+        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
     });
 
     // Create table first time (using storage::ColumnType)
@@ -841,6 +860,7 @@ async fn test_drop_table_executor_success() -> Result<()> {
         )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
+        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
     });
 
     // Create table first
@@ -894,6 +914,7 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
         )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
+        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
     });
 
     // Try to drop a non-existent table without IF EXISTS
@@ -938,6 +959,7 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
         )),
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
+        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
     });
 
     // Drop a non-existent table with IF EXISTS - should succeed without error
@@ -1383,7 +1405,7 @@ async fn test_data_scan_executor_full_table() -> Result<()> {
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(3)));
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None);
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None, None);
 
     let mut row_count = 0;
     let mut collected_ids: Vec<i64> = Vec::new();
@@ -1421,7 +1443,7 @@ async fn test_data_scan_executor_empty_table() -> Result<()> {
 
     let table_meta = table_mgr.get_table("test").await?;
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None);
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None, None);
 
     // 第一次 next() 应返回 Ok(None) — 空表无数据
     let result = executor.next().await?;
@@ -1469,7 +1491,7 @@ async fn test_data_scan_executor_multi_page() -> Result<()> {
     let result = insert_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(200)));
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None);
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None, None);
 
     let mut row_count = 0;
     while let Some(result) = executor.next().await? {
@@ -1515,7 +1537,7 @@ async fn test_data_scan_executor_streaming() -> Result<()> {
     );
     insert_executor.next().await?;
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None);
+    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, None, None, None, None);
 
     // 流式验证：连续 5 次 next() 各返回 1 行，第 6 次返回 None
     for i in 1..=5 {
@@ -1572,7 +1594,8 @@ async fn test_data_scan_mvcc_uncommitted_invisible() -> Result<()> {
     // Snapshot at tx_id=2, tx1 still active → uncommitted rows invisible
     let snapshot = Snapshot::new(2, vec![1]);
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot), None, None);
+    let mut executor =
+        DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot), None, None, None);
 
     let mut row_count = 0;
     while let Some(result) = executor.next().await? {
@@ -1642,7 +1665,8 @@ async fn test_data_scan_mvcc_committed_visible() -> Result<()> {
     // Snapshot at tx_id=3, no active tx → committed rows visible
     let snapshot = Snapshot::new(3, vec![]);
 
-    let mut executor = DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot), None, None);
+    let mut executor =
+        DataScanExecutor::new(table_meta, buffer_pool, Some(snapshot), None, None, None);
 
     let mut row_count = 0;
     let mut collected_ids: Vec<i64> = Vec::new();

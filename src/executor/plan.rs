@@ -42,6 +42,8 @@ pub enum PhysicalPlan {
     Limit(LimitNode),
     /// JOIN 节点（INNER JOIN）
     Join(JoinNode),
+    /// Nested Loop Join 节点（MS09-T02 — 非等值/混合 ON）
+    NestedLoopJoin(NestedLoopJoinNode),
     /// 聚合节点（GROUP BY + 聚合函数）
     Aggregate(AggregateNode),
     /// HAVING 过滤节点
@@ -320,6 +322,23 @@ pub struct JoinNode {
     /// ON 等值条件列表（AND 组合）
     pub conditions: Vec<JoinCondition>,
     /// 输出列映射
+    pub output_columns: Vec<OutputColumn>,
+}
+
+/// Nested Loop Join 节点（MS09-T02 — 非等值/混合 ON，plan 期启发式路由）
+///
+/// 对左输入每行 × 右输入每行的组合行（左行 ++ 右行）求值完整 ON 谓词，
+/// 谓词为真（三值语义下非 Unknown 非假）的组合按 `output_columns` 产出。
+/// 谓词 `column_index` 是组合行绝对索引（左表 0..n、右表 n..n+m）。
+#[derive(Debug, Clone)]
+pub struct NestedLoopJoinNode {
+    /// 左输入计划
+    pub left: Box<PhysicalPlan>,
+    /// 右输入计划
+    pub right: Box<PhysicalPlan>,
+    /// 完整 ON 谓词（组合行布局上编译）
+    pub predicate: PredicateRef,
+    /// 输出列映射（与 JoinNode 同型）
     pub output_columns: Vec<OutputColumn>,
 }
 

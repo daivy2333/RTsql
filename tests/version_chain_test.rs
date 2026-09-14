@@ -58,7 +58,7 @@ async fn test_version_chain_traversal() -> Result<()> {
     tx_manager.commit(tx1, &buffer_pool).await?;
 
     // Verify Tx1's version is committed
-    let key = 10i64.to_be_bytes();
+    let mut key = 10i64.to_be_bytes();
     let row_id_v1 = table_meta
         .index_manager
         .search(&key)
@@ -88,6 +88,8 @@ async fn test_version_chain_traversal() -> Result<()> {
     update_executor.next().await?;
 
     // Get new row_id for v2
+    // BH-3 校准：UPDATE rekey 10→20 后行当前键为 20，定位与后续寻址均按行当前键
+    key = 20i64.to_be_bytes();
     let row_id_v2 = table_meta
         .index_manager
         .search(&key)
@@ -131,6 +133,8 @@ async fn test_version_chain_traversal() -> Result<()> {
     update_executor.next().await?;
 
     // Get new row_id for v3
+    // BH-3 校准：UPDATE rekey 20→30 后行当前键为 30，定位按行当前键
+    key = 30i64.to_be_bytes();
     let row_id_v3 = table_meta
         .index_manager
         .search(&key)
@@ -270,7 +274,7 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
     insert_executor.next().await?;
     tx_manager.commit(tx1, &buffer_pool).await?;
 
-    let key = 100i64.to_be_bytes();
+    let mut key = 100i64.to_be_bytes();
 
     // Tx2 updates to value=200, but does NOT commit
     let tx2 = tx_manager.begin().await;
@@ -287,6 +291,9 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
         None,
     );
     update_executor.next().await?;
+
+    // BH-3 校准：首次 UPDATE rekey 100→200（未提交）后行当前键为 200（索引条目 UPDATE 执行时即生效）
+    key = 200i64.to_be_bytes();
 
     // Tx3 updates to value=300, commits
     let tx3 = tx_manager.begin().await;
@@ -306,6 +313,8 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
     tx_manager.commit(tx3, &buffer_pool).await?;
 
     // Get latest row_id (v3)
+    // BH-3 校准：UPDATE rekey 200→300 后行当前键为 300，定位按行当前键
+    key = 300i64.to_be_bytes();
     let row_id_v3 = table_meta
         .index_manager
         .search(&key)

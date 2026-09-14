@@ -4,8 +4,11 @@
 ///   Cleared by any write (INSERT/DELETE/UPDATE/COMMIT), lazily re-set on read.
 ///
 /// `min_create_tx_id`: minimum create_tx_id among all slots on this page.
-///   If `min_create_tx_id > snapshot.tx_id()`, the entire page is invisible
-///   to that snapshot (all rows created after snapshot started).
+///   If `min_create_tx_id > snapshot.high_water()`, the entire page is
+///   invisible to that snapshot (all rows created after the snapshot's
+///   visibility high-water mark). The high-water mark — not the reader's
+///   own id — is the correct comparison source for both snapshot shapes
+///   (MS09 Iter000 002-rework).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PageVisibilityInfo {
     pub min_create_tx_id: u64,

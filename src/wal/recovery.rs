@@ -6,7 +6,8 @@ use super::{WalError, WalReader, WalRecord};
 use crate::storage::data::TableMeta;
 use crate::storage::page_format::{deserialize_tuple, RowId, SlottedPage, SlottedPageRef};
 use crate::storage::{
-    update_version_header_in_data_page, BufferPool, IndexManager, PageId, TableManager,
+    update_version_header_in_data_page, write_tuple_to_data_page, BufferPool, IndexManager, PageId,
+    TableManager,
 };
 use crate::transaction::VersionHeader;
 use std::collections::{HashMap, HashSet};
@@ -476,7 +477,7 @@ impl RecoveryManager {
         }
 
         // Step 3: Mark uncommitted tuples as aborted
-        Self::mark_uncommitted_aborted(&uncommitted_tx_ids, &buffer_pool).await?;
+        Self::mark_uncommitted_aborted(&uncommitted_tx_ids, &buffer_pool, &table_manager).await?;
 
         // Step 4 (R-T0b-R8, D10)：有重放时从最终数据页重建各表 PK 索引并
         // 换入（redo_count == 0 的 clean 打开零变化——不进入重建路径）
@@ -739,7 +740,10 @@ impl RecoveryManager {
                 Ok(())
             }
             WalRecord::Delete {
-                table_name, row_id, ..
+                table_name,
+                row_id,
+                tx_id,
+                ..
             } => {
                 let table_meta = table_manager.get_table(table_name).await.map_err(|e| {
                     WalError::RedoFailed(format!(
@@ -762,25 +766,29 @@ impl RecoveryManager {
                     }
                 }
 
-                // 2. 墓碑：read_version_header → mark_deleted → update_version_header_in_data_page
-                //    SlotNotFound 按 delete.rs:76-80 语义跳过（PK 索引已清即足够保证查询正确）
-                let page_id = PageId(row_id.page_id as u64);
+                // 2. 墓碑：写独立墓碑 slot（MS09 Iter000 D3，镜像运行期
+                //    delete.rs 形态）——create_tx = record.tx_id（redo 只重放
+                //    已提交事务，重放出的墓碑即已提交删除）、SENTINEL、
+                //    next → 被删 rid。被删 rid 的 SlotNotFound 容错镜像运行
+                //    期探测（delete.rs）：slot 缺失时不写墓碑（仅索引清理）。
+                //    幂等性由 redo 单次性 + 重复 slot 无害性保障（重复墓碑
+                //    经扫描去重「最新创建者胜出」收敛）。
                 match buffer_pool.read_version_header(*row_id).await {
-                    Ok(vh) => {
-                        let deleted_vh = vh.mark_deleted();
-                        update_version_header_in_data_page(buffer_pool, *row_id, deleted_vh, &[])
+                    Ok(_) => {
+                        let tombstone = VersionHeader::new(*tx_id, None)
+                            .with_next_version(*row_id)
+                            .mark_deleted();
+                        write_tuple_to_data_page(buffer_pool, &table_meta, &tombstone, &[])
                             .await
                             .map_err(|e| {
                                 WalError::RedoFailed(format!(
-                                    "delete redo tombstone update in '{}' row {:?} failed: {}",
+                                    "delete redo tombstone slot write in '{}' row {:?} failed: {}",
                                     table_name, row_id, e
                                 ))
                             })?;
-                        // M21: clear page visibility after marking deleted
-                        buffer_pool.clear_all_visible(page_id);
                     }
                     Err(crate::storage::StorageError::SlotNotFound(_)) => {
-                        // SlotNotFound 跳过（delete.rs:76-80 对齐）
+                        // SlotNotFound 跳过（delete.rs 运行期容错对齐）
                     }
                     Err(e) => {
                         return Err(WalError::RedoFailed(format!(
@@ -974,16 +982,104 @@ impl RecoveryManager {
         Ok(())
     }
 
-    /// Mark all uncommitted tuples as aborted so MVCC skips them
+    /// Mark all uncommitted tuples as aborted so MVCC skips them.
+    ///
+    /// MS09 Iter000 (I032, D3): iterate every table's data page chain and
+    /// neutralize each slot whose creating transaction never committed and
+    /// whose header is not committed-encoded (commit id unset, or an
+    /// uncommitted delete's tombstone sentinel). Without this, uncommitted
+    /// rows that were evicted or flushed to disk before a crash resurrect on
+    /// the next open — snapshot-less scans yield any non-deleted slot
+    /// regardless of commit state. Runs unconditionally (also when
+    /// `redo_count == 0`); with no uncommitted transactions it is a no-op,
+    /// keeping the clean-open path unchanged.
     async fn mark_uncommitted_aborted(
         uncommitted_tx_ids: &HashSet<u64>,
         buffer_pool: &Arc<BufferPool>,
+        table_manager: &Arc<TableManager>,
     ) -> Result<(), WalError> {
-        for tx_id in uncommitted_tx_ids {
-            buffer_pool.mark_tx_aborted(*tx_id).await.map_err(|e| {
-                WalError::RedoFailed(format!("mark tx {} aborted failed: {}", tx_id, e))
-            })?;
+        if uncommitted_tx_ids.is_empty() {
+            return Ok(());
         }
+        let tables = table_manager.catalog().scan_tables().await.map_err(|e| {
+            WalError::RedoFailed(format!(
+                "mark uncommitted aborted catalog scan failed: {}",
+                e
+            ))
+        })?;
+
+        for row in tables {
+            let meta = table_manager
+                .get_table(&row.table_name)
+                .await
+                .map_err(|e| {
+                    WalError::RedoFailed(format!(
+                        "mark uncommitted aborted: table '{}' lookup failed: {}",
+                        row.table_name, e
+                    ))
+                })?;
+
+            let mut page_id = Some(meta.data_page_head);
+            while let Some(pid) = page_id {
+                // Collect the fixes inside the page-lock closure, then apply
+                // them through the version-header write path afterwards.
+                let (next_page, fixes) = buffer_pool
+                    .with_page_data(
+                        pid,
+                        |data| -> crate::storage::Result<(u32, Vec<(u16, VersionHeader)>)> {
+                            let slotted = SlottedPageRef::new(data);
+                            let mut fixes = Vec::new();
+                            for index in 0..slotted.slot_count() {
+                                let Some(slot) = slotted.get_slot(index) else {
+                                    continue;
+                                };
+                                let slot_data = slotted.get_slot_data(&slot);
+                                if slot_data.len() < VersionHeader::SIZE {
+                                    continue;
+                                }
+                                let Some(vh) =
+                                    VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE])
+                                else {
+                                    continue;
+                                };
+                                if !uncommitted_tx_ids.contains(&vh.create_tx_id()) {
+                                    continue;
+                                }
+                                if vh.commit_tx_id().is_none() || vh.is_deleted() {
+                                    fixes.push((slot.logical_id, vh.mark_aborted()));
+                                }
+                            }
+                            Ok((slotted.header().next_page_id, fixes))
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "mark uncommitted aborted scan of page {:?} failed: {}",
+                            pid, e
+                        ))
+                    })?;
+
+                for (logical_id, fixed) in fixes {
+                    let rid = RowId::new(pid.0 as u32, logical_id);
+                    update_version_header_in_data_page(buffer_pool, rid, fixed, &[])
+                        .await
+                        .map_err(|e| {
+                            WalError::RedoFailed(format!(
+                                "mark uncommitted aborted write of {:?} failed: {}",
+                                rid, e
+                            ))
+                        })?;
+                }
+
+                page_id = if next_page == 0 {
+                    None
+                } else {
+                    Some(PageId(next_page as u64))
+                };
+            }
+        }
+
         Ok(())
     }
 

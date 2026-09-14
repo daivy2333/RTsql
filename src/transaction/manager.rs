@@ -224,6 +224,15 @@ impl TransactionManager {
         self.tx_id_allocator.current()
     }
 
+    /// Advance the tx id allocator past every id observed by recovery
+    /// (MS09 Iter000 001-replan, D10): the next allocated id is strictly
+    /// greater than `max_used`, so ids are never reused after a restart and
+    /// the Read Committed high-water argument ("every id ≤ the allocator's
+    /// current value is committed, aborted, or active") stays sound.
+    pub fn advance_past(&self, max_used: u64) {
+        self.tx_id_allocator.advance_past(max_used);
+    }
+
     /// Commit by ID (for testing error cases)
     pub async fn commit_by_id(&self, tx_id: u64) -> Result<()> {
         let mut active = self.active_tx_ids.write().await;
@@ -294,9 +303,16 @@ impl TransactionManager {
                 // leaves the tuple in its data-page slot, and snapshot-less
                 // scans (DataScan with `snapshot: None`) yield every slot
                 // that is not deleted — the rolled-back row would stay
-                // visible to `SELECT *`. Marking it deleted makes scans skip
-                // it, matching the "no residue after rollback" contract.
-                update_version_header_in_data_page(buffer_pool, row_id, header.mark_deleted(), &[])
+                // visible to `SELECT *`. Marking it aborted (MS09 Iter000
+                // T4/D2: create_tx_id = 0 + delete sentinel) makes scans skip
+                // it and — unlike the plain delete sentinel — marks it as
+                // belonging to no transaction, so the tombstone never
+                // suppresses the surviving predecessor versions. This also
+                // covers the DELETE case: the recorded rid is the tombstone
+                // slot itself (delete.rs), whose index lookup finds no key
+                // and skips fixup; neutralizing it lets the pre-delete
+                // version resurface ("no residue after rollback").
+                update_version_header_in_data_page(buffer_pool, row_id, header.mark_aborted(), &[])
                     .await?;
             }
         }
@@ -614,5 +630,21 @@ mod tests {
         let manager = TransactionManager::new();
         let versions = manager.get_tx_versions(999).await;
         assert!(versions.is_empty());
+    }
+
+    // MS09 Iter000 001-replan (T6-R3/D10): after recovery hands the max used
+    // tx id to the allocator, `current_tx_id` reflects the watermark and the
+    // next begun transaction gets an id strictly above every recovered id.
+
+    #[tokio::test]
+    async fn test_advance_past_reflected_in_current_and_next_begin() {
+        let manager = TransactionManager::new();
+        assert_eq!(manager.current_tx_id(), 0);
+
+        manager.advance_past(42);
+        assert_eq!(manager.current_tx_id(), 42);
+
+        let tx = manager.begin().await;
+        assert_eq!(tx.id(), 43);
     }
 }

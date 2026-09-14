@@ -268,3 +268,243 @@ async fn key_column_same_value_update_keeps_entry() {
 
     db.wal_buffer.shutdown().await;
 }
+
+// ============================================================================
+// MS16 Iteration 001（I047）：UPDATE rekey 索引一致性
+// ============================================================================
+//
+// change: 2026-09-12-ms16-correctness-batch / tasks T5-T6
+//
+// 缺陷（I047）：Step 7 else 臂对键列 SET 为另一可键控值（rekey）无条件
+// `index_manager.update(&self.key, new_row_id)`——旧键条目残留指向键位已改的
+// 新版本（旧键点查返回 (7, 100)、旧键 INSERT 被 DuplicateKey 误拒）、新键无
+// 索引条目（点查静默空集）、碰撞 rekey 无预检静默改写已有行、崩溃恢复重建
+// 后与运行期不一致。
+//
+// 修复语义（design D4）：写入前碰撞预检（新键命中即 DuplicateKey 拒绝、零
+// 副作用）+ Step 7 三分支（NULL → delete（I037 原样）/ 同键 → update（原样）/
+// rekey → 先 delete 旧键后 insert 新键，顺序固定）。
+
+/// R4-S1：rekey 后新键点查可达。
+///
+/// RED（修复前推演）：else 臂只把旧键 5 条目的 RowId 改指新版本，新键 7 无
+/// 索引条目——`WHERE id = 7` IndexScan 静默空集。
+#[tokio::test]
+async fn rekey_new_key_point_query_reachable() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+        .await;
+    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
+        other => panic!("首次 INSERT 应成功，实际 {:?}", other),
+    }
+    match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
+        Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
+        other => panic!("rekey UPDATE 应成功，实际 {:?}", other),
+    }
+
+    // 修复前：新键 7 无索引条目 → 空集（RED）
+    match db.execute_sql("SELECT * FROM t WHERE id = 7").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!(7), serde_json::json!(100)]],
+                "rekey 后新键点查必须返回 rekeyed 行"
+            );
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// R4-S2：rekey 后旧键条目清理——旧键点查空集、旧键 INSERT 可用。
+///
+/// RED（修复前推演）：残留旧键 5 条目指向新版本——`WHERE id = 5` 返回键位
+/// 已为 7 的行 `(7, 100)`；`INSERT (5, 200)` 被 DuplicateKey 误拒。
+#[tokio::test]
+async fn rekey_old_key_cleaned_insert_available() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+        .await;
+    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
+        other => panic!("首次 INSERT 应成功，实际 {:?}", other),
+    }
+    match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
+        Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
+        other => panic!("rekey UPDATE 应成功，实际 {:?}", other),
+    }
+
+    // 修复前：经残留条目返回 (7, 100)（RED）
+    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(rows.len(), 0, "rekey 后旧键点查必须为空集");
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    // 修复前：DuplicateKey 误拒（RED）
+    match db.execute_sql("INSERT INTO t VALUES (5, 200)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
+        other => panic!("rekey 后旧键 INSERT 不应被残留条目误拒，实际 {:?}", other),
+    }
+    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(rows[0][0], serde_json::json!(2), "表必须恰含两行");
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// R4-S3：碰撞 rekey 在任何写入前以 DuplicateKey 拒绝，零副作用。
+///
+/// 行 (5, 100)、(7, 200)，`SET id = 7 WHERE id = 5`。
+/// RED（修复前推演）：无碰撞预检——UPDATE 成功 affected 1，行 (5, 100) 被
+/// 静默改写为 (7, 100)。
+#[tokio::test]
+async fn rekey_collision_rejected_before_write_zero_side_effects() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+        .await;
+    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
+        other => panic!("首次 INSERT 应成功，实际 {:?}", other),
+    }
+    match db.execute_sql("INSERT INTO t VALUES (7, 200)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
+        other => panic!("第二次 INSERT 应成功，实际 {:?}", other),
+    }
+
+    // 修复前：无预检 → 成功 affected 1，行被静默改写（RED）
+    match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
+        Response::Error { message } => {
+            assert!(
+                message.to_lowercase().contains("duplicate"),
+                "碰撞 rekey 必须报 DuplicateKey，实际: {message}"
+            );
+        }
+        other => panic!("碰撞 rekey 必须被拒绝，实际 {:?}", other),
+    }
+
+    // 零副作用：两行原样
+    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!(5), serde_json::json!(100)]],
+                "被拒绝的 rekey 不得改写行 (5, 100)"
+            );
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    match db.execute_sql("SELECT * FROM t WHERE id = 7").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!(7), serde_json::json!(200)]],
+                "被拒绝的 rekey 不得改写行 (7, 200)"
+            );
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(rows[0][0], serde_json::json!(2), "表必须恰含两行");
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// R4-S4：rekey 后崩溃恢复两态一致。
+///
+/// 流程：建表 → flush_all 持久化 catalog（DDL 无 WAL 记录）→ INSERT (5,100)
+/// → UPDATE SET id = 7 → 运行期断言新键可达/旧键空集（两态比较面）→
+/// shutdown + drop 不 close → 重开（WAL 重放 + 索引重建）→ 同断言。
+///
+/// RED（修复前推演）：运行期新键 7 无条目点查空集、旧键 5 经残留条目返回
+/// (7, 100)——恢复面（重建索引以数据页为准）却正确，两态不一致。
+#[tokio::test]
+async fn recovery_matches_runtime_after_rekey() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    let db = Database::open(&path).await.unwrap();
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+        .await;
+    // DDL 无 WAL 记录：catalog 经 buffer_pool 落盘（夹具先例），否则重开
+    // redo 必 table not found
+    db.buffer_pool.flush_all().await.unwrap();
+
+    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
+        other => panic!("首次 INSERT 应成功，实际 {:?}", other),
+    }
+    match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
+        Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
+        other => panic!("rekey UPDATE 应成功，实际 {:?}", other),
+    }
+
+    // 运行期两态比较面（修复前：新键空集 + 旧键返回 (7, 100)，RED）
+    match db.execute_sql("SELECT * FROM t WHERE id = 7").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!(7), serde_json::json!(100)]],
+                "运行期新键点查必须可达"
+            );
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(rows.len(), 0, "运行期旧键点查必须为空集");
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+
+    db.wal_buffer.shutdown().await;
+    drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
+
+    let db2 = Database::open(&path).await.unwrap();
+
+    // 恢复面同断言（两态一致）
+    match db2.execute_sql("SELECT * FROM t WHERE id = 7").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!(7), serde_json::json!(100)]],
+                "恢复后新键点查必须可达"
+            );
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    match db2.execute_sql("SELECT * FROM t WHERE id = 5").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(rows.len(), 0, "恢复后旧键点查必须为空集");
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    // 恢复面：旧键 INSERT 成功（与运行期行为一致）
+    match db2.execute_sql("INSERT INTO t VALUES (5, 200)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
+        other => panic!("恢复后旧键 INSERT 不应被误拒，实际 {:?}", other),
+    }
+    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(rows[0][0], serde_json::json!(2), "INSERT 后表必须恰含两行");
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+
+    db2.wal_buffer.shutdown().await;
+}

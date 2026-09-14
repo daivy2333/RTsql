@@ -54,7 +54,7 @@ async fn test_gc_removes_old_versions() -> Result<()> {
 
     tx_manager.commit(tx1, &buffer_pool).await?;
 
-    let key = 10i64.to_be_bytes();
+    let mut key = 10i64.to_be_bytes();
     let row_id_v1 = table_meta
         .index_manager
         .search(&key)
@@ -78,6 +78,8 @@ async fn test_gc_removes_old_versions() -> Result<()> {
 
     tx_manager.commit(tx2, &buffer_pool).await?;
 
+    // BH-3 校准：UPDATE rekey 10→20 后行当前键为 20，定位与后续寻址均按行当前键
+    key = 20i64.to_be_bytes();
     let row_id_v2 = table_meta
         .index_manager
         .search(&key)
@@ -102,6 +104,8 @@ async fn test_gc_removes_old_versions() -> Result<()> {
 
     tx_manager.commit(tx3, &buffer_pool).await?;
 
+    // BH-3 校准：UPDATE rekey 20→30 后行当前键为 30，定位按行当前键
+    key = 30i64.to_be_bytes();
     let row_id_v3 = table_meta
         .index_manager
         .search(&key)
@@ -198,7 +202,7 @@ async fn test_gc_preserves_uncommitted_versions() -> Result<()> {
 
     tx_manager.commit(tx1, &buffer_pool).await?;
 
-    let key = 100i64.to_be_bytes();
+    let mut key = 100i64.to_be_bytes();
 
     // Step 2: Tx2 updates to v2 (value=200), does NOT commit
     let tx2 = tx_manager.begin().await;
@@ -216,6 +220,8 @@ async fn test_gc_preserves_uncommitted_versions() -> Result<()> {
     update_executor.next().await?;
 
     // Tx2 NOT committed
+    // BH-3 校准：UPDATE rekey 100→200（未提交）后行当前键为 200（索引条目 UPDATE 执行时即生效）
+    key = 200i64.to_be_bytes();
     let row_id_v2 = table_meta
         .index_manager
         .search(&key)
@@ -327,7 +333,8 @@ async fn test_gc_multiple_keys() -> Result<()> {
             table_meta.clone(),
             buffer_pool.clone(),
             tx_manager.clone(),
-            key_bytes.to_vec(),
+            // BH-3 校准：首次 UPDATE rekey 后行当前键为 versions[i][1]，按行当前键寻址
+            versions[i][1].to_be_bytes().to_vec(),
             "id".to_string(),
             Value::Int(versions[i][2]),
             tx3.id(),
@@ -349,7 +356,8 @@ async fn test_gc_multiple_keys() -> Result<()> {
 
     // Verify each key still has latest version
     for (i, &key) in keys.iter().enumerate() {
-        let key_bytes = key.to_be_bytes();
+        // BH-3 校准：rekey 链后行当前键为 versions[i][2]，定位按行当前键
+        let key_bytes = versions[i][2].to_be_bytes();
         let row_id = table_meta
             .index_manager
             .search(&key_bytes)

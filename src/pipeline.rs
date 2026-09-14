@@ -3,8 +3,9 @@ use crate::executor::{
     AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DataScanExecutor,
     DeleteExecutor, DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
     HavingExecutor, IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig,
-    JoinExecutor, JoinRelatedConfig, LimitExecutor, PhysicalPlan, ProjectionExecutor, ScanExecutor,
-    SemiJoinExecutorV2, SortExecutor, SubqueryEvalExecutor, UpdateExecutor, Value,
+    JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, PhysicalPlan,
+    ProjectionExecutor, ScanExecutor, SemiJoinExecutorV2, SortExecutor, SubqueryEvalExecutor,
+    UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
@@ -12,6 +13,7 @@ use crate::profiling::{
     init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope,
 };
 use crate::storage::Result;
+use crate::transaction::Snapshot;
 use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -135,7 +137,8 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
             } else {
                 None
             };
-            let executor = match create_executor_from_plan(plan, database, Some(tx_id)).await {
+            let executor = match create_executor_from_plan(plan, database, Some(tx_id), None).await
+            {
                 Ok(e) => e,
                 Err(e) => {
                     if let Some(abort_tables) = &abort_tables {
@@ -193,19 +196,25 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
         }
         _ => {
             // Query path (and any non-DML/non-DDL).
+            // MS09 Iter000 (D4): under Read Committed, the statement
+            // evaluates against a snapshot taken at statement start; the
+            // default RepeatableRead path stays `None` (byte-for-byte
+            // unchanged).
+            let statement_snapshot = database.statement_snapshot(None).await;
             let executor_creation_start = if profiling {
                 Some(Instant::now())
             } else {
                 None
             };
-            let executor = match create_executor_from_plan(plan, database, None).await {
-                Ok(e) => e,
-                Err(e) => {
-                    return Response::Error {
-                        message: e.to_string(),
-                    };
-                }
-            };
+            let executor =
+                match create_executor_from_plan(plan, database, None, statement_snapshot).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return Response::Error {
+                            message: e.to_string(),
+                        };
+                    }
+                };
             if let Some(start) = executor_creation_start {
                 record_time("executor_creation", start.elapsed());
             }
@@ -289,12 +298,19 @@ pub async fn execute_stage_in_tx(database: &Database, plan: PhysicalPlan, tx_id:
             database.plan_cache.clear();
             response
         }
-        _ => match create_executor_from_plan(plan, database, Some(tx_id)).await {
-            Ok(executor) => execute_executor(executor).await,
-            Err(e) => Response::Error {
-                message: e.to_string(),
-            },
-        },
+        _ => {
+            // MS09 Iter000 (D4): in-transaction statements take their
+            // statement-start snapshot with the transaction's own id as the
+            // reader (self writes stay visible via `is_visible_self`); the
+            // default RepeatableRead path stays `None`.
+            let statement_snapshot = database.statement_snapshot(Some(tx_id)).await;
+            match create_executor_from_plan(plan, database, Some(tx_id), statement_snapshot).await {
+                Ok(executor) => execute_executor(executor).await,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
     }
 }
 
@@ -436,16 +452,24 @@ async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
 /// `tx_id` is `Some(real_tx_id)` for DML nodes (Insert/Update/Delete) and `None`
 /// for SELECT-side nodes (Scan/Filter/Join/Aggregate/...). Callers must wrap DML
 /// in a real `Transaction` from `TransactionManager::begin()`; see `execute_inner`.
+///
+/// `snapshot` is the statement-start Read Committed snapshot (MS09 Iter000,
+/// D4) — `None` under the default RepeatableRead path, which keeps every scan
+/// construction byte-for-byte unchanged. It threads to all scan nodes and to
+/// subquery/derived-table rebuilds.
 pub(crate) fn create_executor_from_plan(
     plan: PhysicalPlan,
     database: &Database,
     tx_id: Option<u64>,
+    snapshot: Option<Snapshot>,
 ) -> CreateExecutorFuture<'_> {
     Box::pin(async move {
         match plan {
             PhysicalPlan::Filter(node) => {
                 // Recursively create input executor
-                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
+                let input =
+                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
+                        .await?;
                 Ok(Box::new(
                     FilterExecutor::new(input, node.predicate).with_projection(node.projection),
                 ) as Box<dyn Executor + Send>)
@@ -454,7 +478,7 @@ pub(crate) fn create_executor_from_plan(
             PhysicalPlan::Scan(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
                 Ok(Box::new(
-                    ScanExecutor::new(table_meta, database.buffer_pool.clone(), None)
+                    ScanExecutor::new(table_meta, database.buffer_pool.clone(), snapshot)
                         .with_projection(node.projection),
                 ) as Box<dyn Executor + Send>)
             }
@@ -465,9 +489,10 @@ pub(crate) fn create_executor_from_plan(
                     DataScanExecutor::new(
                         table_meta,
                         database.buffer_pool.clone(),
-                        None,
+                        snapshot,
                         node.predicate,
                         node.scan_cap,
+                        Some(database.transaction_manager.clone()),
                     )
                     .with_projection(node.projection),
                 ) as Box<dyn Executor + Send>)
@@ -480,7 +505,7 @@ pub(crate) fn create_executor_from_plan(
                         table_meta,
                         database.buffer_pool.clone(),
                         node.key.as_bytes().to_vec(),
-                        None,
+                        snapshot,
                     )
                     .with_projection(node.projection),
                 ) as Box<dyn Executor + Send>)
@@ -493,7 +518,7 @@ pub(crate) fn create_executor_from_plan(
                         table_meta,
                         database.buffer_pool.clone(),
                         node.key.as_bytes().to_vec(),
-                        None,
+                        snapshot,
                     )
                     .with_projection(node.projection),
                 ) as Box<dyn Executor + Send>)
@@ -528,12 +553,10 @@ pub(crate) fn create_executor_from_plan(
 
             PhysicalPlan::Delete(node) => {
                 let table_meta = database.table_manager.get_table(&node.table_name).await?;
-                let index_manager = table_meta.index_manager.clone();
                 Ok(Box::new(DeleteExecutor::new(
-                    index_manager,
+                    table_meta,
                     database.buffer_pool.clone(),
                     database.transaction_manager.clone(),
-                    table_meta.name.clone(),
                     node.key.as_bytes().to_vec(),
                     tx_id.expect("DML Delete requires a transaction id"),
                     Some(database.wal_buffer.clone()),
@@ -553,7 +576,8 @@ pub(crate) fn create_executor_from_plan(
                     table_name: _,
                     column_indices,
                 } = node;
-                let input_executor = create_executor_from_plan(*input, database, tx_id).await?;
+                let input_executor =
+                    create_executor_from_plan(*input, database, tx_id, snapshot.clone()).await?;
                 Ok(Box::new(AggregateExecutor::new(
                     input_executor,
                     group_by,
@@ -564,14 +588,18 @@ pub(crate) fn create_executor_from_plan(
             }
 
             PhysicalPlan::Having(node) => {
-                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
+                let input =
+                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
+                        .await?;
                 Ok(Box::new(HavingExecutor::new(input, node.predicate))
                     as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Sort(node) => {
                 // Recursively create input executor
-                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
+                let input =
+                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
+                        .await?;
                 Ok(Box::new(
                     SortExecutor::new(input, node.order_by, node.columns)
                         .with_projection(node.projection),
@@ -580,7 +608,9 @@ pub(crate) fn create_executor_from_plan(
 
             PhysicalPlan::Limit(node) => {
                 // Recursively create input executor
-                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
+                let input =
+                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
+                        .await?;
                 Ok(Box::new(LimitExecutor::new(input, node.limit, node.offset))
                     as Box<dyn Executor + Send>)
             }
@@ -594,11 +624,13 @@ pub(crate) fn create_executor_from_plan(
 
                 // Build left executor recursively
                 let left_executor =
-                    create_executor_from_plan(*join_node.left, database, tx_id).await?;
+                    create_executor_from_plan(*join_node.left, database, tx_id, snapshot.clone())
+                        .await?;
 
                 // Build right executor recursively
                 let right_executor =
-                    create_executor_from_plan(*join_node.right, database, tx_id).await?;
+                    create_executor_from_plan(*join_node.right, database, tx_id, snapshot.clone())
+                        .await?;
 
                 Ok(Box::new(JoinExecutor::new(JoinConfig {
                     left_executor,
@@ -610,6 +642,29 @@ pub(crate) fn create_executor_from_plan(
                     left_table_name,
                     right_table_name,
                 })) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::NestedLoopJoin(node) => {
+                // MS09-T02: left input chain head table name (output_columns
+                // ownership decision in the executor, same source as the Join
+                // arm's extract_column_indices use).
+                let (_, left_table_name) = extract_column_indices(&node.left)?;
+
+                // Build left and right executors recursively
+                let left_executor =
+                    create_executor_from_plan(*node.left, database, tx_id, snapshot.clone())
+                        .await?;
+                let right_executor =
+                    create_executor_from_plan(*node.right, database, tx_id, snapshot.clone())
+                        .await?;
+
+                Ok(Box::new(NestedLoopJoinExecutor::new(
+                    left_executor,
+                    right_executor,
+                    node.predicate.clone(),
+                    node.output_columns.clone(),
+                    left_table_name,
+                )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::SemiJoin(node) => {
@@ -627,9 +682,12 @@ pub(crate) fn create_executor_from_plan(
                 };
 
                 // Build left and right executors recursively
-                let left_executor = create_executor_from_plan(*node.left, database, tx_id).await?;
+                let left_executor =
+                    create_executor_from_plan(*node.left, database, tx_id, snapshot.clone())
+                        .await?;
                 let right_executor =
-                    create_executor_from_plan(*node.right, database, tx_id).await?;
+                    create_executor_from_plan(*node.right, database, tx_id, snapshot.clone())
+                        .await?;
 
                 Ok(Box::new(SemiJoinExecutorV2::new(JoinRelatedConfig {
                     left: left_executor,
@@ -641,6 +699,7 @@ pub(crate) fn create_executor_from_plan(
                     right_column_indices,
                     right_plan,
                     database: Some(Arc::new(database.clone())),
+                    snapshot,
                 })) as Box<dyn Executor + Send>)
             }
 
@@ -658,9 +717,12 @@ pub(crate) fn create_executor_from_plan(
                     None
                 };
                 // Build left and right executors recursively
-                let left_executor = create_executor_from_plan(*node.left, database, tx_id).await?;
+                let left_executor =
+                    create_executor_from_plan(*node.left, database, tx_id, snapshot.clone())
+                        .await?;
                 let right_executor =
-                    create_executor_from_plan(*node.right, database, tx_id).await?;
+                    create_executor_from_plan(*node.right, database, tx_id, snapshot.clone())
+                        .await?;
 
                 Ok(Box::new(AntiJoinExecutor::new(JoinRelatedConfig {
                     left: left_executor,
@@ -672,13 +734,15 @@ pub(crate) fn create_executor_from_plan(
                     right_column_indices,
                     right_plan,
                     database: Some(Arc::new(database.clone())),
+                    snapshot,
                 })) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::SubqueryEval(node) => {
                 let (outer_column_indices, _) = extract_column_indices(&node.input)?;
                 let input_executor =
-                    create_executor_from_plan(*node.input, database, tx_id).await?;
+                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
+                        .await?;
                 Ok(Box::new(SubqueryEvalExecutor::new(
                     input_executor,
                     *node.subquery,
@@ -687,13 +751,15 @@ pub(crate) fn create_executor_from_plan(
                     node.correlated_params.clone(),
                     outer_column_indices,
                     Arc::new(database.clone()),
+                    snapshot,
                 )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::DerivedScan(node) => {
                 // Materialize subquery results into memory
                 let mut subquery_executor =
-                    create_executor_from_plan(*node.subquery, database, tx_id).await?;
+                    create_executor_from_plan(*node.subquery, database, tx_id, snapshot.clone())
+                        .await?;
                 let mut rows = Vec::new();
                 loop {
                     match subquery_executor.next().await? {
@@ -708,7 +774,9 @@ pub(crate) fn create_executor_from_plan(
             PhysicalPlan::Projection(node) => {
                 // MS11-T01 Iter001: 逐项求值走 owned `Expression::evaluate`
                 // 路径（新值表达式的 evaluate_ref 对 String 结果报错，禁用）
-                let input = create_executor_from_plan(*node.input, database, tx_id).await?;
+                let input =
+                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
+                        .await?;
                 let items = node.items.into_iter().map(|item| item.expr).collect();
                 Ok(Box::new(ProjectionExecutor::new(input, items)) as Box<dyn Executor + Send>)
             }
@@ -771,6 +839,23 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
                 .conditions
                 .first()
                 .map(|c| c.left_column.table.clone().unwrap_or_default())
+                .unwrap_or_default();
+            Ok((indices, table_name))
+        }
+        PhysicalPlan::NestedLoopJoin(node) => {
+            // MS09-T02: same output_columns mapping as the Join arm; NLJ has
+            // no equi conditions, so the chain-head table name comes from the
+            // first output column's table_alias.
+            let indices: HashMap<String, usize> = node
+                .output_columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.column.to_lowercase(), idx))
+                .collect();
+            let table_name = node
+                .output_columns
+                .first()
+                .map(|c| c.table_alias.clone())
                 .unwrap_or_default();
             Ok((indices, table_name))
         }
@@ -1001,6 +1086,16 @@ async fn register_table(
                     .map(|(name, _)| name.clone())
                     .collect();
                 builder.register_table(&table_meta.name, columns, &table_meta.pk_column);
+                // MS16 Iteration 000 (I046, design D2): 传递键列声明类型，键位
+                // 等值路由按类型分流。键列不在列清单（pk_column 为空）不注册
+                // ——类型未知 = 既有路由。
+                if let Some((_, pk_type)) = table_meta
+                    .columns
+                    .iter()
+                    .find(|(name, _)| name == &table_meta.pk_column)
+                {
+                    builder.set_pk_column_type(&table_meta.name, pk_type.clone());
+                }
             }
             Err(e) => return Err(format!("Table '{}' not found: {}", table_name, e)),
         }

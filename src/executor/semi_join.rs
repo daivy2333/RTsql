@@ -10,6 +10,7 @@ use crate::executor::{
     ExecResult, Executor, JoinCondition, JoinRelatedConfig, OutputColumn, PhysicalPlan, Value,
 };
 use crate::storage::Result;
+use crate::transaction::Snapshot;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -51,6 +52,14 @@ pub struct SemiJoinExecutorV2 {
     right_plan: Option<PhysicalPlan>,
     /// Database for creating executors from plans (correlated path)
     database: Option<Arc<Database>>,
+    /// MS09 Iter000 (D4): statement-start Read Committed snapshot re-applied
+    /// on every correlated right-plan rebuild (`None` under RepeatableRead).
+    snapshot: Option<Snapshot>,
+    /// MS09 Iter002 (D6): statement-level correlated-result cache keyed by the
+    /// correlated parameter value sequence. Stores the full right row set
+    /// (including NULL-key rows, which count toward `right_has_rows`). Errors
+    /// are never cached.
+    correlated_rows_cache: HashMap<Vec<(String, Value)>, Vec<Vec<Value>>>,
 
     phase: SemiJoinPhase,
     executed: bool,
@@ -71,6 +80,8 @@ impl SemiJoinExecutorV2 {
             right_has_rows: None,
             right_plan: config.right_plan,
             database: config.database,
+            snapshot: config.snapshot,
+            correlated_rows_cache: HashMap::new(),
             phase: SemiJoinPhase::BuildRight,
             executed: false,
         }
@@ -193,34 +204,62 @@ impl Executor for SemiJoinExecutorV2 {
                             Some(ExecResult::Row(left_row)) => {
                                 // CORRELATED PATH: rebuild right for this left row
                                 if !self.correlated_params.is_empty() {
-                                    let plan = self.right_plan.as_ref().unwrap();
-                                    let db = self.database.as_ref().unwrap();
-                                    let cloned_plan = plan.clone();
                                     let param_values = self.extract_param_values(&left_row);
-                                    crate::executor::inject_correlated_values(
-                                        &cloned_plan,
-                                        &param_values,
-                                    );
-                                    let mut right_exec =
-                                        crate::pipeline::create_executor_from_plan(
-                                            cloned_plan,
-                                            db,
-                                            None,
-                                        )
-                                        .await?;
-                                    let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
-                                        HashMap::new();
-                                    let mut has_rows = false;
-                                    while let Some(result) = right_exec.next().await? {
-                                        if let ExecResult::Row(row) = result {
-                                            has_rows = true;
-                                            if let Some(hash_key) = self.build_right_key(&row) {
-                                                hashmap.entry(hash_key).or_default().push(row);
+                                    if let Some(rows) =
+                                        self.correlated_rows_cache.get(&param_values)
+                                    {
+                                        // Cache hit: rebuild the hash map and row
+                                        // presence exactly as the miss path does.
+                                        let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
+                                            HashMap::new();
+                                        for row in rows {
+                                            if let Some(hash_key) = self.build_right_key(row) {
+                                                hashmap
+                                                    .entry(hash_key)
+                                                    .or_default()
+                                                    .push(row.clone());
                                             }
                                         }
+                                        let has_rows = !rows.is_empty();
+                                        self.right_hashmap = Some(hashmap);
+                                        self.right_has_rows = Some(has_rows);
+                                    } else {
+                                        let plan = self.right_plan.as_ref().unwrap();
+                                        let db = self.database.as_ref().unwrap();
+                                        let cloned_plan = plan.clone();
+                                        crate::executor::inject_correlated_values(
+                                            &cloned_plan,
+                                            &param_values,
+                                        );
+                                        let mut right_exec =
+                                            crate::pipeline::create_executor_from_plan(
+                                                cloned_plan,
+                                                db,
+                                                None,
+                                                self.snapshot.clone(),
+                                            )
+                                            .await?;
+                                        let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
+                                            HashMap::new();
+                                        let mut has_rows = false;
+                                        let mut collected: Vec<Vec<Value>> = Vec::new();
+                                        while let Some(result) = right_exec.next().await? {
+                                            if let ExecResult::Row(row) = result {
+                                                has_rows = true;
+                                                if let Some(hash_key) = self.build_right_key(&row) {
+                                                    hashmap
+                                                        .entry(hash_key)
+                                                        .or_default()
+                                                        .push(row.clone());
+                                                }
+                                                collected.push(row);
+                                            }
+                                        }
+                                        // Store only after a successful drain.
+                                        self.correlated_rows_cache.insert(param_values, collected);
+                                        self.right_hashmap = Some(hashmap);
+                                        self.right_has_rows = Some(has_rows);
                                     }
-                                    self.right_hashmap = Some(hashmap);
-                                    self.right_has_rows = Some(has_rows);
                                 }
 
                                 // Re-read hashmap after potential correlated rebuild

@@ -50,7 +50,8 @@ fn bench_visibility(c: &mut Criterion) {
         // Scenario 1: No snapshot (no MVCC checks, baseline)
         group.bench_with_input(BenchmarkId::new("no_snapshot", n), &n, |b, &_n| {
             b.to_async(&rt).iter(|| async {
-                let mut executor = DataScanExecutor::new(tm.clone(), bp.clone(), None, None, None);
+                let mut executor =
+                    DataScanExecutor::new(tm.clone(), bp.clone(), None, None, None, None);
                 let mut count = 0i64;
                 while let Some(_row) = executor.next().await.unwrap() {
                     count += 1;
@@ -65,7 +66,7 @@ fn bench_visibility(c: &mut Criterion) {
             b.to_async(&rt).iter(|| async {
                 let snapshot = Snapshot::new(n as u64 * 10, vec![]);
                 let mut executor =
-                    DataScanExecutor::new(tm.clone(), bp.clone(), Some(snapshot), None, None);
+                    DataScanExecutor::new(tm.clone(), bp.clone(), Some(snapshot), None, None, None);
                 let mut count = 0i64;
                 while let Some(_row) = executor.next().await.unwrap() {
                     count += 1;
@@ -80,14 +81,14 @@ fn bench_visibility(c: &mut Criterion) {
         {
             let snapshot = Snapshot::new(n as u64 * 10, vec![]);
             let mut warmup =
-                DataScanExecutor::new(tm.clone(), bp.clone(), Some(snapshot), None, None);
+                DataScanExecutor::new(tm.clone(), bp.clone(), Some(snapshot), None, None, None);
             rt.block_on(async { while warmup.next().await.unwrap().is_some() {} });
         }
         group.bench_with_input(BenchmarkId::new("snapshot_warm", n), &n, |b, &_n| {
             b.to_async(&rt).iter(|| async {
                 let snapshot = Snapshot::new(n as u64 * 10, vec![]);
                 let mut executor =
-                    DataScanExecutor::new(tm.clone(), bp.clone(), Some(snapshot), None, None);
+                    DataScanExecutor::new(tm.clone(), bp.clone(), Some(snapshot), None, None, None);
                 let mut count = 0i64;
                 while let Some(_row) = executor.next().await.unwrap() {
                     count += 1;

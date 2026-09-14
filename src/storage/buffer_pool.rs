@@ -310,7 +310,7 @@ impl BufferPool {
                     .await;
             }
 
-            if vis_info.all_invisible_for(snapshot.tx_id()) {
+            if vis_info.all_invisible_for(snapshot.high_water()) {
                 return Ok(None);
             }
         }
@@ -357,17 +357,6 @@ impl BufferPool {
 
         // All versions invisible
         Ok(None)
-    }
-
-    /// Mark all tuples created by an aborted transaction
-    /// Sets commit_tx_id = u64::MAX so MVCC visibility skips them
-    ///
-    /// TODO: Implement proper slot iteration using SlottedPage API.
-    /// For now, aborted tuples remain invisible to other transactions
-    /// because MVCC visibility checks will see create_tx_id in the
-    /// active_tx_ids set (which is preserved across restarts via WAL).
-    pub async fn mark_tx_aborted(&self, _aborted_tx_id: u64) -> Result<()> {
-        Ok(())
     }
 
     pub async fn free_page(&self, page_id: PageId) -> Result<()> {
@@ -424,7 +413,8 @@ impl BufferPool {
     ///
     /// Returns true if every slot satisfies three conditions:
     /// 1. Committed (commit_tx_id is Some and not a delete sentinel)
-    /// 2. Created before the snapshot (create_tx_id < snapshot.tx_id)
+    /// 2. Created not after the snapshot's visibility high-water mark
+    ///    (create_tx_id <= snapshot.high_water())
     /// 3. Not from an active transaction at snapshot time
     ///
     /// Used by DataScan to lazily set `all_visible` after scanning a page.
@@ -448,8 +438,12 @@ impl BufferPool {
                 if vh.commit_tx_id().is_none() || vh.is_deleted() {
                     return Ok(false);
                 }
-                // Condition 2: created before snapshot
-                if vh.create_tx_id() >= snapshot.tx_id() {
+                // Condition 2: created not after the snapshot's visibility
+                // high-water mark (mirrors `is_visible` rule 2; under
+                // `Snapshot::new` the mark equals the reader's own id and
+                // self-created rows fail condition 1 first, so RR behavior
+                // is unchanged)
+                if vh.create_tx_id() > snapshot.high_water() {
                     return Ok(false);
                 }
                 // Condition 3: not from an active transaction

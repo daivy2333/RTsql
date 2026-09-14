@@ -267,4 +267,20 @@
 - **用途**: MS10-T05（`new/list/schema/dump/restore/import --csv`）Plan 的实现调查输入——`CliArgs` 扁平入口重构点与裸名/子命令名冲突边界、`execute_command_inner` 两阶段信号编排复用、`Database`/`Catalog` 可复用 API（系统表不可 SQL 查询、schema 必须走 `catalog().scan_tables/scan_columns`）、双 `ColumnType` 体系与 String(255) 固定转换决定的 dump 保真边界、csv 依赖缺口、`resolve_db_path` 目录 helper 提取点、测试模式与退出码矩阵零扩展结论
 - **状态**: active
 
+## R21: ISS01 min_create_tx_id=0 毒化 all-invisible 快路径
+
+- **类型**: issue
+- **路径**: `.claude/issues/ISS01-min-create-tx-id-zero-poisoning.md`
+- **日期**: 2026-09-14
+- **用途**: 写路径首建页级可见性条目时 `min_create_tx_id` 被 `or_default()` 钉 0、`find_visible_version` all-invisible 快路径对该页永久失效（保守方向、损失优化）的缺陷台账；MS08 实测域量化与修复裁定的输入（002-rework Plan Review F4(c) 裁定残留）
+- **状态**: active
+
+## R22: ISS02 IN×JOIN 子查询计划期误报 Subquery returns multiple columns
+
+- **类型**: issue
+- **路径**: `.claude/issues/ISS02-in-subquery-join-plan-rejection.md`
+- **日期**: 2026-09-14
+- **用途**: `IN (SELECT … JOIN …)` 计划期误报「requires single column」的缺陷台账——`get_subquery_first_column` 无 Join/NLJ 形态臂（等值 Hash 同源预存，`subquery.rs:437` fallback）、关联参数仅扫 WHERE 与 WHERE+JOIN 拒绝面的三面叠加边界；IN×JOIN 能力裁定与诊断文案修正决策的输入（MS09 Iteration 001 000-initial Plan Review F5 裁定残留）
+- **状态**: active
+
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
