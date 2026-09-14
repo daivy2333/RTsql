@@ -10,6 +10,18 @@ use crate::transaction::{TransactionManager, VersionHeader};
 use crate::wal::{WALBuffer, WalRecord};
 use std::sync::Arc;
 
+/// MS16 Iteration 000 (design D3): 键位越界值的类型名（`KeyTypeMismatch`
+/// 错误文案用；调用点已保证值非 Int/Null，Int/Null 臂仅为穷尽性）。
+fn key_value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_) => "Int",
+        Value::String(_) => "String",
+        Value::Null => "Null",
+        Value::Float(_) => "Float",
+        Value::Bool(_) => "Bool",
+    }
+}
+
 pub struct InsertExecutor {
     table_meta: Arc<TableMeta>,
     /// MS07-T01: When set, the executor routes writes through
@@ -92,6 +104,20 @@ impl Executor for InsertExecutor {
         let mut count = 0u64;
         for row_values in &self.values {
             let pk_value = &row_values[self.pk_index];
+
+            // MS16 Iteration 000 (design D3): Int 键列只接受 Int 或 NULL 键位
+            // 值——越界类型在此拒绝（先于 DuplicateKey 预检，非法类型无需
+            // 访问索引），否则按值打 tag 落库为无键行、键位等值点查静默漏行
+            // （I046 同族）。非 Int 键列不新增拒绝；NULL 保持无键行语义。
+            if matches!(self.schema[self.pk_index], ColumnType::Int)
+                && !matches!(pk_value, Value::Int(_) | Value::Null)
+            {
+                return Err(StorageError::KeyTypeMismatch {
+                    column: self.table_meta.pk_column.clone(),
+                    expected: "INT".to_string(),
+                    actual: key_value_type_name(pk_value).to_string(),
+                });
+            }
 
             // MS10-T05 001-rework (T8-R1): rows whose key-position value has
             // no B-Tree key (NULL / non-Int) are stored but not indexed —

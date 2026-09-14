@@ -4,12 +4,14 @@
 //! For each outer row, executes the subquery and takes the first row's first column
 //! as the scalar result, inserting it at the specified column index.
 //! For independent (non-correlated) subqueries, the result is cached after first evaluation.
-//! For correlated subqueries, the plan is cloned, injected with outer values, and
-//! re-executed per outer row (no caching).
+//! For correlated subqueries, results are cached per correlated parameter value
+//! sequence for the lifetime of the statement (executors are rebuilt per
+//! statement, so a local cache never outlives it).
 
 use crate::database::Database;
 use crate::executor::{CorrelatedParam, ExecResult, Executor, PhysicalPlan, Value};
 use crate::storage::Result;
+use crate::transaction::Snapshot;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,11 +28,20 @@ pub struct SubqueryEvalExecutor {
     correlated_params: Vec<CorrelatedParam>,
     outer_column_indices: HashMap<String, usize>,
     database: Arc<Database>,
+    /// MS09 Iter000 (D4): statement-start Read Committed snapshot re-applied
+    /// on every (re-)evaluation of the subquery (`None` under RepeatableRead).
+    snapshot: Option<Snapshot>,
     cached_result: Option<Value>,
+    /// MS09 Iter002 (D6): statement-level correlated-result cache keyed by the
+    /// correlated parameter value sequence. Stores the successful row set (0 or
+    /// 1 rows; multi-row evaluations error before reaching the store). Errors
+    /// are never cached.
+    correlated_cache: HashMap<Vec<(String, Value)>, Vec<Vec<Value>>>,
 }
 
 impl SubqueryEvalExecutor {
     /// Create a new SubqueryEvalExecutor
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: Box<dyn Executor + Send>,
         subquery_plan: PhysicalPlan,
@@ -39,6 +50,7 @@ impl SubqueryEvalExecutor {
         correlated_params: Vec<CorrelatedParam>,
         outer_column_indices: HashMap<String, usize>,
         database: Arc<Database>,
+        snapshot: Option<Snapshot>,
     ) -> Self {
         Self {
             input,
@@ -48,7 +60,9 @@ impl SubqueryEvalExecutor {
             correlated_params,
             outer_column_indices,
             database,
+            snapshot,
             cached_result: None,
+            correlated_cache: HashMap::new(),
         }
     }
 
@@ -60,6 +74,7 @@ impl SubqueryEvalExecutor {
             self.subquery_plan.clone(),
             &self.database,
             None,
+            self.snapshot.clone(),
         )
         .await?;
 
@@ -114,38 +129,52 @@ impl Executor for SubqueryEvalExecutor {
                 Some(ExecResult::Row(mut row)) => {
                     let is_correlated = !self.correlated_params.is_empty();
                     let scalar_value = if is_correlated {
-                        // Per-row: clone plan, inject outer values, execute fresh (no cache)
-                        let cloned_plan = self.subquery_plan.clone();
+                        // Statement-level cache: same parameter value sequence
+                        // reuses the first evaluation's row set (MS09 Iter002).
                         let param_values = self.extract_param_values(&row);
-                        crate::executor::inject_correlated_values(&cloned_plan, &param_values);
-                        let mut executor = crate::pipeline::create_executor_from_plan(
-                            cloned_plan,
-                            &self.database,
-                            None,
-                        )
-                        .await?;
-                        let mut result_value: Option<Value> = None;
-                        let mut row_count = 0;
-                        while let Some(result) = executor.next().await? {
-                            match result {
-                                ExecResult::Row(inner_row) => {
-                                    row_count += 1;
-                                    if row_count > 1 {
-                                        return Err(
-                                            crate::storage::StorageError::ExecutionError(
-                                                crate::parser::error::PlanError::SubqueryReturnsMultipleRow
-                                                    .to_string(),
-                                            ),
-                                        );
-                                    }
-                                    if !inner_row.is_empty() {
-                                        result_value = Some(inner_row[0].clone());
-                                    }
-                                }
-                                ExecResult::AffectedRows(_) | ExecResult::RowId(_) => continue,
+                        if let Some(rows) = self.correlated_cache.get(&param_values) {
+                            match rows.first() {
+                                Some(inner_row) if !inner_row.is_empty() => inner_row[0].clone(),
+                                _ => Value::Null,
                             }
+                        } else {
+                            let cloned_plan = self.subquery_plan.clone();
+                            crate::executor::inject_correlated_values(&cloned_plan, &param_values);
+                            let mut executor = crate::pipeline::create_executor_from_plan(
+                                cloned_plan,
+                                &self.database,
+                                None,
+                                self.snapshot.clone(),
+                            )
+                            .await?;
+                            let mut result_value: Option<Value> = None;
+                            let mut row_count = 0;
+                            let mut collected: Vec<Vec<Value>> = Vec::new();
+                            while let Some(result) = executor.next().await? {
+                                match result {
+                                    ExecResult::Row(inner_row) => {
+                                        row_count += 1;
+                                        if row_count > 1 {
+                                            return Err(
+                                                crate::storage::StorageError::ExecutionError(
+                                                    crate::parser::error::PlanError::SubqueryReturnsMultipleRow
+                                                        .to_string(),
+                                                ),
+                                            );
+                                        }
+                                        if !inner_row.is_empty() {
+                                            result_value = Some(inner_row[0].clone());
+                                        }
+                                        collected.push(inner_row);
+                                    }
+                                    ExecResult::AffectedRows(_) | ExecResult::RowId(_) => continue,
+                                }
+                            }
+                            // Store only after a successful drain; errors and
+                            // the multi-row early exit above never reach here.
+                            self.correlated_cache.insert(param_values, collected);
+                            result_value.unwrap_or(Value::Null)
                         }
-                        result_value.unwrap_or(Value::Null)
                     } else {
                         // Independent subquery: cache result (unchanged)
                         if self.cached_result.is_none() {

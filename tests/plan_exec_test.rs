@@ -26,8 +26,6 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
     let table_meta = table_mgr.get_table("test").await?;
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let index_manager = table_meta.index_manager.clone();
-
     let key_bytes = 100i64.to_be_bytes();
     let values = vec![vec![Value::Int(100)]];
     let mut insert_executor = InsertExecutor::new(
@@ -55,10 +53,9 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
     );
 
     let mut delete_executor = DeleteExecutor::new(
-        index_manager.clone(),
+        table_meta.clone(),
         buffer_pool.clone(),
         tx_manager.clone(),
-        "test".to_string(),
         key_bytes.to_vec(),
         0,
         None,
@@ -188,7 +185,13 @@ async fn test_insert_update_scan_flow() -> Result<()> {
     let result = update_executor.next().await?;
     assert_eq!(result, Some(ExecResult::AffectedRows(1)));
 
-    let mut scan = IndexScanExecutor::new(table_meta, buffer_pool, key_bytes.to_vec(), None);
+    // BH-3 校准：UPDATE rekey 1→1000 后行当前键为 1000，IndexScan 按行当前键定位
+    let mut scan = IndexScanExecutor::new(
+        table_meta,
+        buffer_pool,
+        1000i64.to_be_bytes().to_vec(),
+        None,
+    );
     let result = scan.next().await?;
     assert!(
         matches!(result, Some(ExecResult::Row(ref values)) if values[0] == Value::Int(1000)),
@@ -214,8 +217,6 @@ async fn test_multiple_operations_sequence() -> Result<()> {
         .await?;
     let table_meta = table_mgr.get_table("test").await?;
     let tx_manager = Arc::new(TransactionManager::new());
-
-    let index_manager = table_meta.index_manager.clone();
 
     for i in 1i64..=3 {
         let values = vec![vec![Value::Int(i)]];
@@ -245,10 +246,9 @@ async fn test_multiple_operations_sequence() -> Result<()> {
 
     let key_2 = 2i64.to_be_bytes().to_vec();
     let mut delete_executor = DeleteExecutor::new(
-        index_manager.clone(),
+        table_meta.clone(),
         buffer_pool.clone(),
         tx_manager.clone(),
-        "test".to_string(),
         key_2,
         0,
         None,

@@ -5,6 +5,7 @@
 //! per-module imports are introduced.
 
 use super::aggregate::{extract_aggregate_func, is_aggregate_expr};
+use super::ddl_dml::is_pure_equi_join_on;
 use super::expression::expr_to_column_name;
 use super::PlanBuilder;
 use crate::executor::{
@@ -77,6 +78,14 @@ impl PlanBuilder {
             PhysicalPlan::Join(node) => {
                 // JOIN 行组装严格按 output_columns 顺序（见 executor/join.rs），
                 // 列名直接取自节点，不递归合并左右子计划。
+                node.output_columns
+                    .iter()
+                    .map(|c| c.column.clone())
+                    .collect()
+            }
+            PhysicalPlan::NestedLoopJoin(node) => {
+                // MS09-T02: 与 Join 臂同型——行组装严格按 output_columns 顺序
+                //（见 executor/nested_loop_join.rs），列名直接取自节点。
                 node.output_columns
                     .iter()
                     .map(|c| c.column.clone())
@@ -186,10 +195,9 @@ impl PlanBuilder {
 
             // 解析 ON 条件
             let on_clause = on_clause.ok_or(PlanError::MissingOnClause)?;
-            let conditions =
-                self.extract_join_conditions(&current_tables, &right_table, on_clause)?;
 
-            // 构建输出列（根据 qualified_columns 过滤）
+            // 构建输出列（根据 qualified_columns 过滤）—— Hash 与 NLJ 两路由共享，
+            // SELECT * 与列过滤行为对两种 join 节点一致。
             let all_columns: Vec<OutputColumn> = current_tables
                 .iter()
                 .flat_map(|t| {
@@ -245,13 +253,64 @@ impl PlanBuilder {
                     .collect()
             };
 
-            // 构建 Join 节点
-            current_plan = PhysicalPlan::Join(crate::executor::JoinNode {
-                left: Box::new(current_plan),
-                right: Box::new(right_plan),
-                conditions,
-                output_columns,
-            });
+            // MS09-T02 (I015): 计划期启发式路由（delta spec R4）。结构探测的
+            // 真集恰为 `extract_join_conditions` 的接受面（resolve_column_ref
+            // 只接受 Identifier / 2 段 CompoundIdentifier），纯等值形态的 Hash
+            // 路径输入集与行为逐字节不变；其余形态（非等值/字面量/表达式腿）
+            // 路由 NLJ——原计划期 `Unsupported expression type` 拒绝面被该
+            // 能力取代。
+            if is_pure_equi_join_on(on_clause) {
+                let conditions =
+                    self.extract_join_conditions(&current_tables, &right_table, on_clause)?;
+
+                // 构建 Join 节点
+                current_plan = PhysicalPlan::Join(crate::executor::JoinNode {
+                    left: Box::new(current_plan),
+                    right: Box::new(right_plan),
+                    conditions,
+                    output_columns,
+                });
+            } else {
+                // 非纯等值 ON → NLJ：组合行布局（左表偏移 0..n、右表
+                // n..n+m）上编译完整 ON 谓词。布局覆盖 save/restore 严格配对
+                //（`inner_table_names` 同型先例）；谓词 `column_index` 为
+                // 组合行绝对索引。
+                let mut layout: Vec<(String, Vec<String>)> = current_tables
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.clone(),
+                            self.tables
+                                .get(t)
+                                .expect("validated table must exist in metadata")
+                                .clone(),
+                        )
+                    })
+                    .collect();
+                layout.push((
+                    right_table.clone(),
+                    self.tables
+                        .get(&right_table)
+                        .expect("validated right_table must exist")
+                        .clone(),
+                ));
+                self.join_column_layout = Some(layout);
+                let predicate = match self.build_where(&current_tables[0], on_clause) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.join_column_layout = None;
+                        return Err(e);
+                    }
+                };
+                self.join_column_layout = None;
+
+                current_plan = PhysicalPlan::NestedLoopJoin(crate::executor::NestedLoopJoinNode {
+                    left: Box::new(current_plan),
+                    right: Box::new(right_plan),
+                    predicate,
+                    output_columns,
+                });
+            }
 
             current_tables.push(right_table);
         }
@@ -342,7 +401,9 @@ impl PlanBuilder {
         let table_name = match &base_plan {
             PhysicalPlan::Scan(scan_node) => scan_node.table_name.clone(),
             PhysicalPlan::DerivedScan(derived_node) => derived_node.alias.clone(),
-            PhysicalPlan::Join(_) => "join_result".to_string(), // 虚拟表名用于 JOIN 结果
+            PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_) => {
+                "join_result".to_string() // 虚拟表名用于 JOIN 结果
+            }
             _ => "unknown".to_string(),
         };
 
@@ -421,7 +482,11 @@ impl PlanBuilder {
                 ));
             }
             // JOIN 输出形状是列过滤而非逐项求值，表达式项 + JOIN 显式拒绝
-            if matches!(base_plan, PhysicalPlan::Join(_)) {
+            //（MS09-T02: 两种 join 节点同语义，拒绝面不因新节点形状漏接）
+            if matches!(
+                base_plan,
+                PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_)
+            ) {
                 return Err(PlanError::ParseError(
                     "Expression projection items are not supported with JOIN queries".to_string(),
                 ));
@@ -504,7 +569,12 @@ impl PlanBuilder {
         // Handle WHERE clause
         let plan_with_where = if let Some(where_expr) = &select.selection {
             // Skip WHERE processing for JOIN queries (will be handled in future tasks)
-            if matches!(base_plan, PhysicalPlan::Join(_)) {
+            // MS09-T02: 两种 join 节点同语义——漏接时 NLJ 会以 table_name
+            // "unknown" 走单表 WHERE 路径（错误行为而非既有拒绝）。
+            if matches!(
+                base_plan,
+                PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_)
+            ) {
                 return Err(PlanError::UnsupportedStatement);
             }
 
@@ -516,7 +586,7 @@ impl PlanBuilder {
                 &projection_columns,
             )? {
                 subquery_plan
-            } else if let Some(key) = self.extract_pk_from_where(&table_name, where_expr)? {
+            } else if let Some(key) = self.extract_pk_from_where_gated(&table_name, where_expr)? {
                 // Try to extract primary key from WHERE clause for index scan
                 // Simple PK equality check - use index scan
                 // Note: This is a simplification. A more sophisticated optimizer would
@@ -557,7 +627,13 @@ impl PlanBuilder {
                 // rows (stored, not indexed) are invisible to Scan's index
                 // traversal and would be silently dropped. Fall through to the
                 // OR / pushdown arms for data-page evaluation instead.
-                if has_pk_eq && !self.has_non_keyable_pk_literal_leg(&table_name, where_expr)? {
+                // MS16 Iteration 000 (I046, design D1 门 2)：键列已知声明非
+                // Int 时同样不得进入 Filter(Scan) 索引遍历（该表全行无键），
+                // 键位等值全形态分流到数据页臂。
+                if has_pk_eq
+                    && !self.pk_type_known_non_int(&table_name)
+                    && !self.has_non_keyable_pk_literal_leg(&table_name, where_expr)?
+                {
                     // PK equality present but in a non-simple form (e.g. AND-combined
                     // with another predicate). Keep base_plan as-is.
                     PhysicalPlan::Filter(FilterNode {
@@ -921,6 +997,32 @@ impl PlanBuilder {
                 || self.has_non_keyable_pk_literal_leg(table_name, right)?),
             _ => Ok(false),
         }
+    }
+
+    /// MS16 Iteration 000 (I046): 键列声明类型是否已知且非 Int
+    /// （Float/String/Bool）。此时全部存储行必为无键行（`Value::to_key()`
+    /// 仅 Int 有值），键位等值任何形态都不可路由索引遍历——统一分流到
+    /// 数据页臂（design D1）。类型未注册（派生表别名）视同未知，不分流、
+    /// 回退既有路由。
+    fn pk_type_known_non_int(&self, table_name: &str) -> bool {
+        match self.primary_key_types.get(table_name) {
+            Some(ct) => !matches!(ct, crate::storage::page_format::ColumnType::Int),
+            None => false,
+        }
+    }
+
+    /// MS16 Iteration 000 (I046): `extract_pk_from_where` 判定门（design D1
+    /// 门 1）——键列已知非 Int 时跳过索引键提取（视同 None），键位等值
+    /// 流入下方非 PK 臂；类型未知或 Int 时保持原提取行为。
+    fn extract_pk_from_where_gated(
+        &self,
+        table_name: &str,
+        expr: &Expr,
+    ) -> Result<Option<crate::storage::page_format::Key>, PlanError> {
+        if self.pk_type_known_non_int(table_name) {
+            return Ok(None);
+        }
+        self.extract_pk_from_where(table_name, expr)
     }
 
     /// Extract primary key from WHERE clause

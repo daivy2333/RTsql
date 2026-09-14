@@ -14,6 +14,13 @@
 //!
 //! RED（实施前实测）：目标形态全部 `Plan error: Unsupported expression
 //! type`（或 INSERT 负数 `Unsupported value type`）。
+//!
+//! MS16 T8 校准（change 2026-09-12-ms16-correctness-batch，BH-1 裁定
+//! 2026-09-12，spec key-column-type-conformance 校准段）：
+//! `negative_number_literal_persists` 的负 Float 行由 Int 隐式键列表 `t`
+//! 移入 Float 键列表 `tf`——R3 键列写入类型强制（design D3）后 Int 键列
+//! 拒绝 Float 值；负 Int 行断言逐字节保留，I040 负 Int/负 Float 字面量
+//! 折叠覆盖完整。
 
 use rtsql::database::Database;
 use rtsql::network::protocol::Response;
@@ -499,6 +506,11 @@ async fn cast_unknown_target_type_rejected() {
 // ---------------------------------------------------------------------------
 
 /// R5/S1：负数入库、查询与重开库持久
+///
+/// MS16 T8 校准（BH-1 裁定，spec key-column-type-conformance 校准段）：
+/// 负 Float 行原落在 Int 隐式键列表 `t`，R3 键列写入类型强制（MS16
+/// design D3）后 Int 键列拒绝 Float 值，移入 Float 键列表 `tf`；负 Int
+/// 行与断言逐字节保留，I040 覆盖完整。
 #[tokio::test]
 async fn negative_number_literal_persists() {
     let dir = TempDir::new().unwrap();
@@ -513,7 +525,11 @@ async fn negative_number_literal_persists() {
         Response::AffectedRows { count: 1 } => {}
         other => panic!("负数 INSERT 应 affected 1，实际 {:?}", other),
     }
-    match db.execute_sql("INSERT INTO t VALUES (-1.5, 'y')").await {
+
+    // MS16 T8 校准：负 Float 行移入 Float 键列表（R3 强制后 Int 键列不接受）
+    exec_ok(&db, "CREATE TABLE tf (f FLOAT, s STRING)").await;
+    db.buffer_pool.flush_all().await.unwrap();
+    match db.execute_sql("INSERT INTO tf VALUES (-1.5, 'y')").await {
         Response::AffectedRows { count: 1 } => {}
         other => panic!("负浮点 INSERT 应 affected 1，实际 {:?}", other),
     }
@@ -531,11 +547,14 @@ async fn negative_number_literal_persists() {
     let rows = query_rows(db2.execute_sql("SELECT v, s FROM t ORDER BY v").await);
     assert_eq!(
         rows,
-        vec![
-            vec![serde_json::json!(-1.5), serde_json::json!("y")],
-            vec![serde_json::json!(-1), serde_json::json!("x")],
-        ],
+        vec![vec![serde_json::json!(-1), serde_json::json!("x")]],
         "负数行必须持久化并在重开后可见"
+    );
+    let rows = query_rows(db2.execute_sql("SELECT f, s FROM tf ORDER BY f").await);
+    assert_eq!(
+        rows,
+        vec![vec![serde_json::json!(-1.5), serde_json::json!("y")]],
+        "负浮点行（Float 键列表）必须持久化并在重开后可见"
     );
     db2.wal_buffer.shutdown().await;
 }

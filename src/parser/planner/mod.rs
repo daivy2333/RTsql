@@ -18,6 +18,7 @@ mod subquery;
 
 use crate::executor::PhysicalPlan;
 use crate::parser::error::PlanError;
+use crate::storage::page_format::ColumnType;
 use sqlparser::ast::ObjectType;
 use sqlparser::ast::Statement;
 use std::collections::HashMap;
@@ -100,6 +101,11 @@ pub struct PlanBuilder {
     pub(crate) tables: HashMap<String, Vec<String>>,
     /// Table name -> primary key column name
     pub(crate) primary_keys: HashMap<String, String>,
+    /// MS16 Iteration 000 (I046): Table name -> key column declared type (design D2 additive
+    /// channel). Real tables are passed through at the pipeline registration point; derived table aliases
+    /// (pk="") are not registered — unknown type = falls back to existing routing (only real
+    /// tables can reach key-position equality, downgrade is unreachable).
+    pub(crate) primary_key_types: HashMap<String, ColumnType>,
     /// Set of inner table names when building a subquery (for detecting outer references).
     /// None when building a top-level query.
     pub(crate) inner_table_names: Option<Vec<String>>,
@@ -108,6 +114,11 @@ pub struct PlanBuilder {
     /// 消费面——SELECT 表达式项的顶层 Projection 路由在子查询上下文抑制，
     /// 子查询计划保持既有行为。
     pub(crate) building_subquery: bool,
+    /// MS09-T02 (I015): NLJ 组合行列布局（design D5a 加性通道）。Some 时
+    /// `build_expression` 两个列解析臂优先消费——列引用解析为组合行绝对
+    /// 索引（前序表偏移累计 + 表内位置）。仅在 NLJ 分支编译 ON 期间置位
+    ///（save/restore 严格配对），None 时既有路径行为逐字节不变。
+    pub(crate) join_column_layout: Option<Vec<(String, Vec<String>)>>,
 }
 
 impl PlanBuilder {
@@ -116,8 +127,10 @@ impl PlanBuilder {
         Self {
             tables: HashMap::new(),
             primary_keys: HashMap::new(),
+            primary_key_types: HashMap::new(),
             inner_table_names: None,
             building_subquery: false,
+            join_column_layout: None,
         }
     }
 
@@ -126,6 +139,12 @@ impl PlanBuilder {
         let name_lower = name.to_lowercase();
         self.tables.insert(name_lower.clone(), columns);
         self.primary_keys.insert(name_lower, pk.to_lowercase());
+    }
+
+    /// MS16 Iteration 000 (I046): Register the key column's declared type (design D2 additive channel —
+    /// `register_table` signature unchanged; the key is lowercase, consistent with `register_table`).
+    pub fn set_pk_column_type(&mut self, name: &str, ct: ColumnType) {
+        self.primary_key_types.insert(name.to_lowercase(), ct);
     }
 
     /// Build PhysicalPlan from Statement

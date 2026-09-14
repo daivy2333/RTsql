@@ -19,6 +19,6 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。详细项�
 
 ## 加载入口
 
-- Claude Code: 使用 `.claude/skills/` 和本仓库的 OpenSpec skill 入口
-- Codex / OpenCode: 使用 `.agents/skills/`（见 Phase 7 安装结果）
+- Claude Code: 通过 `.claude/settings.json` 启用的插件加载 `openspec-*` skill；仓库内无 `.claude/skills/`
+- Codex / OpenCode: 使用仓库 `.agents/skills/`（openspec 1.13.0 6 个 skill，由 openspec-init Phase 6 安装）
 - 公共规则统一从 `CLAUDE.md` 加载

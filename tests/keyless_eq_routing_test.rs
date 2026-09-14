@@ -236,3 +236,167 @@ async fn keyless_equality_reachability_survives_restart() {
 
     db2.wal_buffer.shutdown().await;
 }
+
+// ===========================================================================
+// MS16 Iteration 000（I046）：键列类型感知路由
+//
+// change: 2026-09-12-ms16-correctness-batch
+//
+// 缺陷（I046，MS15-T01 调查新发现）：键列声明类型非 Int（Float/String/Bool）
+// 时全部存储行必为无键行（`Value::to_key()` 仅 Int 有值），但路由可靠性只按
+// 字面量可键控性判定——键位等值腿含 Int 字面量时仍路由 IndexScan/Filter(Scan)
+// 索引遍历，无键行不入索引 → 静默空集 exit 0。MS15-T01 的字面量护栏
+// （`has_non_keyable_pk_literal_leg`）对 Int 字面量腿放行，修不到本形态。
+//
+// 修复语义（I046 方向 B）：键列声明类型非 Int 时键位等值全形态（简单/AND/
+// 反向）统一分流到既有数据页臂（无 OR → 谓词下推 `DataScan`；含 OR →
+// `Filter(DataScan)`），行内求值按 `Value::equals` 语义（Int↔Float 隐式转换
+// 为 true；Int vs String/Bool 为 false）。Int 键列路由形状逐字节不变。
+// ===========================================================================
+
+/// I046-S1：Float 键列 + Int 字面量简单等值必须命中无键行。
+///
+/// RED（修复前预测）：Int 字面量 `to_key()==Some` → `IndexScan` 点查空索引
+/// → 空集 exit 0（行 (5.0, 1) 键位 Float 不入索引）。
+#[tokio::test]
+async fn float_key_int_literal_simple_equality_reaches_rows() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    exec_ok(&db, "CREATE TABLE t4 (f FLOAT, n INT)").await;
+    exec_ok(&db, "INSERT INTO t4 VALUES (5.0, 1)").await;
+
+    let rows = query_rows(db.execute_sql("SELECT * FROM t4 WHERE f = 5").await);
+    assert_eq!(
+        rows,
+        vec![vec![json!(5.0), json!(1)]],
+        "Float 键列 + Int 字面量等值必须经数据页求值命中无键行"
+    );
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// I046-S2：Float 键列 + Int 字面量 AND 组合等值必须命中无键行。
+///
+/// RED（修复前预测）：AND 内 Int 字面量腿可键控 → `has_pk_eq` 分支
+/// `Filter(Scan)` 索引遍历丢无键行 → 空集。
+#[tokio::test]
+async fn float_key_int_literal_and_combined_equality_reaches_rows() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    exec_ok(&db, "CREATE TABLE t4 (f FLOAT, n INT)").await;
+    exec_ok(&db, "INSERT INTO t4 VALUES (5.0, 1)").await;
+    exec_ok(&db, "INSERT INTO t4 VALUES (6.0, 2)").await;
+
+    let rows = query_rows(
+        db.execute_sql("SELECT * FROM t4 WHERE f = 5 AND n = 1")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!(5.0), json!(1)]],
+        "AND 组合的 Float 键列 + Int 字面量等值必须命中无键行"
+    );
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// I046-S3：Float 键列反向等值（`5 = f`）必须命中无键行。
+///
+/// RED（修复前预测）：反向形态经 `extract_pk_from_where` Case 2 取 Int
+/// 字面量键 → `IndexScan` 点查空索引 → 空集。
+#[tokio::test]
+async fn float_key_int_literal_reversed_equality_reaches_rows() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    exec_ok(&db, "CREATE TABLE t4 (f FLOAT, n INT)").await;
+    exec_ok(&db, "INSERT INTO t4 VALUES (5.0, 1)").await;
+
+    let rows = query_rows(db.execute_sql("SELECT * FROM t4 WHERE 5 = f").await);
+    assert_eq!(
+        rows,
+        vec![vec![json!(5.0), json!(1)]],
+        "反向 Float 键列 + Int 字面量等值必须经数据页求值命中无键行"
+    );
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// I046-S4 修复形态 plan 形状：Float 键列 + Int 字面量简单等值下推进
+/// `DataScan` 行内求值。
+///
+/// RED（修复前预测）：实际为 `IndexScan`（`extract_pk_from_where` 臂）。
+#[tokio::test]
+async fn float_key_int_literal_simple_equality_plan_is_data_scan_with_predicate() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    exec_ok(&db, "CREATE TABLE t4 (f FLOAT, n INT)").await;
+
+    let plan = plan_of(&db, "SELECT f FROM t4 WHERE f = 5").await;
+    match plan {
+        PhysicalPlan::DataScan(node) => {
+            assert!(
+                node.predicate.is_some(),
+                "非 Int 键列的键位等值必须作为谓词下推进 DataScan 行内求值"
+            );
+        }
+        other => panic!("Float 键列 + Int 字面量等值应为谓词下推 DataScan，实际 {other:?}"),
+    }
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// I046-S5：String 键列 + Int 字面量等值保持空集（变更前后 GREEN，锁结果
+/// 不锁路径）。
+///
+/// 修复前：`IndexScan` 点查（Int 字面量可键控），跨类型无键行 → 空集；
+/// 修复后：谓词下推 `DataScan`，`equals(String, Int)` false → 空集。
+/// 可观察结果逐字节一致（design D1 结果不变场景）。
+#[tokio::test]
+async fn string_key_int_literal_keeps_empty_result() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    exec_ok(&db, "CREATE TABLE t5 (s STRING, n INT)").await;
+    exec_ok(&db, "INSERT INTO t5 VALUES ('x', 1)").await;
+
+    let rows = query_rows(db.execute_sql("SELECT * FROM t5 WHERE s = 5").await);
+    assert!(
+        rows.is_empty(),
+        "String 键列 + Int 字面量等值必须保持空集（跨类型 equals false）"
+    );
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// I046-S6：restart（WAL 恢复 + 索引重建）后 Float 键列 + Int 字面量等值
+/// 可达性保持。
+///
+/// RED（修复前预测）：恢复面索引重建同样不含无键行 → `IndexScan` 空集。
+/// 流程参照 R1-S5 夹具先例（DDL 无 WAL 记录，catalog 经 buffer_pool 落盘）。
+#[tokio::test]
+async fn float_key_int_literal_reachability_survives_restart() {
+    let dir = tempdir().unwrap();
+    let path = db_path(&dir);
+    let db = Database::open(&path).await.unwrap();
+
+    exec_ok(&db, "CREATE TABLE t4 (f FLOAT, n INT)").await;
+    db.buffer_pool.flush_all().await.unwrap();
+    exec_ok(&db, "INSERT INTO t4 VALUES (5.0, 1)").await;
+
+    db.wal_buffer.shutdown().await;
+    drop(db);
+
+    let db2 = Database::open(&path).await.unwrap();
+    let rows = query_rows(db2.execute_sql("SELECT * FROM t4 WHERE f = 5").await);
+    assert_eq!(
+        rows,
+        vec![vec![json!(5.0), json!(1)]],
+        "restart 后 Float 键列 + Int 字面量等值必须保持可达"
+    );
+
+    db2.wal_buffer.shutdown().await;
+}

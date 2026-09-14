@@ -23,8 +23,8 @@ use crate::executor::{ExecResult, Executor, PredicateRef, Value};
 use crate::storage::page_format::{deserialize_value_refs, ColumnType, RowId, SlottedPageRef};
 use crate::storage::PageId;
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
-use crate::transaction::{Snapshot, VersionHeader};
-use std::collections::HashMap;
+use crate::transaction::{Snapshot, TransactionManager, VersionHeader};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Safety bound for walking a superseder chain (R-T0b-R6), mirroring the
@@ -94,6 +94,14 @@ pub struct DataScanExecutor {
     /// and must be skipped when any newer version in its chain suppresses it
     /// (see `superseder_suppresses`). `None` until first `next()`.
     superseded_map: Option<HashMap<RowId, (RowId, u64)>>,
+    /// MS09 Iter000 (T3): transaction manager for the tombstone
+    /// deleter-commit-state suppression decision (I033). `None` is equivalent
+    /// to an empty active set (direct unit-test constructions).
+    tx_manager: Option<Arc<TransactionManager>>,
+    /// MS09 Iter000 (T3): active transaction set captured once at the first
+    /// `next()` — the scan-start view for tombstone suppression. `None` until
+    /// captured.
+    active_tx_ids: Option<HashSet<u64>>,
 }
 
 impl DataScanExecutor {
@@ -103,6 +111,7 @@ impl DataScanExecutor {
         snapshot: Option<Snapshot>,
         predicate: Option<PredicateRef>,
         scan_cap: Option<usize>,
+        tx_manager: Option<Arc<TransactionManager>>,
     ) -> Self {
         let schema: Vec<ColumnType> = table_meta
             .columns
@@ -128,6 +137,8 @@ impl DataScanExecutor {
             projection: Vec::new(),
             data_page_head: table_meta.data_page_head,
             superseded_map: None,
+            tx_manager,
+            active_tx_ids: None,
         }
     }
 
@@ -275,6 +286,10 @@ impl DataScanExecutor {
             .superseded_map
             .as_ref()
             .expect("superseded map built before first slot visit");
+        let active_tx_ids = self
+            .active_tx_ids
+            .as_ref()
+            .expect("active set captured before first slot visit");
         let mut current = match map.get(&rid) {
             Some((superseder, _)) => *superseder,
             None => return Ok(false),
@@ -282,7 +297,7 @@ impl DataScanExecutor {
         let mut depth = 0usize;
         loop {
             let vh = read_tuple_from_data_page(&self.buffer_pool, current, |vh, _| Ok(vh)).await?;
-            if Self::superseder_suppresses(&vh, self.snapshot.as_ref()) {
+            if Self::superseder_suppresses(&vh, self.snapshot.as_ref(), active_tx_ids) {
                 return Ok(true);
             }
             current = match map.get(&current) {
@@ -299,17 +314,37 @@ impl DataScanExecutor {
         }
     }
 
-    /// R-T0b-R6 (G5): whether a newer version suppresses the old versions it
-    /// supersedes. Only a committed, non-tombstone version suppresses:
-    /// tombstones never suppress (an aborted update must not hide the
-    /// surviving old version; delete semantics stay exactly as before), and
-    /// uncommitted versions never suppress (scans without a snapshot keep
-    /// seeing the old version alongside — unchanged explicit-tx behavior).
-    /// With a snapshot, suppression follows `Snapshot::is_visible` so old
-    /// snapshots keep seeing their own version.
-    fn superseder_suppresses(vh: &VersionHeader, snapshot: Option<&Snapshot>) -> bool {
-        if vh.is_deleted() {
+    /// R-T0b-R6 (G5) + MS09 Iter000 (D2, I033): whether a newer version
+    /// suppresses the old versions it supersedes.
+    ///
+    /// Aborted versions (create_tx_id = 0, the abort neutralization marker)
+    /// never suppress. Tombstone slots — independent delete versions —
+    /// suppress by the DELETER's commit state: a deleter already committed
+    /// for this read suppresses the whole chain (every version of the row is
+    /// gone), while a deleter still active at scan start (or still active in
+    /// the statement's snapshot view) does not — evaluation falls through to
+    /// the pre-delete version. A snapshot reader always sees its own delete
+    /// as a deletion. Non-tombstone semantics unchanged: only a committed
+    /// version suppresses; with a snapshot, suppression follows
+    /// `Snapshot::is_visible`.
+    fn superseder_suppresses(
+        vh: &VersionHeader,
+        snapshot: Option<&Snapshot>,
+        active_tx_ids: &HashSet<u64>,
+    ) -> bool {
+        if vh.create_tx_id() == 0 {
             return false;
+        }
+        if vh.is_deleted() {
+            return match snapshot {
+                None => !active_tx_ids.contains(&vh.create_tx_id()),
+                Some(s) => {
+                    // Own delete reads as deleted; a deleter still active in
+                    // the snapshot view does not suppress; otherwise (the
+                    // deleter committed before the statement) it does.
+                    vh.create_tx_id() == s.tx_id() || !s.contains_active_tx(vh.create_tx_id())
+                }
+            };
         }
         let Some(commit) = vh.commit_tx_id() else {
             return false;
@@ -329,6 +364,15 @@ impl Executor for DataScanExecutor {
         if self.superseded_map.is_none() {
             self.superseded_map =
                 Some(Self::build_superseded_map(&self.buffer_pool, self.data_page_head).await?);
+        }
+        // MS09 Iter000 (T3): capture the active transaction set once at scan
+        // start — the tombstone deleter-commit-state decision uses this
+        // scan-start view, not a per-slot lock read.
+        if self.active_tx_ids.is_none() {
+            self.active_tx_ids = Some(match &self.tx_manager {
+                Some(tm) => tm.active_transactions().await.into_iter().collect(),
+                None => HashSet::new(),
+            });
         }
 
         loop {
@@ -366,7 +410,7 @@ impl Executor for DataScanExecutor {
                 .snapshot
                 .as_ref()
                 .zip(page_vis)
-                .map(|(s, v)| v.all_invisible_for(s.tx_id()))
+                .map(|(s, v)| v.all_invisible_for(s.high_water()))
                 .unwrap_or(false);
 
             let snapshot_ref = self.snapshot.as_ref();
@@ -427,7 +471,12 @@ impl Executor for DataScanExecutor {
                     // is known to be all-visible (every slot committed).
                     if !page_all_visible {
                         if let Some(snapshot) = snapshot_ref {
-                            if !snapshot.is_visible(vh.create_tx_id(), vh.commit_tx_id()) {
+                            // MS09 Iter000 (D4, RC): a transaction sees its own
+                            // uncommitted writes (`is_visible_self`) in
+                            // addition to the committed view.
+                            if !(snapshot.is_visible(vh.create_tx_id(), vh.commit_tx_id())
+                                || snapshot.is_visible_self(vh.create_tx_id(), vh.commit_tx_id()))
+                            {
                                 // Invisible for this snapshot. The version its
                                 // chain points to lives in its own slot and is
                                 // yielded from there (R-T0b-R6 map guarantees it
@@ -529,15 +578,21 @@ mod tests {
             .unwrap();
         let table_meta = table_mgr.get_table("t").await.unwrap();
 
-        let default_executor =
-            DataScanExecutor::new(table_meta.clone(), buffer_pool.clone(), None, None, None);
+        let default_executor = DataScanExecutor::new(
+            table_meta.clone(),
+            buffer_pool.clone(),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             !default_executor.prefetch_enabled,
             "new() must default to prefetch disabled"
         );
 
-        let explicit_on =
-            DataScanExecutor::new(table_meta, buffer_pool, None, None, None).with_prefetch(true);
+        let explicit_on = DataScanExecutor::new(table_meta, buffer_pool, None, None, None, None)
+            .with_prefetch(true);
         assert!(
             explicit_on.prefetch_enabled,
             "with_prefetch(true) must explicitly enable prefetch"

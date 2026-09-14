@@ -1,5 +1,6 @@
 use crate::database::Database;
 use crate::executor::{CorrelatedParam, Executor, JoinCondition, OutputColumn, PhysicalPlan};
+use crate::transaction::Snapshot;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,4 +17,7 @@ pub struct JoinRelatedConfig {
     pub right_column_indices: HashMap<String, usize>,
     pub right_plan: Option<PhysicalPlan>,
     pub database: Option<Arc<Database>>,
+    /// MS09 Iter000 (D4): statement-start Read Committed snapshot, re-applied
+    /// on every correlated right-plan rebuild (`None` under RepeatableRead).
+    pub snapshot: Option<Snapshot>,
 }

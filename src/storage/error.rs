@@ -48,6 +48,13 @@ pub enum StorageError {
     #[error("Key not found")]
     KeyNotFound,
 
+    #[error("key column '{column}' expects {expected}, got {actual}")]
+    KeyTypeMismatch {
+        column: String,
+        expected: String,
+        actual: String,
+    },
+
     #[error("Page full")]
     PageFull,
 

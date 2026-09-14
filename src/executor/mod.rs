@@ -22,6 +22,7 @@ mod index_scan_all;
 mod insert;
 mod join;
 mod limit;
+mod nested_loop_join;
 mod plan;
 mod predicate;
 mod projection;
@@ -54,12 +55,13 @@ pub use index_scan_all::IndexScanAllExecutor;
 pub use insert::InsertExecutor;
 pub use join::JoinExecutor;
 pub use limit::LimitExecutor;
+pub use nested_loop_join::NestedLoopJoinExecutor;
 pub use plan::{
     AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, CorrelatedParam,
     CreateTableNode, DataScanNode, DeleteNode, DerivedScanNode, DropTableNode, FilterNode,
     HavingNode, IndexScanAllNode, IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode,
-    OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode, ScanNode,
-    SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode,
+    NestedLoopJoinNode, OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
+    ScanNode, SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode,
 };
 pub use predicate::{
     CaseExpression, CastExpression, CastType, CoalesceExpression, ColumnExpression, ComparisonOp,

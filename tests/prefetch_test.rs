@@ -117,14 +117,26 @@ async fn test_prefetch_multipage_scan_equivalence() {
     let pages = count_chain_pages(&buffer_pool, table_meta.data_page_head).await;
     assert!(pages >= 3, "expected >= 3 data pages, got {}", pages);
 
-    let mut prefetch_on =
-        DataScanExecutor::new(table_meta.clone(), buffer_pool.clone(), None, None, None)
-            .with_prefetch(true);
+    let mut prefetch_on = DataScanExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .with_prefetch(true);
     let ids_on = scan_ids(&mut prefetch_on).await;
 
-    let mut prefetch_off =
-        DataScanExecutor::new(table_meta.clone(), buffer_pool.clone(), None, None, None)
-            .with_prefetch(false);
+    let mut prefetch_off = DataScanExecutor::new(
+        table_meta.clone(),
+        buffer_pool.clone(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .with_prefetch(false);
     let ids_off = scan_ids(&mut prefetch_off).await;
 
     assert_eq!(ids_on.len(), ROWS);
@@ -162,6 +174,7 @@ async fn test_prefetch_predicate_and_limit_equivalence() {
             None,
             predicate.clone(),
             scan_cap,
+            None,
         )
         .with_prefetch(true);
         let mut off = DataScanExecutor::new(
@@ -170,6 +183,7 @@ async fn test_prefetch_predicate_and_limit_equivalence() {
             None,
             predicate,
             scan_cap,
+            None,
         )
         .with_prefetch(false);
 
@@ -187,9 +201,15 @@ async fn test_prefetch_chain_tail_paths() {
     {
         let (table_mgr, buffer_pool, _dir) = setup_table(0).await;
         let table_meta = table_mgr.get_table("test").await.unwrap();
-        let mut executor =
-            DataScanExecutor::new(table_meta.clone(), buffer_pool.clone(), None, None, None)
-                .with_prefetch(true);
+        let mut executor = DataScanExecutor::new(
+            table_meta.clone(),
+            buffer_pool.clone(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_prefetch(true);
         assert!(scan_ids(&mut executor).await.is_empty());
     }
 
@@ -200,11 +220,17 @@ async fn test_prefetch_chain_tail_paths() {
         let pages = count_chain_pages(&buffer_pool, table_meta.data_page_head).await;
         assert_eq!(pages, 1, "3 rows must fit one page");
 
-        let mut on =
-            DataScanExecutor::new(table_meta.clone(), buffer_pool.clone(), None, None, None)
-                .with_prefetch(true);
-        let mut off =
-            DataScanExecutor::new(table_meta, buffer_pool, None, None, None).with_prefetch(false);
+        let mut on = DataScanExecutor::new(
+            table_meta.clone(),
+            buffer_pool.clone(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_prefetch(true);
+        let mut off = DataScanExecutor::new(table_meta, buffer_pool, None, None, None, None)
+            .with_prefetch(false);
         assert_eq!(scan_ids(&mut on).await, vec![1, 2, 3]);
         assert_eq!(scan_ids(&mut off).await, vec![1, 2, 3]);
     }

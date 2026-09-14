@@ -6,7 +6,7 @@
 use crate::network::protocol::Response;
 use crate::plan_cache::PlanCache;
 use crate::storage::{BufferPool, ColumnType, FileStorage, Result, TableManager, TableMeta};
-use crate::transaction::{Transaction, TransactionManager};
+use crate::transaction::{IsolationLevel, Snapshot, Transaction, TransactionManager};
 use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalWriter};
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,10 +22,24 @@ pub struct Database {
     pub wal_buffer: Arc<WALBuffer>,
     pub plan_cache: Arc<PlanCache>,
     pub checkpoint_manager: Arc<CheckpointManager>,
+    /// MS09 Iter000 (D4): isolation level fixed at open time. The default
+    /// `RepeatableRead` keeps every existing behavior byte for byte.
+    pub isolation: IsolationLevel,
 }
 
 impl Database {
     pub async fn open(path: &Path) -> Result<Self> {
+        Self::open_with_isolation(path, IsolationLevel::RepeatableRead).await
+    }
+
+    /// Open a database with an explicit isolation level (MS09 Iter000, D4).
+    ///
+    /// `RepeatableRead` is equivalent to [`Database::open`]. Under
+    /// `ReadCommitted`, every query statement constructs a snapshot at
+    /// statement start (see [`Database::statement_snapshot`]) and threads it
+    /// through all scan constructions, so only transactions already
+    /// committed at that point are visible.
+    pub async fn open_with_isolation(path: &Path, isolation: IsolationLevel) -> Result<Self> {
         // 1. Initialize storage
         let storage: Arc<dyn crate::storage::AsyncStorage> = Arc::new(FileStorage::open(path)?);
         let buffer_pool = Arc::new(BufferPool::new(100, storage.clone())?);
@@ -55,16 +69,21 @@ impl Database {
                 .await
                 .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?;
 
-        // Update transaction ID allocator to avoid conflicts with recovered transactions
-        let _max_tx_id = recovery_result
+        // MS09 Iter000 001-replan (D10/T6-R3): advance the tx id allocator
+        // past every id observed in recovery so ids are never reused after a
+        // restart — the next allocation is strictly greater than the max
+        // committed/aborted/uncommitted id. This is also the soundness
+        // premise of the Read Committed high-water mark ("every id ≤ the
+        // allocator's current value is committed, aborted, or active").
+        let max_tx_id = recovery_result
             .committed_tx_ids
             .iter()
             .chain(recovery_result.aborted_tx_ids.iter())
             .chain(recovery_result.uncommitted_tx_ids.iter())
             .max()
-            .unwrap_or(&0);
-        // Skip past recovered transaction IDs
-        // (TransactionManager's allocator starts at 1, auto-increment)
+            .copied()
+            .unwrap_or(0);
+        transaction_manager.advance_past(max_tx_id);
 
         // R-T0b-R5: attach catalog root-sync contexts only AFTER recovery —
         // replay-time root changes must not be persisted (the recovery load
@@ -89,7 +108,34 @@ impl Database {
             wal_buffer,
             plan_cache,
             checkpoint_manager,
+            isolation,
         })
+    }
+
+    /// Statement-start snapshot for the current isolation level (MS09
+    /// Iter000, D4; statement view per 001-replan D10).
+    ///
+    /// `RepeatableRead` returns `None` — the historical no-snapshot scan
+    /// semantics stay byte for byte. `ReadCommitted` returns a statement
+    /// view: the visibility high-water mark is the allocator's current
+    /// value (every transaction committed before this statement has an id
+    /// ≤ it; auto-commit reads need no WAL BeginTxn), and `reader_tx_id`
+    /// carries only self identity — the explicit transaction's id inside
+    /// one, otherwise 0 (an auto-commit statement owns no in-flight
+    /// versions, and id 0 is the aborted marker so `is_visible_self` never
+    /// matches a real version).
+    pub(crate) async fn statement_snapshot(&self, reader_tx_id: Option<u64>) -> Option<Snapshot> {
+        match self.isolation {
+            IsolationLevel::RepeatableRead => None,
+            IsolationLevel::ReadCommitted => {
+                let active = self.transaction_manager.active_transactions().await;
+                Some(Snapshot::statement_view(
+                    self.transaction_manager.current_tx_id(),
+                    reader_tx_id.unwrap_or(0),
+                    active,
+                ))
+            }
+        }
     }
 
     pub async fn create_table(

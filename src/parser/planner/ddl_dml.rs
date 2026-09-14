@@ -15,6 +15,50 @@ use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
 use sqlparser::ast::{BinaryOperator, Expr};
 
+/// MS09-T02: structural column-reference probe for the ON classifier (design
+/// D5a) — a bare `Identifier` or 2-part `CompoundIdentifier` only.
+fn is_structural_column_ref(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) => true,
+        Expr::CompoundIdentifier(parts) => parts.len() == 2,
+        _ => false,
+    }
+}
+
+/// MS09-T02 (I015): plan-time ON classification probe (delta spec R4 —
+/// structural heuristic, no cost model). AND-recursion mirrors
+/// `extract_join_conditions`' shape; a leg qualifies only when it is a bare
+/// `Eq` whose both sides are plain column references. Purely structural — no
+/// semantic resolution, so the equi forms' existing semantic errors
+/// (ColumnNotFound / AmbiguousColumn / …) stay on the Hash path unchanged.
+/// The probe-true set is exactly `extract_join_conditions`' acceptance face
+/// (`resolve_column_ref` accepts only these two Expr shapes), so the Hash
+/// path's input set — and therefore its behavior — is unchanged byte for byte.
+pub(crate) fn is_pure_equi_join_on(on_expr: &Expr) -> bool {
+    match on_expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => is_pure_equi_join_on(left) && is_pure_equi_join_on(right),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => is_structural_column_ref(left) && is_structural_column_ref(right),
+        _ => false,
+    }
+}
+
+/// MS16 Iteration 000 replan (design D7): shared count-mismatch message for
+/// INSERT column-list / row-length rejections (expected vs actual, pointable).
+fn insert_count_error(table_name: &str, expected: usize, got: usize) -> PlanError {
+    PlanError::ParseError(format!(
+        "INSERT INTO '{}' expects {} values, got {}",
+        table_name, expected, got
+    ))
+}
+
 impl PlanBuilder {
     /// 提取 JOIN ON 条件（支持 AND 组合等值条件）
     pub(crate) fn extract_join_conditions(
@@ -83,11 +127,92 @@ impl PlanBuilder {
         // Extract values from source
         let values = self.extract_insert_values(source)?;
 
+        // MS16 Iteration 000 replan (BH-2, design D7): apply the column list —
+        // validate it as a permutation of the table's columns and reorder each
+        // row through the list→table mapping (key-position semantics act on
+        // the reordered value).
+        let values = self.map_insert_values(&table_name_str, &columns, values)?;
+
         Ok(PhysicalPlan::Insert(InsertNode {
             table_name: table_name_str,
             columns,
             values,
         }))
+    }
+
+    /// MS16 Iteration 000 replan (BH-2, design D7): `InsertNode.columns` had no
+    /// downstream consumer — values were interpreted positionally in table
+    /// column order, so an out-of-order list silently misplaced values, a
+    /// partial list panicked in `compute_tuple_size`, and unknown columns were
+    /// silently dropped. The list must be a permutation of the table's
+    /// columns; rows are reordered through the list→table mapping. A missing
+    /// list keeps the existing positional semantics with only a row-length
+    /// check (restore/import produce list-less INSERTs and are unaffected).
+    fn map_insert_values(
+        &self,
+        table_name: &str,
+        columns: &[String],
+        values: Vec<Vec<Value>>,
+    ) -> Result<Vec<Vec<Value>>, PlanError> {
+        let table_columns = self.tables.get(&table_name.to_lowercase()).ok_or_else(|| {
+            PlanError::ParseError(format!("Table '{}' does not exist", table_name))
+        })?;
+
+        if columns.is_empty() {
+            return values
+                .into_iter()
+                .map(|row| {
+                    if row.len() != table_columns.len() {
+                        Err(insert_count_error(
+                            table_name,
+                            table_columns.len(),
+                            row.len(),
+                        ))
+                    } else {
+                        Ok(row)
+                    }
+                })
+                .collect();
+        }
+
+        // The list must be exactly a permutation of the table's columns:
+        // every entry resolves to a distinct known column and the list is
+        // as long as the table is wide.
+        let mut table_pos: Vec<usize> = Vec::with_capacity(columns.len());
+        for name in columns {
+            let pos = table_columns
+                .iter()
+                .position(|c| c.to_lowercase() == *name)
+                .ok_or_else(|| PlanError::ColumnNotFound(name.clone()))?;
+            if table_pos.contains(&pos) {
+                return Err(PlanError::ParseError(format!(
+                    "Duplicate column '{}' in INSERT column list",
+                    name
+                )));
+            }
+            table_pos.push(pos);
+        }
+        if columns.len() != table_columns.len() {
+            return Err(insert_count_error(
+                table_name,
+                table_columns.len(),
+                columns.len(),
+            ));
+        }
+
+        values
+            .into_iter()
+            .map(|row| {
+                if row.len() != columns.len() {
+                    return Err(insert_count_error(table_name, columns.len(), row.len()));
+                }
+                let mut ordered = vec![Value::Null; table_columns.len()];
+                for (requested, target) in table_pos.iter().enumerate() {
+                    ordered[*target] = row[requested].clone();
+                }
+                Ok(ordered)
+            })
+            .collect()
     }
 
     /// Extract values from INSERT source (VALUES clause)

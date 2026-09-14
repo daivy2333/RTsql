@@ -179,6 +179,36 @@ impl PlanBuilder {
                 if ident_value == "NULL" {
                     return Ok(Arc::new(ConstantExpression { value: Value::Null }));
                 }
+                // MS09-T02: NLJ combined-row layout override (design D5a).
+                // While set, unqualified names resolve against a full-layout
+                // search into absolute combined-row indices; `self.tables` is
+                // not consulted on this path.
+                if let Some(layout) = &self.join_column_layout {
+                    let column_name = ident.value.to_lowercase();
+                    let mut hit: Option<(usize, usize)> = None;
+                    let mut ambiguous = false;
+                    let mut offset = 0;
+                    for (_table, columns) in layout {
+                        if let Some(pos) =
+                            columns.iter().position(|c| c.to_lowercase() == column_name)
+                        {
+                            if hit.is_some() {
+                                ambiguous = true;
+                                break;
+                            }
+                            hit = Some((offset, pos));
+                        }
+                        offset += columns.len();
+                    }
+                    return match (hit, ambiguous) {
+                        (_, true) => Err(PlanError::AmbiguousColumn(column_name)),
+                        (Some((table_offset, pos)), false) => Ok(Arc::new(ColumnExpression {
+                            column_name,
+                            column_index: table_offset + pos,
+                        })),
+                        (None, false) => Err(PlanError::ColumnNotFound(column_name)),
+                    };
+                }
                 // Column reference
                 let column_name = ident.value.to_lowercase();
                 let columns = self.tables.get(table_name).ok_or_else(|| {
@@ -211,6 +241,30 @@ impl PlanBuilder {
                         let param_name = format!("{}.{}", table_ref, column_name);
                         return Ok(Arc::new(ParameterExpression::new(param_name)));
                     }
+                }
+
+                // MS09-T02: NLJ combined-row layout override (design D5a) —
+                // qualified names resolve to their table's layout offset +
+                // in-table position. Correlated outer refs were returned
+                // above, so this only sees the join's own tables.
+                if let Some(layout) = &self.join_column_layout {
+                    let mut offset = 0;
+                    for (table, columns) in layout {
+                        if *table == table_ref {
+                            return match columns
+                                .iter()
+                                .position(|c| c.to_lowercase() == column_name)
+                            {
+                                Some(pos) => Ok(Arc::new(ColumnExpression {
+                                    column_name,
+                                    column_index: offset + pos,
+                                })),
+                                None => Err(PlanError::ColumnNotFound(column_name)),
+                            };
+                        }
+                        offset += columns.len();
+                    }
+                    return Err(PlanError::TableNotFound(table_ref));
                 }
 
                 // Resolve the table reference

@@ -47,7 +47,7 @@
 - **问题**: 只有 Repeatable Read
 - **方案**: Read Committed + Serializable（SSI）
 - **依赖**: 无
-- **状态**: planned（P4）
+- **状态**: planned（Read Committed 部分已排期 MS09-T01；Serializable/SSI 维持 MS09 非目标，2026-09-12 路线重排）
 - **Legacy**: O014
 
 ## I015: M25 多 Join 算法
@@ -56,7 +56,7 @@
 - **问题**: 只有 Hash Join
 - **方案**: NLJ + SMJ + 启发式选择
 - **依赖**: 无
-- **状态**: planned（P4）
+- **状态**: planned（已排期 MS09-T02，2026-09-12 路线重排）
 - **Legacy**: O015
 
 ## I016: M26 代价模型 + Join 重排
@@ -74,18 +74,18 @@
 - **问题**: 每行外层重新执行子查询
 - **方案**: `SubqueryCache` 参数值→结果集 LRU
 - **依赖**: 无
-- **状态**: planned（P4）
+- **状态**: planned（已排期 MS09-T04，2026-09-12 路线重排）
 - **Legacy**: O017
 
 ## I018: M28 多层关联子查询
 
-⚠️ STALE [2026-09-09] — 建议在 30 天内确认、更新或归档（无路线图归属，规划时决断）
+✅ 已决断 [2026-09-12] — 用户批准归档（单层关联子查询缓存已排期 MS09-T04，多层嵌套无当前需求）；物理归档待 openspec-archivist 执行
 
 - **分类**: 功能 / 子查询
 - **问题**: 显式拒绝多层嵌套
 - **方案**: 递归遍历 + 多层注入
 - **依赖**: M27（I017）
-- **状态**: planned（P4）
+- **状态**: 已裁定归档（2026-09-12 用户批准，待 openspec-archivist 物理归档）
 - **Legacy**: O018
 
 ## I020: M37 clone 消除 Arc/Cow
@@ -99,13 +99,11 @@
 
 ## I021: M39 INSERT 批量执行
 
-⚠️ STALE [2026-09-09] — 建议在 30 天内确认、更新或归档（无路线图归属，规划时决断）
-
 - **分类**: 性能 / 写入
 - **问题**: 多值 INSERT 逐行执行
 - **方案**: `bulk_insert(keys)` + `append_batch(records)`
 - **依赖**: M20（已完成）
-- **状态**: planned（P4）
+- **状态**: planned（已排期 MS08-T09 实测候选——先 bench 逐行路径占比再决定，2026-09-12 路线重排解析 STALE）
 - **Legacy**: O021
 
 ## Phase 5 高级优化
@@ -117,7 +115,7 @@
 - **方案**: `Key` 内部 `Vec<u8>` 变长编码
 - **预期**: 索引空间 ~70% 缩减
 - **依赖**: 无
-- **状态**: planned（P5）
+- **状态**: planned（已排期 MS08-T05，2026-09-12 路线重排归属注记）
 - **Legacy**: O024, D02 successor
 
 ## I025: M33 B+Tree 节点级锁
@@ -136,18 +134,18 @@
 - **方案**: 连续页合并写 + `writev()` 向量化
 - **预期**: Checkpoint 5-10x
 - **依赖**: M31（已完成）+ M48（I013）
-- **状态**: planned（P5）
+- **状态**: planned（已排期 MS08-T03，2026-09-12 路线重排归属注记）
 - **Legacy**: O026, D12 下游
 
 ## I027: M43 并行扫描
 
-⚠️ STALE [2026-09-09] — 建议在 30 天内确认、更新或归档（无路线图归属，规划时决断）
+✅ 已决断 [2026-09-12] — 用户批准归档（风险收益比与 D-candidates 同级：复杂度高且既有测试未证明扫描争用）；物理归档待 openspec-archivist 执行
 
 - **分类**: 性能 / 并行
 - **问题**: 全表扫描单线程
 - **方案**: 按页范围分区 + `mpsc` 汇聚
 - **依赖**: M19（已完成）+ M22（I023）
-- **状态**: planned（P5）
+- **状态**: 已裁定归档（2026-09-12 用户批准，待 openspec-archivist 物理归档）
 - **Legacy**: O027
 
 ## I028: M45 io_uring 批量提交
@@ -185,7 +183,7 @@
 - **问题**: 页驱逐按 LRU 而非树拓扑刷盘——checkpoint 后的运行期修改使磁盘 B-Tree 含洞（父页指向未刷盘子页）与孤儿页（裸读实测 `scan_all` 184/10000 + `InvalidPageType` 洞页）。恢复侧已由 `redo_count > 0` 时索引去信任 + 重放后重建消解（MS10-T02 R7/R8），但运行期检查点间的磁盘树仍处于撕裂状态；MS12 整库加密若引入页级 transform 将放大对磁盘树一致性的依赖
 - **候选方案**: 结构感知刷盘（子树后序）/ checkpoint 树快照 / no-steal 驱逐——均为 BufferPool 驱逐策略重设计，MS10-T02 design D10 拒绝并入
 - **量化支撑**: D10 恢复重建代价实测 40k 行→8.86s、160k 行→40.7s（100 页池随机访存主导；撕裂树运行期根修可同时压缩该恢复代价）
-- **状态**: planned（与 MS08-T03 脏页 writev 同域，实施前先量化）
+- **状态**: planned（已排期 MS08-T07 实测候选——先量化撕裂增长与恢复代价再决定，2026-09-12 路线重排）
 
 ## I032: `BufferPool::mark_tx_aborted` 空实现补全
 
@@ -193,7 +191,7 @@
 - **问题**: `mark_tx_aborted` 为 no-op（`buffer_pool.rs:369-371`）——`RecoveryManager::full_recover` 的 mark-uncommitted-aborted 步骤实际空转；未提交行仅靠 header `commit_tx_id=None` 的不可见性兜底，aborted 行物理滞留数据页
 - **影响**: 当前语义自洽（未提交行不可见、重建谓词按 committed 排除），但未提交事务的页空间不可回收，且未来依赖「aborted 标记」的机制（如空间回收、更细的可见性）将踩空
 - **方案**: 恢复期对 uncommitted 事务的行打显式 aborted 标记（header 扩展或墓碑化），或明确文档化「无标记」模型
-- **状态**: planned（小改动，随下次触碰 transaction/recovery 面顺带评估）
+- **状态**: planned（已排期 MS09-T01 随带——评估后实施或文档化，2026-09-12 路线重排）
 
 ## I033: update→delete 行旧版本在无快照扫描重现
 
@@ -202,7 +200,7 @@
 - **证据**: MS15-Rest Iteration 002 Act Remaining Issues 2 跨进程探针 + Plan Review 独立复现（2026-09-12，归档 change `2026-09-12-ms15-rest-correctness-batch`）——`INSERT (1,10)` → 进程 A `UPDATE SET n=99 WHERE id=1`（affected 1）→ 进程 B `DELETE WHERE id=1`（affected 1）→ 进程 C 扫描 `[[1,10]]`、点查 `id=1` 空集（两步变更从扫描面消失）；对照 Z1 异键 update→delete、Z2 delete→update 均正常（`[[1,99]]`）；全裸名序列同样复现（与表名归一化无关，预存缺陷）；未被既有 867 测试覆盖
 - **影响**: 语义为「既有行为未扩大」（R6 前同样重现）；MS10-T02 验收夹具 UPDATE/DELETE 域不相交故未触发；MS15-Rest 收尾探针实证该形态在真实跨进程 CLI 序列下两步变更丢失（原「未来混合负载」预判已现实化）
 - **方案**: 抑制谓词区分「已提交墓碑」（应抑制整条链）与「未提交墓碑」（不抑制、回溯前驱）——需对照 WAL committed 集合或 header 编码扩展
-- **状态**: planned（与 MS09-T01 隔离级别工作同域，届时一并处理）
+- **状态**: planned（已排期 MS09-T01 与 Read Committed 一并实施——方案留实现调查裁定，2026-09-12 路线重排）
 
 ## I034: 裸 DataScan 子集投影的 CLI 表头返回全 schema
 
@@ -220,7 +218,7 @@
 - **证据**: MS10-T04 Act Blocker Handoff + Plan Review 独立复现（2026-09-09，revision `5c42ec8`）
 - **影响**: 常量表达式查询、`SELECT current_setting()` 类无表探测不可达；agent/脚本日常探测用法受挫
 - **方案**: planner 增加 no-FROM SELECT 臂（单行虚拟输入），属引擎能力扩展，需独立 change
-- **状态**: planned
+- **状态**: planned（已排期 MS13-T03 小项，2026-09-12 路线重排）
 
 ## I036: planner 简单 PK 等值 + 非 Int 字面量路由 Filter(Scan) 对无键行不可达
 
@@ -247,7 +245,7 @@
 - **证据**: MS10-T05 Iteration 001 001-rework Plan Context Risks 预判 + 实施后语义成立（2026-09-09，归档 change 同上）；`gc_table` 为可选维护路径（M10）
 - **影响**: 含无键行的表长期频繁 UPDATE 场景下旧版本空间不回收；无正确性影响
 - **方案**: GC 增加数据页链全扫模式（不经索引）或无键链登记结构；需评估成本后独立 change
-- **状态**: planned
+- **状态**: planned（已排期 MS08-T08 实测候选——先量化含无键行表的版本空间增长再决定，2026-09-12 路线重排）
 
 ## I039: 多代 dump/restore 表名引号膨胀（ObjectName Display 即表名）
 
@@ -274,7 +272,7 @@
 - **证据**: MS11-T02 Iteration 001 Act Remaining Issue #1（2026-09-10，change `2026-09-10-ms11-t02-sql-transaction-statements`）；新增 16 个子进程型 e2e 测试提高全量并行负载放大该既有窗口；Plan Review 独立全量复跑未复现（偶发）；本 change 未触碰 resolve.rs 且 diff 无 env 变更
 - **影响**: 全量回归假失败（重跑即绿），干扰 CI/收尾判定；无产品影响
 - **方案**: 两 env 用例合并为单测试顺序执行，或 env 用例串行化（同一测试线程内执行）；属测试基建修改，需独立小 change
-- **状态**: planned
+- **状态**: planned（建议与 MS16 同期以独立小 change 实施——测试基建，不入 MS16 验收面，2026-09-12 路线重排）
 
 ## I042: 边界子句拒绝 × 活跃会话事务组合路径无 e2e 锁定
 
@@ -292,7 +290,7 @@
 - **证据**: MS11-T03 Iteration 001 Act Remaining Issues #1/#2（2026-09-11，归档 change `2026-09-10-ms11-t03-scalar-functions`；Plan Review 独立核实实现契约与公式）
 - **影响**: 极端输入下 panic/非有限值；常规分析负载不可达，无当前正确性问题
 - **方案**: abs 改 `checked_abs` 显式溢出报 `ValueError` 或文档化回绕语义；round 对 |digits| 设上限截断或文档化——随下次触碰 `function.rs` 的 change 顺带评估，需用户裁定方向
-- **状态**: planned
+- **状态**: planned（已排期 MS13-T02 随带——语义方向届时裁定，2026-09-12 路线重排）
 
 ## I044: 标量函数名大小写不敏感缺 SQL 层测试见证
 
@@ -301,7 +299,7 @@
 - **证据**: MS11-T03 Plan Review Finding F1（2026-09-11，归档 change 同上；大写变体 grep + 两处规范化点核实）
 - **影响**: 未来重构函数名匹配路径时大小写语义可能静默回归；无当前正确性问题
 - **方案**: `tests/scalar_function_test.rs` 增加大写/混合大小写变体用例（可选测试加固，随下次触碰函数面的 change 顺带实施）
-- **状态**: planned
+- **状态**: planned（已排期 MS13-T02 随带实施，2026-09-12 路线重排）
 
 ## I045: 主 specs Purpose 占位与 TBD/TODO 残留（validate --specs 持续 WARNING）
 
@@ -319,7 +317,7 @@
 - **证据**: MS15-T01 调查新发现（2026-09-12，归档 change `openspec/changes/archive/2026-09-12-ms15-t01-keyless-eq-routing/` proposal Out of Scope 形态 2 + design D4 残差 1；用户裁定采纳独立后续 change、方向 B 为候选）
 - **影响**: 对含无键行的 Float 键列表按 Int 字面量等值过滤漏行（静默不完整结果）；MS15-T01 修复（按字面量可键控性判定）不覆盖此形态
 - **方案**: 方向 B 键列类型感知路由——planner `register_table` 加性传递列类型（`pipeline.rs:996-1001` 调用点已有 `ColumnType` 可用），键列非 Int 时键位等值形态统一回退 DataScan；MS15-T01 的路由判定点即方向 B 将来落点，扩展不冲突
-- **状态**: planned
+- **状态**: promoted（2026-09-13 并入 MS16 实施——`PlanBuilder` 加性传递键列声明类型（`primary_key_types`/`set_pk_column_type`）+ 两处判定门（`extract_pk_from_where` 门 1 + 非 PK 臂条件扩展门 2），键列声明非 Int 时键位等值形态统一回退 DataScan/Filter(DataScan)，行集按 `Value::equals` 行内求值；change 归档 `openspec/changes/archive/2026-09-12-ms16-correctness-batch/`，修改 spec `planner-key-equality-routing` 新增「键列类型感知路由」）
 
 ## I047: UPDATE 键列 SET 为另一可键控值（rekey）旧键条目残留且新键不可达
 
@@ -328,7 +326,7 @@
 - **证据**: MS15-Rest 调查新发现 + Iteration 002 T7 等价用例初稿同键 rekey 形态探针实证（2026-09-12，归档 change `2026-09-12-ms15-rest-correctness-batch` proposal 默认假设 2 + design D2 + Act Deviation 1——同键 rekey 后 `SELECT WHERE id=2` 空集；用户批准排除出该 change 范围）
 - **影响**: rekey 后新键不可达、旧键误拒；与 I037（键位无键值清理，已实施）同面相邻——I037 修复只覆盖新值不可键控分支，rekey（新值可键控且 ≠ 旧键）行为不变
 - **方案**: rekey 判定（新旧键均可键控且不等）改为删旧键条目 + 插新键条目；新键撞已有行 DuplicateKey 拒绝（与恢复侧重建重复 PK 显式报错一致）；需独立 change
-- **状态**: planned
+- **状态**: promoted（2026-09-13 并入 MS16 实施——`UpdateExecutor` 前置块碰撞预检（新键 `search` 命中即 `DuplicateKey`，任何写入前零副作用）+ Step 7 三分支（NULL 删旧键〔I037 原样〕/ 同键 update〔原样〕/ rekey 先 `delete(old)` 后 `insert(new)`）；change 归档 `openspec/changes/archive/2026-09-12-ms16-correctness-batch/`，修改 spec `update-index-maintenance` 新增「键位 rekey 后索引条目一致」；6 个依赖缺陷行为的 M10 直连执行器测试按 BH-3 裁定校准）
 
 ## I048: import 实参插值对历史带引号表名不可达
 
@@ -337,6 +335,6 @@
 - **证据**: MS15-Rest Plan Review Finding 7 代码核实（2026-09-12，归档 change 同上）；spec `table-name-resolution` R2 仅覆盖 dump/schema，import 无 requirement 面；归一化前该形态经 Display 凑巧可达
 - **影响**: 极窄角落（历史带引号表名 × import）；design D3「历史带引号表名可达性收缩」预发布边界内，新库无影响
 - **方案**: import 表名实参经 `quote_ident` 包裹或文档化该边界；随下次触碰 lifecycle/import 面的 change 顺带
-- **状态**: planned
+- **状态**: planned（已排期 MS14 随带——quote_ident 包裹或文档化，可裁，2026-09-12 路线重排）
 
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

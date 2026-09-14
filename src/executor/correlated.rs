@@ -53,6 +53,13 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
             inject_correlated_values(&node.left, param_values);
             inject_correlated_values(&node.right, param_values);
         }
+        PhysicalPlan::NestedLoopJoin(node) => {
+            // MS09-T02: 与 Join 臂同型——ON 谓词可能携带 ParameterExpression
+            //（子查询内 NLJ），递归左右输入 + 谓词注入。
+            node.predicate.inject_parameters(param_values);
+            inject_correlated_values(&node.left, param_values);
+            inject_correlated_values(&node.right, param_values);
+        }
         PhysicalPlan::DerivedScan(node) => {
             inject_correlated_values(&node.subquery, param_values);
         }

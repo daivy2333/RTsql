@@ -73,6 +73,17 @@ impl VersionHeader {
         self
     }
 
+    /// Mark this version as aborted (MS09 Iter000 D2): create_tx_id = 0 (no
+    /// real transaction id matches it) plus the delete sentinel, chain
+    /// pointer preserved. Aborted versions stay skipped by scan paths
+    /// (`is_deleted()` remains true) and never suppress their predecessors —
+    /// the rollback produces no residue and hides nothing.
+    pub fn mark_aborted(mut self) -> Self {
+        self.create_tx_id = 0;
+        self.commit_tx_id = DELETED_TX_ID;
+        self
+    }
+
     /// Check if this version is marked as deleted.
     pub fn is_deleted(&self) -> bool {
         self.commit_tx_id == DELETED_TX_ID
@@ -167,6 +178,25 @@ mod tests {
         assert!(deleted.is_deleted());
         // commit_tx_id returns Some(DELETED_TX_ID), not None
         assert_eq!(deleted.commit_tx_id(), Some(DELETED_TX_ID));
+    }
+
+    #[test]
+    fn test_version_header_mark_aborted() {
+        let row_id = RowId::new(1, 2);
+        let header = VersionHeader::new(7, None).with_next_version(row_id);
+        let aborted = header.mark_aborted();
+
+        assert_eq!(aborted.create_tx_id(), 0, "aborted marker: no real tx id");
+        assert!(
+            aborted.is_deleted(),
+            "aborted versions stay skipped by scans"
+        );
+        assert_eq!(aborted.commit_tx_id(), Some(DELETED_TX_ID));
+        assert_eq!(
+            aborted.next_version(),
+            Some(row_id),
+            "chain pointer preserved for predecessor backtracking"
+        );
     }
 
     #[test]
