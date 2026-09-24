@@ -115,7 +115,7 @@ SQL SHALL 支持 searched CASE（`CASE WHEN <cond> THEN <r> ... [ELSE <e>] END`�
 
 ### Requirement: SELECT 派生列（投影表达式）
 
-非聚合查询的 SELECT 列表 SHALL 支持本 spec 定义的值表达式项（CASE/COALESCE/CAST 及既有列引用/字面量），执行时对每行求值并按项输出；SHALL 支持 `AS <别名>` 命名派生列，无别名时列名 SHALL 为表达式 Display 文本。派生列 SHALL 与既有列裁剪投影（`with_projection` 语义：谓词与 MVCC 判定后按投影产出）共存，`SELECT *` 行为不变，CLI 四格式渲染无需改动（产出为既有 `Value` 变体）。聚合查询中的非聚合表达式项 SHALL 保持现有报错。
+非聚合查询的 SELECT 列表 SHALL 支持本 spec 定义的值表达式项（CASE/COALESCE/CAST 及既有列引用/字面量），执行时对每行求值并按项输出；SHALL 支持 `AS <别名>` 命名派生列，无别名时列名 SHALL 为表达式 Display 文本。派生列 SHALL 与既有列裁剪投影（`with_projection` 语义：谓词与 MVCC 判定后按投影产出）共存，`SELECT *` 行为不变，CLI 四格式渲染无需改动（产出为既有 `Value` 变体）。聚合查询中的非聚合表达式项 SHALL 保持现有报错。MS13（change `2026-09-23-ms13-analytics-functions`）引入的算术表达式节点经共享编译通路在 SELECT 投影项与 WHERE 比较腿双侧可达：算术比较腿按逐行求值结果参与谓词判定（严格数值面、NULL 传播，与投影项同一节点语义）。
 
 #### Scenario: 派生列输出与命名
 
@@ -140,6 +140,12 @@ SQL SHALL 支持 searched CASE（`CASE WHEN <cond> THEN <r> ... [ELSE <e>] END`�
 - **GIVEN** 派生列查询在 TTY 与非 TTY 环境
 - **WHEN** 分别以默认格式与 `--format csv` 执行
 - **THEN** table/json/csv/tsv 输出与同形状既有查询渲染规则一致（派生列值均为既有 Value 变体）
+
+#### Scenario: WHERE 算术比较腿（MS13 共享编译通路）
+
+- **GIVEN** 表 t 含列 id，行 id=1、id=2
+- **WHEN** `SELECT id FROM t WHERE id + 1 > 2 ORDER BY id`
+- **THEN** 仅输出 id=2 行（算术腿逐行求值后参与比较，exit 0；接受记录：Iteration 000 Review F1）
 
 ### Requirement: INSERT 负数字面量
 

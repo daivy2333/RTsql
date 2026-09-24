@@ -33,6 +33,7 @@ fn spawn_cli(dir: &Path, args: &[&str]) -> Child {
         .args(args)
         .current_dir(dir)
         .env("RTSQL_HOME", dir)
+        .env_remove("RTSQL_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -46,6 +47,7 @@ fn spawn_cli_stdin(dir: &Path, args: &[&str]) -> Child {
         .args(args)
         .current_dir(dir)
         .env("RTSQL_HOME", dir)
+        .env_remove("RTSQL_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2350,4 +2352,875 @@ fn test_escaped_name_dump_restore_identity() {
     assert_eq!(out.code, Some(0), "escaped select failed: {}", out.stderr);
     let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
     assert_eq!(parsed["rows"], serde_json::json!([[1, 10]]));
+}
+
+// ==== MS13 Iteration 002：stats 命令（cli-analytics R1/R4）====
+
+/// 建分布表：id 1..=5（INT 主键）、score 含 1 个 NULL（10/20/30/NULL/50）。
+fn seed_stats_db(dir: &Path) {
+    let out = run_cli(
+        dir,
+        &[
+            "app",
+            "CREATE TABLE m (id INT PRIMARY KEY, score INT, d DATE, s STRING)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create m failed: {}", out.stderr);
+    for sql in [
+        "INSERT INTO m VALUES (1, 10, DATE '2024-01-15', 'alpha')",
+        "INSERT INTO m VALUES (2, 20, DATE '2024-03-01', 'beta')",
+        "INSERT INTO m VALUES (3, 30, NULL, 'alpha')",
+        "INSERT INTO m VALUES (4, NULL, DATE '2024-02-01', 'gamma')",
+        "INSERT INTO m VALUES (5, 50, DATE '2024-01-20', 'alpha')",
+    ] {
+        let out = run_cli(dir, &["app", sql]);
+        assert_eq!(out.code, Some(0), "{sql} failed: {}", out.stderr);
+    }
+}
+
+/// R1/S1: 数值列全字段断言（行数/null 率/distinct/min/max/三分位数）。
+/// score: 5 行 1 NULL → null_rate 20、distinct 4、min 10、max 50；
+/// 数值 [10,20,30,50]：p50 = (20+30)/2 = 25（偶数双值平均）、
+/// p90 = ceil(0.9×4) = 4 → 50、p99 = 50。
+#[test]
+fn test_stats_numeric_column_full_fields() {
+    let dir = fixture();
+    seed_stats_db(dir.path());
+    let out = run_cli(dir.path(), &["stats", "app", "m"]);
+    assert_eq!(out.code, Some(0), "stats failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let rows = parsed["rows"].as_array().unwrap();
+    assert_eq!(
+        parsed["columns"],
+        serde_json::json!([
+            "column",
+            "type",
+            "row_count",
+            "null_rate",
+            "distinct",
+            "min",
+            "max",
+            "p50",
+            "p90",
+            "p99"
+        ])
+    );
+
+    let find = |name: &str| -> &serde_json::Value {
+        rows.iter()
+            .find(|r| r[0] == serde_json::json!(name))
+            .unwrap_or_else(|| panic!("missing stats row for column {name}: {rows:?}"))
+    };
+    let id = find("id");
+    assert_eq!(id[1], serde_json::json!("INT"));
+    assert_eq!(id[2], serde_json::json!(5));
+    assert_eq!(id[3], serde_json::json!(0));
+    assert_eq!(id[4], serde_json::json!(5));
+    assert_eq!(id[5], serde_json::json!(1));
+    assert_eq!(id[6], serde_json::json!(5));
+    // 奇数 N=5：p50 = 中位 3；p90 = ceil(4.5)=5 → 5；p99 = 5
+    assert_eq!(id[7], serde_json::json!(3));
+    assert_eq!(id[8], serde_json::json!(5));
+    assert_eq!(id[9], serde_json::json!(5));
+
+    let score = find("score");
+    assert_eq!(score[2], serde_json::json!(5));
+    assert_eq!(score[3], serde_json::json!(20));
+    assert_eq!(score[4], serde_json::json!(4));
+    assert_eq!(score[5], serde_json::json!(10));
+    assert_eq!(score[6], serde_json::json!(50));
+    assert_eq!(score[7], serde_json::json!(25));
+    assert_eq!(score[8], serde_json::json!(50));
+    assert_eq!(score[9], serde_json::json!(50));
+}
+
+/// R1/S2: 日期列 min/max 为日期形态（DA5 字符串字典序 = 时间序）、
+/// 分位数格 null（非数值列）；String 列同型。
+#[test]
+fn test_stats_date_column_min_max_and_null_percentiles() {
+    let dir = fixture();
+    seed_stats_db(dir.path());
+    let out = run_cli(dir.path(), &["stats", "app", "m"]);
+    assert_eq!(out.code, Some(0), "stats failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let rows = parsed["rows"].as_array().unwrap();
+    let find = |name: &str| -> &serde_json::Value {
+        rows.iter()
+            .find(|r| r[0] == serde_json::json!(name))
+            .unwrap_or_else(|| panic!("missing stats row for column {name}: {rows:?}"))
+    };
+    let d = find("d");
+    assert_eq!(d[1], serde_json::json!("DATE"));
+    assert_eq!(d[2], serde_json::json!(5));
+    assert_eq!(d[3], serde_json::json!(20));
+    assert_eq!(d[4], serde_json::json!(4));
+    assert_eq!(d[5], serde_json::json!("2024-01-15"));
+    assert_eq!(d[6], serde_json::json!("2024-03-01"));
+    assert_eq!(d[7], serde_json::json!(null));
+    assert_eq!(d[8], serde_json::json!(null));
+    assert_eq!(d[9], serde_json::json!(null));
+
+    // String 列 min/max 字典序、distinct 非空精确计数（alpha×3）
+    let s = find("s");
+    assert_eq!(s[4], serde_json::json!(3));
+    assert_eq!(s[5], serde_json::json!("alpha"));
+    assert_eq!(s[6], serde_json::json!("gamma"));
+    assert_eq!(s[7], serde_json::json!(null));
+}
+
+/// R1/S3: 空表零除保护——行数 0、null 率 100%、min/max/分位数 null，不崩溃。
+#[test]
+fn test_stats_empty_table_zero_division_guard() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE empty_t (id INT PRIMARY KEY, v INT)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["stats", "app", "empty_t"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stats on empty table failed: {}",
+        out.stderr
+    );
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let rows = parsed["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "one row per column: {rows:?}");
+    for row in rows {
+        assert_eq!(row[2], serde_json::json!(0), "row_count: {row:?}");
+        assert_eq!(row[3], serde_json::json!(100), "null_rate: {row:?}");
+        assert_eq!(row[5], serde_json::json!(null), "min: {row:?}");
+        assert_eq!(row[6], serde_json::json!(null), "max: {row:?}");
+        assert_eq!(row[7], serde_json::json!(null), "p50: {row:?}");
+    }
+}
+
+/// R4: 表不存在 → 既有 SQL 错误面 exit 3（非 dump 的 General 语义）。
+#[test]
+fn test_stats_missing_table_exit_3() {
+    let dir = fixture();
+    seed_users(dir.path());
+    let out = run_cli(dir.path(), &["stats", "app", "no_such_table"]);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "missing table must exit 3: code={:?} stderr={}",
+        out.code,
+        out.stderr
+    );
+    assert!(
+        !out.stderr.is_empty(),
+        "missing table must report an error message"
+    );
+}
+
+/// R4: 库文件缺失沿用 General exit 1；--format csv/json 四态抽检。
+#[test]
+fn test_stats_format_and_error_surface() {
+    let dir = fixture();
+    seed_stats_db(dir.path());
+
+    // csv 表头形状与 json 列一致
+    let out = run_cli(dir.path(), &["stats", "app", "m", "--format", "csv"]);
+    assert_eq!(out.code, Some(0), "stats csv failed: {}", out.stderr);
+    let header = out.stdout.lines().next().unwrap();
+    assert_eq!(
+        header,
+        "column,type,row_count,null_rate,distinct,min,max,p50,p90,p99"
+    );
+
+    // json 显式格式与默认形态一致
+    let out = run_cli(dir.path(), &["stats", "app", "m", "--format", "json"]);
+    assert_eq!(out.code, Some(0), "stats json failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert!(parsed["columns"].is_array());
+
+    // 库文件缺失 → General exit 1（schema 先例）
+    let out = run_cli(dir.path(), &["stats", "ghost_db", "m"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "missing db must exit 1: code={:?} stderr={}",
+        out.code,
+        out.stderr
+    );
+}
+
+// ==== MS13 Iteration 002：sample 命令（cli-analytics R2/R4）====
+
+/// 建 12 行表 `pop`：id 1..=12。
+fn seed_sample_db(dir: &Path) {
+    let out = run_cli(
+        dir,
+        &["app", "CREATE TABLE pop (id INT PRIMARY KEY, label STRING)"],
+    );
+    assert_eq!(out.code, Some(0), "create pop failed: {}", out.stderr);
+    for i in 1..=12 {
+        let out = run_cli(
+            dir,
+            &["app", &format!("INSERT INTO pop VALUES ({i}, 'item{i}')")],
+        );
+        assert_eq!(out.code, Some(0), "insert {i} failed: {}", out.stderr);
+    }
+}
+
+/// R2/S1: M > N 恰 N 行 + 列形状 + 行集 ⊆ 全行集（reservoir 随机性合法）。
+#[test]
+fn test_sample_returns_n_rows_when_table_larger() {
+    let dir = fixture();
+    seed_sample_db(dir.path());
+    let out = run_cli(
+        dir.path(),
+        &["sample", "app", "pop", "5", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "sample failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["id", "label"]));
+    let rows = parsed["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 5, "sample(5) must yield 5 rows: {rows:?}");
+    for row in rows {
+        let id = row[0].as_i64().unwrap();
+        assert!(
+            (1..=12).contains(&id),
+            "row id out of full-set range: {row:?}"
+        );
+    }
+}
+
+/// R2: M ≤ N 输出全行；N 缺省 10。
+#[test]
+fn test_sample_returns_all_rows_when_below_n_and_default() {
+    let dir = fixture();
+    seed_sample_db(dir.path());
+    let out = run_cli(dir.path(), &["sample", "app", "pop", "100"]);
+    assert_eq!(out.code, Some(0), "sample 100 failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"].as_array().unwrap().len(),
+        12,
+        "M <= N must return all 12 rows"
+    );
+
+    let out = run_cli(dir.path(), &["sample", "app", "pop"]);
+    assert_eq!(out.code, Some(0), "default N sample failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"].as_array().unwrap().len(),
+        10,
+        "default N must be 10"
+    );
+}
+
+/// R2/S2: N=0 用法错 exit 2（手动校验）；非整数由 clap 解析自动 exit 2。
+#[test]
+fn test_sample_n_zero_and_non_integer_usage_error() {
+    let dir = fixture();
+    seed_sample_db(dir.path());
+    let out = run_cli(dir.path(), &["sample", "app", "pop", "0"]);
+    assert_eq!(out.code, Some(2), "N=0 must exit 2: code={:?}", out.code);
+
+    let out = run_cli(dir.path(), &["sample", "app", "pop", "abc"]);
+    assert_eq!(
+        out.code,
+        Some(2),
+        "non-integer N must exit 2 (clap parse): code={:?}",
+        out.code
+    );
+}
+
+/// R4: 表不存在 → exit 3（与 stats 一致）。
+#[test]
+fn test_sample_missing_table_exit_3() {
+    let dir = fixture();
+    seed_sample_db(dir.path());
+    let out = run_cli(dir.path(), &["sample", "app", "no_such"]);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "missing table must exit 3: code={:?}",
+        out.code
+    );
+}
+
+// ==== MS13 Iteration 002：profile 命令（cli-analytics R3/R4）====
+
+/// 建混合列画像表 `mix`：id INT（数值无 top-k）、name STRING（top-k 主战场）、
+/// d DATE（日期无 top-k）。
+fn seed_profile_db(dir: &Path) {
+    let out = run_cli(
+        dir,
+        &[
+            "app",
+            "CREATE TABLE mix (id INT PRIMARY KEY, name STRING, d DATE)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create mix failed: {}", out.stderr);
+    let rows = [
+        "INSERT INTO mix VALUES (1, 'alice', DATE '2024-01-15')",
+        "INSERT INTO mix VALUES (2, 'bob',   DATE '2024-02-20')",
+        "INSERT INTO mix VALUES (3, 'alice', DATE '2024-03-10')",
+        "INSERT INTO mix VALUES (4, 'alice', DATE '2024-04-05')",
+        "INSERT INTO mix VALUES (5, 'bob',   DATE '2024-05-25')",
+        "INSERT INTO mix VALUES (6, 'carol', DATE '2024-06-30')",
+        "INSERT INTO mix VALUES (7, 'alice', DATE '2024-07-07')",
+    ];
+    for sql in rows {
+        let out = run_cli(dir, &["app", sql]);
+        assert_eq!(out.code, Some(0), "{sql} failed: {}", out.stderr);
+    }
+}
+
+/// R3/S1: 混合列画像——name top-3 (alice×4, bob×2, carol×1)；id/d 无 top-k。
+#[test]
+fn test_profile_mixed_columns() {
+    let dir = fixture();
+    seed_profile_db(dir.path());
+    let out = run_cli(dir.path(), &["profile", "app", "mix", "--format", "json"]);
+    assert_eq!(out.code, Some(0), "profile failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["columns"],
+        serde_json::json!(["column", "type", "min", "max", "top_k"])
+    );
+    let rows = parsed["rows"].as_array().unwrap();
+    let find = |name: &str| -> &serde_json::Value {
+        rows.iter()
+            .find(|r| r[0] == serde_json::json!(name))
+            .unwrap_or_else(|| panic!("missing profile row for column {name}: {rows:?}"))
+    };
+
+    // 数值列无 top-k（null）
+    let id = find("id");
+    assert_eq!(id[4], serde_json::json!(null), "id top_k must be null");
+
+    // 日期列无 top-k
+    let d = find("d");
+    assert_eq!(d[4], serde_json::json!(null), "d top_k must be null");
+    assert_eq!(d[1], serde_json::json!("DATE"));
+    assert_eq!(d[2], serde_json::json!("2024-01-15"));
+    assert_eq!(d[3], serde_json::json!("2024-07-07"));
+
+    // name top-3（默认 k=5，3 个 distinct）
+    let name = find("name");
+    assert_eq!(name[1], serde_json::json!("STRING"));
+    assert_eq!(name[4], serde_json::json!("alice(4), bob(2), carol(1)"));
+}
+
+/// R3/S2: top-k 并列稳定——同频按字典序升序；多次执行一致。
+#[test]
+fn test_profile_topk_tie_break_is_deterministic() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE twotie (id INT PRIMARY KEY, s STRING)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    for sql in [
+        "INSERT INTO twotie VALUES (1, 'zebra')",
+        "INSERT INTO twotie VALUES (2, 'apple')",
+        "INSERT INTO twotie VALUES (3, 'zebra')",
+        "INSERT INTO twotie VALUES (4, 'apple')",
+        "INSERT INTO twotie VALUES (5, 'mango')",
+    ] {
+        let out = run_cli(dir.path(), &["app", sql]);
+        assert_eq!(out.code, Some(0), "{sql} failed: {}", out.stderr);
+    }
+    let out1 = run_cli(
+        dir.path(),
+        &["profile", "app", "twotie", "--format", "json"],
+    );
+    let out2 = run_cli(
+        dir.path(),
+        &["profile", "app", "twotie", "--format", "json"],
+    );
+    assert_eq!(out1.stdout, out2.stdout, "two runs must be byte-identical");
+    let parsed: serde_json::Value = serde_json::from_str(out1.stdout.trim()).unwrap();
+    let rows = parsed["rows"].as_array().unwrap();
+    let s_row = rows
+        .iter()
+        .find(|r| r[0] == serde_json::json!("s"))
+        .unwrap();
+    // apple=2, mango=1, zebra=2 → 同频 apple < zebra 字典序
+    assert_eq!(s_row[4], serde_json::json!("apple(2), zebra(2), mango(1)"));
+}
+
+/// R3: 默认 k=5（--top 缺省）。
+#[test]
+fn test_profile_default_top_k_is_5() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE many (id INT PRIMARY KEY, s STRING)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    for i in 0..7 {
+        let v = format!("v{:02}", i);
+        let out = run_cli(
+            dir.path(),
+            &[
+                "app",
+                &format!("INSERT INTO many VALUES ({}, '{}')", i + 1, v),
+            ],
+        );
+        assert_eq!(out.code, Some(0), "insert {v} failed: {}", out.stderr);
+    }
+    let out = run_cli(dir.path(), &["profile", "app", "many"]);
+    assert_eq!(out.code, Some(0), "profile failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let s_row = parsed["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r[0] == serde_json::json!("s"))
+        .unwrap();
+    let topk = s_row[4].as_str().unwrap();
+    // 7 distinct，默认 top-5 → 5 项
+    assert_eq!(
+        topk.split(", ").count(),
+        5,
+        "default top-k must be 5: {topk}"
+    );
+}
+
+/// R4: --top > 20 用法错 exit 2。
+#[test]
+fn test_profile_top_gt_20_usage_error() {
+    let dir = fixture();
+    seed_profile_db(dir.path());
+    let out = run_cli(dir.path(), &["profile", "app", "mix", "--top", "25"]);
+    assert_eq!(out.code, Some(2), "top>20 must exit 2: code={:?}", out.code);
+}
+
+// ==== MS17-T02 T3（ISS03）：标量子查询表头在标量位置携带列名 ====
+
+/// emp/dept 关联夹具：dept.rid ↔ emp.id，标量子查询恰返回单行。
+fn seed_emp_region(dir: &Path) {
+    let out = run_cli(
+        dir,
+        &["app", "CREATE TABLE emp (id INT, name STRING, salary INT)"],
+    );
+    assert_eq!(out.code, Some(0), "create emp failed: {}", out.stderr);
+    for (id, name, salary) in [(1, "Alice", 50000), (2, "Bob", 60000)] {
+        let out = run_cli(
+            dir,
+            &[
+                "app",
+                &format!("INSERT INTO emp VALUES ({}, '{}', {})", id, name, salary),
+            ],
+        );
+        assert_eq!(out.code, Some(0), "insert emp {id} failed: {}", out.stderr);
+    }
+    let out = run_cli(dir, &["app", "CREATE TABLE dept (rid INT, region STRING)"]);
+    assert_eq!(out.code, Some(0), "create dept failed: {}", out.stderr);
+    for (rid, region) in [(1, "East"), (2, "West")] {
+        let out = run_cli(
+            dir,
+            &[
+                "app",
+                &format!("INSERT INTO dept VALUES ({}, '{}')", rid, region),
+            ],
+        );
+        assert_eq!(
+            out.code,
+            Some(0),
+            "insert dept {rid} failed: {}",
+            out.stderr
+        );
+    }
+}
+
+/// R-S1：json 下 `columns` 在标量位置（index 1）携带别名，且长度等于行宽。
+#[test]
+fn test_scalar_subquery_header_carries_alias_json() {
+    let dir = fixture();
+    seed_emp_region(dir.path());
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT id, (SELECT region FROM dept WHERE dept.rid = emp.id) AS region FROM emp",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "query failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    // 行形状按 Preserve 锁定为全外层行 + 标量插 index 1：修后表头镜像
+    // 执行器插入语义，别名 "region" 落 index 1，列数 == 行宽。
+    assert_eq!(
+        parsed["columns"],
+        serde_json::json!(["id", "region", "name", "salary"])
+    );
+    let ncols = parsed["columns"].as_array().unwrap().len();
+    let row_width = parsed["rows"][0].as_array().unwrap().len();
+    assert_eq!(ncols, row_width, "columns width must match row width");
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1, "East", "Alice", 50000], [2, "West", "Bob", 60000]])
+    );
+}
+
+/// R-S2：标量位于末列时 table 表头三列与三值行对齐（修前两列头丢第三值）。
+#[test]
+fn test_scalar_subquery_last_column_table_header() {
+    let dir = fixture();
+    seed_emp_region(dir.path());
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "--format",
+            "table",
+            "SELECT id, name, (SELECT region FROM dept WHERE dept.rid = emp.id) AS region FROM emp",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "query failed: {}", out.stderr);
+    let header = out.stdout.lines().next().unwrap();
+    for col in ["id", "name", "region"] {
+        assert!(header.contains(col), "header missing {col}: {header}");
+    }
+    let first_row = out.stdout.lines().nth(2).unwrap();
+    assert!(
+        first_row.contains("East"),
+        "row missing region: {first_row}"
+    );
+}
+
+// ==== MS17-T02 T4（I048）：import 表名实参转义可达 ====
+
+/// R-S1：含引号字符的 catalog 表名（`CREATE TABLE "a""b"` → `a"b`）经
+/// import 实参 `a"b` 可达落库（修前 INSERT 原文插值 SQL 解析报错）；
+/// 修后行可回读。
+#[test]
+fn test_import_escaped_quoted_table_name() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["app", "CREATE TABLE \"a\"\"b\" (i INT)"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "create escaped-name table failed: {}",
+        out.stderr
+    );
+
+    std::fs::write(dir.path().join("data.csv"), "i\n42\n").unwrap();
+    let out = run_cli(dir.path(), &["import", "app", "a\"b", "data.csv", "--csv"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "import must reach escaped name: stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["affected_rows"],
+        serde_json::json!(1),
+        "{:?}",
+        out.stdout
+    );
+
+    let out = run_cli(dir.path(), &["app", "SELECT i FROM \"a\"\"b\""]);
+    assert_eq!(out.code, Some(0), "readback failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[42]]),
+        "{:?}",
+        out.stdout
+    );
+}
+
+/// 以显式额外环境变量启动 rtsql（RTSQL_KEY env 等效用例）；RTSQL_KEY
+/// 同样不在继承面——env 值只来自显式传入。
+fn spawn_cli_env(dir: &Path, envs: &[(&str, &str)], args: &[&str]) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtsql"));
+    cmd.args(args)
+        .current_dir(dir)
+        .env("RTSQL_HOME", dir)
+        .env_remove("RTSQL_KEY");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rtsql binary")
+}
+
+fn run_cli_env(dir: &Path, envs: &[(&str, &str)], args: &[&str]) -> CliOutput {
+    wait_cli(spawn_cli_env(dir, envs, args))
+}
+
+// ---- MS17-T05: CLI 密钥通道（--key / RTSQL_KEY / exit 5）----
+
+use std::fs;
+
+/// (1) `new --key` 建加密库 + `--key` 主命令 CRUD/schema/dump/restore/import/stats
+/// 全链路成功；落盘头携带加密位
+#[test]
+fn key_encrypted_full_chain() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "--key", "pw", "app"]);
+    assert_eq!(out.code, Some(0), "new --key failed: {}", out.stderr);
+
+    let raw = fs::read(dir.path().join("db/app.db")).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+        1,
+        "on-disk header must carry the encrypted flag"
+    );
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "--key",
+            "pw",
+            "app",
+            "CREATE TABLE t (id INT PRIMARY KEY, name STRING)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "encrypted create failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["--key", "pw", "app", "INSERT INTO t VALUES (1, 'Alice')"],
+    );
+    assert_eq!(out.code, Some(0), "encrypted insert failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["--key", "pw", "app", "SELECT * FROM t"]);
+    assert_eq!(out.code, Some(0), "encrypted select failed: {}", out.stderr);
+    assert!(
+        out.stdout.contains("Alice"),
+        "select output: {}",
+        out.stdout
+    );
+
+    let out = run_cli(dir.path(), &["--key", "pw", "schema", "app"]);
+    assert_eq!(out.code, Some(0), "encrypted schema failed: {}", out.stderr);
+    assert!(
+        out.stdout.contains("CREATE TABLE"),
+        "schema output: {}",
+        out.stdout
+    );
+
+    let out = run_cli(dir.path(), &["--key", "pw", "dump", "app"]);
+    assert_eq!(out.code, Some(0), "encrypted dump failed: {}", out.stderr);
+    assert!(
+        out.stdout.contains("INSERT INTO"),
+        "dump output: {}",
+        out.stdout
+    );
+    fs::write(dir.path().join("dump.sql"), &out.stdout).unwrap();
+
+    let out = run_cli(dir.path(), &["new", "--key", "pw", "restored"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "encrypted target new failed: {}",
+        out.stderr
+    );
+    let out = run_cli(
+        dir.path(),
+        &["--key", "pw", "restore", "restored", "dump.sql"],
+    );
+    assert_eq!(out.code, Some(0), "restore --key failed: {}", out.stderr);
+
+    fs::write(dir.path().join("rows.csv"), "id,name\n5,Eve\n").unwrap();
+    let out = run_cli(
+        dir.path(),
+        &["--key", "pw", "import", "app", "t", "rows.csv", "--csv"],
+    );
+    assert_eq!(out.code, Some(0), "encrypted import failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["--key", "pw", "stats", "app", "t"]);
+    assert_eq!(out.code, Some(0), "encrypted stats failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["--key", "pw", "sample", "app", "t"]);
+    assert_eq!(out.code, Some(0), "encrypted sample failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["--key", "pw", "profile", "app", "t"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "encrypted profile failed: {}",
+        out.stderr
+    );
+}
+
+/// (2) `RTSQL_KEY` 环境变量与 `--key` 等效
+#[test]
+fn key_env_equivalent() {
+    let dir = fixture();
+    let out = run_cli_env(dir.path(), &[("RTSQL_KEY", "pw")], &["new", "app2"]);
+    assert_eq!(out.code, Some(0), "new via env key failed: {}", out.stderr);
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_KEY", "pw")],
+        &["app2", "CREATE TABLE t (id INT PRIMARY KEY)"],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "create via env key failed: {}",
+        out.stderr
+    );
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_KEY", "pw")],
+        &["app2", "INSERT INTO t VALUES (1)"],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "insert via env key failed: {}",
+        out.stderr
+    );
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_KEY", "pw")],
+        &["app2", "SELECT * FROM t"],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "select via env key failed: {}",
+        out.stderr
+    );
+}
+
+/// (3) `--key` 显式 flag 覆盖 `RTSQL_KEY`（clap 原生优先级）
+#[test]
+fn key_flag_overrides_env() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "--key", "pw", "app3"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_KEY", "wrong")],
+        &["--key", "pw", "app3", "SELECT 1"],
+    );
+    assert_eq!(out.code, Some(0), "--key must override env: {}", out.stderr);
+}
+
+/// (4) 错误密钥打开加密库：exit 5 且 stderr 含 `invalid key`
+#[test]
+fn key_wrong_key_exit_5() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "--key", "pw", "app4"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["--key", "wrong", "app4", "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(5),
+        "wrong key must exit 5: {} / {}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stderr.contains("invalid key"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("decryption failed"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+/// (5) 加密库无钥打开：exit 5 且消息点名 `--key`
+#[test]
+fn key_missing_exit_5_names_flag() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "--key", "pw", "app5"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["app5", "SELECT 1"]);
+    assert_eq!(out.code, Some(5), "missing key must exit 5: {}", out.stderr);
+    assert!(
+        out.stderr.contains("--key"),
+        "stderr must name --key: {}",
+        out.stderr
+    );
+}
+
+/// (6) 明文库带钥打开：exit 5（明密互斥）
+#[test]
+fn key_on_plaintext_exit_5() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "plain"]);
+    assert_eq!(out.code, Some(0), "plain new failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["--key", "pw", "plain", "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(5),
+        "plaintext with key must exit 5: {}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("invalid key"), "stderr: {}", out.stderr);
+}
+
+/// (7) 空密钥（flag 或 env）：exit 2（开库前拒绝）
+#[test]
+fn key_empty_exit_2() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "--key", "", "app7"]);
+    assert_eq!(out.code, Some(2), "empty --key must exit 2: {}", out.stderr);
+    let out = run_cli_env(dir.path(), &[("RTSQL_KEY", "")], &["app7", "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(2),
+        "empty env key must exit 2: {}",
+        out.stderr
+    );
+}
+
+/// (8) 无钥 `list` 不受密钥通道影响
+#[test]
+fn list_without_key_unaffected() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "present"]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["list"]);
+    assert_eq!(out.code, Some(0), "list failed: {}", out.stderr);
+    assert!(
+        out.stdout.contains("present"),
+        "list output: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn completions_supported_shells() {
+    let dir = fixture();
+    for shell in ["bash", "zsh", "fish"] {
+        let out = run_cli(dir.path(), &["completions", shell]);
+        assert_eq!(
+            out.code,
+            Some(0),
+            "{shell} generation failed: {}",
+            out.stderr
+        );
+        assert!(!out.stdout.is_empty(), "{shell} output must not be empty");
+        assert!(
+            out.stdout.contains("rtsql"),
+            "{shell} output: {}",
+            out.stdout
+        );
+        assert!(
+            out.stdout.contains("--key") || out.stdout.contains("-l key"),
+            "{shell} output: {}",
+            out.stdout
+        );
+    }
+}
+
+#[test]
+fn completions_hidden_and_usage_errors() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["--help"]);
+    assert_eq!(out.code, Some(0), "help failed: {}", out.stderr);
+    assert!(
+        !out.stdout.contains("completions"),
+        "hidden command appeared in help: {}",
+        out.stdout
+    );
+
+    for args in [&["completions"][..], &["completions", "powershell"][..]] {
+        let out = run_cli(dir.path(), args);
+        assert_eq!(out.code, Some(2), "usage error expected: {args:?}");
+    }
 }

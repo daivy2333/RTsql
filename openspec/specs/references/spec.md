@@ -273,7 +273,7 @@
 - **路径**: `.claude/issues/ISS01-min-create-tx-id-zero-poisoning.md`
 - **日期**: 2026-09-14
 - **用途**: 写路径首建页级可见性条目时 `min_create_tx_id` 被 `or_default()` 钉 0、`find_visible_version` all-invisible 快路径对该页永久失效（保守方向、损失优化）的缺陷台账；MS08 实测域量化与修复裁定的输入（002-rework Plan Review F4(c) 裁定残留）
-- **状态**: active
+- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，哨兵语义双向闭合 0/MAX 毒化）
 
 ## R22: ISS02 IN×JOIN 子查询计划期误报 Subquery returns multiple columns
 
@@ -281,6 +281,30 @@
 - **路径**: `.claude/issues/ISS02-in-subquery-join-plan-rejection.md`
 - **日期**: 2026-09-14
 - **用途**: `IN (SELECT … JOIN …)` 计划期误报「requires single column」的缺陷台账——`get_subquery_first_column` 无 Join/NLJ 形态臂（等值 Hash 同源预存，`subquery.rs:437` fallback）、关联参数仅扫 WHERE 与 WHERE+JOIN 拒绝面的三面叠加边界；IN×JOIN 能力裁定与诊断文案修正决策的输入（MS09 Iteration 001 000-initial Plan Review F5 裁定残留）
+- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，最小诚实化拒绝；能力解锁留 improvement 候选）
+
+## R23: ISS03 标量子查询 select-list 输出表头与行形状不一致
+
+- **类型**: issue
+- **路径**: `.claude/issues/ISS03-scalar-subquery-header-shape-mismatch.md`
+- **日期**: 2026-09-14
+- **用途**: `get_plan_output_columns` SubqueryEval 臂未计入执行器插入的标量列、表头 N 列对 N+1 值行（I034 同族缺口，SubqueryEval 臂在其修复范围外，e51c4a3 即预存）的缺陷台账；标量子查询输出形状修复独立小 change 规划的输入（MS09 Iteration 002 000-initial Plan Review F4 裁定残留）
+- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，SubqueryEval 臂按 `result_column_index` 插列）
+
+## R24: 进程内 close→reopen 数据库测试配方 Runbook
+
+- **类型**: runbook
+- **路径**: `.claude/runbooks/in-process-reopen-testing.md`
+- **日期**: 2026-09-23
+- **用途**: 集成测试同进程重开库文件的固定步骤（显式作用域 + 显式 `close()` 释放 advisory 锁、tempdir 路径坑、RC 重开免抬水位）；WAL 恢复/checkpoint/隔离级别/加密 with-without key 重开类测试的执行配方（MS17-T02 Iter001/002 双 Iteration 实证）
+- **状态**: active
+
+## R25: RTsql workspace crate 化与微内核数据库形态探索分析
+
+- **类型**: analysis
+- **路径**: `.claude/analysis/workspace-crate-modularization.md`
+- **日期**: 2026-09-24（revision `7364bc9` 工作区，含 MS13/MS17-T02 未提交实施）
+- **用途**: 初版后长期方向（用户裁定 2026-09-24，路线 B workspace crate 化）的调查输入——模块依赖实测图谱与两条真实依赖环（database→pipeline→executor→database、storage↔transaction 经 VersionHeader）、词表熔接点（Value/PhysicalPlan 约 20 变体/ColumnType 磁盘绑定）与现成接缝（AsyncStorage/REGISTRY/火山树/IsolationLevel）、Response 错层（core 反向依赖 network）、目标 crate 拓扑与四刀迁移顺序草图（词表下沉→存储域→语言域→组装层+可选件）、风险清单（断环成本/测试矩阵×无 CI I051/spec 条件化/过度拆分告诫）、三种模块化模式开源先例（SQLite 编译宏/SurrealDB kv-* features/GlueSQL+DataFusion trait 接缝/Materialize+GreptimeDB+RisingWave workspace/PostgreSQL 扩展/FoundationDB 角色分解）；同日补充——定位裁定（异步·嵌入式·CLI 三分句 + 决策过滤器 + 模块化为手段非身份 + 对路线 B 排序影响，2026-09-24 用户裁定，含 async-native 稀缺性查证）与关联方向 I059 注记（跨库交互 ATTACH 式，身份过滤器三词全沾）
 - **状态**: active
 
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

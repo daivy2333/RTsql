@@ -235,40 +235,46 @@ None required（Plan Context mode: none——全部验收由可重复运行的�
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-（待 Plan Review）
+- **F1（三执行器缓存面逐臂核实，与契约逐点吻合）**：(1) `subquery_eval.rs`——缓存查询在 clone/inject/重建执行器之前（:134-135）；命中派生标量与 miss 路径逐语义等价（`rows.first()` 非空取 `[0]`、空行或 0 行 → `Null`，:136-139）；多行 `row_count > 1` 早退 `Err(SubqueryReturnsMultipleRow)` 保持在原位置、先于缓存写入（:157-164 vs :175）——错误与多行永不入缓存；`collected` 于成功 drain 后存储（:173-175）；非关联臂 `cached_result` 路径逐字节原样（:178-185）。(2) `semi_join.rs`/`anti_join.rs` 同型——命中从缓存完整行集重建 `right_hashmap`（仅 `build_right_key()==Some` 行、行序保持）+ `right_has_rows = !rows.is_empty()`（NULL 键行计入，EXISTS/NOT EXISTS 语义保真）；miss 收集全部行（含 NULL 键行）且存储在 drain 循环后；错误经既有 `?` 在存储前传播；非关联快路径/`build_right_key`/探测/输出行零触碰。Acceptance 5「相同参数值至多执行一次」代码审查锚点独立复核成立（查在执行前、存在成功后）。
+- **F2（Act 偏差 3 项核实为真实且非实质）**：Deviation 1（见证断言按直执行参照形状校准）——形状预存性核实：`get_plan_output_columns` SubqueryEval 臂（`query.rs:104`）返回 `get_plan_output_columns(&node.input)`，不含执行器插入的标量列（表头 N 列对 N+1 值行）；`query.rs:476` 既有注释即记载「标量子查询项会追加一列（SubqueryEval 移位输出形状）」；本 Cycle 未触碰 query.rs。契约未定死列位置，以直执行参照为断言锚点正是等价见证的正确形态。Deviation 2（错误文案双重包装逐字节断言 `Execution error: execution error: Subquery returns multiple rows (scalar subquery requires single row)`）——错误构造代码（`StorageError::ExecutionError(PlanError::…)`）与 Response 包装层本 Cycle 零改动，实际串即既有面；逐字节断言比 Plan 预期更严格，非放宽。Deviation 3（fmt 重排触及文件）——机械伴随面，`cargo fmt --check` 0 diff 复核。
+- **F3（验证独立复现，与 Act 决定性聚合一致）**：本会话复跑 `cargo test --test subquery_test` **28 passed / 0 failed**（20 既有零修改 + 8 新增）；全量 `cargo test --no-fail-fast` 首轮出现单点失败（935/1/2），连续两轮复跑干净，第三轮聚合 **936 passed / 0 failed / 2 ignored**（73 bins）——与 Act 决定性运行逐数一致；单点失败复跑即消失且失败项未在干净运行复现，符合已知 I041 resolve env 竞态假失败形态（Act Risks 预授权处置 + 001-rework 先例），按公共规则 › 验证（已知 flaky 重跑）不采信失败运行。`cargo clippy --all-targets -- -D warnings` exit 0；`cargo fmt --check` 0 diff；`openspec validate --specs --changes` **28 passed / 0 failed**（1 条 wal-writer-handle-reuse Purpose 占位 WARNING 为预存项）。
+- **F4（范围外实质发现——Issue 候选核实成立，非阻塞）**：Act 报告的「标量子查询 select-list 输出表头与行形状不一致」（`SELECT col, (subquery) AS alias FROM t` 表头为基表 N 列、行为 N+1 值）独立核实为真且预存——根因 `query.rs:104` SubqueryEval 臂未计入插入列，属 I034（已 promoted，修复面仅 DataScan/Scan/IndexScan 臂）同族缺口；关联与非关联同形，既有用例按此形状断言通过。本 Cycle 以直执行参照校准见证未改变也未掩盖该形状；Acceptance（等价性 + 零回归）不受影响。属 change 范围外实质缺陷，按规则只报告不落账，处置留 Recorder/用户（独立小 change：SubqueryEval 臂补插入列名）。
+- **F5（Forbidden/Invariant 全过）**：无计数 hooks、无 static/global 跨语句结构、无 LRU/淘汰、无错误缓存、planner/plan cache/`inject_correlated_values`/`Value` Eq-Hash impl/快照语义/页格式/WAL 零触及（改动面 = 3 执行器 + 测试文件，与 Act Changed Files 清单精确一致；diff 含 Iteration 000 快照字段属既有工作区叠加，非本 Cycle 引入）。
 
 **Deviation Classification**
 
-（待 Plan Review）
+- ACT-DEVIATION: None（3 项偏差均契约内非实质——测试形式 / 文案校准从严 / fmt 机械重排）。无 PLAN-OMISSION、PLAN-INVALID、BASELINE-CHANGED、NEW-EVIDENCE。
 
 **Acceptance Gaps**
 
-（待 Plan Review）
+- None——5 项 Acceptance 全部满足：等价见证 8 用例（≥7）实施前后双 GREEN（Act 表第 1/3 行 + 本会话复跑 28/28）；Semi/Anti 关联面覆盖（用例 7/8 + 既有 IN/EXISTS 全绿）；全量 936/0/2（= 928 基线 + 8 新增，零修改）；clippy/fmt/validate 全 0/PASS；「至多执行一次」代码审查独立复核成立。
 
 **Convergence**
 
-（待 Plan Review）
+- N/A（initial Cycle 首次 Review，无 gap 历史可比；父 Iteration 001-rework accepted 面未变化）
 
 **Evidence**
 
-（待 Plan Review）
+- 代码核实：`subquery_eval.rs:130-185`（关联臂缓存面 + 非关联臂原样）、`semi_join.rs`/`anti_join.rs` 关联重建臂 diff（命中重建 + miss 收集/存储位置）、`query.rs:104`（SubqueryEval 表头臂——Issue 候选根因）、`query.rs:476`（预存形状注释）、`tests/subquery_test.rs` 8 新用例 + `name_value_map` helper（错误用例逐字节断言、跨语句新鲜度断言均经本会话读码核对）。
+- 本会话复跑：subquery_test 28/28；全量 936/0/2（第 3 轮，第 1 轮单点失败按已知 I041 flaky 处置）；clippy 0、fmt OK、validate 28 passed/0 failed。
+- 采信：Act Verification Evidence 全表（实施前第一 GREEN 28/28、T20/T21 后 28/28——材料未变化，本 Review 读码与复跑核对一致）。
 
 **Follow-up Decision**
 
-（待 Plan Review）
+None——Acceptance 完整达成、无 Minor finding 需当前 Cycle 修复。Issue 候选（标量子查询 select-list 表头/行形状，I034 同族）为范围外预存缺陷，只报告不落账，处置留 Recorder/用户。**Iteration 002（T20-T22）完成，本 change 三个 Iteration 全部 accepted——change 实施面收口，待用户触发 openspec-docs-maintainer 收尾。**
 
 **Iteration Plan Update**
 
-（待 Plan Review）
+None
 
 **Next Cycle**
 
-（待 Plan Review）
+None
 
 **Next Iteration**
 
-（待 Plan Review——本 Iteration 为 change 最后一个 Iteration；accepted 时写 None）
+None（Iteration 002 为 change 最后一个 Iteration；三个 Iteration 全部 accepted）

@@ -103,6 +103,9 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                 // Display 文本对投影解析惰性——表达式查询绕过 per-node 投影。
                 // MS11-T03: TRIM/CEIL/FLOOR 是独立 sqlparser 变体（非
                 // Expr::Function），同门放行，由 planner 臂校验其形态。
+                // MS13 T4: TypedString（类型字面量）与 BinaryOp（算术项，
+                // WITH-FORM `SELECT id + 1` 解锁）同门放行；JOIN 形态的
+                // qualified 提取仍拒绝（既有表达式项 + JOIN 拒绝面）。
                 Expr::Case { .. }
                 | Expr::Cast { .. }
                 | Expr::InList { .. }
@@ -112,7 +115,12 @@ pub fn extract_columns(projection: &[SelectItem]) -> Result<Vec<String>, PlanErr
                 | Expr::IsNotNull { .. }
                 | Expr::Trim { .. }
                 | Expr::Ceil { .. }
-                | Expr::Floor { .. } => Ok(expr.to_string()),
+                | Expr::Floor { .. }
+                | Expr::TypedString { .. }
+                | Expr::BinaryOp { .. }
+                // MS13 T7: INTERVAL 腿随算术项放行至 planner（独立/畸形
+                // 形态由 planner 点名拒绝，非此处既有兜底文案）。
+                | Expr::Interval { .. } => Ok(expr.to_string()),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => Ok(alias.value.to_string().to_lowercase()),
@@ -191,6 +199,9 @@ pub fn extract_qualified_columns(
                 // MS11-T01 Iter001: 值表达式项放行至 planner 的 SELECT 路由
                 //（Display 文本对 JOIN 输出过滤惰性——表达式项 + JOIN 显式拒绝）
                 // MS11-T03: TRIM/CEIL/FLOOR 独立变体同门放行。
+                // MS13 T4: TypedString 与 BinaryOp（算术项）同门放行——本提取
+                // 对非 JOIN 查询也执行（query.rs 无条件调用），表达式项 + JOIN
+                // 的显式拒绝由 planner 路由层统一裁决（与 CASE/CAST 同型）。
                 Expr::Case { .. }
                 | Expr::Cast { .. }
                 | Expr::InList { .. }
@@ -200,7 +211,11 @@ pub fn extract_qualified_columns(
                 | Expr::IsNotNull { .. }
                 | Expr::Trim { .. }
                 | Expr::Ceil { .. }
-                | Expr::Floor { .. } => Ok((None, expr.to_string())),
+                | Expr::Floor { .. }
+                | Expr::TypedString { .. }
+                | Expr::BinaryOp { .. }
+                // MS13 T7: INTERVAL 腿同门放行（拒绝面由 planner 统一裁决）。
+                | Expr::Interval { .. } => Ok((None, expr.to_string())),
                 _ => Err(PlanError::UnsupportedStatement),
             },
             SelectItem::ExprWithAlias { alias, .. } => {

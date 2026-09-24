@@ -8,7 +8,8 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util", "signal"] }
 async-trait = "0.1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 thiserror = "1.0"
 anyhow = "1.0"
 futures = "0.3"
@@ -21,6 +22,8 @@ lru = "0.12"
 crc32fast = "1.4"
 dashmap = "6"
 csv = "1"
+argon2 = "0.6"
+aes-gcm = "0.11"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }

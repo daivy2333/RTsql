@@ -47,7 +47,7 @@
 - **问题**: 只有 Repeatable Read
 - **方案**: Read Committed + Serializable（SSI）
 - **依赖**: 无
-- **状态**: planned（Read Committed 部分已排期 MS09-T01；Serializable/SSI 维持 MS09 非目标，2026-09-12 路线重排）
+- **状态**: promoted（Read Committed 部分已于 MS09-T01 实施——`IsolationLevel` 枚举 + `Database::open_with_isolation`（默认 RR 逐字节等价）+ RC 语句级已提交视图，spec `transaction-isolation-levels`，change 归档 `openspec/changes/archive/2026-09-13-ms09-engine-mvcc-closeout/`；Serializable/SSI 维持非目标，未排期）
 - **Legacy**: O014
 
 ## I015: M25 多 Join 算法
@@ -56,7 +56,7 @@
 - **问题**: 只有 Hash Join
 - **方案**: NLJ + SMJ + 启发式选择
 - **依赖**: 无
-- **状态**: planned（已排期 MS09-T02，2026-09-12 路线重排）
+- **状态**: promoted（NLJ 部分已于 MS09-T02 实施——`NestedLoopJoin` 执行器 + 计划期启发式（纯等值 Hash 保持 / 非等值·混合·字面量腿经 NLJ，用户裁定一并解锁），spec `join-executor-selection`，change 归档 `openspec/changes/archive/2026-09-13-ms09-engine-mvcc-closeout/`；SMJ 维持未排期）
 - **Legacy**: O015
 
 ## I016: M26 代价模型 + Join 重排
@@ -74,7 +74,7 @@
 - **问题**: 每行外层重新执行子查询
 - **方案**: `SubqueryCache` 参数值→结果集 LRU
 - **依赖**: 无
-- **状态**: planned（已排期 MS09-T04，2026-09-12 路线重排）
+- **状态**: promoted（MS09-T04 实施——`SubqueryEval`/`SemiJoin`/`AntiJoin` 三执行器关联臂语句级缓存 `HashMap<Vec<(String, Value)>, Vec<Vec<Value>>>`（design D6 修正 DA1 的 LRU 设想：语句界有界 HashMap 足够），spec `correlated-subquery-cache`，change 归档 `openspec/changes/archive/2026-09-13-ms09-engine-mvcc-closeout/`）
 - **Legacy**: O017
 
 ## I018: M28 多层关联子查询
@@ -103,7 +103,7 @@
 - **问题**: 多值 INSERT 逐行执行
 - **方案**: `bulk_insert(keys)` + `append_batch(records)`
 - **依赖**: M20（已完成）
-- **状态**: planned（已排期 MS08-T09 实测候选——先 bench 逐行路径占比再决定，2026-09-12 路线重排解析 STALE）
+- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，先 bench 逐行路径占比再决定，初版优先；原 MS08-T09 排期撤销）
 - **Legacy**: O021
 
 ## Phase 5 高级优化
@@ -115,7 +115,7 @@
 - **方案**: `Key` 内部 `Vec<u8>` 变长编码
 - **预期**: 索引空间 ~70% 缩减
 - **依赖**: 无
-- **状态**: planned（已排期 MS08-T05，2026-09-12 路线重排归属注记）
+- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，初版优先；原 MS08-T05 排期撤销）
 - **Legacy**: O024, D02 successor
 
 ## I025: M33 B+Tree 节点级锁
@@ -134,7 +134,7 @@
 - **方案**: 连续页合并写 + `writev()` 向量化
 - **预期**: Checkpoint 5-10x
 - **依赖**: M31（已完成）+ M48（I013）
-- **状态**: planned（已排期 MS08-T03，2026-09-12 路线重排归属注记）
+- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，初版优先；原 MS08-T03 排期撤销）
 - **Legacy**: O026, D12 下游
 
 ## I027: M43 并行扫描
@@ -183,7 +183,7 @@
 - **问题**: 页驱逐按 LRU 而非树拓扑刷盘——checkpoint 后的运行期修改使磁盘 B-Tree 含洞（父页指向未刷盘子页）与孤儿页（裸读实测 `scan_all` 184/10000 + `InvalidPageType` 洞页）。恢复侧已由 `redo_count > 0` 时索引去信任 + 重放后重建消解（MS10-T02 R7/R8），但运行期检查点间的磁盘树仍处于撕裂状态；MS12 整库加密若引入页级 transform 将放大对磁盘树一致性的依赖
 - **候选方案**: 结构感知刷盘（子树后序）/ checkpoint 树快照 / no-steal 驱逐——均为 BufferPool 驱逐策略重设计，MS10-T02 design D10 拒绝并入
 - **量化支撑**: D10 恢复重建代价实测 40k 行→8.86s、160k 行→40.7s（100 页池随机访存主导；撕裂树运行期根修可同时压缩该恢复代价）
-- **状态**: planned（已排期 MS08-T07 实测候选——先量化撕裂增长与恢复代价再决定，2026-09-12 路线重排）
+- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，先量化撕裂增长与恢复代价再决定，初版优先；原 MS08-T07 排期撤销）
 
 ## I032: `BufferPool::mark_tx_aborted` 空实现补全
 
@@ -191,7 +191,7 @@
 - **问题**: `mark_tx_aborted` 为 no-op（`buffer_pool.rs:369-371`）——`RecoveryManager::full_recover` 的 mark-uncommitted-aborted 步骤实际空转；未提交行仅靠 header `commit_tx_id=None` 的不可见性兜底，aborted 行物理滞留数据页
 - **影响**: 当前语义自洽（未提交行不可见、重建谓词按 committed 排除），但未提交事务的页空间不可回收，且未来依赖「aborted 标记」的机制（如空间回收、更细的可见性）将踩空
 - **方案**: 恢复期对 uncommitted 事务的行打显式 aborted 标记（header 扩展或墓碑化），或明确文档化「无标记」模型
-- **状态**: planned（已排期 MS09-T01 随带——评估后实施或文档化，2026-09-12 路线重排）
+- **状态**: promoted（MS09-T01 实施——恢复期 `mark_uncommitted_aborted` 页链迭代显式中性化 + `BufferPool::mark_tx_aborted` no-op 移除，spec `mvcc-tombstone-visibility` R4，change 归档 `openspec/changes/archive/2026-09-13-ms09-engine-mvcc-closeout/`）
 
 ## I033: update→delete 行旧版本在无快照扫描重现
 
@@ -200,7 +200,7 @@
 - **证据**: MS15-Rest Iteration 002 Act Remaining Issues 2 跨进程探针 + Plan Review 独立复现（2026-09-12，归档 change `2026-09-12-ms15-rest-correctness-batch`）——`INSERT (1,10)` → 进程 A `UPDATE SET n=99 WHERE id=1`（affected 1）→ 进程 B `DELETE WHERE id=1`（affected 1）→ 进程 C 扫描 `[[1,10]]`、点查 `id=1` 空集（两步变更从扫描面消失）；对照 Z1 异键 update→delete、Z2 delete→update 均正常（`[[1,99]]`）；全裸名序列同样复现（与表名归一化无关，预存缺陷）；未被既有 867 测试覆盖
 - **影响**: 语义为「既有行为未扩大」（R6 前同样重现）；MS10-T02 验收夹具 UPDATE/DELETE 域不相交故未触发；MS15-Rest 收尾探针实证该形态在真实跨进程 CLI 序列下两步变更丢失（原「未来混合负载」预判已现实化）
 - **方案**: 抑制谓词区分「已提交墓碑」（应抑制整条链）与「未提交墓碑」（不抑制、回溯前驱）——需对照 WAL committed 集合或 header 编码扩展
-- **状态**: planned（已排期 MS09-T01 与 Read Committed 一并实施——方案留实现调查裁定，2026-09-12 路线重排）
+- **状态**: promoted（MS09-T01 实施——DELETE 墓碑独立版本 slot 自描述删除者 + `superseder_suppresses` 按删除者提交状态（已提交抑制整链 / 未提交·回滚回溯前驱）+ 恢复两态一致，spec `mvcc-tombstone-visibility`，change 归档 `openspec/changes/archive/2026-09-13-ms09-engine-mvcc-closeout/`）
 
 ## I034: 裸 DataScan 子集投影的 CLI 表头返回全 schema
 
@@ -245,7 +245,7 @@
 - **证据**: MS10-T05 Iteration 001 001-rework Plan Context Risks 预判 + 实施后语义成立（2026-09-09，归档 change 同上）；`gc_table` 为可选维护路径（M10）
 - **影响**: 含无键行的表长期频繁 UPDATE 场景下旧版本空间不回收；无正确性影响
 - **方案**: GC 增加数据页链全扫模式（不经索引）或无键链登记结构；需评估成本后独立 change
-- **状态**: planned（已排期 MS08-T08 实测候选——先量化含无键行表的版本空间增长再决定，2026-09-12 路线重排）
+- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，先量化含无键行表的版本空间增长再决定，初版优先；原 MS08-T08 排期撤销）
 
 ## I039: 多代 dump/restore 表名引号膨胀（ObjectName Display 即表名）
 
@@ -272,7 +272,7 @@
 - **证据**: MS11-T02 Iteration 001 Act Remaining Issue #1（2026-09-10，change `2026-09-10-ms11-t02-sql-transaction-statements`）；新增 16 个子进程型 e2e 测试提高全量并行负载放大该既有窗口；Plan Review 独立全量复跑未复现（偶发）；本 change 未触碰 resolve.rs 且 diff 无 env 变更
 - **影响**: 全量回归假失败（重跑即绿），干扰 CI/收尾判定；无产品影响
 - **方案**: 两 env 用例合并为单测试顺序执行，或 env 用例串行化（同一测试线程内执行）；属测试基建修改，需独立小 change
-- **状态**: planned（建议与 MS16 同期以独立小 change 实施——测试基建，不入 MS16 验收面，2026-09-12 路线重排）
+- **状态**: promoted（2026-09-23 并入 MS17-T02 缺陷清账——env 用例合并/串行化方案随 change 调查定稿；消除全量假失败源以稳定 MS17 全量验证门）
 
 ## I042: 边界子句拒绝 × 活跃会话事务组合路径无 e2e 锁定
 
@@ -335,6 +335,94 @@
 - **证据**: MS15-Rest Plan Review Finding 7 代码核实（2026-09-12，归档 change 同上）；spec `table-name-resolution` R2 仅覆盖 dump/schema，import 无 requirement 面；归一化前该形态经 Display 凑巧可达
 - **影响**: 极窄角落（历史带引号表名 × import）；design D3「历史带引号表名可达性收缩」预发布边界内，新库无影响
 - **方案**: import 表名实参经 `quote_ident` 包裹或文档化该边界；随下次触碰 lifecycle/import 面的 change 顺带
-- **状态**: planned（已排期 MS14 随带——quote_ident 包裹或文档化，可裁，2026-09-12 路线重排）
+- **状态**: promoted（2026-09-23 并入 MS17-T02——原 MS14 随带项随 MS14 裁剪并入；quote_ident 包裹或文档化，可裁，随 change 调查定稿）
+
+## I049: WAL fsync 合并（组提交）
+
+- **分类**: 性能 / WAL
+- **问题**: 提交路径逐事务 fsync（原 MS03 原范围项，曾排期 MS08-T06 未实施）
+- **方案**: 组提交 / 多事务合并 fsync
+- **前置**: 做前先验证 fsync 是否真瓶颈（原 MS08 实测纪律保留）
+- **状态**: planned（2026-09-14 MS08 剥离退还登记——未排期候选，初版优先）
+
+## I050: RowLockTable DashMap 化
+
+- **分类**: 性能 / 并发
+- **问题**: 行锁表为非并发友好结构（原 MS03 原范围项，曾排期 MS08-T04 未实施）
+- **方案**: RowLockTable 迁移 DashMap
+- **前置**: 先做 mini-bench 决定是否值得做（原 MS08 实测纪律保留）
+- **状态**: planned（2026-09-14 MS08 剥离退还登记——未排期候选，初版优先）
+
+## I051: CI workflow（构建/测试自动化流水线）
+
+- **分类**: 分发 / CI
+- **问题**: 无 CI workflow——构建、测试、静态检查靠本地手工执行（原 MS14-T01 组成项，2026-09-23 用户裁定「CI 没必要」裁剪）
+- **方案**: GitHub Actions workflow（build + test + clippy/fmt）；按需求重启时规划
+- **状态**: planned（2026-09-23 MS14 裁剪退还登记——未排期候选，用户裁定暂不做）
+
+## I052: GitHub Releases 预编译矩阵
+
+- **分类**: 分发 / 发布
+- **问题**: 无预编译产物分发——x86_64-linux-gnu / musl 静态 / aarch64 / macOS 矩阵（原 MS14-T01 组成项，2026-09-23 用户裁定「Release 也没必要」裁剪）
+- **方案**: Releases + cargo-zigbuild 或 runner 原生矩阵 + 各平台 smoke（`rtsql --version` + 基础 CRUD）；macOS 矩阵受阻可独立收口（原 MS14 split signal 随条目保留）
+- **状态**: planned（2026-09-23 MS14 裁剪退还登记——未排期候选，用户裁定暂不做）
+
+## I053: crates.io 发布（cargo install 可用）
+
+- **分类**: 分发 / 发布
+- **问题**: 未发布 crates.io——`cargo install rtsql` 不可用（原 MS14-T01 组成项，2026-09-23 用户裁定「暂时不发布」）
+- **方案**: crates.io 元数据 + 发布流程；发布不可逆性与名额届时确认
+- **状态**: planned（2026-09-23 MS14 裁剪退还登记——未排期候选，用户裁定暂不发布）
+
+## I054: TTL 密钥缓存（sudo 式密钥管理层）
+
+- **分类**: 安全便利层 / 密钥管理
+- **问题**: 派生密钥每次打开需重输（原 MS12-T02 组成项：TTL 缓存 `~/.rtsql/keys/` 0600 + 过期重问，2026-09-23 用户裁定初版最小加密不含便利层）
+- **方案**: 派生密钥（非明文）落盘 TTL 缓存 + 过期重问；依赖 MS17-T01 最小加密先行
+- **状态**: planned（2026-09-23 MS12 裁剪退还登记——未排期候选，初版最小集外）
+
+## I055: `rtsql key set/remove/status` 密钥管理子命令
+
+- **分类**: 安全便利层 / 密钥管理 CLI
+- **问题**: 无密钥管理子命令（原 MS12-T02 组成项，2026-09-23 裁剪）
+- **方案**: key 三子命令（set/remove/status）；依赖 MS17-T01 与 I054 的密钥面定型
+- **状态**: planned（2026-09-23 MS12 裁剪退还登记——未排期候选）
+
+## I056: `--password-file <path>` 密钥通道
+
+- **分类**: 安全便利层 / 密钥通道
+- **问题**: 初版仅 `--key` 与 `RTSQL_KEY` 两通道（原 MS12-T02 三通道之一被裁，2026-09-23）；脚本场景可暂以 `RTSQL_KEY` 环境变量兜底
+- **方案**: 补 `--password-file <path>` 通道；依赖 MS17-T01
+- **状态**: planned（2026-09-23 MS12 裁剪退还登记——未排期候选）
+
+## I057: 加密性能正式 bench 基线
+
+- **分类**: 性能 / 加密（MS08「先量化再决定」纪律随条目保留）
+- **问题**: 加密后打开延迟与吞吐影响仅 Act Response 顺带实测记录（MS17-T01），无正式 bench 基线设施（原 MS12-T03 组成项，2026-09-23 裁剪）
+- **方案**: 加密开关两态对比 bench（open 延迟 / CRUD 吞吐，`--save-baseline` 纪律）；依赖 MS17-T01 落地后实施
+- **状态**: planned（2026-09-23 MS12 裁剪退还登记——未排期候选，先量化再决定）
+
+## I058: man 页生成（clap_mangen）
+
+- **分类**: 分发 / 文档
+- **问题**: 无 man 页（原 MS14-T01 组成项，2026-09-23 裁剪——v0.1 文档职责由双语 README 承担）
+- **方案**: clap_mangen 从 Command 定义构建期生成 man 页；与 I052 发布形态一并规划为宜
+- **状态**: planned（2026-09-23 MS14 裁剪退还登记——未排期候选）
+
+## I059: 跨数据库文件交互（ATTACH 式多文件关联检索与物化）
+
+- **分类**: 功能 / 多库交互
+- **问题**: `Database` 单文件绑定（单 table_manager/FileStorage/WAL/事务管理器，`database.rs:42-121`），CLI 无跨 .db 文件关联检索与物化能力——多库场景（跨库查询、抽取、合并、分析）需人工 dump/restore 中转
+- **用户方向**（2026-09-24）: 两个或多个 db 文件经命令行关联检索；跨库增删查改；跨库取视图物化为新库（「数据库视作表」）
+- **方案**: SQLite ATTACH 同型（嵌入式正统设计；PostgreSQL 单连接锁死单库为反例）——`Database` 增 attach 注册表 `Map<别名, AttachedFile>`（各持 table_manager/storage/BufferPool）+ 表名命名空间「别名.表」解析（I039 落地的 11 处表名消费点扩展）+ 每文件独立 RC 快照；文件锁为 try_lock 不等待，交叉 attach 死锁结构性不可能（一方直接 `DatabaseLocked` exit 4）。两期拆分：一期只读跨查 + CTAS（`CREATE TABLE AS SELECT`，单独即单库通用 SQL 增益；`new` + attach + CTAS 组合覆盖物化全场景）；二期跨文件 DML（每文件独立提交、非原子 v1 语义文档化——SQLite 跨 attach 原子提交亦需 master journal 级机制）
+- **身份过滤器判定**: 异步/嵌入式/CLI 三词全沾（attach 文件走同一异步扫描路径 / 无 daemon 多文件互查的正统设计 / 一行命令跨库抽取合并分析、agent 场景强化）——判定依据见 R25 分析「定位裁定与决策过滤器」节
+- **状态**: planned（2026-09-24 用户方向登记，未排期；初版 MS17 交付后评估；与 crate 化路线 B 顺风——attach 注册表催生「多文件会话」抽象）
+
+## I060: WAL 与 checkpoint 伴生文件加密
+
+- **分类**: 安全 / 存储
+- **问题**: MS17-T01 只加密主数据库文件；`.wal` 仍含可重放记录，`.checkpoint` 仍公开位点与事务水位。加密数据库运行期间，伴生文件可能泄露表/行内容或恢复元数据
+- **方案**: 独立 change 评估 WAL 帧与 checkpoint 载荷的加密/认证格式，明确密钥派生、nonce/tag、格式协商、旧明文库兼容、错误密钥拒绝与恢复失败边界；先确认威胁模型和兼容要求，再决定是否实施
+- **状态**: planned（2026-09-24 MS17 初版收尾登记；用户裁定为初版非目标，未排期）
 
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

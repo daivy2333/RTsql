@@ -17,6 +17,10 @@ pub enum ValueRef<'a> {
     Null,
     Float(f64),
     Bool(bool),
+    /// 日期（MS13：自 0001-01-01 起的天数）
+    Date(i32),
+    /// 时间戳（MS13：Unix epoch 微秒）
+    Timestamp(i64),
 }
 
 impl<'a> Eq for ValueRef<'a> {}
@@ -30,6 +34,8 @@ impl<'a> Hash for ValueRef<'a> {
             Self::Null => {}
             Self::Float(f) => f.to_bits().hash(state),
             Self::Bool(b) => b.hash(state),
+            Self::Date(d) => d.hash(state),
+            Self::Timestamp(t) => t.hash(state),
         }
     }
 }
@@ -43,6 +49,8 @@ impl<'a> ValueRef<'a> {
             Self::Null => Value::Null,
             Self::Float(f) => Value::Float(*f),
             Self::Bool(b) => Value::Bool(*b),
+            Self::Date(d) => Value::Date(*d),
+            Self::Timestamp(t) => Value::Timestamp(*t),
         }
     }
 
@@ -78,6 +86,9 @@ impl<'a> ValueRef<'a> {
             (Self::Text(a), Self::Text(b)) => a == b,
             (Self::Float(a), Self::Float(b)) => a == b,
             (Self::Bool(a), Self::Bool(b)) => a == b,
+            // MS13: 日期族同类型比较（跨族 false 兜底不变）
+            (Self::Date(a), Self::Date(b)) => a == b,
+            (Self::Timestamp(a), Self::Timestamp(b)) => a == b,
             (Self::Int(a), Self::Float(b)) => (*a as f64) == *b,
             (Self::Float(a), Self::Int(b)) => *a == (*b as f64),
             _ => false,
@@ -91,6 +102,9 @@ impl<'a> ValueRef<'a> {
             (Self::Text(a), Self::Text(b)) => Ok(a > b),
             (Self::Float(a), Self::Float(b)) => Ok(a > b),
             (Self::Bool(a), Self::Bool(b)) => Ok(a > b),
+            // MS13: 日期族同类型时间序比较
+            (Self::Date(a), Self::Date(b)) => Ok(a > b),
+            (Self::Timestamp(a), Self::Timestamp(b)) => Ok(a > b),
             (Self::Int(a), Self::Float(b)) => Ok((*a as f64) > *b),
             (Self::Float(a), Self::Int(b)) => Ok(*a > *b as f64),
             _ => Err(ValueError::TypeMismatch),
@@ -104,6 +118,9 @@ impl<'a> ValueRef<'a> {
             (Self::Text(a), Self::Text(b)) => Ok(a < b),
             (Self::Float(a), Self::Float(b)) => Ok(a < b),
             (Self::Bool(a), Self::Bool(b)) => Ok(a < b),
+            // MS13: 日期族同类型时间序比较
+            (Self::Date(a), Self::Date(b)) => Ok(a < b),
+            (Self::Timestamp(a), Self::Timestamp(b)) => Ok(a < b),
             (Self::Int(a), Self::Float(b)) => Ok((*a as f64) < *b),
             (Self::Float(a), Self::Int(b)) => Ok(*a < *b as f64),
             _ => Err(ValueError::TypeMismatch),
@@ -117,6 +134,9 @@ impl<'a> ValueRef<'a> {
             (Self::Text(a), Self::Text(b)) => Ok(a >= b),
             (Self::Float(a), Self::Float(b)) => Ok(a >= b),
             (Self::Bool(a), Self::Bool(b)) => Ok(a >= b),
+            // MS13: 日期族同类型时间序比较
+            (Self::Date(a), Self::Date(b)) => Ok(a >= b),
+            (Self::Timestamp(a), Self::Timestamp(b)) => Ok(a >= b),
             (Self::Int(a), Self::Float(b)) => Ok((*a as f64) >= *b),
             (Self::Float(a), Self::Int(b)) => Ok(*a >= *b as f64),
             _ => Err(ValueError::TypeMismatch),
@@ -130,6 +150,9 @@ impl<'a> ValueRef<'a> {
             (Self::Text(a), Self::Text(b)) => Ok(a <= b),
             (Self::Float(a), Self::Float(b)) => Ok(a <= b),
             (Self::Bool(a), Self::Bool(b)) => Ok(a <= b),
+            // MS13: 日期族同类型时间序比较
+            (Self::Date(a), Self::Date(b)) => Ok(a <= b),
+            (Self::Timestamp(a), Self::Timestamp(b)) => Ok(a <= b),
             (Self::Int(a), Self::Float(b)) => Ok((*a as f64) <= *b),
             (Self::Float(a), Self::Int(b)) => Ok(*a <= *b as f64),
             _ => Err(ValueError::TypeMismatch),

@@ -4,8 +4,8 @@ use crate::executor::{
     DeleteExecutor, DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
     HavingExecutor, IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig,
     JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, PhysicalPlan,
-    ProjectionExecutor, ScanExecutor, SemiJoinExecutorV2, SortExecutor, SubqueryEvalExecutor,
-    UpdateExecutor, Value,
+    ProjectionExecutor, ScanExecutor, SemiJoinExecutorV2, SingleRowExecutor, SortExecutor,
+    SubqueryEvalExecutor, UpdateExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
@@ -571,6 +571,7 @@ pub(crate) fn create_executor_from_plan(
                 let AggregateNode {
                     input,
                     group_by,
+                    group_key_exprs,
                     aggregates,
                     output_columns,
                     table_name: _,
@@ -581,6 +582,7 @@ pub(crate) fn create_executor_from_plan(
                 Ok(Box::new(AggregateExecutor::new(
                     input_executor,
                     group_by,
+                    group_key_exprs,
                     aggregates,
                     output_columns,
                     column_indices,
@@ -780,6 +782,11 @@ pub(crate) fn create_executor_from_plan(
                 let items = node.items.into_iter().map(|item| item.expr).collect();
                 Ok(Box::new(ProjectionExecutor::new(input, items)) as Box<dyn Executor + Send>)
             }
+
+            PhysicalPlan::SingleRow => {
+                // MS13 T9: no-FORM 虚拟单行输入（恰产出一行空行）
+                Ok(Box::new(SingleRowExecutor::new()) as Box<dyn Executor + Send>)
+            }
         }
     })
 }
@@ -802,6 +809,11 @@ pub(crate) fn value_to_json(value: Value) -> serde_json::Value {
             }
         }
         Value::Bool(b) => serde_json::Value::Bool(b),
+        // MS13: 日期族按 DA5 字符串形态渲染
+        Value::Date(d) => serde_json::Value::String(crate::executor::datetime::format_date(d)),
+        Value::Timestamp(t) => {
+            serde_json::Value::String(crate::executor::datetime::format_timestamp(t))
+        }
     }
 }
 
@@ -939,6 +951,8 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
                 .collect();
             Ok((indices, node.table_name.clone()))
         }
+        // MS13 T9: no-FORM 输入节点不可达此处（无列消费方）；空臂防御。
+        PhysicalPlan::SingleRow => Ok((HashMap::new(), String::new())),
         _ => Err(crate::storage::StorageError::ExecutionError(
             "Expected Scan, Join, SemiJoin, AntiJoin, Filter, Aggregate, SubqueryEval, DerivedScan, IndexScan, or IndexScanAll".into(),
         )),

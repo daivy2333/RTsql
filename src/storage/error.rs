@@ -21,6 +21,9 @@ pub enum StorageError {
     #[error("incompatible database header: {0}")]
     IncompatibleHeader(String),
 
+    #[error("invalid key: {0}")]
+    InvalidKey(String),
+
     #[error("Page size mismatch: expected {expected}, got {actual}")]
     PageSizeMismatch { expected: usize, actual: usize },
 
@@ -53,6 +56,12 @@ pub enum StorageError {
         column: String,
         expected: String,
         actual: String,
+    },
+
+    #[error("invalid {expected} value: '{value}'")]
+    InvalidDateTime {
+        value: String,
+        expected: &'static str,
     },
 
     #[error("Page full")]

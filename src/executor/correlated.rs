@@ -83,6 +83,8 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
         | PhysicalPlan::Delete(_)
         | PhysicalPlan::CreateTable(_)
         | PhysicalPlan::DropTable(_) => {}
+        // MS13 T9: no-FORM 输入节点无谓词、无子计划
+        PhysicalPlan::SingleRow => {}
     }
 }
 

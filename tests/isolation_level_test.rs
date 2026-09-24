@@ -291,3 +291,140 @@ async fn rc_autocommit_matches_default_path() {
     );
     assert_eq!(rc_rows, vec![row(1, 20)]);
 }
+
+/// mvcc-tombstone-visibility (MS17-T02 T5): the page-level visibility summary
+/// must not poison visibility. After a restart the in-memory summary is empty;
+/// the first full scan lazily establishes it (`set_all_visible` first-builds
+/// `min_create = u64::MAX`), and the committed delete then clears
+/// `all_visible`. The stale `{u64::MAX, false}` entry must fall back to
+/// per-row checks — the remaining committed rows stay reachable through both
+/// the PK point-lookup and the full-scan path. RED before the fix: the stale
+/// entry reports the whole page all-invisible, so both reads return empty.
+///
+/// Fixture note: the checkpoint site carries the allocator watermark
+/// (MS17-T02 Iter002), so the reopened RC database's high-water mark already
+/// covers the pre-restart tx ids — no scratch DML is needed to raise it, and
+/// table t keeps no summary entry until the scan below arms it via the
+/// entry-less `set_all_visible` first-build.
+#[tokio::test]
+async fn rc_scan_then_delete_keeps_remaining_rows_reachable_after_restart() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("rc-summary-poison.db");
+
+    {
+        let db = Database::open_with_isolation(&path, IsolationLevel::ReadCommitted)
+            .await
+            .unwrap();
+        create_t(&db).await;
+        for i in 1..=3 {
+            assert_affected(
+                db.execute_sql(&format!("INSERT INTO t VALUES ({i}, {i}0)"))
+                    .await,
+                "committed insert",
+                1,
+            );
+        }
+        db.close().await.unwrap();
+    } // dropped: releases the advisory file lock before reopening
+
+    // Reopen: the process-local vis_map starts empty, so the scan below arms
+    // the summary via set_all_visible's entry-less first-build.
+    let db = Database::open_with_isolation(&path, IsolationLevel::ReadCommitted)
+        .await
+        .unwrap();
+
+    let scan = rows(
+        db.execute_sql("SELECT * FROM t").await,
+        "scan after restart",
+    );
+    assert_eq!(
+        scan.len(),
+        3,
+        "precondition: three committed rows survive the restart"
+    );
+
+    assert_affected(
+        db.execute_sql("DELETE FROM t WHERE id = 1").await,
+        "committed delete",
+        1,
+    );
+
+    let lookup = rows(
+        db.execute_sql("SELECT * FROM t WHERE id = 2").await,
+        "point lookup after delete",
+    );
+    assert_eq!(
+        lookup,
+        vec![row(2, 20)],
+        "stale page summary must not hide a committed row from the point-lookup path"
+    );
+    let scan = rows(
+        db.execute_sql("SELECT * FROM t").await,
+        "full scan after delete",
+    );
+    assert_eq!(
+        scan.len(),
+        2,
+        "stale page summary must not hide committed rows from the scan path"
+    );
+}
+
+/// transaction-isolation-levels S1/S3 (MS17-T02 Iter002): after a clean close
+/// (checkpoint truncates the WAL), the checkpoint site carries the allocator
+/// watermark, so a reopened Read Committed database sees all pre-restart
+/// committed rows immediately — without any new DML raising the high-water
+/// mark. RED before the fix: the truncated WAL leaves no Begin/Commit frames,
+/// recovery observes no ids, the allocator restarts at zero, and the first
+/// SELECT returns zero rows. The trailing insert is the S3 witness: the
+/// post-restart tx id exceeds the site watermark, so the new row coexists
+/// with the pre-restart rows in one RC statement.
+#[tokio::test]
+async fn rc_reopen_sees_committed_rows_without_new_dml() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("rc-reopen-watermark.db");
+
+    {
+        let db = Database::open_with_isolation(&path, IsolationLevel::ReadCommitted)
+            .await
+            .unwrap();
+        create_t(&db).await;
+        for i in 1..=3 {
+            assert_affected(
+                db.execute_sql(&format!("INSERT INTO t VALUES ({i}, {i}0)"))
+                    .await,
+                "committed insert",
+                1,
+            );
+        }
+        db.close().await.unwrap();
+    } // dropped: releases the advisory file lock before reopening
+
+    let db = Database::open_with_isolation(&path, IsolationLevel::ReadCommitted)
+        .await
+        .unwrap();
+
+    let scan = rows(
+        db.execute_sql("SELECT * FROM t").await,
+        "immediate scan after reopen",
+    );
+    assert_eq!(
+        scan,
+        vec![row(1, 10), row(2, 20), row(3, 30)],
+        "S1: committed rows must be visible immediately after reopen, got {scan:?}"
+    );
+
+    assert_affected(
+        db.execute_sql("INSERT INTO t VALUES (4, 40)").await,
+        "post-restart insert",
+        1,
+    );
+    let scan = rows(
+        db.execute_sql("SELECT * FROM t").await,
+        "scan after new insert",
+    );
+    assert_eq!(
+        scan,
+        vec![row(1, 10), row(2, 20), row(3, 30), row(4, 40)],
+        "S3: the new row's tx id exceeds the site watermark; old and new rows coexist in one statement, got {scan:?}"
+    );
+}

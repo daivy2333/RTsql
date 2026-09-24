@@ -45,6 +45,8 @@ pub enum PlanError {
     SubqueryReturnsMultipleRow,
     /// 子查询返回多列（IN 子查询要求单列）
     SubqueryReturnsMultipleColumns,
+    /// IN 子查询计划含 JOIN 节点（MS17-T02/ISS02：点名 JOIN 的诚实拒绝）
+    InSubqueryJoinUnsupported,
     /// 标量子查询返回空结果
     SubqueryReturnsEmpty,
     /// 不支持的子查询位置
@@ -100,6 +102,9 @@ impl fmt::Display for PlanError {
                 f,
                 "Subquery returns multiple columns (IN subquery requires single column)"
             ),
+            PlanError::InSubqueryJoinUnsupported => {
+                write!(f, "IN subquery with JOIN is not supported")
+            }
             PlanError::SubqueryReturnsEmpty => write!(f, "Scalar subquery returns empty result"),
             PlanError::UnsupportedSubqueryPosition => write!(f, "Unsupported subquery position"),
             PlanError::CorrelatedParamError(msg) => {

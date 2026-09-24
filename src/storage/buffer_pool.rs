@@ -7,6 +7,7 @@ use crate::storage::{
     page_format::SlottedPageRef,
     page_frame::{PageFrame, PageGuard},
     AsyncStorage, Page, PageId, PageVisibilityInfo, Result, RowId, StorageError,
+    MIN_CREATE_UNKNOWN,
 };
 use crate::transaction::{Snapshot, VersionHeader};
 
@@ -387,11 +388,20 @@ impl BufferPool {
 
     /// Clear the all_visible flag for a page.
     /// Called by INSERT/DELETE/UPDATE/COMMIT paths.
+    ///
+    /// The first-build records the [`MIN_CREATE_UNKNOWN`]
+    /// sentinel instead of `Default`'s `0`: the write path always follows with
+    /// `update_visibility_on_insert`, whose `min()` merge must see UNKNOWN —
+    /// not 0 — or the real writer id would be pinned to 0 forever and the
+    /// all-invisible fast path could never fire (MS17-T02 close-out).
     pub fn clear_all_visible(&self, page_id: PageId) {
         self.vis_map
             .entry(page_id)
             .and_modify(|info| info.all_visible = false)
-            .or_default();
+            .or_insert(PageVisibilityInfo {
+                min_create_tx_id: MIN_CREATE_UNKNOWN,
+                all_visible: false,
+            });
     }
 
     /// Update visibility info after a new row is inserted on this page.
@@ -455,5 +465,54 @@ impl BufferPool {
         })
         .await
         .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::FileStorage;
+    use tempfile::tempdir;
+
+    fn setup() -> (BufferPool, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("vis-test.db")).unwrap());
+        let pool = BufferPool::new(10, storage).unwrap();
+        (pool, dir)
+    }
+
+    /// MS17-T02 T5 (MAX poison): `set_all_visible` on an entry-less page
+    /// first-builds `{u64::MAX, true}`; a later write clears `all_visible`
+    /// without touching `min_create_tx_id`. The stale `{UNKNOWN, false}` entry
+    /// must fall back to per-row checks, not report the whole page invisible.
+    #[test]
+    fn cleared_page_after_set_all_visible_never_reports_all_invisible() {
+        let (pool, _dir) = setup();
+        let page = PageId(0);
+        pool.set_all_visible(page);
+        pool.clear_all_visible(page);
+        let info = pool.get_visibility(page).expect("summary entry exists");
+        assert!(
+            !info.all_invisible_for(0),
+            "stale UNKNOWN min_create must fall back to per-row checks"
+        );
+    }
+
+    /// MS17-T02 T5 (0 poison): the write path builds the summary entry via
+    /// `clear_all_visible` before `update_visibility_on_insert` — the
+    /// first-build must use the UNKNOWN sentinel so the subsequent min() merge
+    /// records the real writer id instead of pinning 0 forever.
+    #[test]
+    fn insert_after_first_build_records_real_min_create() {
+        let (pool, _dir) = setup();
+        let page = PageId(0);
+        pool.clear_all_visible(page);
+        pool.update_visibility_on_insert(page, 7);
+        let info = pool.get_visibility(page).expect("summary entry exists");
+        assert_eq!(info.min_create_tx_id, 7, "real writer id must be recorded");
+        assert!(!info.all_visible);
+        // Merged real value keeps strict-greater semantics (S1 scenario THEN).
+        assert!(info.all_invisible_for(6));
+        assert!(!info.all_invisible_for(7));
     }
 }

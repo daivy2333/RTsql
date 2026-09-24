@@ -6,11 +6,13 @@
 //! per-module imports are introduced.
 
 use super::PlanBuilder;
+use crate::executor::datetime::{interval_parts_from_unit, parse_interval_string, IntervalParts};
 use crate::executor::{
-    check_scalar_function, is_scalar_function, CaseExpression, CastExpression, CastType,
-    CoalesceExpression, ColumnExpression, ColumnRef, ComparisonOp, ComparisonPredicate,
-    ConstantExpression, ExpressionRef, FunctionExpression, IsNullPredicate, LikePredicate,
-    LogicalOp, LogicalPredicate, NotPredicate, ParameterExpression, PredicateRef, Value,
+    check_scalar_function, is_scalar_function, ArithOp, BinaryArithExpression, CaseExpression,
+    CastExpression, CastType, CoalesceExpression, ColumnExpression, ColumnRef, ComparisonOp,
+    ComparisonPredicate, ConstantExpression, ExpressionRef, FunctionExpression,
+    IntervalArithExpression, IsNullPredicate, LikePredicate, LogicalOp, LogicalPredicate,
+    NotPredicate, ParameterExpression, PredicateRef, Value,
 };
 use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
@@ -102,7 +104,7 @@ impl PlanBuilder {
         &self,
         data_type: &sqlparser::ast::DataType,
     ) -> Result<CastType, PlanError> {
-        use sqlparser::ast::DataType;
+        use sqlparser::ast::{DataType, TimezoneInfo};
         Ok(match data_type {
             DataType::Int(_)
             | DataType::Int4(_)
@@ -136,6 +138,12 @@ impl PlanBuilder {
 
             DataType::Bool | DataType::Boolean => CastType::Bool,
 
+            // MS13 T5: 日期族 CAST 目标（datetime-type-system R5）；带时区
+            // 变体落入下方既有未知类型拒绝。
+            DataType::Date => CastType::Date,
+            DataType::Datetime(_) => CastType::Timestamp,
+            DataType::Timestamp(_, TimezoneInfo::None) => CastType::Timestamp,
+
             other => {
                 return Err(PlanError::ParseError(format!(
                     "Unsupported CAST target type: {}",
@@ -145,8 +153,62 @@ impl PlanBuilder {
         })
     }
 
-    /// MS11-T03: shared body of the CEIL/FLOOR dedicated-variant arms. Only
-    /// the plain `fn(x)` form is supported; `fn(x TO field)` is rejected by
+    /// MS13 T7: 解缠绕 sqlparser INTERVAL 吞比较形态。`d + INTERVAL '1 day' > X`
+    /// 被 sqlparser 解析为 `Plus(d, Interval{ value: Gt('1 day', X) })`——
+    /// 算术腿是谓词顶层而比较被埋进 interval.value。本 helper 仅在该形态
+    /// 命中时还原为 `IntervalArith(d, ±, '1 day') <比较> X` 谓词；其余形状
+    /// 返回 `None` 交回既有比较臂（interval 自身畸形仍经 parse 点名拒绝）。
+    fn unswallow_interval_comparison(
+        &self,
+        table_name: &str,
+        left: &Expr,
+        op: &sqlparser::ast::BinaryOperator,
+        right: &Expr,
+    ) -> Result<Option<PredicateRef>, PlanError> {
+        use sqlparser::ast::BinaryOperator as SqlOp;
+        let arith_op = match op {
+            SqlOp::Plus => ArithOp::Add,
+            SqlOp::Minus => ArithOp::Sub,
+            _ => return Ok(None),
+        };
+        let Expr::Interval(interval) = right else {
+            return Ok(None);
+        };
+        let Expr::BinaryOp {
+            left: lit,
+            op: cmp_op,
+            right: rest,
+        } = interval.value.as_ref()
+        else {
+            return Ok(None);
+        };
+        // 仅比较操作符命中；AND/OR 等更低优先级不会进入 value（解析即终止）
+        let Some(comp_op) = self.convert_comparison_op(cmp_op) else {
+            return Ok(None);
+        };
+        // 重建仅含字面量值的 Interval 并按既有解析路径取区间值
+        let rebuilt = sqlparser::ast::Interval {
+            value: Box::new((**lit).clone()),
+            leading_field: interval.leading_field,
+            leading_precision: interval.leading_precision,
+            last_field: interval.last_field,
+            fractional_seconds_precision: interval.fractional_seconds_precision,
+        };
+        let parts = parse_interval_expr(&rebuilt)?;
+        let left_expr = Arc::new(IntervalArithExpression {
+            left: self.build_expression(table_name, left)?,
+            op: arith_op,
+            interval: parts,
+        });
+        let right_expr = self.build_expression(table_name, rest)?;
+        Ok(Some(Arc::new(ComparisonPredicate {
+            left: left_expr,
+            op: comp_op,
+            right: right_expr,
+        })))
+    }
+
+    /// MS11-T03: shared body of the CEIL/FLOOR dedicated-variant arms. Only    /// the plain `fn(x)` form is supported; `fn(x TO field)` is rejected by
     /// name (mirrors the TRIM specification-form rejection).
     fn build_ceil_floor(
         &self,
@@ -290,6 +352,89 @@ impl PlanBuilder {
                 let value = value_from_sqlparser(v)?;
                 Ok(Arc::new(ConstantExpression { value }))
             }
+            // MS13 T4: `DATE '...'` / `TIMESTAMP '...'` 类型字面量（sqlparser
+            // TypedString）在 plan 期解析为对应值；解析失败点名报错，非日期族
+            // 类型名维持既有 Unsupported 拒绝。
+            Expr::TypedString { data_type, value } => {
+                use sqlparser::ast::{DataType, TimezoneInfo};
+                let parsed = match data_type {
+                    DataType::Date => crate::executor::datetime::parse_date(value).map(Value::Date),
+                    DataType::Datetime(_) | DataType::Timestamp(_, TimezoneInfo::None) => {
+                        crate::executor::datetime::parse_timestamp(value).map(Value::Timestamp)
+                    }
+                    _ => None,
+                };
+                match parsed {
+                    Some(v) => Ok(Arc::new(ConstantExpression { value: v })),
+                    None => match data_type {
+                        DataType::Date
+                        | DataType::Datetime(_)
+                        | DataType::Timestamp(_, TimezoneInfo::None) => Err(PlanError::ParseError(
+                            format!("invalid DATE/TIMESTAMP literal: '{value}'"),
+                        )),
+                        _ => Err(PlanError::UnsupportedExpression),
+                    },
+                }
+            }
+            // MS13 T4: BinaryOp 算术项（WITH-FORM `SELECT id + 1` 解锁，
+            // no-from-select R3 场景；编译路径 design D13）。AND/OR 与比较
+            // 操作符由 build_where 处理，此处仅接受四则算术；求值语义：NULL
+            // 传播、严格数值面（非数值操作符类型错误）、Int/Int 截断除。
+            // MS13 T7: INTERVAL 腿在数值分流之前探测（design D11）——仅
+            // `<date/timestamp> ± INTERVAL` 可达；INTERVAL 在左、双侧、
+            // 乘除腿点名拒绝（左操作数的 Date/Timestamp 类型在求值期校验，
+            // plan 期无法判定列类型）。
+            Expr::BinaryOp { left, op, right } => {
+                use sqlparser::ast::BinaryOperator as SqlOp;
+                let left_interval = try_parse_interval(left)?;
+                let right_interval = try_parse_interval(right)?;
+                match (left_interval, right_interval) {
+                    (Some(_), Some(_)) => Err(PlanError::ParseError(
+                        "INTERVAL ± INTERVAL arithmetic is not supported".to_string(),
+                    )),
+                    (Some(_), None) => Err(PlanError::ParseError(
+                        "INTERVAL is only supported on the right side of +/- (e.g. date + INTERVAL '1 day')"
+                            .to_string(),
+                    )),
+                    (None, Some(interval)) => {
+                        let arith_op = match op {
+                            SqlOp::Plus => ArithOp::Add,
+                            SqlOp::Minus => ArithOp::Sub,
+                            other => {
+                                return Err(PlanError::ParseError(format!(
+                                    "INTERVAL arithmetic supports only + and -, not {other}"
+                                )))
+                            }
+                        };
+                        Ok(Arc::new(IntervalArithExpression {
+                            left: self.build_expression(table_name, left)?,
+                            op: arith_op,
+                            interval,
+                        }))
+                    }
+                    (None, None) => {
+                        let arith_op = match op {
+                            SqlOp::Plus => ArithOp::Add,
+                            SqlOp::Minus => ArithOp::Sub,
+                            SqlOp::Multiply => ArithOp::Mul,
+                            SqlOp::Divide => ArithOp::Div,
+                            _ => return Err(PlanError::UnsupportedExpression),
+                        };
+                        Ok(Arc::new(BinaryArithExpression {
+                            left: self.build_expression(table_name, left)?,
+                            op: arith_op,
+                            right: self.build_expression(table_name, right)?,
+                        }))
+                    }
+                }
+            }
+            // MS13 T7: INTERVAL 不可独立求值（不可存储/不可投影/不可比较）——
+            // 仅在 `<date/timestamp> ± INTERVAL` 算术位置可达（BinaryOp 臂
+            // 分流到 IntervalArithExpression）；到达此臂即为非法位置，点名拒绝。
+            Expr::Interval(_) => Err(PlanError::ParseError(
+                "INTERVAL is only supported as `<date/timestamp> +/- INTERVAL` in an arithmetic expression"
+                    .to_string(),
+            )),
             // MS11-T01: CAST — strict four-family target mapping; the FORMAT
             // clause and unknown types are rejected, not silently degraded.
             Expr::Cast {
@@ -515,6 +660,16 @@ impl PlanBuilder {
                         }))
                     }
                     _ => {
+                        // MS13 T7: sqlparser 0.44 的 INTERVAL 语法把紧随的
+                        // 比较操作吞入 interval.value（`d + INTERVAL '1 day' > X`
+                        // 解析为 `d + INTERVAL('1 day' > X)`——value 是宽表达式）。
+                        // 此处解缠绕：`<expr> ± INTERVAL{比较}` 还原为
+                        // 「区间算术 <比较> 右侧表达式」谓词，恢复用户书写意图。
+                        if let Some(pred) =
+                            self.unswallow_interval_comparison(table_name, left, op, right)?
+                        {
+                            return Ok(pred);
+                        }
                         // Try to convert to comparison operator
                         let comp_op = self
                             .convert_comparison_op(op)
@@ -651,5 +806,75 @@ pub(crate) fn expr_to_column_name(expr: &Expr) -> Result<String, PlanError> {
         _ => Err(PlanError::InvalidAggregateArgument(
             "Expected column name".to_string(),
         )),
+    }
+}
+
+/// MS13 T7（design D11）：`Expr::Interval` → 内部区间值；非 Interval 表达式
+/// 返回 `None`，畸形 INTERVAL（多字段/精度语法/未知单位/多段字符串）返回
+/// 点名 `ParseError`。
+fn try_parse_interval(e: &Expr) -> Result<Option<IntervalParts>, PlanError> {
+    match e {
+        Expr::Interval(interval) => Ok(Some(parse_interval_expr(interval)?)),
+        _ => Ok(None),
+    }
+}
+
+/// 解析 sqlparser `Interval`：支持 `INTERVAL 'N unit'`（字符串内嵌单位，
+/// leading_field=None）与 `INTERVAL N UNIT` / `INTERVAL 'N' UNIT`
+///（leading_field=Some，六主力单位）。多字段（`YEAR TO MONTH` 的
+/// last_field 形态）、精度语法、六主力单位之外的字段（WEEK 等）点名拒绝。
+fn parse_interval_expr(interval: &sqlparser::ast::Interval) -> Result<IntervalParts, PlanError> {
+    use sqlparser::ast::{DateTimeField, Value as SqlValue};
+    if interval.last_field.is_some() {
+        return Err(PlanError::ParseError(
+            "INTERVAL with multiple fields (e.g. YEAR TO MONTH) is not supported".to_string(),
+        ));
+    }
+    if interval.leading_precision.is_some() || interval.fractional_seconds_precision.is_some() {
+        return Err(PlanError::ParseError(
+            "INTERVAL precision syntax is not supported".to_string(),
+        ));
+    }
+    match (&*interval.value, interval.leading_field) {
+        // 字符串形态：单位内嵌于字符串
+        (Expr::Value(SqlValue::SingleQuotedString(s)), None) => {
+            parse_interval_string(s).map_err(PlanError::ParseError)
+        }
+        // 数值/纯整数字符串 + 单位字段
+        (Expr::Value(v), Some(field)) => {
+            let unit = match field {
+                DateTimeField::Year => "year",
+                DateTimeField::Month => "month",
+                DateTimeField::Day => "day",
+                DateTimeField::Hour => "hour",
+                DateTimeField::Minute => "minute",
+                DateTimeField::Second => "second",
+                other => {
+                    return Err(PlanError::ParseError(format!(
+                        "INTERVAL unit {other:?} is not supported (supported: year, month, day, hour, minute, second)"
+                    )))
+                }
+            };
+            let n: i64 = match v {
+                SqlValue::Number(n, _) => n
+                    .parse()
+                    .map_err(|_| PlanError::ParseError(format!("invalid INTERVAL value '{n}'")))?,
+                SqlValue::SingleQuotedString(s) => s.trim().parse().map_err(|_| {
+                    PlanError::ParseError(format!(
+                        "invalid INTERVAL value '{s}' for a typed unit (expected an integer)"
+                    ))
+                })?,
+                other => {
+                    return Err(PlanError::ParseError(format!(
+                        "invalid INTERVAL value {other:?} (expected a number)"
+                    )))
+                }
+            };
+            interval_parts_from_unit(unit, n)
+                .ok_or_else(|| PlanError::ParseError("INTERVAL value out of range".to_string()))
+        }
+        (other, _) => Err(PlanError::ParseError(format!(
+            "invalid INTERVAL value {other:?} (expected `INTERVAL '<n> <unit>'` or `INTERVAL <n> <unit>`)"
+        ))),
     }
 }

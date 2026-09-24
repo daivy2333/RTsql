@@ -58,6 +58,12 @@ pub enum PhysicalPlan {
     DerivedScan(DerivedScanNode),
     /// 投影表达式节点（MS11-T01 Iter001 — SELECT 派生列）
     Projection(ProjectionNode),
+    /// 无 FROM 虚拟单行输入节点（MS13 T9 — no-FORM SELECT）
+    ///
+    /// 恰产出一行空行（`vec![]`），供其上的 ProjectionNode 逐项求值；无负载
+    /// 字段（design D13）。列引用在 no-FORM 分支编译期即 ColumnNotFound，
+    /// 空行不可达（安全性质）。
+    SingleRow,
 }
 
 /// 全表扫描节点
@@ -204,6 +210,9 @@ impl ColumnDef {
             ColumnType::String => StorageColumnType::String(255), // 默认长度 255
             ColumnType::Float => StorageColumnType::Float,
             ColumnType::Bool => StorageColumnType::Bool,
+            // MS13: 日期族直映射（固定宽度负载，无长度参数）
+            ColumnType::Date => StorageColumnType::Date,
+            ColumnType::Timestamp => StorageColumnType::Timestamp,
         };
 
         // 解析约束
@@ -343,10 +352,16 @@ pub struct NestedLoopJoinNode {
 }
 
 /// 聚合节点（GROUP BY + 聚合函数）
+///
+/// MS13 T8：`group_key_exprs` 为加性字段——分组键的求值表达式（列名键 =
+/// `ColumnExpression`，与既有 `extract_group_key` 名字查索引语义逐字节
+/// 一致；表达式/别名/位置键 = 对应 SELECT 项的编译表达式）。`group_by`
+/// 保留键名清单（执行器 `is_empty` 判定与输出命名）。
 #[derive(Debug, Clone)]
 pub struct AggregateNode {
     pub input: Box<PhysicalPlan>,
     pub group_by: Vec<String>,
+    pub group_key_exprs: Vec<ExpressionRef>,
     pub aggregates: Vec<AggregateFunc>,
     pub output_columns: Vec<String>,
     pub table_name: String,

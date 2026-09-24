@@ -7,9 +7,11 @@ TBD - created by archiving change 2026-09-06-ms10-t01-cli-shell. Update Purpose 
 
 ### Requirement: 参数化 CLI 入口与主命令
 
-`rtsql` 二进制 SHALL 提供 `rtsql <db> <sql>` one-shot 主命令：解析参数、打开数据库、执行 SQL（单条语句，或以 `;` 分隔的多条语句逐条执行）、渲染结果到 stdout、以分类退出码退出。进程正常退出前 SHALL 调用 `Database::close()`（checkpoint + WAL 截断）。主命令参数缺失或非法时 SHALL 以退出码 2 报用法错误。打开时遇跨进程锁冲突 SHALL 以退出码 4 报 `database is locked`。
+`rtsql` 二进制 SHALL 提供 `rtsql <db> <sql>` one-shot 主命令：解析参数、打开数据库、执行 SQL（单条语句，或以 `;` 分隔的多条语句逐条执行）、渲染结果到 stdout、以分类退出码退出。进程正常退出前 SHALL 调用 `Database::close()`（checkpoint + WAL 截断）。主命令参数缺失或非法时 SHALL 以退出码 2 报用法错误。打开时遇跨进程锁冲突 SHALL 以退出码 4 报 `database is locked`；打开时遇密钥错误 SHALL 以退出码 5 报 `invalid key` 语义消息（密钥语义见 `database-encryption` spec）。
 
-`rtsql` SHALL 同时提供生命周期子命令 `new` / `list` / `schema` / `dump` / `restore` / `import`：第一个位置参数命中子命令名时 SHALL 分发到对应子命令（子命令优先），未命中时按主命令位置参数解析。子命令参数缺失或非法时 SHALL 以退出码 2 报用法错误。裸名与子命令名同名的数据库 SHALL 以含 `/` 的路径形式经主命令打开（冲突行为文档化）。
+`rtsql` SHALL 同时提供生命周期子命令 `new` / `list` / `schema` / `dump` / `restore` / `import` 与分析子命令 `stats` / `sample` / `profile`：第一个位置参数命中子命令名时 SHALL 分发到对应子命令（子命令优先），未命中时按主命令位置参数解析。子命令参数缺失或非法时 SHALL 以退出码 2 报用法错误。裸名与子命令名同名的数据库 SHALL 以含 `/` 的路径形式经主命令打开（冲突行为文档化）。
+
+`rtsql` SHALL 提供全局参数 `--key <KEY>`（含环境变量 `RTSQL_KEY` 通道）作用于全部开库命令，并 SHALL 提供 `completions` 隐藏子命令（见「Shell 补全脚本生成」Requirement）；两者的完整语义分别在 `database-encryption` spec 与本文件 completions Requirement 权威记录。
 
 #### Scenario: one-shot SELECT 执行成功
 
@@ -21,7 +23,7 @@ TBD - created by archiving change 2026-09-06-ms10-t01-cli-shell. Update Purpose 
 #### Scenario: 用法错误退出码 2
 
 - **GIVEN** 任意环境
-- **WHEN** `rtsql`（无参数）或 `rtsql --format bogus db "SELECT 1"`（非法选项值）或 `rtsql <db>`（缺 SQL 参数）
+- **WHEN** `rtsql`（无参数）或 `rtsql --format bogus db "SELECT 1"`（非法选项值）或 `rtsql <db>`（缺 SQL 参数）或 `rtsql --key "" <db> "SELECT 1"`（空密钥）
 - **THEN** stderr 输出用法信息，退出码 2，不打开任何数据库
 
 #### Scenario: SQL 错误退出码 3
@@ -35,14 +37,14 @@ TBD - created by archiving change 2026-09-06-ms10-t01-cli-shell. Update Purpose 
 - **GIVEN** 某持有者已锁定目标库文件
 - **WHEN** `rtsql <db> "SELECT 1"`
 - **THEN** stderr 输出以 `database is locked` 开头的错误信息（含目标路径），退出码 4，且不执行任何 SQL
-- **AND** 密钥错误退出码 5 仍为枚举留位（MS12 落地）
+- **AND** 锁冲突 SHALL 优先于密钥错误（加密库被占用时无密钥打开仍报退出码 4）
 
 #### Scenario: 退出码枚举为后续任务留位
 
-- **GIVEN** CLI 退出码枚举（0/2/3/4/5）
+- **GIVEN** CLI 退出码枚举（0/1/2/3/4/5）
 - **WHEN** 本 capability 落地后的代码审查
-- **THEN** 退出码 4（锁冲突）已由本 Requirement 的锁冲突场景获得产生路径（T02 落地）
-- **AND** 退出码 5（密钥）已存在于枚举与映射表中，但尚无产生路径（MS12 落地）
+- **THEN** 退出码 4（锁冲突）已由锁冲突场景获得产生路径（T02 落地）
+- **AND** 退出码 5（密钥）已由 `database-encryption` spec 的错误面获得产生路径（本 change 落地——错误密钥/加密无钥/明文带钥，场景见该 spec「退出码 5 产生路径」）
 
 #### Scenario: 子命令分发与主命令零回归
 
@@ -474,3 +476,41 @@ CLI SHALL 对以 `;` 分隔的多条 SQL 语句逐条执行：每条语句独立
 - **GIVEN** 某持有者已锁定目标库文件
 - **WHEN** `rtsql import <db> <table> data.csv --csv`
 - **THEN** stderr 输出以 `database is locked` 开头的错误信息，退出码 4
+
+### Requirement: 标量子查询输出列的表头形状
+
+SELECT 清单含标量子查询项（`SELECT col, (SELECT …) AS alias FROM t` 形态）时，CLI 输出表头 SHALL 在该标量列的输出位置（`result_column_index`）携带其列名（别名或表达式名），SHALL NOT 返回未插入标量列名的输入计划列名。json 输出 `columns` 数组长度 SHALL 与 `rows` 每行值数一致；table/csv/tsv 表头 SHALL 与值列对齐。标量列名来源与既有执行器插入语义一致（`SubqueryEvalExecutor` 在 `result_column_index` 插入标量值，索引越界时追加）。不含标量子查询项的既有形态（含 I034 已锁定的扫描投影表头）SHALL 逐字节保持。来源：MS17-T02（ISS03；change `2026-09-23-ms17-t02-defect-closeout`）。
+
+#### Scenario: 表头在标量位置携带列名
+
+- **GIVEN** 表 `emp(id INT, name VARCHAR, salary INT)` 与 `dept(rid INT, region VARCHAR)` 存在关联数据（标量子查询可返回单行）
+- **WHEN** `SELECT id, (SELECT region FROM dept WHERE dept.rid = emp.id) AS region FROM emp`，输出格式 json
+- **THEN** `columns` 为 `["id", "region", "name", "salary"]`（别名在 index 1，输入计划列名保持原序列于其后），`columns` 长度等于每行 `rows` 值数，标量值位于行内 index 1
+
+#### Scenario: 标量子查询位于中间位置时 table 表头对齐
+
+- **GIVEN** 同上数据
+- **WHEN** `SELECT id, name, (SELECT region FROM dept WHERE dept.rid = emp.id) AS region FROM emp`，输出格式 table
+- **THEN** 表头为 `id | name | region | salary` 四列，与四值行对齐，标量列名位于标量值所在位置（index 2）；change 前表头为 `[id, name, salary]` 三列，对四值行错位且无 `region` 列名
+
+#### Scenario: 非标量子查询形态零回归
+
+- **GIVEN** 既有投影表头用例（I034 锁定的裸 DataScan/IndexScan 表头断言与 cli_test 全部既有用例）
+- **WHEN** 全量测试运行
+- **THEN** 全部零修改通过；不含标量子查询的查询表头行为逐字节不变
+
+### Requirement: Shell 补全脚本生成
+
+`rtsql` SHALL 提供隐藏子命令 `rtsql completions <shell>`，`<shell>` SHALL 接受 `bash` / `zsh` / `fish` 三值；执行 SHALL 向 stdout 输出对应 shell 的补全脚本（clap_complete 运行时生成，覆盖主命令、全局参数与全部子命令）。该子命令 SHALL NOT 出现在 `--help` 输出中（隐藏面）。`<shell>` 缺失或取值非法时 SHALL 以退出码 2 报用法错误。生成路径 SHALL NOT 打开数据库、不消费密钥。
+
+#### Scenario: 三 shell 补全脚本生成
+
+- **GIVEN** 任意环境（无需任何数据库）
+- **WHEN** 分别执行 `rtsql completions bash`、`rtsql completions zsh`、`rtsql completions fish`
+- **THEN** stdout 各输出非空补全脚本，内容含 `rtsql` 命令名与 `--key` 等全局参数，退出码 0
+
+#### Scenario: 隐藏面与用法错误
+
+- **GIVEN** 任意环境
+- **WHEN** 执行 `rtsql --help`；再执行 `rtsql completions`（缺参数）与 `rtsql completions powershell`（未收窄值）
+- **THEN** `--help` 输出不含 completions；后两者以退出码 2 报用法错误

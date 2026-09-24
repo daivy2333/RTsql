@@ -9,14 +9,24 @@ use super::ddl_dml::is_pure_equi_join_on;
 use super::expression::expr_to_column_name;
 use super::PlanBuilder;
 use crate::executor::{
-    DataScanNode, FilterNode, IndexScanNode, OrderByColumn, OutputColumn, PhysicalPlan,
-    ProjectionItem, ProjectionNode, ScanNode, SortNode,
+    ColumnExpression, DataScanNode, ExpressionRef, FilterNode, IndexScanNode, OrderByColumn,
+    OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode, ScanNode, SortNode,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
 use crate::parser::value::value_from_sqlparser;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Query, TableFactor};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// MS13 T8: 解析后的 GROUP BY 键——列名键（`column`）或表达式键（匹配的
+/// SELECT 项索引 `expr_item`）。`name` 为键名（列名 / SELECT 项名），用于
+/// 输出装配、严格检查与 HAVING 绑定。
+pub(crate) struct GroupKey {
+    name: String,
+    column: Option<String>,
+    expr_item: Option<usize>,
+}
 
 /// MS15-Rest (I034): describe a scan node's real output shape. The scan
 /// executors trim rows by `projection` after predicate evaluation, so the
@@ -101,12 +111,139 @@ impl PlanBuilder {
                 .iter()
                 .map(|c| c.column.clone())
                 .collect(),
-            PhysicalPlan::SubqueryEval(node) => self.get_plan_output_columns(&node.input),
+            PhysicalPlan::SubqueryEval(node) => {
+                // MS17-T02/ISS03: 执行器在 result_column_index 插入标量值
+                //（越界时 push，见 executor/subquery_eval.rs）——表头镜像该
+                // 语义插入标量列名，保证列数与行宽一致。
+                let mut columns = self.get_plan_output_columns(&node.input);
+                let idx = node.result_column_index.min(columns.len());
+                columns.insert(idx, node.output_column.clone());
+                columns
+            }
             PhysicalPlan::Projection(node) => node.columns.clone(),
+            // MS13 T9: SingleRow 无输出列（no-FORM 输入节点，表头由其上的
+            // ProjectionNode 承载）。
+            PhysicalPlan::SingleRow => Vec::new(),
             PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => {
                 Vec::new()
             }
             PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => Vec::new(),
+        }
+    }
+
+    /// MS13 T8（design D12）：解析单个 GROUP BY 项——列名（既有语义优先）
+    /// → SELECT 别名（大小写不敏感）→ SELECT 项表达式文本（双侧
+    /// `Expr::to_string()` 归一比较）→ 1-based 位置引用；全部不匹配 →
+    /// `NonAggregatedColumn` 点名。命中聚合项的别名/文本/位置键显式拒绝
+    ///（键不得为聚合）。
+    pub(crate) fn resolve_group_by_item(
+        &self,
+        expr: &Expr,
+        projection: &[sqlparser::ast::SelectItem],
+        column_indices: &HashMap<String, usize>,
+    ) -> Result<GroupKey, PlanError> {
+        match expr {
+            Expr::Identifier(ident) => {
+                let name = ident.value.clone();
+                // 列名（既有语义优先）
+                if column_indices.contains_key(&name.to_lowercase()) {
+                    return Ok(GroupKey {
+                        name: name.clone(),
+                        column: Some(name),
+                        expr_item: None,
+                    });
+                }
+                // SELECT 别名（大小写不敏感）
+                for (i, item) in projection.iter().enumerate() {
+                    if let sqlparser::ast::SelectItem::ExprWithAlias { expr: e, alias } = item {
+                        if alias.value.eq_ignore_ascii_case(&name) {
+                            if is_aggregate_expr(e) {
+                                return Err(PlanError::NonAggregatedColumn(name));
+                            }
+                            return Ok(GroupKey {
+                                name: alias.value.clone(),
+                                column: None,
+                                expr_item: Some(i),
+                            });
+                        }
+                    }
+                }
+                Err(PlanError::NonAggregatedColumn(name))
+            }
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let name = parts[1].value.clone();
+                if column_indices.contains_key(&name.to_lowercase()) {
+                    Ok(GroupKey {
+                        name: name.clone(),
+                        column: Some(name),
+                        expr_item: None,
+                    })
+                } else {
+                    Err(PlanError::NonAggregatedColumn(name))
+                }
+            }
+            Expr::Value(sqlparser::ast::Value::Number(n, _)) => {
+                // 位置引用（1-based，≤ 投影项数）
+                let pos: usize = n
+                    .parse()
+                    .map_err(|_| PlanError::NonAggregatedColumn(n.clone()))?;
+                let idx = pos
+                    .checked_sub(1)
+                    .filter(|i| *i < projection.len())
+                    .ok_or_else(|| PlanError::NonAggregatedColumn(n.clone()))?;
+                match &projection[idx] {
+                    sqlparser::ast::SelectItem::UnnamedExpr(e) => {
+                        if is_aggregate_expr(e) {
+                            return Err(PlanError::NonAggregatedColumn(e.to_string()));
+                        }
+                        Ok(GroupKey {
+                            name: e.to_string(),
+                            column: None,
+                            expr_item: Some(idx),
+                        })
+                    }
+                    sqlparser::ast::SelectItem::ExprWithAlias { expr: e, alias } => {
+                        if is_aggregate_expr(e) {
+                            return Err(PlanError::NonAggregatedColumn(alias.value.clone()));
+                        }
+                        Ok(GroupKey {
+                            name: alias.value.clone(),
+                            column: None,
+                            expr_item: Some(idx),
+                        })
+                    }
+                    other => Err(PlanError::NonAggregatedColumn(other.to_string())),
+                }
+            }
+            other => {
+                // 表达式文本匹配（双侧 to_string 归一比较；聚合项不参与）
+                let text = other.to_string();
+                for (i, item) in projection.iter().enumerate() {
+                    let matched = match item {
+                        sqlparser::ast::SelectItem::UnnamedExpr(e) => {
+                            !is_aggregate_expr(e) && e.to_string() == text
+                        }
+                        sqlparser::ast::SelectItem::ExprWithAlias { expr: e, .. } => {
+                            !is_aggregate_expr(e) && e.to_string() == text
+                        }
+                        _ => false,
+                    };
+                    if matched {
+                        let name = match item {
+                            sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => {
+                                alias.value.clone()
+                            }
+                            _ => text.clone(),
+                        };
+                        return Ok(GroupKey {
+                            name,
+                            column: None,
+                            expr_item: Some(i),
+                        });
+                    }
+                }
+                Err(PlanError::NonAggregatedColumn(text))
+            }
         }
     }
 
@@ -327,6 +464,18 @@ impl PlanBuilder {
         // Extract Select body
         let select = extract_select_body(query)?;
 
+        // === MS13 T9: no-FROM SELECT（I035）===
+        // 无 FROM 的 SELECT 经虚拟单行输入（SingleRow）产出恰一行：先拒绝面
+        // 逐项点名（通配符 / WHERE / GROUP BY / HAVING / ORDER BY / LIMIT /
+        // 聚合项），再逐项 `build_expression` 编译并包 `Projection(SingleRow)`。
+        // 置于子查询检测之前——no-FORM 形态不进入聚合/SubqueryEval 装配；
+        // 列引用经既有 `ColumnNotFound`、子查询项经既有 `UnsupportedExpression`
+        // 兜底拒绝。`building_subquery` 上下文同样生效（内层 no-FORM 子查询
+        // 经既有 SubqueryEval/SemiJoin 消费面自然可达）。
+        if select.from.is_empty() {
+            return self.build_no_from_select(select, query);
+        }
+
         // === Scalar subquery detection in SELECT projection ===
         // Scan projection for Expr::Subquery items and build subquery plans
         // Also detect correlated parameters (outer table column references)
@@ -418,6 +567,18 @@ impl PlanBuilder {
         // 不报错——路由在下文统一裁决：非聚合 → 顶层 Projection；聚合 →
         // 保持聚合路径报错（design D4：检测循环裁决顺序不变）。
         let mut has_expression_items = false;
+        // MS13 T8: 每个 SELECT 项的聚合装配角色（None = 子查询/通配等不经
+        // 聚合装配的项），供混合投影校验、分组键归属与条件包装消费。
+        #[derive(Clone)]
+        enum SelectItemRole {
+            /// 聚合项（输出名 = result_column_name / 别名）
+            Aggregate(String),
+            /// 纯列名项（列名，大小写保留）
+            Column(String),
+            /// 表达式项（输出名 = 别名 / 表达式文本）
+            Expression(String),
+        }
+        let mut item_roles: Vec<Option<SelectItemRole>> = vec![None; select.projection.len()];
 
         for (item_idx, item) in select.projection.iter().enumerate() {
             // Skip subquery items (handled by SubqueryEval plan node later)
@@ -432,14 +593,18 @@ impl PlanBuilder {
                                 "Unknown aggregate function".to_string(),
                             )
                         })?;
-                        agg_output_columns.push(func.result_column_name());
+                        let name = func.result_column_name();
+                        agg_output_columns.push(name.clone());
+                        item_roles[item_idx] = Some(SelectItemRole::Aggregate(name));
                         aggregates.push(func);
                     } else if !building_subquery && !is_plain_column_expr(expr) {
                         has_expression_items = true;
+                        item_roles[item_idx] = Some(SelectItemRole::Expression(expr.to_string()));
                     } else {
                         let col = expr_to_column_name(expr)?;
                         non_agg_columns.push(col.clone());
-                        agg_output_columns.push(col);
+                        agg_output_columns.push(col.clone());
+                        item_roles[item_idx] = Some(SelectItemRole::Column(col));
                     }
                 }
                 sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
@@ -449,14 +614,19 @@ impl PlanBuilder {
                                 "Unknown aggregate function".to_string(),
                             )
                         })?;
-                        agg_output_columns.push(alias.value.clone());
+                        let name = alias.value.clone();
+                        agg_output_columns.push(name.clone());
+                        item_roles[item_idx] = Some(SelectItemRole::Aggregate(name));
                         aggregates.push(func);
                     } else if !building_subquery && !is_plain_column_expr(expr) {
                         has_expression_items = true;
+                        item_roles[item_idx] =
+                            Some(SelectItemRole::Expression(alias.value.clone()));
                     } else {
                         let col = expr_to_column_name(expr)?;
                         non_agg_columns.push(col.clone());
                         agg_output_columns.push(alias.value.clone());
+                        item_roles[item_idx] = Some(SelectItemRole::Column(col));
                     }
                 }
                 _ => {} // Wildcard etc. — not relevant for aggregate queries
@@ -465,14 +635,43 @@ impl PlanBuilder {
 
         let has_aggregates = !aggregates.is_empty();
 
-        // === MS11-T01 Iter001: SELECT 表达式项路由 ===
-        let projection_items = if has_expression_items {
-            // 聚合查询保持聚合路径报错（非聚合项不可与聚合混用）
-            if has_aggregates {
-                return Err(PlanError::InvalidAggregateArgument(
-                    "Expected column name".to_string(),
+        // === MS13 T8: SELECT 表达式项路由 ===
+        // 混合投影（表达式项 + 聚合）解锁：输出装配由聚合分支的条件包装
+        // 承担（每个表达式项 SHALL 解析到某 GROUP BY 键，校验在 GROUP BY
+        // 解析后）；范围外混用形态维持既有显式拒绝。纯表达式查询（无聚合）
+        // 走既有顶层 Projection 通路，裁决顺序不变。
+        let mixed_aggregate = has_expression_items && has_aggregates;
+        if mixed_aggregate {
+            // 标量子查询项会追加一列（SubqueryEval 移位输出形状），与混合
+            // 投影显式拒绝；子查询单独出现维持现状
+            if !subquery_evals.is_empty() {
+                return Err(PlanError::ParseError(
+                    "Expression projection items cannot be mixed with scalar subquery items"
+                        .to_string(),
                 ));
             }
+            // JOIN 输出形状是列过滤而非逐项求值，表达式项 + JOIN 显式拒绝
+            //（MS09-T02: 两种 join 节点同语义，拒绝面不因新节点形状漏接）
+            if matches!(
+                base_plan,
+                PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_)
+            ) {
+                return Err(PlanError::ParseError(
+                    "Expression projection items are not supported with JOIN queries".to_string(),
+                ));
+            }
+            // `SELECT *, expr` 通配混用拒绝（通配单独出现维持现状）
+            if select
+                .projection
+                .iter()
+                .any(|item| matches!(item, sqlparser::ast::SelectItem::Wildcard(_)))
+            {
+                return Err(PlanError::ParseError(
+                    "SELECT * cannot be mixed with expression projection items".to_string(),
+                ));
+            }
+        }
+        let projection_items = if has_expression_items && !mixed_aggregate {
             // 标量子查询项会追加一列（SubqueryEval 移位输出形状），与表达式
             // 项混用显式拒绝；子查询单独出现维持现状
             if !subquery_evals.is_empty() {
@@ -700,31 +899,13 @@ impl PlanBuilder {
 
         // Build aggregate plan if needed
         let plan_with_aggregate = if has_aggregates {
-            // Extract GROUP BY columns
-            let group_by: Vec<String> = match &select.group_by {
-                sqlparser::ast::GroupByExpr::Expressions(exprs) => exprs
-                    .iter()
-                    .map(expr_to_column_name)
-                    .collect::<Result<Vec<_>, _>>()?,
-                sqlparser::ast::GroupByExpr::All => {
-                    // GROUP BY ALL: all non-aggregate columns
-                    non_agg_columns.clone()
-                }
-            };
-
-            // Strict mode: non-aggregate columns must appear in GROUP BY
-            for col in &non_agg_columns {
-                if !group_by.contains(col) {
-                    return Err(PlanError::NonAggregatedColumn(col.clone()));
-                }
-            }
-
             // Build column index mapping from input plan.
             // MS10-T01 Iter001: unified through get_plan_output_columns, which
             // describes the input plan's real output shape on every form —
             // IndexScan/IndexScanAll inputs previously fell into the empty
             // fallback and silently NULL-ed aggregates (and mis-mapped GROUP
             // BY keys).
+            // MS13 T8: 前移——分组键解析与编译消费 column_indices。
             let input_schema = self.get_plan_output_columns(&plan_with_where);
             let column_indices: HashMap<String, usize> = input_schema
                 .iter()
@@ -732,9 +913,175 @@ impl PlanBuilder {
                 .map(|(i, col)| (col.to_lowercase(), i))
                 .collect();
 
-            // Build HAVING predicate BEFORE consuming agg_output_columns
+            // MS13 T8: GROUP BY 项解析（design D12 顺序：列名（既有）→
+            // SELECT 别名 → SELECT 项表达式文本 → 1-based 位置；全部不匹配
+            // → NonAggregatedColumn 点名）。
+            let group_keys: Vec<GroupKey> = match &select.group_by {
+                sqlparser::ast::GroupByExpr::Expressions(exprs) => exprs
+                    .iter()
+                    .map(|e| self.resolve_group_by_item(e, &select.projection, &column_indices))
+                    .collect::<Result<Vec<_>, _>>()?,
+                sqlparser::ast::GroupByExpr::All => {
+                    // GROUP BY ALL: all non-aggregate columns（列名键，既有语义）
+                    non_agg_columns
+                        .iter()
+                        .map(|col| GroupKey {
+                            name: col.clone(),
+                            column: Some(col.clone()),
+                            expr_item: None,
+                        })
+                        .collect()
+                }
+            };
+            let group_by: Vec<String> = group_keys.iter().map(|k| k.name.clone()).collect();
+
+            // Strict mode: non-aggregate columns must appear in GROUP BY
+            //（名字包含检查与既有语义一致——大小写敏感，列名键名 = 既有
+            // expr_to_column_name 产物）
+            for col in &non_agg_columns {
+                if !group_by.contains(col) {
+                    return Err(PlanError::NonAggregatedColumn(col.clone()));
+                }
+            }
+
+            // MS13 T8 混合投影校验：每个表达式 SELECT 项必须被某分组键匹配
+            //（别名/表达式文本/位置），否则 NonAggregatedColumn 点名。
+            for (i, role) in item_roles.iter().enumerate() {
+                if let Some(SelectItemRole::Expression(name)) = role {
+                    if !group_keys.iter().any(|k| k.expr_item == Some(i)) {
+                        return Err(PlanError::NonAggregatedColumn(name.clone()));
+                    }
+                }
+            }
+
+            // MS13 T8: 分组键编译为求值表达式。列名键 = ColumnExpression
+            //（column_indices 已知索引，与既有 extract_group_key 名字查索引
+            // 语义逐字节一致）；表达式键 = 匹配 SELECT 项的编译表达式。
+            let group_key_exprs: Vec<ExpressionRef> = group_keys
+                .iter()
+                .map(|k| match &k.column {
+                    Some(col) => {
+                        let idx = *column_indices
+                            .get(&col.to_lowercase())
+                            .ok_or_else(|| PlanError::NonAggregatedColumn(col.clone()))?;
+                        Ok(Arc::new(ColumnExpression {
+                            column_name: col.to_lowercase(),
+                            column_index: idx,
+                        }) as ExpressionRef)
+                    }
+                    None => {
+                        let item = &select.projection[k.expr_item.expect("validated at resolve")];
+                        let e = match item {
+                            sqlparser::ast::SelectItem::UnnamedExpr(e) => e,
+                            sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => expr,
+                            _ => unreachable!("aggregate/wildcard keys rejected at resolve"),
+                        };
+                        self.build_expression(&table_name, e)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // MS13 T8 输出装配（design D12）：直出路径零变化判定——无表达式
+            // 项、全部键为纯列名、且 SELECT 序为「键项在前、聚合项在后」；
+            // 否则（表达式键或交错序）在 Aggregate/Having 之上包一层
+            // ProjectionNode（键项/聚合项按聚合行位置重排，列名 = SELECT 名）。
+            let keys_all_column = group_keys.iter().all(|k| k.column.is_some());
+            let mut seen_aggregate = false;
+            let mut select_keys_first = true;
+            for role in item_roles.iter().flatten() {
+                match role {
+                    SelectItemRole::Column(_) => {
+                        if seen_aggregate {
+                            select_keys_first = false;
+                        }
+                    }
+                    SelectItemRole::Aggregate(_) => seen_aggregate = true,
+                    SelectItemRole::Expression(_) => select_keys_first = false,
+                }
+            }
+            let direct = !has_expression_items && keys_all_column && select_keys_first;
+
+            let key_count = group_keys.len();
+            let agg_names: Vec<String> = item_roles
+                .iter()
+                .flatten()
+                .filter_map(|r| match r {
+                    SelectItemRole::Aggregate(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            // 输出列名：直出 = 既有 agg_output_columns（SELECT 序，逐字节
+            // 保持）；包装 = 行序（GROUP BY 键序 ++ 聚合序，供 HAVING 绑定
+            // 与聚合行形状一致）。
+            let node_output_columns = if direct {
+                agg_output_columns
+            } else {
+                group_keys
+                    .iter()
+                    .map(|k| k.name.clone())
+                    .chain(agg_names)
+                    .collect()
+            };
+
+            // 条件包装项（仅非直出形态）：SELECT 项 → 聚合行位置的
+            // ColumnExpression 重排，列名 = SELECT 名。
+            let wrap_projection = if direct {
+                None
+            } else {
+                let mut items = Vec::with_capacity(select.projection.len());
+                let mut agg_seen = 0usize;
+                for (i, role) in item_roles.iter().enumerate() {
+                    match role {
+                        None => {}
+                        Some(SelectItemRole::Column(col)) => {
+                            let gpos = group_keys
+                                .iter()
+                                .position(|k| {
+                                    k.column
+                                        .as_deref()
+                                        .is_some_and(|c| c.eq_ignore_ascii_case(col))
+                                })
+                                .ok_or_else(|| PlanError::NonAggregatedColumn(col.clone()))?;
+                            items.push(ProjectionItem {
+                                expr: Arc::new(ColumnExpression {
+                                    column_name: col.to_lowercase(),
+                                    column_index: gpos,
+                                }),
+                                name: col.clone(),
+                            });
+                        }
+                        Some(SelectItemRole::Expression(name)) => {
+                            let gpos = group_keys
+                                .iter()
+                                .position(|k| k.expr_item == Some(i))
+                                .expect("mixed projection validated above");
+                            items.push(ProjectionItem {
+                                expr: Arc::new(ColumnExpression {
+                                    column_name: name.to_lowercase(),
+                                    column_index: gpos,
+                                }),
+                                name: name.clone(),
+                            });
+                        }
+                        Some(SelectItemRole::Aggregate(name)) => {
+                            items.push(ProjectionItem {
+                                expr: Arc::new(ColumnExpression {
+                                    column_name: name.to_lowercase(),
+                                    column_index: key_count + agg_seen,
+                                }),
+                                name: name.clone(),
+                            });
+                            agg_seen += 1;
+                        }
+                    }
+                }
+                let columns = items.iter().map(|it| it.name.clone()).collect();
+                Some((items, columns))
+            };
+
+            // Build HAVING predicate BEFORE consuming node_output_columns
             let having_pred = if let Some(having_expr) = &select.having {
-                Some(self.build_having(having_expr, &agg_output_columns)?)
+                Some(self.build_having(having_expr, &node_output_columns)?)
             } else {
                 None
             };
@@ -742,14 +1089,15 @@ impl PlanBuilder {
             let agg_plan = PhysicalPlan::Aggregate(crate::executor::AggregateNode {
                 input: Box::new(plan_with_where),
                 group_by,
+                group_key_exprs,
                 aggregates,
-                output_columns: agg_output_columns,
+                output_columns: node_output_columns,
                 table_name: table_name.clone(),
                 column_indices,
             });
 
             // Wrap with HAVING if predicate was built
-            if let Some(having_pred) = having_pred {
+            let with_having = if let Some(having_pred) = having_pred {
                 PhysicalPlan::Having(crate::executor::HavingNode {
                     input: Box::new(agg_plan),
                     predicate: having_pred,
@@ -757,6 +1105,15 @@ impl PlanBuilder {
                 })
             } else {
                 agg_plan
+            };
+
+            match wrap_projection {
+                Some((items, columns)) => PhysicalPlan::Projection(ProjectionNode {
+                    input: Box::new(with_having),
+                    items,
+                    columns,
+                }),
+                None => with_having,
             }
         } else {
             plan_with_where
@@ -874,6 +1231,113 @@ impl PlanBuilder {
         }
 
         Ok(plan)
+    }
+
+    /// MS13 T9（design D13）：no-FROM SELECT——拒绝面先行，逐项编译表达式，
+    /// 包 `Projection(SingleRow)`（恰产出一行）。表头 = 别名 / 表达式文本
+    /// （既有表达式项语义）；行数恰 1。
+    fn build_no_from_select(
+        &mut self,
+        select: &sqlparser::ast::Select,
+        query: &Query,
+    ) -> Result<PhysicalPlan, PlanError> {
+        // 拒绝面：通配符与聚合项（逐项点名）
+        for item in &select.projection {
+            match item {
+                sqlparser::ast::SelectItem::Wildcard(_) => {
+                    return Err(PlanError::ParseError(
+                        "SELECT * is not supported without FROM".to_string(),
+                    ));
+                }
+                sqlparser::ast::SelectItem::QualifiedWildcard(_, _) => {
+                    return Err(PlanError::ParseError(
+                        "Qualified wildcard is not supported without FROM".to_string(),
+                    ));
+                }
+                sqlparser::ast::SelectItem::UnnamedExpr(expr)
+                | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
+                    if is_aggregate_expr(expr) {
+                        return Err(PlanError::ParseError(format!(
+                            "Aggregate function {} is not supported without FROM",
+                            expr
+                        )));
+                    }
+                }
+            }
+        }
+        // 拒绝面：各子句逐一点名（LIMIT 与 OFFSET 各自报）
+        if select.selection.is_some() {
+            return Err(PlanError::ParseError(
+                "WHERE clause is not supported without FROM".to_string(),
+            ));
+        }
+        match &select.group_by {
+            sqlparser::ast::GroupByExpr::Expressions(exprs) if exprs.is_empty() => {}
+            _ => {
+                return Err(PlanError::ParseError(
+                    "GROUP BY clause is not supported without FROM".to_string(),
+                ))
+            }
+        }
+        if select.having.is_some() {
+            return Err(PlanError::ParseError(
+                "HAVING clause is not supported without FROM".to_string(),
+            ));
+        }
+        if !query.order_by.is_empty() {
+            return Err(PlanError::ParseError(
+                "ORDER BY clause is not supported without FROM".to_string(),
+            ));
+        }
+        if query.limit.is_some() {
+            return Err(PlanError::ParseError(
+                "LIMIT clause is not supported without FROM".to_string(),
+            ));
+        }
+        if query.offset.is_some() {
+            return Err(PlanError::ParseError(
+                "OFFSET clause is not supported without FROM".to_string(),
+            ));
+        }
+
+        // 可达面：逐项编译（无表注册）。空布局覆盖（MS09-T02 NLJ layout
+        // 机制的空表形态）使列引用走既有布局搜索臂——空布局无命中 → 既有
+        // `ColumnNotFound`（spec R2/S3 列不存在类错误，零新文案）；限定名
+        // → 既有 `TableNotFound`。save/restore 与 NLJ 配对同型。
+        let saved_layout = self.join_column_layout.take();
+        self.join_column_layout = Some(Vec::new());
+        let compiled = (|| {
+            let mut items = Vec::with_capacity(select.projection.len());
+            for item in &select.projection {
+                match item {
+                    sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
+                        let built = self.build_expression("", expr)?;
+                        items.push(ProjectionItem {
+                            expr: built,
+                            name: expr.to_string(),
+                        });
+                    }
+                    sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
+                        let built = self.build_expression("", expr)?;
+                        items.push(ProjectionItem {
+                            expr: built,
+                            name: alias.value.clone(),
+                        });
+                    }
+                    _ => unreachable!("wildcards rejected above"),
+                }
+            }
+            Ok(items)
+        })();
+        self.join_column_layout = saved_layout;
+        let items = compiled?;
+
+        let columns = items.iter().map(|i| i.name.clone()).collect();
+        Ok(PhysicalPlan::Projection(ProjectionNode {
+            input: Box::new(PhysicalPlan::SingleRow),
+            items,
+            columns,
+        }))
     }
 
     /// Check if WHERE clause is a simple PK equality (pk = value)

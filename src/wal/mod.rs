@@ -10,7 +10,7 @@ mod recovery;
 mod writer;
 
 pub use buffer::WALBuffer;
-pub use checkpoint::CheckpointManager;
+pub use checkpoint::{CheckpointManager, CheckpointSite};
 pub use reader::WalReader;
 pub use record::{WalError, WalRecord, WalRecordType};
 pub use recovery::RecoveryManager;

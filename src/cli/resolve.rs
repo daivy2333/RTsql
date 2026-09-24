@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bare_name_env_cases() {
+    fn test_env_resolution_cases() {
         let _guard = EnvGuard::capture();
 
         // 裸名默认：RTSQL_HOME 未设置，HOME 决定基目录
@@ -94,16 +94,6 @@ mod tests {
             resolve_db_path("foo").unwrap(),
             PathBuf::from("/tmp/rtshome/db/foo.db")
         );
-
-        // HOME 与 RTSQL_HOME 均缺失 → Err
-        std::env::remove_var("RTSQL_HOME");
-        std::env::remove_var("HOME");
-        assert!(resolve_db_path("foo").is_err());
-    }
-
-    #[test]
-    fn test_db_dir_env_cases() {
-        let _guard = EnvGuard::capture();
 
         // HOME 默认基目录：base/db
         std::env::remove_var("RTSQL_HOME");
@@ -122,6 +112,7 @@ mod tests {
         // HOME 与 RTSQL_HOME 均缺失 → Err
         std::env::remove_var("RTSQL_HOME");
         std::env::remove_var("HOME");
+        assert!(resolve_db_path("foo").is_err());
         assert!(rtsql_home().is_err());
         assert!(db_dir().is_err());
     }

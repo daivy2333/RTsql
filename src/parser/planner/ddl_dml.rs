@@ -261,6 +261,31 @@ impl PlanBuilder {
                                             Err(PlanError::UnsupportedValue)
                                         }
                                     }
+                                    // MS13 T4: 类型字面量 plan 期解析（决策 2）；
+                                    // 解析失败点名报错，非日期族类型名维持既有拒绝。
+                                    Expr::TypedString { data_type, value } => {
+                                        use sqlparser::ast::{DataType, TimezoneInfo};
+                                        match data_type {
+                                            DataType::Date => crate::executor::datetime::parse_date(value)
+                                                .map(Value::Date)
+                                                .ok_or_else(|| {
+                                                    PlanError::ParseError(format!(
+                                                        "invalid DATE/TIMESTAMP literal: '{value}'"
+                                                    ))
+                                                }),
+                                            DataType::Datetime(_)
+                                            | DataType::Timestamp(_, TimezoneInfo::None) => {
+                                                crate::executor::datetime::parse_timestamp(value)
+                                                    .map(Value::Timestamp)
+                                                    .ok_or_else(|| {
+                                                        PlanError::ParseError(format!(
+                                                            "invalid DATE/TIMESTAMP literal: '{value}'"
+                                                        ))
+                                                    })
+                                            }
+                                            _ => Err(PlanError::UnsupportedValue),
+                                        }
+                                    }
                                     _ => Err(PlanError::UnsupportedValue),
                                 }
                             })
@@ -272,9 +297,15 @@ impl PlanBuilder {
         }
     }
 
-    /// Convert sqlparser DataType to ColumnType
-    pub(crate) fn convert_data_type(&self, data_type: &sqlparser::ast::DataType) -> ColumnType {
-        use sqlparser::ast::DataType;
+    /// Convert sqlparser DataType to ColumnType. MS13: DATE/TIMESTAMP map
+    /// explicitly (decision 1); timezone-aware timestamp, TIME and INTERVAL
+    /// are rejected by name — INTERVAL is expression-only and never a stored
+    /// column type — while other unknown types keep the String fallback.
+    pub(crate) fn convert_data_type(
+        &self,
+        data_type: &sqlparser::ast::DataType,
+    ) -> Result<ColumnType, PlanError> {
+        use sqlparser::ast::{DataType, TimezoneInfo};
         match data_type {
             // Integer types -> Int
             DataType::Int(_)
@@ -285,7 +316,7 @@ impl PlanBuilder {
             | DataType::SmallInt(_)
             | DataType::Int2(_)
             | DataType::TinyInt(_)
-            | DataType::MediumInt(_) => ColumnType::Int,
+            | DataType::MediumInt(_) => Ok(ColumnType::Int),
 
             // String types -> String
             DataType::Varchar(_)
@@ -297,7 +328,7 @@ impl PlanBuilder {
             | DataType::Text
             | DataType::Clob(_)
             | DataType::CharacterLargeObject(_)
-            | DataType::CharLargeObject(_) => ColumnType::String,
+            | DataType::CharLargeObject(_) => Ok(ColumnType::String),
 
             // Float types -> Float
             DataType::Float(_)
@@ -306,13 +337,31 @@ impl PlanBuilder {
             | DataType::Real
             | DataType::Double
             | DataType::Float8
-            | DataType::DoublePrecision => ColumnType::Float,
+            | DataType::DoublePrecision => Ok(ColumnType::Float),
 
             // Boolean types -> Bool
-            DataType::Bool | DataType::Boolean => ColumnType::Bool,
+            DataType::Bool | DataType::Boolean => Ok(ColumnType::Bool),
 
-            // Unknown/unsupported types -> Null (placeholder)
-            _ => ColumnType::String, // Default to String for unknown types
+            // MS13: 日期族显式映射（决策 1）——DATETIME 与无时区信息/无时区
+            // TIMESTAMP 落 Timestamp；带时区变体与 TIME 点名拒绝。
+            DataType::Date => Ok(ColumnType::Date),
+            DataType::Datetime(_) => Ok(ColumnType::Timestamp),
+            DataType::Timestamp(_, TimezoneInfo::None) => Ok(ColumnType::Timestamp),
+            DataType::Timestamp(_, _) => Err(PlanError::ParseError(format!(
+                "Unsupported column type: {data_type} (time-zone-aware timestamps are not supported)"
+            ))),
+            DataType::Time(_, _) => Err(PlanError::ParseError(format!(
+                "Unsupported column type: {data_type}"
+            ))),
+
+            // MS13: INTERVAL 仅作表达式构造，不可作列类型存储（决策 1）。
+            DataType::Interval => Err(PlanError::ParseError(
+                "Unsupported column type: INTERVAL (interval is expression-only and cannot be a stored column type)"
+                    .to_string(),
+            )),
+
+            // Unknown/unsupported types -> String (existing fallback)
+            _ => Ok(ColumnType::String), // Default to String for unknown types
         }
     }
 
@@ -439,7 +488,7 @@ impl PlanBuilder {
             .iter()
             .map(|col| {
                 let col_name = col.name.value.to_lowercase();
-                let col_type = self.convert_data_type(&col.data_type);
+                let col_type = self.convert_data_type(&col.data_type)?;
                 let col_constraints = self.extract_column_constraints(col)?;
                 Ok(ColumnDef {
                     name: col_name,
@@ -517,6 +566,30 @@ impl PlanBuilder {
         // Extract new value
         let new_value = match &assignment.value {
             Expr::Value(v) => value_from_sqlparser(v)?,
+            // MS13 T4: 类型字面量 plan 期解析（决策 2）；裸字符串的强制解析
+            // 在 UpdateExecutor 按目标列类型进行。
+            Expr::TypedString { data_type, value } => {
+                use sqlparser::ast::{DataType, TimezoneInfo};
+                match data_type {
+                    DataType::Date => crate::executor::datetime::parse_date(value)
+                        .map(Value::Date)
+                        .ok_or_else(|| {
+                            PlanError::ParseError(format!(
+                                "invalid DATE/TIMESTAMP literal: '{value}'"
+                            ))
+                        })?,
+                    DataType::Datetime(_) | DataType::Timestamp(_, TimezoneInfo::None) => {
+                        crate::executor::datetime::parse_timestamp(value)
+                            .map(Value::Timestamp)
+                            .ok_or_else(|| {
+                                PlanError::ParseError(format!(
+                                    "invalid DATE/TIMESTAMP literal: '{value}'"
+                                ))
+                            })?
+                    }
+                    _ => return Err(PlanError::UnsupportedValue),
+                }
+            }
             Expr::Identifier(ident) => {
                 if ident.value.to_uppercase() == "NULL" {
                     Value::Null

@@ -275,9 +275,12 @@ async fn aggregate_expression_error_preserved() {
         db.execute_sql("SELECT COUNT(*), CASE WHEN 1 = 1 THEN 'x' END FROM t")
             .await,
     );
+    // MS13 T8 校准（BH-1 同型）：混合投影解锁后，未分组表达式项仍显式拒绝，
+    // 但错误通道由旧「Invalid aggregate argument」改为 spec 规定的
+    // NonAggregatedColumn（group-by-expression R2）。
     assert!(
-        message.contains("Invalid aggregate argument"),
-        "aggregate + expression must keep the aggregate-path error, got: {message}"
+        message.contains("Non-aggregated column"),
+        "aggregate + uncovered expression must be rejected via NonAggregatedColumn, got: {message}"
     );
 }
 

@@ -1,237 +1,222 @@
 # RTsql
 
-异步协程驱动的高性能嵌入式关系型数据库 — 以 Tokio 无栈协程为调度核心，实现轻量、便捷、高效的现代数据库系统。
+[English](README.md) | [简体中文](README.zh-CN.md) | [Agent operations guide](docs/SKILL.md)
 
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](https://opensource.org/licenses/)
-[![Tests](https://img.shields.io/badge/tests-481%20pass-brightgreen.svg)]()
+RTsql is an embedded relational database written in Rust. It uses Tokio tasks for asynchronous I/O, stores each database in one main file, and provides a one-shot CLI for SQL execution and database management.
 
----
+This repository currently targets Linux and macOS. It does not require a database server.
 
-## 功能特性
+## Quick start
 
-| 类别 | 支持 |
-|------|------|
-| **SQL DML** | SELECT, INSERT, UPDATE, DELETE |
-| **SQL DDL** | CREATE TABLE, DROP TABLE |
-| **查询** | WHERE, JOIN (INNER), GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET |
-| **子查询** | WHERE IN/EXISTS (SemiJoin/AntiJoin), SELECT 标量 (SubqueryEval), FROM 派生表 (DerivedScan), 相关子查询 |
-| **索引** | B-Tree 主键索引, 非唯一索引, split/merge 自动维护 |
-| **事务** | MVCC 无锁读, 行级锁, 版本链 |
-| **持久化** | WAL (Write-Ahead Logging) + Group Commit + 崩溃恢复 |
-| **API** | `open`, `execute_sql`, `close` — 简洁嵌入式接口 |
+### Prerequisites
 
----
+- A stable Rust toolchain with `cargo`
+- `bash` and standard Unix user tools; `strip` is optional
+- Git if you are cloning the repository
 
-## 设计理念
-
-### 核心架构
-
-RTsql 采用异步协程驱动的现代数据库架构：
-
-| 架构层 | 传统数据库 | RTsql |
-|--------|-----------|-------|
-| I/O 模型 | 同步阻塞 I/O | Tokio 异步协程 |
-| 并发模型 | 线程池 + 互斥锁 | MVCC 无锁读 + AtomicPageId |
-| 页访问 | 每次克隆 4KB | 零拷贝 PageDataGuard |
-| 缓冲池 | 单锁争用 | DashMap 分片 + miss Semaphore(16) + per-page loading_locks |
-| 索引访问 | RwLock\<BTree\> | AtomicPageId + async search |
-| 索引维护 | 手动/无 | B-Tree split/merge 自动 |
-| 崩溃恢复 | WAL | WAL + Group Commit + CRC32 |
-
-### 技术亮点
-
-1. **异步协程调度**
-   - Tokio 多线程 scheduler，轻量级无栈协程
-   - 消除 spawn_blocking 调度开销（~25µs → 0µs）
-   - Async search 路径直接访问 BufferPool
-
-2. **零拷贝页访问**
-   - `PageDataGuard` 零拷贝读取，读操作无需克隆 4KB
-   - BTree 读路径完全零拷贝（LeafNodeRef/InternalNodeRef）
-
-3. **无锁索引设计**
-   - `AtomicPageId` 替代 `RwLock<BTree>`，消除锁争用
-   - 写操作保持 sync 路径（临时 BTree 实例）
-
-4. **Redistribution-First B-Tree Merge**
-   - 删除后先尝试从兄弟节点借 entries，不足时才合并
-   - 递归 merge 传播 + root shrink，保持树结构合法
-   - FileStorage free-list 复用释放的页
-
-5. **WAL + Group Commit**
-   - 写入操作批量刷盘，减少 fsync 开销
-   - CRC32 校验 + LSN 序列号，保证数据完整性
-   - RecoveryManager 崩溃恢复（redo committed + mark uncommitted）
-
----
-
-## SQLite 全方位对比
-
-### 速度对比
-
-| 操作 | RTsql | SQLite | 对比 |
-|------|-------|--------|------|
-| **INSERT 100 rows** | 693µs | 232ms | **332x faster** ⚡ |
-| **PK Lookup（单次）** | 0.66µs | 5.25µs | **8x faster** ⚡ |
-| **PK Lookup（1000次）** | ~15µs/次 | ~20µs/次 | **1.3x faster** |
-| **Full Scan 1K rows** | 327µs | 80µs | 4x slower |
-| **DELETE 500 rows** | merge 自动维护 | 手动 VACUUM | 功能完整 |
-
-**测试条件**：Release mode, 1000 行预热数据, criterion 精确测量。详细数据见 `.claude/docs/optimization.md`。
-
-### 写入性能优势分析
-
-RTsql INSERT 332x faster 的核心原因：
-- **异步 I/O**：非阻塞写入，批量 Group Commit
-- **MVCC 无锁写**：无需获取表级写锁
-- **两阶段锁缓冲池**：I/O 期间不持锁，其他操作不受阻
-
-### 并发性能
-
-| 并发度 | RTsql（优化后） | 优化前 | 提升 |
-|--------|----------------|--------|------|
-| 1 线程 | ~99µs | ~170µs | 41% |
-| 4 线程 | ~182µs | ~290µs | 37% |
-| 8 线程 | ~283µs | ~520µs | 46% |
-| 16 线程 | ~559µs | ~1.2ms | 54% |
-| 32 线程 | ~1.2ms | ~3.2ms | 63% |
-
-高并发场景下 RTsql 优势更明显，得益于 AtomicPageId 无锁读 + async search 路径。
-
-### 资源消耗对比
-
-| 维度 | RTsql | SQLite | 差异 |
-|------|-------|--------|------|
-| **数据文件（10K rows）** | 1.4 MB | 217 KB | 6.5x larger |
-| **二进制大小** | 3.7 MB | 1.6 MB | 2.3x larger |
-| **内存（启动）** | ~5 MB | ~1 MB | Tokio runtime 开销 |
-| **测试覆盖** | 481 tests | — | 全面 |
-
-#### 文件大小差异分析
-
-| 因素 | RTsql 开销 | 设计权衡 |
-|------|-----------|---------|
-| 两层分离索引（索引页+数据页） | ~3x | 灵活性：多索引、非唯一索引 |
-| 固定 Key 32 bytes（vs SQLite varint） | ~10x per key | 简化实现、CPU 友好 |
-| SlottedPage 页填充率 50-70% | ~1.4x | MVCC 版本链友好 |
-| Tag byte 序列化 | ~1.2x | 类型安全 |
-
-**总体权衡**：RTsql 选择**实现简洁性 + 架构灵活性**换取空间效率。后续可通过 varint 编码、页填充优化进一步缩小差距。
-
----
-
-## 快速开始
-
-### 安装
+### Install from source
 
 ```bash
-git clone https://github.com/daivy2333/RTsql.git
+git clone git@github.com:daivy2333/RTsql.git
 cd RTsql
-cargo build --release
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+rtsql --version
 ```
 
-### 基本用法
+`install.sh` builds the release binary, installs it under `~/.local/bin`, installs completions for the current shell when available, and prints a PATH hint when needed. It does not use `sudo` or invoke a separate downloader; Cargo may fetch declared Rust dependencies during the build.
 
-```rust
-use rtsql::Database;
-
-#[tokio::main]
-async fn main() {
-    let db = Database::open("mydb.rtsql").await.unwrap();
-
-    db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)").await.unwrap();
-    db.execute_sql("INSERT INTO users VALUES (1, 'Alice', 30)").await.unwrap();
-
-    let result = db.execute_sql("SELECT * FROM users WHERE id = 1").await.unwrap();
-    println!("{}", result);
-
-    db.close().await.unwrap();
-}
-```
-
-### 运行测试
+Use another installation prefix or skip completions with:
 
 ```bash
-cargo test                           # 481 tests
-cargo bench                          # 完整 benchmark 套件
-cargo bench --bench sqlite_compare   # SQLite 对比
+./install.sh --prefix "$HOME/.local-rtsql"
+./install.sh --prefix "$HOME/.local-rtsql" --no-completions
 ```
 
----
+The prefix controls the binary location. Completion files remain in their standard per-user shell directories.
 
-## 技术栈
+### Create and query a database
 
-| 类别 | 技术 | 版本 |
-|------|------|------|
-| 语言 | Rust | 1.75+ |
-| 异步运行时 | Tokio | 1.x (multi-thread) |
-| SQL 解析 | sqlparser-rs | 0.44 |
-| 基准测试 | criterion.rs | 0.5 |
-| SQLite 对比 | rusqlite | 0.31 |
-
----
-
-## 架构概览
-
-```
-SQL Text → Parser (sqlparser) → PlanBuilder → PhysicalPlan (19 节点)
-  → Pipeline → Volcano Executor Tree
-    → Scan/Filter/Join/Aggregate/Having/Sort/Limit
-    → SemiJoin/AntiJoin/SubqueryEval/DerivedScan
-    → Insert/Update/Delete
-  → Storage (BufferPool + BTree + SlottedPage + WAL)
+```bash
+rtsql new demo
+rtsql demo "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)"
+rtsql --format table demo "INSERT INTO people VALUES (1, 'Ada', 36), (2, 'Lin', 41)"
+rtsql --format table demo "SELECT id, name, age FROM people WHERE age >= 40"
+rtsql schema demo
 ```
 
-完整架构决策记录见 `openspec/specs/architecture/spec.md`（12 个 ADR）。
+A bare database name is stored under `$RTSQL_HOME/db/<name>.db`; the default is `$HOME/.rtsql/db`. An argument containing `/` is used as a file path directly.
 
----
+### Use an SQL transaction
 
-## 项目文档
+Each CLI invocation is one-shot. Send `BEGIN`, the transaction statements, and `COMMIT` or `ROLLBACK` in the same SQL argument:
 
-| 文档 | 用途 |
-|------|------|
-| [openspec/specs/architecture/spec.md](openspec/specs/architecture/spec.md) | 12 个架构决策记录（ADR） |
-| [openspec/specs/learned/spec.md](openspec/specs/learned/spec.md) | API 速查 + 踩坑经验 |
-| [openspec/specs/optimization/spec.md](openspec/specs/optimization/spec.md) | 性能基准 + 优化方向 |
-| [.claude/docs/snapshot.md](.claude/docs/snapshot.md) | 项目状态快照 |
-| [.claude/docs/tasks.md](.claude/docs/tasks.md) | 任务追踪与里程碑规划 |
-| [.claude/docs/archive.md](.claude/docs/archive.md) | 已归档历史条目 |
+```bash
+rtsql --format table demo "BEGIN; INSERT INTO people VALUES (3, 'Kai', 22); COMMIT;"
+rtsql --format table demo "BEGIN; INSERT INTO people VALUES (4, 'Mira', 29); ROLLBACK;"
+rtsql --format table demo "SELECT id, name FROM people ORDER BY id"
+```
 
----
+Without an explicit transaction, each statement in a semicolon-separated SQL string is committed separately. If the input ends with an active transaction, RTsql rolls it back and reports the rollback on stderr.
 
-## 里程碑路线图
+### Back up and restore
 
-| 里程碑 | 内容 | 状态 |
-|--------|------|------|
-| M1-M12 | 核心 Storage/Executor/Parser/WAL/MVCC | ✅ |
-| M13 | PageGuard 零拷贝 + BufferPool 两阶段锁 | ✅ |
-| M14 | Async search + AtomicPageId 无锁读 | ✅ |
-| M15 | 聚合函数 + GROUP BY + HAVING | ✅ |
-| M16 | 子查询（独立+相关）+ 派生表 | ✅ |
-| M17-Phase1 | 非唯一索引 + 批量删除 | ✅ |
-| M17-Phase2 | B-Tree Split 机制 | ✅ |
-| M17.5 | 代码清理 + SQLite 全面对比 | ✅ |
-| M18-Phase1 | 架构 Warnings 清理 | ✅ |
-| M18-Phase2 | Executor 层非唯一索引 | ✅ |
-| M18-Phase3 | WAL + Group Commit + 崩溃恢复 | ✅ |
-| M18-Phase4 | B-Tree Merge + free-list 页复用 | ✅ |
-| M19 | DataScan 路径（数据页链表，跳过索引） | ✅ |
-| M20 | 零拷贝 SlottedPageRef（with_page_data 闭包） | ✅ |
-| M21 | 页面级 MVCC 可见性摘要（DashMap vis_map） | ✅ |
-| M30 | 连接并发 Semaphore | ✅ |
-| M31 | BufferPool DashMap + Miss Semaphore + per-page loading_locks | ✅ |
-| M36 | 零拷贝 ValueRef（消除 30 万次 String 分配） | ✅ |
-| M38 | 网络 BufWriter + TCP_NODELAY | ✅ |
-| M41 | 事务 ID AtomicU64 无锁分配 | ✅ |
+```bash
+rtsql dump demo > demo.sql
+rtsql new demo-restored
+rtsql restore demo-restored demo.sql
+rtsql --format table demo-restored "SELECT id, name, age FROM people ORDER BY id"
+```
 
----
+`dump` writes SQL text and does not encrypt that file. Protect the dump as you would any plaintext database export. `restore` requires an empty target database; pass `-` instead of a file path to read the dump from stdin.
 
-## 许可证
+### Create an encrypted database
 
-MIT OR Apache-2.0
+```bash
+rtsql new secure --key 'replace-with-a-password'
+rtsql --key 'replace-with-a-password' secure "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"
+rtsql --key 'replace-with-a-password' secure "INSERT INTO notes VALUES (1, 'private')"
+rtsql --key 'replace-with-a-password' secure "SELECT id, body FROM notes"
+```
 
-## 致谢
+`RTSQL_KEY` is equivalent to `--key`; an explicit `--key` takes precedence:
 
-受 SQLite（嵌入式标杆）、PostgreSQL（MVCC）、TiKV（异步协程）启发。
-感谢 Rust 社区（Tokio, sqlparser-rs, criterion.rs）。
+```bash
+RTSQL_KEY='replace-with-a-password' rtsql secure "SELECT id, body FROM notes"
+```
+
+To migrate by export and import:
+
+```bash
+rtsql dump demo > demo.sql
+rtsql new secure-copy --key 'replace-with-a-password'
+rtsql --key 'replace-with-a-password' restore secure-copy demo.sql
+```
+
+Opening an encrypted database without a key, opening a plaintext database with a key, and using the wrong key all return exit code 5. An empty key is rejected with exit code 2 before a database is opened.
+
+### Uninstall
+
+Run these commands from the source checkout:
+
+```bash
+./install.sh --uninstall
+```
+
+This removes the installed binary and completion files but keeps `$RTSQL_HOME` (or `$HOME/.rtsql` by default).
+
+```bash
+./install.sh --uninstall --purge-data
+```
+
+`--purge-data` additionally prints and deletes the data directory. This deletion is not recoverable through RTsql.
+
+## CLI surface
+
+Run `rtsql --help` for the built-in reference. The main form is:
+
+```text
+rtsql [OPTIONS] [DB] [SQL] [COMMAND]
+```
+
+| Command | Purpose |
+|---|---|
+| `rtsql <db> <sql>` | Execute one SQL statement or a semicolon-separated script |
+| `rtsql new <target>` | Create an empty named database or path |
+| `rtsql list` | List databases in the centralized storage directory |
+| `rtsql schema <db>` | Print user-table DDL |
+| `rtsql dump <db>` | Export DDL and rows as SQL text |
+| `rtsql restore <db> <file>` | Restore a dump into an empty database; `-` reads stdin |
+| `rtsql import <db> <table> <file> --csv` | Import CSV with a matching header row |
+| `rtsql stats <db> <table>` | Summarize count, null rate, distinct values, ranges, and numeric percentiles |
+| `rtsql sample <db> <table> [n]` | reservoir-sample rows; default `n` is 10 |
+| `rtsql profile <db> <table> [--top n]` | Profile columns and frequent String values; default top count is 5, maximum 20 |
+| `rtsql completions <bash\|zsh\|fish>` | Generate a completion script; this command is hidden from `--help` |
+
+### Output formats
+
+`--format` accepts `table`, `json`, `csv`, and `tsv`. RTsql uses `table` for an interactive terminal and `json` otherwise unless the option is set.
+
+### Exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | Success |
+| 1 | General I/O, storage, or format error |
+| 2 | CLI usage error |
+| 3 | SQL parse or execution error |
+| 4 | Database is locked by another process |
+| 5 | Encryption-key error |
+| 130 / 143 | Terminated by SIGINT / SIGTERM |
+
+## SQL and engine capabilities
+
+- **DDL and DML:** `CREATE TABLE`, `DROP TABLE`, `SELECT`, `INSERT`, `UPDATE`, and `DELETE`.
+- **Queries:** `WHERE`, `JOIN`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, and `OFFSET`.
+- **Expressions:** `IN`, `BETWEEN`, `LIKE`, `IS NULL`, `NOT`, `CASE`, `COALESCE`, `CAST`, and arithmetic operators.
+- **Scalar functions:** `upper`, `lower`, `length`, `substr`, `replace`, `trim`, `abs`, `round`, `floor`, and `ceil`.
+- **Date and time:** `DATE`, `TIMESTAMP`, `now`, `date`, `year`, `month`, `day`, `hour`, `minute`, `second`, `date_trunc`, `datediff`, and `INTERVAL` arithmetic.
+- **Subqueries:** scalar subqueries, `IN`, `EXISTS`, derived tables, and correlated subqueries with statement-level result reuse for repeated parameters.
+- **Grouping:** group by column, alias, expression text, or ordinal position.
+- **Constant queries:** expressions without `FROM`, such as `SELECT 1 + 1`.
+- **Transactions:** explicit library transactions and CLI `BEGIN` / `COMMIT` / `ROLLBACK` sessions.
+- **MVCC:** Repeatable Read by default and opt-in Read Committed through `Database::open_with_isolation`.
+- **Storage:** persistent schema, B-Tree primary-key indexes, WAL with frame checksums, checkpointing, crash recovery, and page reuse.
+
+The engine uses explicit type checks and three-valued predicate logic. It does not implicitly convert incompatible SQL types.
+
+## Encryption model
+
+An encrypted database uses a 64-byte plaintext header followed by encrypted page records. The header contains a random 32-byte Argon2id salt and persisted KDF parameters. Each 4096-byte page is stored as a 4124-byte record containing a 12-byte nonce, ciphertext, and a 16-byte AES-GCM authentication tag. The page ID is authenticated as additional data.
+
+The `.wal` and `.checkpoint` sidecar files remain in their existing plaintext formats. Encrypting a main database file does not encrypt an exported dump or these sidecars.
+
+## Library API
+
+The main entry points are:
+
+- `Database::open(path)` — open or create with Repeatable Read.
+- `Database::open_with_isolation(path, level)` — select Repeatable Read or Read Committed.
+- `Database::open_with_key(path, isolation, key)` — open plaintext or encrypted storage.
+- `Database::execute_sql(sql)` — execute SQL.
+- `Database::execute_in_tx(...)` — execute inside an explicit library transaction.
+- `Database::checkpoint()` — flush a checkpoint.
+- `Database::close()` — flush, checkpoint, and release the file lock.
+
+## Architecture
+
+SQL text is parsed with `sqlparser-rs`, planned into a physical plan, and executed by a Volcano-style executor tree. The execution pipeline reads MVCC-visible rows through a DashMap-backed buffer pool and B-Tree primary-key indexes. Fixed-size slotted pages hold serialized rows and version chains. WAL records provide redo recovery, while checkpoints persist a safe replay position and bound WAL growth. Page encryption is contained in `FileStorage`; the buffer pool and executors operate on ordinary 4096-byte page images.
+
+## Build and test
+
+```bash
+cargo build --release
+cargo test --no-fail-fast
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+cargo bench
+```
+
+The repository also contains Criterion benchmarks and SQLite comparison benchmarks under `benches/`.
+
+## Known limitations
+
+- Linux and macOS are supported; Windows file I/O is not implemented.
+- Only the main database file is encrypted. WAL, checkpoint, and dump output remain plaintext.
+- There is no in-place plaintext/encrypted conversion; use `dump` and `restore`.
+- Key rotation, a key-management subcommand, key caching, and `--password-file` are not included.
+- Argon2id runs when an encrypted database is opened. A small dev-profile sample recorded on 2026-09-24 took about 0.35–0.39 seconds, versus sub-millisecond plaintext opens; this is an observation, not a benchmark guarantee.
+- Repeatable Read and Read Committed are available; serializable isolation is not.
+- Window functions, user-defined functions, time-zone types, `TIMESTAMPTZ`, and `INTERVAL` storage columns are not included.
+- There is no interactive REPL, multi-user role model, or remote access control.
+- CI, packaged releases, `cargo install` publication, and generated man pages are not part of this repository's current delivery surface.
+
+## Documentation
+
+- [简体中文 README](README.zh-CN.md)
+- [Agent operations guide](docs/SKILL.md)
+- [Project snapshot](.claude/docs/SNAPSHOT.md)
+- [Project roadmap](.claude/docs/tasks.md)
+- [OpenSpec behavior specifications](openspec/specs/)
+
+Package metadata declares `MIT OR Apache-2.0`.

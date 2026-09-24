@@ -34,7 +34,6 @@ fn rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
 }
 
 /// Helper: extract error message from an Error response.
-#[allow(dead_code)] // test helper, kept for future subquery error tests
 fn error_msg(resp: Response) -> String {
     match resp {
         Response::Error { message } => message,
@@ -728,4 +727,94 @@ async fn test_correlated_anti_duplicate_params_row_sets() {
     .await;
     let r = rows(resp);
     assert_eq!(r.len(), 0);
+}
+
+// === MS17-T02 T2 (ISS02): IN subquery JOIN-form honest rejection ===
+
+/// Shared fixture for the JOIN-form rejection cases: `o(x)`, `r(a)`, `s(b)`.
+async fn setup_o_r_s(db: &Database) {
+    exec(db, "CREATE TABLE o (x INT)").await;
+    exec(db, "INSERT INTO o VALUES (5)").await;
+    exec(db, "CREATE TABLE r (a INT)").await;
+    exec(db, "INSERT INTO r VALUES (1)").await;
+    exec(db, "CREATE TABLE s (b INT)").await;
+    exec(db, "INSERT INTO s VALUES (1)").await;
+}
+
+/// R1-S1: single-column IN subquery whose plan contains a JOIN is rejected at
+/// plan time with a message naming JOIN, not the multi-column misreport.
+#[tokio::test]
+async fn test_in_subquery_join_rejected_with_join_message() {
+    let db = open_db().await;
+    setup_o_r_s(&db).await;
+
+    let resp = exec(
+        &db,
+        "SELECT o.x FROM o WHERE o.x IN (SELECT r.a FROM r JOIN s ON r.a = s.b)",
+    )
+    .await;
+    let msg = error_msg(resp);
+    assert!(
+        msg.contains("IN subquery with JOIN is not supported"),
+        "expected JOIN-naming rejection, got: {msg}"
+    );
+    assert!(
+        !msg.contains("multiple columns"),
+        "multi-column misreport leaked: {msg}"
+    );
+}
+
+/// R1-S2: multi-column select list over a JOIN gets the JOIN message too
+/// (primary cause takes precedence over the legacy multi-column report).
+#[tokio::test]
+async fn test_in_subquery_join_multi_column_same_message() {
+    let db = open_db().await;
+    setup_o_r_s(&db).await;
+
+    let resp = exec(
+        &db,
+        "SELECT o.x FROM o WHERE o.x IN (SELECT r.a, s.b FROM r JOIN s ON r.a = s.b)",
+    )
+    .await;
+    let msg = error_msg(resp);
+    assert!(
+        msg.contains("IN subquery with JOIN is not supported"),
+        "expected JOIN-naming rejection, got: {msg}"
+    );
+}
+
+/// R1-S3: WHERE + JOIN keeps the pre-existing `Unsupported statement type`
+/// rejection verbatim (Preserve witness for the surrounding surfaces).
+#[tokio::test]
+async fn test_in_subquery_where_join_keeps_existing_rejection() {
+    let db = open_db().await;
+    setup_o_r_s(&db).await;
+
+    let resp = exec(
+        &db,
+        "SELECT o.x FROM o WHERE o.x IN \
+         (SELECT r.a FROM r JOIN s ON r.a = s.b WHERE r.a > 0)",
+    )
+    .await;
+    let msg = error_msg(resp);
+    assert!(
+        msg.contains("Unsupported statement type"),
+        "expected existing Unsupported statement type rejection, got: {msg}"
+    );
+}
+
+/// R2-S1: non-JOIN single-column IN subquery stays reachable with identical
+/// results (zero-regression witness next to the new rejection arm).
+#[tokio::test]
+async fn test_in_subquery_non_join_single_column_reachable() {
+    let db = open_db().await;
+    exec(&db, "CREATE TABLE o (x INT)").await;
+    exec(&db, "INSERT INTO o VALUES (5)").await;
+    exec(&db, "CREATE TABLE r (a INT)").await;
+    exec(&db, "INSERT INTO r VALUES (1)").await;
+    exec(&db, "INSERT INTO r VALUES (5)").await;
+
+    let resp = exec(&db, "SELECT o.x FROM o WHERE o.x IN (SELECT r.a FROM r)").await;
+    let r = rows(resp);
+    assert_eq!(r, vec![vec![serde_json::json!(5)]]);
 }
