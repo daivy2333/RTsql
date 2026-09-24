@@ -1,6 +1,6 @@
 # RTsql
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Agent 操作手册](docs/SKILL.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Agent 操作手册](rtsql-docs/SKILL.md)
 
 RTsql 是一个用 Rust 编写的嵌入式关系型数据库。它使用 Tokio 任务执行异步 I/O，以单个主文件保存数据库，并通过一次性执行的 CLI 提供 SQL 执行和管理能力。
 
@@ -20,11 +20,11 @@ RTsql 是一个用 Rust 编写的嵌入式关系型数据库。它使用 Tokio �
 git clone git@github.com:daivy2333/RTsql.git
 cd RTsql
 ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
+source ~/.bashrc
 rtsql --version
 ```
 
-`install.sh` 会构建 release 二进制，将它安装到 `~/.local/bin`，在当前 shell 和对应工具可用时安装补全，并在需要时输出 PATH 提示。脚本不使用 `sudo`，也不调用单独的下载工具；构建时 Cargo 可能获取已声明的 Rust 依赖。
+`install.sh` 会构建 release 二进制，将它安装到 `~/.local/bin`，在当前 shell 和对应工具可用时安装补全，并在需要时将安装目录写入 `~/.bashrc`。脚本不使用 `sudo`，也不调用单独的下载工具；构建时 Cargo 可能获取已声明的 Rust 依赖。
 
 可指定其他安装前缀，或跳过补全安装：
 
@@ -34,6 +34,30 @@ rtsql --version
 ```
 
 `--prefix` 只控制二进制位置；补全文件仍写入各 shell 的标准用户目录。
+
+### 交叉构建 RISC-V 64 Linux（musl）
+
+先安装固定 Rust target，再从仓库根目录构建：
+
+```bash
+rustup target add riscv64gc-unknown-linux-musl
+./build-riscv64-musl.sh
+```
+
+默认输出目录是 `dist/riscv64gc-unknown-linux-musl/`。可指定其他输出根目录：
+
+```bash
+./build-riscv64-musl.sh --output-dir /tmp/rtsql-dist
+```
+
+成功执行后，该目录包含 `rtsql` 二进制、收录二进制与双语 README 的版本化 `.tar.gz`，以及 `SHA256SUMS`。可在构建宿主机校验归档：
+
+```bash
+cd dist/riscv64gc-unknown-linux-musl
+sha256sum --check SHA256SUMS
+```
+
+脚本依赖 `riscv64-linux-musl-gcc`、GNU tar 与 coreutils `sha256sum`。交叉链接器只传给当前构建子进程，并启用 `+crt-static`，不修改全局 Cargo 配置。脚本不使用 `sudo`、不上传产物，也不执行 RISC-V 二进制。部署时将归档和校验文件复制到目标设备，再在真实 RISC-V 硬件上执行版本、CRUD、加密与恢复检查；仅完成交叉构建不代表这些运行检查已经通过。
 
 ### 建库与查询
 
@@ -214,7 +238,7 @@ cargo bench
 ## 文档
 
 - [English README](README.md)
-- [Agent 操作手册](docs/SKILL.md)
+- [Agent 操作手册](rtsql-docs/SKILL.md)
 - [项目快照](.claude/docs/SNAPSHOT.md)
 - [项目路线](.claude/docs/tasks.md)
 - [OpenSpec 行为规格](openspec/specs/)

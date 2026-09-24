@@ -61,13 +61,68 @@ BIN_PATH="$PREFIX/bin/rtsql"
 BASH_COMPLETION="$HOME/.local/share/bash-completion/completions/rtsql"
 ZSH_COMPLETION="$HOME/.zsh/completions/_rtsql"
 FISH_COMPLETION="$HOME/.config/fish/completions/rtsql.fish"
+BASHRC_PATH="$HOME/.bashrc"
+
+if [[ "$PREFIX" == "$HOME/.local" ]]; then
+    PATH_EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+else
+    printf -v PATH_DIR_QUOTED '%q' "$PREFIX/bin"
+    PATH_EXPORT_LINE="export PATH=${PATH_DIR_QUOTED}:\$PATH"
+fi
+BASHRC_PATH_UPDATED=0
 
 remove_program() {
     rm -f -- "$BIN_PATH" "$BASH_COMPLETION" "$ZSH_COMPLETION" "$FISH_COMPLETION"
 }
 
+bashrc_contains_path_line() {
+    local line
+
+    [[ -f "$BASHRC_PATH" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == "$PATH_EXPORT_LINE" ]] && return 0
+    done < "$BASHRC_PATH"
+    return 1
+}
+
+ensure_bashrc_path() {
+    BASHRC_PATH_UPDATED=0
+    if [[ ! -f "$BASHRC_PATH" ]]; then
+        printf '%s\n' "$PATH_EXPORT_LINE" > "$BASHRC_PATH"
+        BASHRC_PATH_UPDATED=1
+    elif ! bashrc_contains_path_line; then
+        printf '\n%s\n' "$PATH_EXPORT_LINE" >> "$BASHRC_PATH"
+        BASHRC_PATH_UPDATED=1
+    fi
+}
+
+remove_bashrc_path() {
+    local line
+    local filtered
+    local found=0
+
+    bashrc_contains_path_line || return 0
+    filtered=$(mktemp "${BASHRC_PATH}.rtsql.XXXXXX")
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "$PATH_EXPORT_LINE" ]]; then
+            found=1
+        else
+            printf '%s\n' "$line" >> "$filtered"
+        fi
+    done < "$BASHRC_PATH"
+
+    if [[ "$found" -eq 0 ]]; then
+        rm -f -- "$filtered"
+        return 0
+    fi
+
+    cat "$filtered" > "$BASHRC_PATH"
+    rm -f -- "$filtered"
+}
+
 if [[ "$UNINSTALL" -eq 1 ]]; then
     remove_program
+    remove_bashrc_path
     if [[ "$PURGE_DATA" -eq 1 ]]; then
         case "$DATA_DIR" in
             ''|/|.|..)
@@ -134,7 +189,13 @@ if [[ "$NO_COMPLETIONS" -eq 0 ]]; then
     esac
 fi
 
-case ":$PATH:" in
-    *":$PREFIX/bin:"*) ;;
-    *) printf 'add this directory to your PATH: %s\n' "$PREFIX/bin" ;;
-esac
+ensure_bashrc_path
+
+if [[ "$BASHRC_PATH_UPDATED" -eq 1 ]]; then
+    printf 'added this directory to your PATH in %s: %s\n' "$BASHRC_PATH" "$PREFIX/bin"
+else
+    case ":$PATH:" in
+        *":$PREFIX/bin:"*) ;;
+        *) printf 'add this directory to your PATH: %s\n' "$PREFIX/bin" ;;
+    esac
+fi

@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-24（maintainer MS17 初版收尾：change `2026-09-23-ms17-initial-release` 归档——单 change 3 Iteration 各 1 Cycle 全部 Plan Review accepted；specs 37→39（新增 database-encryption / install-script，修改 cli-noninteractive-shell / database-file-format-header），**1101 tests**，MS17 全部完成，★初版达成★；MS13/MS17-T02/MS17 初版实施与收尾 docs 由本轮统一提交一并入库（提交基线 7364bc9）。前次 2026-09-23：MS17-T02 缺陷清账收尾，1065 tests）
+> 最后更新：2026-09-24（maintainer RISC-V musl 交叉构建收尾：change `2026-09-24-riscv64-musl-build-artifacts` 归档——单 Iteration 单 Cycle Plan Review accepted；specs 39→40（新增 riscv64-musl-build，4 Requirement）；新增仓库根 `build-riscv64-musl.sh`（固定 musl target 静态交叉构建）与 `.gitignore` `/dist/`；本轮统一提交一并纳入该 change 实施/收尾与范围外工作流（install.sh bashrc PATH、docs/SKILL.md→rtsql-docs/ 迁移、docs 路径勘误），提交基线 145bba4。前次 2026-09-24：MS17 初版收尾，1101 tests）
 > 同步状态：current
 
 ## 项目身份
@@ -56,7 +56,8 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 基准测试: `benches/` (8 套: micro / concurrent / scale / sqlite_compare / single / precise_compare / data_scan / visibility)
 - OpenSpec: `openspec/`
 - 安装脚本: `install.sh`
-- 用户文档: `README.md`、`README.zh-CN.md`、`docs/SKILL.md`
+- 交叉构建脚本: `build-riscv64-musl.sh`（RISC-V 64 musl 固定 target；产物输出 `dist/`，Git 忽略）
+- 用户文档: `README.md`、`README.zh-CN.md`、`rtsql-docs/SKILL.md`
 - 状态文档: `.claude/docs/`
 - 分析: `.claude/analysis/`（按需）
 - Runbook: `.claude/runbooks/`（按需）
@@ -72,16 +73,16 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 7364bc9（此前已提交状态；本文件所在提交统一纳入 MS13、MS17-T02 与 MS17 初版实施/收尾）
-- **ahead of origin**: 22 commits
-- **工作区**: 本文件所在统一提交覆盖 MS13、MS17-T02、MS17 初版实施与全部收尾同步；提交完成后工作区 clean
+- **提交基线**: 145bba4（此前已提交状态，origin/master 同点；本文件所在提交统一纳入 RISC-V musl 交叉构建 change 实施/收尾与范围外工作流）
+- **ahead of origin**: 1 commit（本文件所在提交）
+- **工作区**: 本文件所在统一提交覆盖 RISC-V 交叉构建 change 实施/收尾与范围外工作流（install.sh bashrc PATH、SKILL.md 迁移、docs 路径勘误）；提交完成后工作区 clean（`dist/` 产物 Git 忽略）
 - **最新 tag**: M11
-- **测试**: 1101 tests pass, 0 failures, 2 ignored（2026-09-24 MS17 初版收口；`cargo test --no-fail-fast` 78 个 suite result 全部 ok，clippy/fmt 通过；2 ignored 为信号标定设计项）
-- **OpenSpec**: 39 specs validate PASS（2026-09-24 MS17 初版收尾新增 database-encryption / install-script，修改 cli-noninteractive-shell / database-file-format-header；change 已归档；无活跃 change）
+- **测试**: 1101 tests pass, 0 failures, 2 ignored（Rust 产品代码零变化，沿用 2026-09-24 MS17 初版收口结论）
+- **OpenSpec**: 40 specs（2026-09-24 新增 riscv64-musl-build；change 已归档；无活跃 change。注：新版 openspec CLI `validate --all --strict` 将 14 个 MS06–MS10 时代 spec 的占位 Purpose 标记为失败——既有状态，非本轮引入）
 
 ## 同步状态
 
-- `current` — 文档与代码一致；MS13、MS17-T02 与 MS17 初版实施/收尾由本文件所在统一提交承载；39 specs 已合并，change 已归档，tasks/SNAPSHOT 已同步
+- `current` — 文档与代码一致；RISC-V musl 交叉构建 change 实施与收尾由本文件所在统一提交承载；40 specs 已合并，change 已归档，tasks/SNAPSHOT 已同步
 
 ## 权威文档
 
@@ -92,7 +93,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 参考: `openspec/specs/references/spec.md` (Rxx)
 - 改进: `openspec/specs/improvements/spec.md` (Ixx)
 - 任务与路线: `.claude/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含 MS06–MS17 已完成 carriers，最新为 `archive/2026-09-23-ms17-t02-defect-closeout/` 与 `archive/2026-09-23-ms17-initial-release/`）
+- 变更: `openspec/changes/`（无活跃 change；归档目录含 MS06–MS17 已完成 carriers，最新为 `archive/2026-09-23-ms17-initial-release/` 与 `archive/2026-09-24-riscv64-musl-build-artifacts/`）
 - Legacy migration carrier: `.claude/legacy/2026-08-25-openspec-init-migration/`
 - 新增能力 spec:
   - `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）
@@ -111,6 +112,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - `openspec/specs/database-file-format-header/spec.md`（MS10-T03 起 4 个 Requirement；MS17-T01 扩展 64B 头的加密位/盐/KDF 参数、加密页偏移与 24B checkpoint 位点校准）
 - `openspec/specs/database-encryption/spec.md`（MS17-T01，4 个 Requirement：页记录格式 / Argon2id 与打开拒绝面 / `--key`·env 与 exit 5 / 明文零回归及伴生文件限制）
 - `openspec/specs/install-script/spec.md`（MS17-T03，2 个 Requirement：一键编译安装与补全 / 程序与数据两模式卸载）
+- `openspec/specs/riscv64-musl-build/spec.md`（MS17 后续分发扩展，4 个 Requirement：固定目标的交叉构建入口 / 构建前置检查与锁定依赖 / 版本化分发产物 / 宿主机验证边界）
 - `openspec/specs/sql-expression-evaluation/spec.md`（MS11-T01 落地，6 个 Requirement：R1 谓词四件套 / R2 NULL 三值语义 / R3 CASE-COALESCE-CAST / R4 SELECT 派生列 / R5 INSERT 负数字面量 / R6 既有语义零回归）
 - `openspec/specs/sql-transaction-statements/spec.md`（MS11-T02 落地，5 个 Requirement：R1 事务语句 CLI 会话往返 / R2 边界子句显式拒绝（含 `AND NO CHAIN` 按裸语句同义）/ R3 会话状态边界 / R4 非会话路径显式拒绝 / R5 既有语义零回归）
 - `openspec/specs/sql-scalar-functions/spec.md`（MS11-T03 落地，6 个 Requirement：R1 注册与分派机制 / R2 string 函数六件 / R3 math 函数四件 / R4 NULL 语义与嵌套参数 / R5 调用面与边界 / R6 既有语义零回归；MS13 修改——R1 大小写变体 SQL 层 e2e 见证 + `now` 等零参注册函数 carve-out、R3 abs i64::MIN 溢出显式错误 + round 极端 digits SQLite 对齐饱和（I043），仍 6 个 Requirement）
