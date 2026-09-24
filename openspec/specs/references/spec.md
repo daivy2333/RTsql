@@ -307,4 +307,12 @@
 - **用途**: 初版后长期方向（用户裁定 2026-09-24，路线 B workspace crate 化）的调查输入——模块依赖实测图谱与两条真实依赖环（database→pipeline→executor→database、storage↔transaction 经 VersionHeader）、词表熔接点（Value/PhysicalPlan 约 20 变体/ColumnType 磁盘绑定）与现成接缝（AsyncStorage/REGISTRY/火山树/IsolationLevel）、Response 错层（core 反向依赖 network）、目标 crate 拓扑与四刀迁移顺序草图（词表下沉→存储域→语言域→组装层+可选件）、风险清单（断环成本/测试矩阵×无 CI I051/spec 条件化/过度拆分告诫）、三种模块化模式开源先例（SQLite 编译宏/SurrealDB kv-* features/GlueSQL+DataFusion trait 接缝/Materialize+GreptimeDB+RisingWave workspace/PostgreSQL 扩展/FoundationDB 角色分解）；同日补充——定位裁定（异步·嵌入式·CLI 三分句 + 决策过滤器 + 模块化为手段非身份 + 对路线 B 排序影响，2026-09-24 用户裁定，含 async-native 稀缺性查证）与关联方向 I059 注记（跨库交互 ATTACH 式，身份过滤器三词全沾）
 - **状态**: active
 
+## R26: RTsql vs SQLite 跨引擎对比基准与资源测量 Runbook
+
+- **类型**: runbook
+- **路径**: `.claude/runbooks/sqlite-compare-benchmark.md`
+- **日期**: 2026-09-24
+- **用途**: RTsql 对 SQLite 的性能与资源快照采集——引擎级 criterion 三段（insert/pk lookup/full scan，`--noplot` 降时参）+ `estimates.json` 精确均值提取 + CLI 级 time -v 负载（单参数 128KB 上限、2000 行安全负载）/库文件体积/50 次 one-shot 时延/二进制体积；含双实例污染、pkill 自匹配、E2BIG 静默失败等实测失败处理；结果固化为双语 README「性能与资源对比」板块
+- **状态**: active
+
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

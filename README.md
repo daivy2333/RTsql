@@ -217,6 +217,30 @@ cargo bench
 
 The repository also contains Criterion benchmarks and SQLite comparison benchmarks under `benches/`. RISC-V 64 Linux (musl) artifacts are produced by `build-riscv64-musl.sh`; see [Cross-build for RISC-V 64 Linux (musl)](#cross-build-for-risc-v-64-linux-musl).
 
+## Performance and resource comparison
+
+Measured 2026-09-24 on an Intel i9-13900HX (32 threads) Linux machine: RTsql 0.1.0 (release build) versus SQLite 3.37.2 (system `libsqlite3` linked via `rusqlite`, plus the `sqlite3` CLI). Both engines run with default settings on the same synthetic `bench (id INTEGER PRIMARY KEY, name TEXT, value INTEGER)` table; RTsql auto-commits each statement through its WAL while SQLite uses its default rollback journal. These are single-machine observations, not benchmark guarantees.
+
+Engine-level operations (Criterion in-process benchmarks against the engine API, mean of 20 samples; reproduce with `cargo bench --bench sqlite_compare`):
+
+| Operation | RTsql | SQLite | Faster |
+|---|---|---|---|
+| INSERT 100 rows (per-statement commit) | 4.8 ms (~20,800 rows/s) | 251.3 ms (~400 rows/s) | RTsql ~52x |
+| PK point lookup (1k-row table) | 1.57 µs | 6.80 µs | RTsql ~4.3x |
+| Full scan of 1k rows | 297 µs | 98 µs | SQLite ~3x |
+
+CLI-level footprint (one-shot process loading 2,000 rows plus `SELECT COUNT(*)`):
+
+| Metric | RTsql | sqlite3 |
+|---|---|---|
+| Load time (2,000 inserts) | 3.2 s | 5.3 s |
+| Peak RSS | ~16.7 MiB | ~4.1 MiB |
+| Main database file after close | 300 KiB | 48 KiB |
+| One-shot `SELECT 1` latency (mean of 50 runs) | 10.8 ms | 1.2 ms |
+| Binary size | 6.7 MB | 1.6 MB |
+
+Reading the numbers: RTsql's per-statement insert path and index lookups are fast, its full-scan path is currently slower than SQLite's, and one-shot invocations carry the fixed cost of an async runtime and a checkpointing close. SQLite is three decades more mature; treat these tables as a snapshot of where RTsql stands today, and re-run the benchmarks on your own hardware before drawing conclusions.
+
 ## Known limitations
 
 - Linux and macOS hosts are supported; Windows file I/O is not implemented. RISC-V 64 Linux is delivered as a static musl cross-build artifact and has not been validated on real RISC-V hardware.
