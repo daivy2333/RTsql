@@ -4,7 +4,7 @@
 
 RTsql is an embedded relational database written in Rust. It uses Tokio tasks for asynchronous I/O, stores each database in one main file, and provides a one-shot CLI for SQL execution and database management.
 
-This repository currently targets Linux and macOS. It does not require a database server.
+This repository currently targets Linux and macOS and can cross-build static RISC-V 64 Linux (musl) binaries. It does not require a database server.
 
 ## Quick start
 
@@ -37,27 +37,21 @@ The prefix controls the binary location. Completion files remain in their standa
 
 ### Cross-build for RISC-V 64 Linux (musl)
 
-Install the fixed Rust target, then build from the repository root:
+On a Linux build host, RTsql can cross-compile a static RISC-V 64 binary and package it for deployment — the script never runs the RISC-V binary itself:
 
 ```bash
 rustup target add riscv64gc-unknown-linux-musl
 ./build-riscv64-musl.sh
 ```
 
-The default output is `dist/riscv64gc-unknown-linux-musl/`. Choose another output root with:
+The target is fixed to `riscv64gc-unknown-linux-musl`; the build links with `riscv64-linux-musl-gcc` and enables `+crt-static`, so the result is a fully static RISC-V ELF with no dynamic interpreter dependency. Prerequisites (`cargo`, `rustup`, `riscv64-linux-musl-gcc`, and GNU `tar`) are checked up front: missing items are reported with install hints and the script stops — it never auto-installs, never uses `sudo`, never uploads anything, and never writes global Cargo configuration.
 
-```bash
-./build-riscv64-musl.sh --output-dir /tmp/rtsql-dist
-```
+A successful run publishes into `dist/riscv64gc-unknown-linux-musl/`:
 
-A successful run leaves the `rtsql` binary, a versioned `.tar.gz` containing the binary and both READMEs, and `SHA256SUMS` in that directory. Verify the archive on the build host with:
+- `rtsql` — the stripped static binary
+- `rtsql-v<version>-riscv64gc-unknown-linux-musl.tar.gz` — the binary plus both READMEs
 
-```bash
-cd dist/riscv64gc-unknown-linux-musl
-sha256sum --check SHA256SUMS
-```
-
-The script requires `riscv64-linux-musl-gcc`, GNU tar, and coreutils `sha256sum`. It passes the cross-linker to Cargo only for the current build subprocess, enables `+crt-static`, and does not modify global Cargo configuration. It does not use `sudo`, upload artifacts, or execute the RISC-V binary. Copy the archive and checksum to the target device for deployment, then run version, CRUD, encryption, and recovery checks on real RISC-V hardware; this repository does not claim those runtime checks from a cross-build alone.
+Pass `--output-dir DIR` to publish under a different output root, and `--help` for the built-in reference. Copy the archive to the target device and deploy there. A cross-build is not runtime validation: version, CRUD, encryption, and recovery checks must be run on real RISC-V hardware, and this repository does not claim them from a cross-build alone.
 
 ### Create and query a database
 
@@ -221,11 +215,11 @@ cargo fmt --check
 cargo bench
 ```
 
-The repository also contains Criterion benchmarks and SQLite comparison benchmarks under `benches/`.
+The repository also contains Criterion benchmarks and SQLite comparison benchmarks under `benches/`. RISC-V 64 Linux (musl) artifacts are produced by `build-riscv64-musl.sh`; see [Cross-build for RISC-V 64 Linux (musl)](#cross-build-for-risc-v-64-linux-musl).
 
 ## Known limitations
 
-- Linux and macOS are supported; Windows file I/O is not implemented.
+- Linux and macOS hosts are supported; Windows file I/O is not implemented. RISC-V 64 Linux is delivered as a static musl cross-build artifact and has not been validated on real RISC-V hardware.
 - Only the main database file is encrypted. WAL, checkpoint, and dump output remain plaintext.
 - There is no in-place plaintext/encrypted conversion; use `dump` and `restore`.
 - Key rotation, a key-management subcommand, key caching, and `--password-file` are not included.

@@ -4,7 +4,7 @@
 
 RTsql 是一个用 Rust 编写的嵌入式关系型数据库。它使用 Tokio 任务执行异步 I/O，以单个主文件保存数据库，并通过一次性执行的 CLI 提供 SQL 执行和管理能力。
 
-当前仓库支持 Linux 和 macOS，不依赖独立数据库服务。
+当前仓库支持 Linux 和 macOS，并可交叉构建静态 RISC-V 64 Linux（musl）二进制；不依赖独立数据库服务。
 
 ## 快速开始
 
@@ -37,27 +37,21 @@ rtsql --version
 
 ### 交叉构建 RISC-V 64 Linux（musl）
 
-先安装固定 Rust target，再从仓库根目录构建：
+在 Linux 构建机上，RTsql 可交叉编译静态 RISC-V 64 二进制并打包待部署——脚本自身不执行 RISC-V 二进制：
 
 ```bash
 rustup target add riscv64gc-unknown-linux-musl
 ./build-riscv64-musl.sh
 ```
 
-默认输出目录是 `dist/riscv64gc-unknown-linux-musl/`。可指定其他输出根目录：
+目标固定为 `riscv64gc-unknown-linux-musl`；构建使用 `riscv64-linux-musl-gcc` 链接并启用 `+crt-static`，产物是完全静态的 RISC-V ELF，不依赖动态解释器。前置条件（`cargo`、`rustup`、`riscv64-linux-musl-gcc` 和 GNU `tar`）在构建前统一检查：缺失项会连同安装提示一起报告并停止——脚本不会自动安装、不使用 `sudo`、不上传任何产物，也不写全局 Cargo 配置。
 
-```bash
-./build-riscv64-musl.sh --output-dir /tmp/rtsql-dist
-```
+成功执行后，产物发布到 `dist/riscv64gc-unknown-linux-musl/`：
 
-成功执行后，该目录包含 `rtsql` 二进制、收录二进制与双语 README 的版本化 `.tar.gz`，以及 `SHA256SUMS`。可在构建宿主机校验归档：
+- `rtsql`：strip 后的静态二进制
+- `rtsql-v<version>-riscv64gc-unknown-linux-musl.tar.gz`：收录二进制与双语 README
 
-```bash
-cd dist/riscv64gc-unknown-linux-musl
-sha256sum --check SHA256SUMS
-```
-
-脚本依赖 `riscv64-linux-musl-gcc`、GNU tar 与 coreutils `sha256sum`。交叉链接器只传给当前构建子进程，并启用 `+crt-static`，不修改全局 Cargo 配置。脚本不使用 `sudo`、不上传产物，也不执行 RISC-V 二进制。部署时将归档和校验文件复制到目标设备，再在真实 RISC-V 硬件上执行版本、CRUD、加密与恢复检查；仅完成交叉构建不代表这些运行检查已经通过。
+`--output-dir DIR` 可指定其他输出根目录，`--help` 查看内置说明。将归档复制到目标设备后部署。交叉构建成功不等于运行验证：版本、CRUD、加密与恢复检查必须在真实 RISC-V 硬件上执行，本仓库不因交叉构建成功而声明这些运行检查通过。
 
 ### 建库与查询
 
@@ -221,11 +215,11 @@ cargo fmt --check
 cargo bench
 ```
 
-仓库的 `benches/` 目录还包含 Criterion 基准和 SQLite 对比基准。
+仓库的 `benches/` 目录还包含 Criterion 基准和 SQLite 对比基准。RISC-V 64 Linux（musl）产物由 `build-riscv64-musl.sh` 生成，见上文「交叉构建 RISC-V 64 Linux（musl）」章节。
 
 ## 已知限制
 
-- 支持 Linux 和 macOS；尚未实现 Windows 文件 I/O。
+- 支持 Linux 和 macOS 构建宿主；尚未实现 Windows 文件 I/O。RISC-V 64 Linux 以静态 musl 交叉构建产物交付，尚未在真实 RISC-V 硬件上验证。
 - 只加密主数据库文件；WAL、checkpoint 和 dump 输出仍为明文。
 - 不支持原地切换明文/加密状态；请使用 `dump` 和 `restore`。
 - 不包含密钥轮换、密钥管理子命令、密钥缓存和 `--password-file`。

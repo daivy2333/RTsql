@@ -16,7 +16,7 @@ usage() {
         '  ./build-riscv64-musl.sh --help' \
         '' \
         "Target: $TARGET_TRIPLE" \
-        'Requires: bash, cargo, rustup, riscv64-linux-musl-gcc, tar, sha256sum' \
+        'Requires: bash, cargo, rustup, riscv64-linux-musl-gcc, tar' \
         'The target binary is cross-compiled but never executed by this script.'
 }
 
@@ -50,7 +50,7 @@ if [[ -z "$OUTPUT_ROOT" ]]; then
 fi
 
 missing_commands=()
-for command_name in bash cargo rustup "$CROSS_LINKER" tar sha256sum; do
+for command_name in bash cargo rustup "$CROSS_LINKER" tar; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         missing_commands+=("$command_name")
     fi
@@ -126,10 +126,6 @@ cp -- "$SCRIPT_DIR/README.md" "$STAGING_DIR/README.md"
 cp -- "$SCRIPT_DIR/README.zh-CN.md" "$STAGING_DIR/README.zh-CN.md"
 
 tar -C "$STAGING_DIR" -czf "$STAGING_DIR/$ARCHIVE_NAME" rtsql README.md README.zh-CN.md
-(
-    cd "$STAGING_DIR"
-    sha256sum "$ARCHIVE_NAME" > SHA256SUMS
-)
 
 if [[ -e "$TARGET_OUTPUT_DIR" ]]; then
     BACKUP_DIR=$(mktemp -d "$OUTPUT_ROOT/.$TARGET_DIR_NAME.backup.XXXXXX")
@@ -152,5 +148,4 @@ trap - EXIT INT TERM
 
 printf 'binary: %s\n' "$TARGET_OUTPUT_DIR/rtsql"
 printf 'archive: %s\n' "$TARGET_OUTPUT_DIR/$ARCHIVE_NAME"
-printf 'checksum: %s\n' "$TARGET_OUTPUT_DIR/SHA256SUMS"
 printf '%s\n' 'cross-build succeeded; target execution not verified'

@@ -34,7 +34,7 @@
 
 ### Requirement: 构建前置检查与锁定依赖
 
-脚本 SHALL 在构建前检查 `cargo`、`rustup`、`riscv64-linux-musl-gcc`、`tar` 与 `sha256sum` 可用，并确认 `riscv64gc-unknown-linux-musl` target 已安装。缺失工具或 target 时 SHALL 列出缺失项与对应安装提示并以非零退出码停止；SHALL NOT 自动下载 target、安装系统包、调用 sudo 或修改全局 Rust 配置。构建 SHALL 为当前 Cargo 子进程设置 `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=riscv64-linux-musl-gcc`，SHALL 使用仓库已提交的 `Cargo.lock`，SHALL NOT 更新该文件或持久化 linker 配置。
+脚本 SHALL 在构建前检查 `cargo`、`rustup`、`riscv64-linux-musl-gcc` 与 `tar` 可用，并确认 `riscv64gc-unknown-linux-musl` target 已安装。缺失工具或 target 时 SHALL 列出缺失项与对应安装提示并以非零退出码停止；SHALL NOT 自动下载 target、安装系统包、调用 sudo 或修改全局 Rust 配置。构建 SHALL 为当前 Cargo 子进程设置 `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=riscv64-linux-musl-gcc`，SHALL 使用仓库已提交的 `Cargo.lock`，SHALL NOT 更新该文件或持久化 linker 配置。
 
 #### Scenario: Rust target 已安装
 
@@ -50,31 +50,31 @@
 
 #### Scenario: 构建工具缺失
 
-- **GIVEN** `cargo`、`rustup`、`riscv64-linux-musl-gcc`、`tar` 或 `sha256sum` 任一不可用
+- **GIVEN** `cargo`、`rustup`、`riscv64-linux-musl-gcc` 或 `tar` 任一不可用
 - **WHEN** 执行脚本
 - **THEN** stderr 列出全部缺失工具，退出码非 0，且不创建成功归档或校验文件
 
 #### Scenario: 使用 musl 交叉链接器
 
-- **GIVEN** Rust musl target、`riscv64-linux-musl-gcc`、`tar` 与 `sha256sum` 均可用
+- **GIVEN** Rust musl target、`riscv64-linux-musl-gcc` 与 `tar` 均可用
 - **WHEN** 执行脚本
 - **THEN** 当前 Cargo 子进程使用 `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=riscv64-linux-musl-gcc`，不写入全局 Cargo 配置；链接器为 RISC-V ELF 目标而非宿主机 `/usr/bin/ld`
 
 ### Requirement: 版本化分发产物
 
-成功构建 SHALL 从固定 target 的 release 输出复制 `rtsql`，连同 `README.md` 与 `README.zh-CN.md` 组成版本化 `.tar.gz`；版本 SHALL 来自当前 Cargo package。脚本 SHALL 在归档旁生成该归档的 `SHA256SUMS`，并在 stdout 报告二进制、归档和校验文件的绝对路径。默认输出根 SHALL 为仓库 `dist/`，目标子目录 SHALL 为 `riscv64gc-unknown-linux-musl/`；`--output-dir DIR` SHALL 将该目标子目录放在 DIR 下。重复构建 SHALL 只替换本脚本拥有的目标子目录，SHALL NOT 删除输出根中的其他文件。
+成功构建 SHALL 从固定 target 的 release 输出复制 `rtsql`，连同 `README.md` 与 `README.zh-CN.md` 组成版本化 `.tar.gz`；版本 SHALL 来自当前 Cargo package。脚本 SHALL 在 stdout 报告二进制与归档的绝对路径。脚本 SHALL NOT 生成 checksum 文件、manifest、build-id 或其他以构建归属为目的的身份型产物。默认输出根 SHALL 为仓库 `dist/`，目标子目录 SHALL 为 `riscv64gc-unknown-linux-musl/`；`--output-dir DIR` SHALL 将该目标子目录放在 DIR 下。重复构建 SHALL 只替换本脚本拥有的目标子目录，SHALL NOT 删除输出根中的其他文件。
 
 #### Scenario: 生成默认 musl 产物
 
 - **GIVEN** 前置检查通过且交叉构建成功
 - **WHEN** 执行 `./build-riscv64-musl.sh`
-- **THEN** `dist/riscv64gc-unknown-linux-musl/` 包含可执行 `rtsql`、`rtsql-v<version>-riscv64gc-unknown-linux-musl.tar.gz` 与 `SHA256SUMS`，退出码 0
+- **THEN** `dist/riscv64gc-unknown-linux-musl/` 包含可执行 `rtsql` 与 `rtsql-v<version>-riscv64gc-unknown-linux-musl.tar.gz`，退出码 0
 
-#### Scenario: 归档内容与校验文件
+#### Scenario: 归档内容
 
 - **GIVEN** 交叉构建生成目标二进制
-- **WHEN** 检查版本化 tar.gz 与 SHA256SUMS
-- **THEN** tar.gz 顶层包含 `rtsql`、`README.md`、`README.zh-CN.md`；SHA256SUMS 恰记录该归档，校验命令退出码 0
+- **WHEN** 检查版本化 tar.gz
+- **THEN** tar.gz 顶层包含 `rtsql`、`README.md`、`README.zh-CN.md`，无其他文件
 
 #### Scenario: 自定义输出目录
 
