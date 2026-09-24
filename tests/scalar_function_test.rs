@@ -448,8 +448,11 @@ async fn aggregate_mixed_with_scalar_function_rejected() {
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
     let msg = error_message(db.execute_sql("SELECT count(*), upper(name) FROM t").await);
+    // MS13 T8 校准（BH-1 同型）：混合投影解锁后，未分组表达式项仍显式拒绝，
+    // 错误通道由旧「Invalid aggregate argument」改为 spec 规定的
+    // NonAggregatedColumn（group-by-expression R2）。
     assert!(
-        msg.contains("Invalid aggregate argument"),
+        msg.contains("Non-aggregated column"),
         "unexpected message: {msg}"
     );
 }
@@ -498,4 +501,107 @@ async fn pk_compared_with_function_uses_plain_scan() {
     exec_ok(&db, "INSERT INTO t VALUES (5)").await;
     let rows = query_rows(db.execute_sql("SELECT id FROM t WHERE id = abs(5)").await);
     assert_eq!(rows, vec![vec![serde_json::json!(5)]]);
+}
+
+// ---------------------------------------------------------------------------
+// MS13 Iteration 001 T6：I043（abs 溢出 / round 极端 digits 饱和）
+// ---------------------------------------------------------------------------
+
+/// I043/S1（spec R3）：abs(i64::MIN) 报运行时溢出错误——SHALL NOT panic、
+/// SHALL NOT 回绕为负。
+///
+/// 实参构造注记：i64::MIN 无法经 SQL 字面量直接落库（`-9223372036854775808`
+/// 的无符号部分越 i64 上界，字面量解析为 Float——预存解析面；且无 PK 表首列
+/// 隐式 PK 触发键列类型预检）。改以 Int 算术构造同值实参
+/// `0 - 9223372036854775807 - 1`（各中间值均在 i64 内，结果恰为 i64::MIN），
+/// 经 BinaryArithExpression 求值后进入与「列值入参」完全相同的 ABS Int 臂，
+/// THEN（运行时溢出显式错误、不 panic 不回绕）与 spec 场景一致。
+///
+/// RED（修复前实测）：`n.abs()` 对 i64::MIN 在 debug 构建下 panic
+///（attempt to negate with overflow），测试以 panic 失败承载 RED。
+#[tokio::test]
+async fn abs_i64_min_explicit_overflow_error() {
+    let (db, _dir) = open_db().await;
+    exec_ok(&db, "CREATE TABLE t (k INT PRIMARY KEY)").await;
+    exec_ok(&db, "INSERT INTO t VALUES (1)").await;
+    let resp = db
+        .execute_sql("SELECT abs(0 - 9223372036854775807 - 1) FROM t")
+        .await;
+    let msg = error_message(resp);
+    assert!(
+        !msg.contains("Unsupported"),
+        "应报运行时溢出错误而非计划期拒绝: {msg}"
+    );
+    assert!(!msg.is_empty(), "溢出错误应有显式信息: {msg}");
+}
+
+/// I043/S2（spec R3）：round 极端正 digits 饱和——`round(1, 1000)` = 1.0，
+/// `round(2.5, 400)` = 2.5，SHALL NOT 产出 inf/NaN。
+///
+/// RED（修复前实测）：`10f64.powi(1000)` = inf → 结果 NaN（json null）。
+#[tokio::test]
+async fn round_extreme_positive_digits_saturate() {
+    let (db, _dir) = open_db().await;
+    exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
+    exec_ok(&db, "INSERT INTO t VALUES (1)").await;
+    let rows = query_rows(
+        db.execute_sql("SELECT round(1, 1000), round(2.5, 400) FROM t")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![serde_json::json!(1.0), serde_json::json!(2.5)]],
+        "正超界 digits 应返回入参 Float 形态"
+    );
+}
+
+/// I043/S3（spec R3）：round 极端负 digits 饱和——`round(1, -1000)` = 0.0。
+///
+/// RED（修复前实测）：`10f64.powi(-1000)` = 0 → 0/0 = NaN（json null）。
+#[tokio::test]
+async fn round_extreme_negative_digits_saturate() {
+    let (db, _dir) = open_db().await;
+    exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
+    exec_ok(&db, "INSERT INTO t VALUES (1)").await;
+    let rows = query_rows(db.execute_sql("SELECT round(1, -1000) FROM t").await);
+    assert_eq!(rows, vec![vec![serde_json::json!(0.0)]]);
+}
+
+// ---------------------------------------------------------------------------
+// MS13 Iteration 001 T6：I044（函数名大小写不敏感 SQL 层 e2e 见证）
+// ---------------------------------------------------------------------------
+
+/// I044/S1（spec R1 修改）：大写/混合调用形态与小写形态结果与错误面
+/// 逐字节一致。UPPER/Abs 为正面形态（既有语义的 SQL 层见证锁，实施前
+/// 即绿属预期——见证补齐非行为变更）；`MiXeD_Length` 为未注册名（全名
+/// 规范化 `MIXED_LENGTH` 不匹配 LENGTH，SHALL NOT 子串匹配），与全小写
+/// 未注册名 `mixed_length` 的错误面逐字节一致。
+#[tokio::test]
+async fn function_name_case_variants_equivalent() {
+    let (db, _dir) = open_db().await;
+    exec_ok(&db, "CREATE TABLE t (name STRING)").await;
+    exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
+    exec_ok(&db, "CREATE TABLE t2 (i INT)").await;
+    exec_ok(&db, "INSERT INTO t2 VALUES (-5)").await;
+
+    // 正面形态：大写/混合与小写结果逐字节一致
+    let upper = query_rows(db.execute_sql("SELECT UPPER(name) FROM t").await);
+    let lower = query_rows(db.execute_sql("SELECT upper(name) FROM t").await);
+    assert_eq!(upper, lower, "UPPER 与 upper 结果应逐字节一致");
+    assert_eq!(upper, vec![vec![serde_json::json!("ABC")]]);
+
+    let mixed_abs = query_rows(db.execute_sql("SELECT Abs(i) FROM t2").await);
+    let lower_abs = query_rows(db.execute_sql("SELECT abs(i) FROM t2").await);
+    assert_eq!(mixed_abs, lower_abs, "Abs 与 abs 结果应逐字节一致");
+    assert_eq!(mixed_abs, vec![vec![serde_json::json!(5)]]);
+
+    // 错误面：未注册名大小写无关——MiXeD_Length 与 mixed_length 拒绝一致，
+    // 且不因包含 LENGTH 子串而误匹配
+    let mixed_err = error_message(db.execute_sql("SELECT MiXeD_Length(name) FROM t").await);
+    let lower_err = error_message(db.execute_sql("SELECT mixed_length(name) FROM t").await);
+    assert_eq!(mixed_err, lower_err, "未注册名大小写变体错误面应逐字节一致");
+    assert!(
+        mixed_err.contains("Unsupported statement type"),
+        "未注册名维持既有文案: {mixed_err}"
+    );
 }

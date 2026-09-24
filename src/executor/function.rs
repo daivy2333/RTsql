@@ -1,21 +1,23 @@
-//! Scalar function registry and evaluation (MS11-T03).
+//! Scalar function registry and evaluation (MS11-T03, MS13 T6).
 //!
 //! Single point of truth for the scalar function library: the metadata table
 //! drives planner-side validation ([`is_scalar_function`] /
 //! [`check_scalar_function`]) and executor-side dispatch in the same module,
 //! so the plan-time name/arity contract and the runtime dispatch cannot
-//! drift. Registry holds the string six plus math four (MS11-T03).
+//! drift. Registry holds the string six, math four (MS11-T03) and the
+//! datetime family ten (MS13 T6).
 
+use crate::executor::datetime::{datediff, parse_trunc_unit, trunc_date, trunc_ts, TruncUnit};
 use crate::executor::{Expression, ExpressionRef, Value, ValueError, ValueRef};
 
 /// Function metadata: canonical uppercase name, inclusive arity range.
 type ScalarFnMeta = (&'static str, usize, usize);
 
-/// Registered scalar functions (MS11-T03: string six + math four). Names
-/// are matched case-insensitively by canonicalizing to uppercase at plan
-/// time. Aggregate names (COUNT/SUM/AVG/MIN/MAX) are intentionally absent:
-/// they route through the aggregate path and keep their existing value
-/// position rejections.
+/// Registered scalar functions (MS11-T03: string six + math four; MS13 T6:
+/// datetime family ten). Names are matched case-insensitively by canonicalizing
+/// to uppercase at plan time. Aggregate names (COUNT/SUM/AVG/MIN/MAX) are
+/// intentionally absent: they route through the aggregate path and keep their
+/// existing value position rejections.
 const REGISTRY: &[ScalarFnMeta] = &[
     ("UPPER", 1, 1),
     ("LOWER", 1, 1),
@@ -27,6 +29,18 @@ const REGISTRY: &[ScalarFnMeta] = &[
     ("ROUND", 1, 2),
     ("FLOOR", 1, 1),
     ("CEIL", 1, 1),
+    // MS13 T6 datetime family (design D10). NOW is zero-arg: `now` is the
+    // documented carve-out to the zero-arg rejection in the spec.
+    ("NOW", 0, 0),
+    ("DATE", 1, 1),
+    ("YEAR", 1, 1),
+    ("MONTH", 1, 1),
+    ("DAY", 1, 1),
+    ("HOUR", 1, 1),
+    ("MINUTE", 1, 1),
+    ("SECOND", 1, 1),
+    ("DATE_TRUNC", 2, 2),
+    ("DATEDIFF", 3, 3),
 ];
 
 /// Whether `name` (canonical uppercase) is a registered scalar function.
@@ -81,8 +95,7 @@ impl FunctionExpression {
         if vals.iter().any(Value::is_null) {
             return Ok(Value::Null);
         }
-        eval_scalar(&self.name, &vals)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        eval_scalar(&self.name, &vals).map_err(Box::<dyn std::error::Error + Send + Sync>::from)
     }
 }
 
@@ -104,6 +117,9 @@ impl Expression for FunctionExpression {
             Value::Float(f) => Ok(ValueRef::Float(f)),
             Value::Bool(b) => Ok(ValueRef::Bool(b)),
             Value::Null => Ok(ValueRef::Null),
+            // MS13: 日期族为 Copy 变体，直接回借
+            Value::Date(d) => Ok(ValueRef::Date(d)),
+            Value::Timestamp(t) => Ok(ValueRef::Timestamp(t)),
             Value::String(_) => Err(
                 "Scalar function string results are not available on the zero-copy evaluate_ref path"
                     .into(),
@@ -121,28 +137,66 @@ impl Expression for FunctionExpression {
 /// First argument as `&str`. NULL is already filtered upstream, so any
 /// non-String value is a runtime type error (strict typing, no implicit
 /// conversion — CAST is the explicit channel).
-fn string_arg(args: &[Value], index: usize) -> Result<&str, ValueError> {
+fn string_arg(args: &[Value], index: usize) -> Result<&str, String> {
     match &args[index] {
         Value::String(s) => Ok(s.as_str()),
-        _ => Err(ValueError::TypeMismatch),
+        _ => Err(ValueError::TypeMismatch.to_string()),
     }
 }
 
 /// Integer argument; strict typing (Int only, same rationale as `string_arg`).
-fn int_arg(args: &[Value], index: usize) -> Result<i64, ValueError> {
+fn int_arg(args: &[Value], index: usize) -> Result<i64, String> {
     match &args[index] {
         Value::Int(n) => Ok(*n),
-        _ => Err(ValueError::TypeMismatch),
+        _ => Err(ValueError::TypeMismatch.to_string()),
     }
 }
 
 /// Numeric argument as f64. Math functions accept Int or Float strictly
 /// (spec R3); other types are a runtime type error, no string parsing.
-fn float_arg(args: &[Value], index: usize) -> Result<f64, ValueError> {
+fn float_arg(args: &[Value], index: usize) -> Result<f64, String> {
     match &args[index] {
         Value::Int(n) => Ok(*n as f64),
         Value::Float(f) => Ok(*f),
-        _ => Err(ValueError::TypeMismatch),
+        _ => Err(ValueError::TypeMismatch.to_string()),
+    }
+}
+
+// ---- MS13 T6 datetime argument helpers (design D10, DA9) ----
+
+/// `(year, month, day)` of a Date/Timestamp argument (strict: no coercion
+/// from String/Int — CAST or typed literals are the explicit channels).
+fn ymd_arg(args: &[Value], index: usize) -> Result<(i32, u32, u32), String> {
+    match &args[index] {
+        Value::Date(d) => Ok(crate::executor::datetime::date_fields(*d)),
+        Value::Timestamp(t) => {
+            let f = crate::executor::datetime::ts_fields(*t);
+            Ok((f.0, f.1, f.2))
+        }
+        _ => Err(ValueError::TypeMismatch.to_string()),
+    }
+}
+
+/// `(hour, minute, second)` of a Timestamp argument; a Date counts as
+/// midnight (DA9).
+fn hms_arg(args: &[Value], index: usize) -> Result<(u32, u32, u32), String> {
+    match &args[index] {
+        Value::Timestamp(t) => {
+            let f = crate::executor::datetime::ts_fields(*t);
+            Ok((f.3, f.4, f.5))
+        }
+        Value::Date(_) => Ok((0, 0, 0)),
+        _ => Err(ValueError::TypeMismatch.to_string()),
+    }
+}
+
+/// Date serial of a Date/Timestamp argument: Date identity, Timestamp
+/// truncated to the day (`date(x)` semantics).
+fn date_val_arg(args: &[Value], index: usize) -> Result<i32, String> {
+    match &args[index] {
+        Value::Date(d) => Ok(*d),
+        Value::Timestamp(t) => Ok(crate::executor::datetime::ts_to_date_serial(*t)),
+        _ => Err(ValueError::TypeMismatch.to_string()),
     }
 }
 
@@ -180,7 +234,7 @@ fn substr_chars(s: &str, start: i64, len: Option<i64>) -> String {
     }
 }
 
-fn eval_scalar(name: &str, args: &[Value]) -> Result<Value, ValueError> {
+fn eval_scalar(name: &str, args: &[Value]) -> Result<Value, String> {
     match name {
         "UPPER" => Ok(Value::String(string_arg(args, 0)?.to_ascii_uppercase())),
         "LOWER" => Ok(Value::String(string_arg(args, 0)?.to_ascii_lowercase())),
@@ -214,9 +268,14 @@ fn eval_scalar(name: &str, args: &[Value]) -> Result<Value, ValueError> {
         // half-away-from-zero via `f64::round` and always returns Float
         // (digits Float truncates toward zero); floor/ceil return Float.
         "ABS" => match &args[0] {
-            Value::Int(n) => Ok(Value::Int(n.abs())),
+            // I043（DA4）: i64::MIN 溢出显式运行时错误（不再 debug panic /
+            // release 回绕）。
+            Value::Int(n) => Ok(Value::Int(
+                n.checked_abs()
+                    .ok_or_else(|| format!("Integer overflow in abs({n})"))?,
+            )),
             Value::Float(f) => Ok(Value::Float(f.abs())),
-            _ => Err(ValueError::TypeMismatch),
+            _ => Err(ValueError::TypeMismatch.to_string()),
         },
         "ROUND" => {
             let x = float_arg(args, 0)?;
@@ -224,15 +283,80 @@ fn eval_scalar(name: &str, args: &[Value]) -> Result<Value, ValueError> {
                 Some(_) => match &args[1] {
                     Value::Int(n) => *n,
                     Value::Float(f) => *f as i64,
-                    _ => return Err(ValueError::TypeMismatch),
+                    _ => return Err(ValueError::TypeMismatch.to_string()),
                 },
                 None => 0,
             };
+            // I043（DA4）: |digits| 超出 f64 数量级表示范围时 SQLite 对齐
+            // 饱和——正超界返回入参 Float 形态、负超界返回 0.0，杜绝
+            // inf/NaN（`10f64.powi(±1000)` 分别溢出/下溢为 inf/0）。
+            if digits > 308 {
+                return Ok(Value::Float(x));
+            }
+            if digits < -308 {
+                return Ok(Value::Float(0.0));
+            }
             let factor = 10f64.powi(digits as i32);
             Ok(Value::Float((x * factor).round() / factor))
         }
         "FLOOR" => Ok(Value::Float(float_arg(args, 0)?.floor())),
         "CEIL" => Ok(Value::Float(float_arg(args, 0)?.ceil())),
+        // MS13 T6 datetime family (design D10, DA9). NULL never reaches
+        // here (D3 short-circuit upstream); strict typing throughout.
+        "NOW" => {
+            let micros = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros() as i64)
+                .unwrap_or(0);
+            Ok(Value::Timestamp(micros))
+        }
+        "DATE" => Ok(Value::Date(date_val_arg(args, 0)?)),
+        "YEAR" => {
+            let (y, _, _) = ymd_arg(args, 0)?;
+            Ok(Value::Int(y as i64))
+        }
+        "MONTH" => {
+            let (_, m, _) = ymd_arg(args, 0)?;
+            Ok(Value::Int(m as i64))
+        }
+        "DAY" => {
+            let (_, _, d) = ymd_arg(args, 0)?;
+            Ok(Value::Int(d as i64))
+        }
+        "HOUR" => {
+            let (h, _, _) = hms_arg(args, 0)?;
+            Ok(Value::Int(h as i64))
+        }
+        "MINUTE" => {
+            let (_, mi, _) = hms_arg(args, 0)?;
+            Ok(Value::Int(mi as i64))
+        }
+        "SECOND" => {
+            let (_, _, s) = hms_arg(args, 0)?;
+            Ok(Value::Int(s as i64))
+        }
+        "DATE_TRUNC" => {
+            let unit_str = string_arg(args, 0)?;
+            let unit = parse_trunc_unit(unit_str)
+                .ok_or_else(|| format!("unknown date_trunc unit '{unit_str}'"))?;
+            match &args[1] {
+                // Date 仅支持日历单位（DA9）；时间单位运行期类型错误。
+                Value::Date(d) => match unit {
+                    TruncUnit::Year | TruncUnit::Month | TruncUnit::Day => {
+                        Ok(Value::Date(trunc_date(*d, unit)))
+                    }
+                    _ => Err(ValueError::TypeMismatch.to_string()),
+                },
+                Value::Timestamp(t) => Ok(Value::Timestamp(trunc_ts(*t, unit))),
+                _ => Err(ValueError::TypeMismatch.to_string()),
+            }
+        }
+        "DATEDIFF" => {
+            let unit_str = string_arg(args, 0)?;
+            let unit = parse_trunc_unit(unit_str)
+                .ok_or_else(|| format!("unknown datediff unit '{unit_str}'"))?;
+            Ok(Value::Int(datediff(unit, &args[1], &args[2])?))
+        }
         // The registry and this match live in the same module on purpose: a
         // registered name without an arm is registry/impl drift and must fail
         // loudly instead of masquerading as a type error.

@@ -76,7 +76,7 @@ async fn test_recover_from_checkpoint() {
     }
 
     let manager = CheckpointManager::new(db_path, wal_writer.clone(), buffer_pool);
-    manager.checkpoint().await.unwrap();
+    manager.checkpoint(|| 0).await.unwrap();
 
     // 写入 checkpoint 后记录
     wal_writer

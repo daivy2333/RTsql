@@ -181,19 +181,32 @@ async fn test_newer_version_rejected() {
     );
 }
 
-/// 加密位（当前版本不支持）→ IncompatibleHeader（前向防护：
-/// 不把 MS12 密文库当明文库解析）
+/// 加密位被当前构建接受（MS17-T01 激活）：加密库经 `open_with_key`
+/// 创建/重开可往返读写，落盘头携带加密位（真未知 flag 位仍被拒——
+/// 见 test_unknown_flag_bit_rejected）
 #[tokio::test]
-async fn test_encrypted_flag_rejected() {
+async fn test_encrypted_header_roundtrip() {
+    use rtsql::storage::Page;
+
     let dir = tempdir().unwrap();
     let path = dir.path().join("enc.db");
-    std::fs::write(&path, header_plus_pages(1, FLAG_ENCRYPTED, 4096, 1)).unwrap();
+    let mut page = Page::new(PageId(0));
+    page.data.fill(0xA5);
+    {
+        let storage = FileStorage::open_with_key(&path, Some("pw")).unwrap();
+        storage.write_page(PageId(0), &page).await.unwrap();
+    }
 
-    let err = expect_err(FileStorage::open(&path));
-    assert!(
-        matches!(err, StorageError::IncompatibleHeader(_)),
-        "got: {err:?}"
+    let raw = std::fs::read(&path).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+        FLAG_ENCRYPTED,
+        "on-disk header must carry the encrypted flag"
     );
+
+    let storage = FileStorage::open_with_key(&path, Some("pw")).unwrap();
+    let read_back = storage.read_page(PageId(0)).await.unwrap();
+    assert_eq!(read_back.data.as_ref(), page.data.as_ref());
 }
 
 /// 未定义 flag 位 → IncompatibleHeader

@@ -123,6 +123,10 @@ fn compare_values(a: &Value, b: &Value) -> Ordering {
         // Bool vs Bool
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
 
+        // MS13: 日期族同类型时间序（跨类型由兜底 Equal 保持稳定序）
+        (Value::Date(x), Value::Date(y)) => x.cmp(y),
+        (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
+
         // Incompatible types - maintain stable order
         _ => Ordering::Equal,
     }
@@ -222,6 +226,26 @@ mod tests {
                 &Value::String("a".to_string())
             ),
             Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_values_datetime() {
+        assert_eq!(
+            compare_values(&Value::Date(1), &Value::Date(2)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_values(&Value::Date(2), &Value::Date(1)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&Value::Timestamp(20), &Value::Timestamp(10)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&Value::Timestamp(10), &Value::Timestamp(10)),
+            Ordering::Equal
         );
     }
 }

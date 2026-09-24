@@ -435,6 +435,12 @@ impl PlanBuilder {
                     column: node.output_columns[0].column.clone(),
                 })
             }
+            // MS17-T02/ISS02: a JOIN-shaped IN-subquery plan used to fall into
+            // the `_` arm below and misreport "multiple columns" even for a
+            // single-column select list — reject with a truthful message.
+            PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_) => {
+                Err(PlanError::InSubqueryJoinUnsupported)
+            }
             _ => Err(PlanError::SubqueryReturnsMultipleColumns),
         }
     }

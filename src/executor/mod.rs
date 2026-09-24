@@ -10,6 +10,7 @@ mod anti_join;
 mod correlated;
 mod create_table;
 mod data_scan;
+pub(crate) mod datetime;
 mod delete;
 mod derived_scan;
 mod drop_table;
@@ -29,6 +30,7 @@ mod projection;
 mod result;
 mod scan;
 mod semi_join;
+mod single_row;
 mod sort;
 mod subquery_eval;
 mod update;
@@ -64,15 +66,16 @@ pub use plan::{
     ScanNode, SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode,
 };
 pub use predicate::{
-    CaseExpression, CastExpression, CastType, CoalesceExpression, ColumnExpression, ComparisonOp,
-    ComparisonPredicate, ConstantExpression, Expression, ExpressionRef, IsNullPredicate,
-    LikePredicate, LogicalOp, LogicalPredicate, NotPredicate, ParameterExpression, Predicate,
-    PredicateRef, Ternary,
+    ArithOp, BinaryArithExpression, CaseExpression, CastExpression, CastType, CoalesceExpression,
+    ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,
+    ExpressionRef, IntervalArithExpression, IsNullPredicate, LikePredicate, LogicalOp,
+    LogicalPredicate, NotPredicate, ParameterExpression, Predicate, PredicateRef, Ternary,
 };
 pub use projection::ProjectionExecutor;
 pub use result::ExecResult;
 pub use scan::ScanExecutor;
 pub use semi_join::SemiJoinExecutorV2;
+pub use single_row::SingleRowExecutor;
 pub use sort::SortExecutor;
 pub use subquery_eval::SubqueryEvalExecutor;
 pub use update::UpdateExecutor;

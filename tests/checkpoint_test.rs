@@ -19,12 +19,12 @@ fn test_read_write_checkpoint_site() {
     assert!(result.is_none());
 
     // 写位点
-    manager.write_checkpoint_site(1024, 1234567890).unwrap();
+    manager.write_checkpoint_site(1024, 1234567890, 0).unwrap();
 
     // 读位点
-    let (lsn, timestamp) = manager.read_checkpoint_site().unwrap().unwrap();
-    assert_eq!(lsn, 1024);
-    assert_eq!(timestamp, 1234567890);
+    let site = manager.read_checkpoint_site().unwrap().unwrap();
+    assert_eq!(site.lsn, 1024);
+    assert_eq!(site.timestamp, 1234567890);
 }
 
 #[tokio::test]
@@ -50,14 +50,14 @@ async fn test_checkpoint_flow() {
     let manager = CheckpointManager::new(db_path, wal_writer.clone(), buffer_pool);
 
     // 执行 checkpoint
-    let captured_lsn = manager.checkpoint().await.unwrap();
+    let captured_lsn = manager.checkpoint(|| 0).await.unwrap();
     assert!(captured_lsn > 0, "checkpoint 返回本次捕获的 LSN");
 
     // 读位点验证
     // MS07-T05：重写截断后位点置 0（语义 = 对已缩短文件重放全部），
     // 既有 `checkpoint_lsn > 0` 断言与 Critical Path 冲突，按新语义同步
-    let (checkpoint_lsn, _) = manager.read_checkpoint_site().unwrap().unwrap();
-    assert_eq!(checkpoint_lsn, 0, "截断后位点必须失效为重放全部");
+    let site = manager.read_checkpoint_site().unwrap().unwrap();
+    assert_eq!(site.lsn, 0, "截断后位点必须失效为重放全部");
 }
 
 #[tokio::test]
@@ -85,13 +85,13 @@ async fn test_checkpoint_threshold_trigger() {
             .unwrap();
 
         if wal_writer.should_checkpoint() {
-            manager.checkpoint().await.unwrap();
+            manager.checkpoint(|| 0).await.unwrap();
             wal_writer.reset_write_count();
         }
     }
 
     // 验证 checkpoint 位点已写入
     // MS07-T05：重写截断后位点置 0（语义 = 对已缩短文件重放全部）
-    let (lsn, _) = manager.read_checkpoint_site().unwrap().unwrap();
-    assert_eq!(lsn, 0, "截断后位点必须失效为重放全部");
+    let site = manager.read_checkpoint_site().unwrap().unwrap();
+    assert_eq!(site.lsn, 0, "截断后位点必须失效为重放全部");
 }

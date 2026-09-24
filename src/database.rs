@@ -40,8 +40,22 @@ impl Database {
     /// through all scan constructions, so only transactions already
     /// committed at that point are visible.
     pub async fn open_with_isolation(path: &Path, isolation: IsolationLevel) -> Result<Self> {
+        Self::open_with_key(path, isolation, None).await
+    }
+
+    /// Open a database with an optional encryption key (MS17 Iter000).
+    ///
+    /// `key` is `Some` for encrypted databases (or to create one from a
+    /// zero-byte file); `None` opens or creates a plaintext database.
+    /// Plaintext behavior is identical to [`Database::open_with_isolation`].
+    pub async fn open_with_key(
+        path: &Path,
+        isolation: IsolationLevel,
+        key: Option<&str>,
+    ) -> Result<Self> {
         // 1. Initialize storage
-        let storage: Arc<dyn crate::storage::AsyncStorage> = Arc::new(FileStorage::open(path)?);
+        let storage: Arc<dyn crate::storage::AsyncStorage> =
+            Arc::new(FileStorage::open_with_key(path, key)?);
         let buffer_pool = Arc::new(BufferPool::new(100, storage.clone())?);
         // MS07-T01: TableManager is async + takes storage. It bootstraps
         // or opens the catalog, then `open_or_init` rebuilds the in-memory
@@ -75,7 +89,14 @@ impl Database {
         // committed/aborted/uncommitted id. This is also the soundness
         // premise of the Read Committed high-water mark ("every id ≤ the
         // allocator's current value is committed, aborted, or active").
-        let max_tx_id = recovery_result
+        //
+        // MS17-T02 Iter002 (D8): a checkpointed restart loses the WAL id
+        // history (a clean close leaves no Begin/Commit frames), so the
+        // observed max alone would reset the allocator to zero. The
+        // checkpoint site carries the allocator watermark captured right
+        // after the LSN; advancing past the max of both keeps the premise
+        // sound on every restart path.
+        let wal_observed_max = recovery_result
             .committed_tx_ids
             .iter()
             .chain(recovery_result.aborted_tx_ids.iter())
@@ -83,7 +104,8 @@ impl Database {
             .max()
             .copied()
             .unwrap_or(0);
-        transaction_manager.advance_past(max_tx_id);
+        let site_watermark = recovery_result.checkpoint_tx_watermark.unwrap_or(0);
+        transaction_manager.advance_past(std::cmp::max(wal_observed_max, site_watermark));
 
         // R-T0b-R5: attach catalog root-sync contexts only AFTER recovery —
         // replay-time root changes must not be persisted (the recovery load
@@ -231,9 +253,15 @@ impl Database {
 
     /// Run a checkpoint: flush dirty pages, write the checkpoint site and
     /// rewrite-truncate the WAL so the file stays bounded (MS07-T05).
+    ///
+    /// MS17-T02 Iter002 (D8): the site carries the tx id allocator watermark,
+    /// read inside `CheckpointManager::checkpoint` right after the WAL LSN
+    /// capture, so a restart after WAL truncation still advances the
+    /// allocator past every pre-restart id (Read Committed high-water
+    /// soundness).
     pub async fn checkpoint(&self) -> Result<()> {
         self.checkpoint_manager
-            .checkpoint()
+            .checkpoint(|| self.transaction_manager.current_tx_id())
             .await
             .map(|_captured_lsn| ())
             .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))

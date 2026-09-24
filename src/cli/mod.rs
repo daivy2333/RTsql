@@ -10,8 +10,8 @@ use crate::parser::planner::{classify_transaction_statement, TxStatementKind};
 use crate::parser::PlanBuilder;
 use crate::pipeline::{execute_stage, execute_stage_in_tx, parse_stage, plan_stage};
 use crate::storage::StorageError;
-use crate::transaction::TransactionSession;
-use clap::{Parser, Subcommand, ValueEnum};
+use crate::transaction::{IsolationLevel, TransactionSession};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use render::{render, OutputKind, QueryPayload};
 use std::future::Future;
 use std::io::{IsTerminal, Write};
@@ -21,9 +21,9 @@ use std::process::ExitCode;
 
 /// 退出码分类：0 成功 / 1 一般错误 / 2 用法错误 / 3 SQL 错误 / 4 锁冲突 / 5 密钥错误。
 ///
-/// InvalidKey 当前无产生路径（密钥 MS12 落地），仅枚举留位。
-/// Signaled 携带信号编号，按 POSIX 映射 128+signum（SIGINT→130、SIGTERM→143），
-/// 不输出 stderr 消息（130/143 自解释）。
+/// InvalidKey 由加密库的密钥错误面产生（MS17-T01：错误密钥 / 加密无钥 /
+/// 明文带钥）。Signaled 携带信号编号，按 POSIX 映射 128+signum（SIGINT→130、
+/// SIGTERM→143），不输出 stderr 消息（130/143 自解释）。
 pub enum ExitStatus {
     Success,
     General(String),
@@ -77,6 +77,9 @@ struct CliArgs {
     /// 输出格式（默认：TTY 用 table，非 TTY 用 json）
     #[arg(short, long, value_enum, global = true)]
     format: Option<FormatArg>,
+    /// 加密库密钥；也可经 RTSQL_KEY 环境变量提供（显式 flag 优先）
+    #[arg(long, value_name = "KEY", global = true, env = "RTSQL_KEY")]
+    key: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -121,6 +124,51 @@ enum Command {
         #[arg(long)]
         csv: bool,
     },
+    /// 输出每列统计摘要（行数/null率/distinct/min/max/分位数）
+    Stats {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+        /// 目标表名
+        table: String,
+    },
+    /// 随机抽样 N 行（reservoir sampling）
+    Sample {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+        /// 目标表名
+        table: String,
+        /// 抽样行数（默认 10）
+        n: Option<usize>,
+    },
+    /// 输出每列画像（类型/min/max/String 列 top-k 高频值）
+    Profile {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+        /// 目标表名
+        table: String,
+        /// top-k 上限调整（默认 5，上限 20）
+        #[arg(long)]
+        top: Option<usize>,
+    },
+    #[command(hide = true)]
+    Completions { shell: CompletionShell },
+}
+
+#[derive(ValueEnum, Clone, Copy)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl From<CompletionShell> for clap_complete::Shell {
+    fn from(shell: CompletionShell) -> Self {
+        match shell {
+            CompletionShell::Bash => Self::Bash,
+            CompletionShell::Zsh => Self::Zsh,
+            CompletionShell::Fish => Self::Fish,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy)]
@@ -142,18 +190,44 @@ pub async fn run() -> ExitCode {
 }
 
 async fn execute_command(args: &CliArgs) -> ExitStatus {
+    // 空密钥防呆（开库前拒绝）：误设空环境变量不得静默降级为无钥打开
+    if args.key.as_deref() == Some("") {
+        return ExitStatus::Usage("key must not be empty".to_string());
+    }
     match &args.command {
-        Some(Command::New { target }) => lifecycle::new_db(target).await,
+        Some(Command::New { target }) => lifecycle::new_db(target, args.key.as_deref()).await,
         Some(Command::List) => lifecycle::list(args.format).await,
-        Some(Command::Schema { db }) => lifecycle::schema(db).await,
-        Some(Command::Dump { db }) => lifecycle::dump(db).await,
-        Some(Command::Restore { db, file }) => lifecycle::restore(db, file).await,
+        Some(Command::Schema { db }) => lifecycle::schema(db, args.key.as_deref()).await,
+        Some(Command::Dump { db }) => lifecycle::dump(db, args.key.as_deref()).await,
+        Some(Command::Restore { db, file }) => {
+            lifecycle::restore(db, file, args.key.as_deref()).await
+        }
         Some(Command::Import {
             db,
             table,
             file,
             csv,
-        }) => lifecycle::import_csv(db, table, file, *csv, args.format).await,
+        }) => lifecycle::import_csv(db, table, file, *csv, args.format, args.key.as_deref()).await,
+        Some(Command::Stats { db, table }) => {
+            lifecycle::stats(db, table, args.format, args.key.as_deref()).await
+        }
+        Some(Command::Sample { db, table, n }) => {
+            lifecycle::sample(db, table, *n, args.format, args.key.as_deref()).await
+        }
+        Some(Command::Profile { db, table, top }) => {
+            lifecycle::profile(db, table, *top, args.format, args.key.as_deref()).await
+        }
+        Some(Command::Completions { shell }) => {
+            let mut command = CliArgs::command();
+            let mut stdout = std::io::stdout();
+            clap_complete::generate(
+                clap_complete::Shell::from(*shell),
+                &mut command,
+                "rtsql",
+                &mut stdout,
+            );
+            ExitStatus::Success
+        }
         None => execute_main_command(args).await,
     }
 }
@@ -178,6 +252,7 @@ async fn execute_main_command(args: &CliArgs) -> ExitStatus {
     let format = args.format;
     execute_command_inner(
         &db_path,
+        args.key.as_deref(),
         move |db| Box::pin(async move { run_sql(db, &sql, format).await }),
         sigint_future,
         sigterm_future,
@@ -219,6 +294,11 @@ fn open_error_status(db_path: &Path, e: StorageError) -> ExitStatus {
         StorageError::DatabaseLocked(_) => {
             ExitStatus::Locked(format!("database is locked: {}", db_path.display()))
         }
+        // detail 保留打开面语境（加密无钥 / 明文带钥 / 页认证失败），
+        // 前缀沿用 StorageError Display 语义（exit 5 消息含 "invalid key"）
+        StorageError::InvalidKey(detail) => {
+            ExitStatus::InvalidKey(format!("invalid key: {detail}"))
+        }
         other => ExitStatus::General(format!(
             "failed to open database {}: {}",
             db_path.display(),
@@ -235,12 +315,13 @@ fn open_error_status(db_path: &Path, e: StorageError) -> ExitStatus {
 /// `close()` 期间不新增 select（快路径；二次 Ctrl-C 不强杀，kill -9 兜底）。
 async fn execute_command_inner(
     db_path: &Path,
+    key: Option<&str>,
     work: impl for<'a> FnOnce(&'a Database) -> WorkFuture<'a> + Send,
     signal_int: impl Fn() -> SignalFuture + Send,
     signal_term: impl Fn() -> SignalFuture + Send,
 ) -> ExitStatus {
     let db = tokio::select! {
-        opened = Database::open(db_path) => match opened {
+        opened = Database::open_with_key(db_path, IsolationLevel::RepeatableRead, key) => match opened {
             Ok(db) => db,
             Err(e) => return open_error_status(db_path, e),
         },
@@ -508,6 +589,7 @@ mod tests {
 
         let status = execute_command_inner(
             &db_path,
+            None,
             move |_db| {
                 let work_release = work_release.clone();
                 Box::pin(async move {

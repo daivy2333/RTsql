@@ -1,5 +1,6 @@
 //! Insert executor - MVCC-aware row insert
 
+use super::datetime::coerce_datetime_write;
 use crate::executor::{ExecResult, Executor, Value};
 use crate::storage::data::TableManager;
 use crate::storage::page_format::{compute_tuple_size, serialize_tuple, ColumnType};
@@ -19,6 +20,8 @@ fn key_value_type_name(v: &Value) -> &'static str {
         Value::Null => "Null",
         Value::Float(_) => "Float",
         Value::Bool(_) => "Bool",
+        Value::Date(_) => "Date",
+        Value::Timestamp(_) => "Timestamp",
     }
 }
 
@@ -103,6 +106,15 @@ impl Executor for InsertExecutor {
 
         let mut count = 0u64;
         for row_values in &self.values {
+            // MS13 T4（决策 2）：日期族目标列写入强制解析——逐列先于 MS16
+            // 键位预检与任何索引访问，非法值零副作用拒绝（同族值/Null 原样，
+            // String 强制解析，其余 InvalidDateTime）。
+            let coerced: Vec<Value> = row_values
+                .iter()
+                .zip(self.schema.iter())
+                .map(|(v, ct)| coerce_datetime_write(v, ct))
+                .collect::<Result<Vec<_>>>()?;
+            let row_values = &coerced;
             let pk_value = &row_values[self.pk_index];
 
             // MS16 Iteration 000 (design D3): Int 键列只接受 Int 或 NULL 键位

@@ -1,13 +1,13 @@
 # sql-scalar-functions Specification
 
 ## Purpose
-SQL 标量函数能力（第一批，string 六件 + math 四件）。十个标量函数在 WHERE 谓词与 SELECT 派生列双侧可用：string 六件（`upper`/`lower`/`length`/`substr`/`replace`/`trim`——严格字符串类型无隐式转换、Unicode 字符计数、substr 边缘对齐 SQLite（start=0 幻影位/负 start 尾数/负 len 前取）、replace 空 from 原样、trim 仅剥 U+0020）与 math 四件（`abs` 同型返回、`round` 半数远离零 + digits 整数位舍入/Float 向零截断、`floor`/`ceil` 返回 Float）。函数经单点注册表（`src/executor/function.rs`）驱动 plan 期校验与执行期分派：名称大小写不敏感、arity plan 期校验，OVER/DISTINCT/FILTER/命名参数/通配符/零参显式点名拒绝；未注册名维持既有拒绝文案，聚合五名不进标量分派。任一参数 NULL → NULL 且跳过类型校验，参数求值错误先于 NULL 检查传播，参数接受任意值表达式（嵌套函数/COALESCE/CAST/负数字面量）。WHERE 下推/Filter/OR 组合三路径一致，聚合混用与 HAVING 标量引用保持既有拒绝，ORDER BY 表达式别名静默保持输入序（既有语义文档化）。来源：MS11-T03（change `2026-09-10-ms11-t03-scalar-functions`，2026-09-11 归档）。
+SQL 标量函数能力（第一批，string 六件 + math 四件）。十个标量函数在 WHERE 谓词与 SELECT 派生列双侧可用：string 六件（`upper`/`lower`/`length`/`substr`/`replace`/`trim`——严格字符串类型无隐式转换、Unicode 字符计数、substr 边缘对齐 SQLite（start=0 幻影位/负 start 尾数/负 len 前取）、replace 空 from 原样、trim 仅剥 U+0020）与 math 四件（`abs` 同型返回、`round` 半数远离零 + digits 整数位舍入/Float 向零截断、`floor`/`ceil` 返回 Float）。函数经单点注册表（`src/executor/function.rs`）驱动 plan 期校验与执行期分派：名称大小写不敏感、arity plan 期校验，OVER/DISTINCT/FILTER/命名参数/通配符/零参显式点名拒绝；未注册名维持既有拒绝文案，聚合五名不进标量分派。任一参数 NULL → NULL 且跳过类型校验，参数求值错误先于 NULL 检查传播，参数接受任意值表达式（嵌套函数/COALESCE/CAST/负数字面量）。WHERE 下推/Filter/OR 组合三路径一致，聚合混用与 HAVING 标量引用保持既有拒绝，ORDER BY 表达式别名静默保持输入序（既有语义文档化）。来源：MS11-T03（change `2026-09-10-ms11-t03-scalar-functions`，2026-09-11 归档）；MS13 修改 R1（大小写变体 SQL 层 e2e 见证 + `now` 等零参注册函数 carve-out）与 R3（abs 溢出 / round 极端 digits 饱和，I043）（change `2026-09-23-ms13-analytics-functions`，2026-09-23 归档）。
 
 ## Requirements
 
 ### Requirement: 函数注册与分派机制
 
-标量函数调用 SHALL 经统一的注册与分派机制处理：函数名匹配 SHALL 大小写不敏感；参数个数 SHALL 在 plan 期校验，不符时报 SQL 错误且错误信息点名函数名与期望参数个数。以下形态 SHALL 在 plan 期显式拒绝为 SQL 错误且错误信息点名不被支持的构造，SHALL NOT 静默降级或部分执行：`OVER` 窗口子句、`DISTINCT` 限定、`FILTER (WHERE ...)` 子句、命名参数（`name => value`）、通配符参数（`*`）、零参调用。未注册的函数名 SHALL 维持既有拒绝行为且文案逐字节不变：SELECT 投影位置为既有 `Unsupported statement type`（`ast.rs` extract_columns 放行门先于 planner 函数臂），谓词与值表达式位置为既有 `Unsupported expression type`。注册表 SHALL 与聚合五函数（COUNT/SUM/AVG/MIN/MAX）互斥：聚合名继续走聚合路径，SHALL NOT 进入标量分派。
+标量函数调用 SHALL 经统一的注册与分派机制处理：函数名匹配 SHALL 大小写不敏感（大写/混合大小写调用形态与小写形态结果与错误面逐字节一致，SQL 层 e2e 见证锁定）；参数个数 SHALL 在 plan 期校验，不符时报 SQL 错误且错误信息点名函数名与期望参数个数。以下形态 SHALL 在 plan 期显式拒绝为 SQL 错误且错误信息点名不被支持的构造，SHALL NOT 静默降级或部分执行：`OVER` 窗口子句、`DISTINCT` 限定、`FILTER (WHERE ...)` 子句、命名参数（`name => value`）、通配符参数（`*`）、零参调用（`now` 等零参注册函数不在此列）。未注册的函数名 SHALL 维持既有拒绝行为且文案逐字节不变：SELECT 投影位置为既有 `Unsupported statement type`（`ast.rs` extract_columns 放行门先于 planner 函数臂），谓词与值表达式位置为既有 `Unsupported expression type`。注册表 SHALL 与聚合五函数（COUNT/SUM/AVG/MIN/MAX）互斥：聚合名继续走聚合路径，SHALL NOT 进入标量分派。
 
 #### Scenario: 未知名维持既有文案
 
@@ -32,6 +32,12 @@ SQL 标量函数能力（第一批，string 六件 + math 四件）。十个标�
 - **GIVEN** 表 `t(name VARCHAR)` 存在
 - **WHEN** `SELECT substr(name) FROM t`
 - **THEN** 报 SQL 错误（plan 期，不执行），错误信息点名 `substr` 与参数个数要求
+
+#### Scenario: 大小写变体 SQL 层等价（I044）
+
+- **GIVEN** 表 `t(name VARCHAR)` 含一行 `name='abc'`、`t2(i INT)` 含一行 `i=-5`
+- **WHEN** `SELECT UPPER(name) FROM t`、`SELECT Abs(i) FROM t2`、`SELECT MiXeD_Length(name) FROM t` 等大写/混合形态
+- **THEN** 与小写形态结果与错误面逐字节一致（表头回放书写形态的既有语义不受影响）
 
 ### Requirement: string 函数六件
 
@@ -76,7 +82,7 @@ SQL 标量函数能力（第一批，string 六件 + math 四件）。十个标�
 
 ### Requirement: math 函数四件
 
-`abs(x)` SHALL 返回绝对值并保持入参类型（Int→Int、Float→Float）；`round(x[, digits])` SHALL 按半数远离零（half-away-from-zero）舍入并返回 Float（`round(3.7)=4.0`、`round(2.5)=3.0`、`round(-2.5)=-3.0`、`round(3.14159,2)=3.14`）；`digits` SHALL 接受 1 或 2 个参数形态，`digits<0` 按整数位舍入（`round(123.4,-1)=120.0`），`digits` 为 Float 时按向零截断取整后使用；`floor(x)`/`ceil(x)` SHALL 返回 Float（`floor(3.7)=3.0`、`ceil(3.2)=4.0`、`floor(-3.7)=-4.0`）。四个函数入参 SHALL 严格校验为 Int 或 Float，其他类型报运行时类型错误；`digits` 参数 SHALL 严格校验为 Int 或 Float。
+`abs(x)` SHALL 返回绝对值并保持入参类型（Int→Int、Float→Float）；Int 入参为 `i64::MIN` 时 SHALL 报运行时溢出错误（显式拒绝，SHALL NOT panic 或回绕为负）；`round(x[, digits])` SHALL 按半数远离零（half-away-from-zero）舍入并返回 Float（`round(3.7)=4.0`、`round(2.5)=3.0`、`round(-2.5)=-3.0`、`round(3.14159,2)=3.14`）；`digits` SHALL 接受 1 或 2 个参数形态，`digits<0` 按整数位舍入（`round(123.4,-1)=120.0`），`digits` 为 Float 时按向零截断取整后使用；`digits` 超出 f64 数量级表示范围时 SHALL SQLite 对齐饱和：`digits` 正超界（如 1000）返回入参的 Float 形态（`round(1,1000)=1.0`），`digits` 负超界（如 -1000）返回 0.0，SHALL NOT 产出 inf/NaN。`floor(x)`/`ceil(x)` SHALL 返回 Float（`floor(3.7)=3.0`、`ceil(3.2)=4.0`、`floor(-3.7)=-4.0`）。四个函数入参 SHALL 严格校验为 Int 或 Float，其他类型报运行时类型错误；`digits` 参数 SHALL 严格校验为 Int 或 Float。
 
 #### Scenario: abs 同型返回
 
@@ -84,11 +90,23 @@ SQL 标量函数能力（第一批，string 六件 + math 四件）。十个标�
 - **WHEN** `SELECT abs(i), abs(f) FROM t`
 - **THEN** 输出 `5`（Int）与 `5.5`（Float）
 
+#### Scenario: abs i64::MIN 溢出显式错误（I043）
+
+- **GIVEN** 表 `t(i INT)` 含一行 `i=-9223372036854775808`
+- **WHEN** `SELECT abs(i) FROM t`
+- **THEN** 报运行时溢出错误（显式错误信息），SHALL NOT panic、SHALL NOT 回绕为负
+
 #### Scenario: round 舍入方向与 digits
 
 - **GIVEN** 表 `t(f FLOAT)` 含一行 `f=3.14159`
 - **WHEN** 依次执行 `SELECT round(3.7) FROM t`、`SELECT round(2.5) FROM t`、`SELECT round(-2.5) FROM t`、`SELECT round(f, 2) FROM t`、`SELECT round(123.4, -1) FROM t`
 - **THEN** 依次输出 `4.0`、`3.0`（半数远离零）、`-3.0`、`3.14`、`120.0`（负 digits 整数位舍入）
+
+#### Scenario: round 极端 digits 饱和（I043）
+
+- **GIVEN** 任意表
+- **WHEN** `SELECT round(1, 1000)`、`SELECT round(1, -1000)`、`SELECT round(2.5, 400)`
+- **THEN** 依次输出 `1.0`、`0.0`、`2.5`（SQLite 对齐饱和，无 inf/NaN）
 
 #### Scenario: floor/ceil 返回 Float
 

@@ -4,7 +4,7 @@
 
 use crate::executor::executor_trait::Executor;
 use crate::executor::result::ExecResult;
-use crate::executor::Value;
+use crate::executor::{ExpressionRef, Value};
 use crate::storage;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -178,6 +178,10 @@ impl AggregateState {
 pub struct AggregateExecutor {
     input: Box<dyn Executor + Send>,
     group_by: Vec<String>,
+    /// MS13 T8: 分组键求值表达式（与 `group_by` 名单一一对应）。列名键 =
+    /// `ColumnExpression`（与既有名字查索引语义逐字节一致），表达式/别名/
+    /// 位置键 = SELECT 项编译表达式。
+    group_key_exprs: Vec<ExpressionRef>,
     aggregates: Vec<AggregateFunc>,
     /// Output column names for projection optimization (future use)
     #[allow(dead_code)]
@@ -199,6 +203,7 @@ impl AggregateExecutor {
     pub fn new(
         input: Box<dyn Executor + Send>,
         group_by: Vec<String>,
+        group_key_exprs: Vec<ExpressionRef>,
         aggregates: Vec<AggregateFunc>,
         output_columns: Vec<String>,
         column_indices: HashMap<String, usize>,
@@ -206,6 +211,7 @@ impl AggregateExecutor {
         Self {
             input,
             group_by,
+            group_key_exprs,
             aggregates,
             output_columns,
             column_indices,
@@ -237,7 +243,7 @@ impl AggregateExecutor {
                             states[i].update(&value);
                         }
                     } else {
-                        let group_key = self.extract_group_key(&row);
+                        let group_key = self.extract_group_key(&row)?;
                         let states = self.groups.entry(group_key).or_insert_with(|| {
                             self.aggregates.iter().map(AggregateState::new).collect()
                         });
@@ -275,15 +281,22 @@ impl AggregateExecutor {
         }
     }
 
-    /// Extract group key from row
-    fn extract_group_key(&self, row: &[Value]) -> Vec<Value> {
-        self.group_by
-            .iter()
-            .map(|col| match self.column_indices.get(&col.to_lowercase()) {
-                Some(&idx) => row.get(idx).cloned().unwrap_or(Value::Null),
-                None => Value::Null,
-            })
-            .collect()
+    /// Extract group key from row by evaluating the group key expressions
+    /// (MS13 T8). NULL 求值结果作为键值参与分桶（HashMap 归并单组）。
+    fn extract_group_key(&self, row: &[Value]) -> Result<Vec<Value>, storage::StorageError> {
+        let mut key = Vec::with_capacity(self.group_key_exprs.len());
+        for expr in &self.group_key_exprs {
+            match expr.evaluate(row) {
+                Ok(v) => key.push(v),
+                Err(e) => {
+                    return Err(storage::StorageError::ExecutionError(format!(
+                        "GROUP BY key evaluation error: {}",
+                        e
+                    )))
+                }
+            }
+        }
+        Ok(key)
     }
 
     /// Build output rows from accumulated aggregate states

@@ -44,6 +44,10 @@ const COL_TAG_STRING: u8 = 0x02;
 const COL_TAG_FLOAT: u8 = 0x03;
 /// Tag byte for `ColumnType::Bool` in the catalog serialized form.
 const COL_TAG_BOOL: u8 = 0x04;
+/// Tag byte for `ColumnType::Date` in the catalog serialized form (MS13).
+const COL_TAG_DATE: u8 = 0x05;
+/// Tag byte for `ColumnType::Timestamp` in the catalog serialized form (MS13).
+const COL_TAG_TIMESTAMP: u8 = 0x06;
 
 /// One row in the `__tables` SlottedPage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -656,6 +660,8 @@ pub(crate) fn serialize_catalog_column_row(row: &CatalogColumnRow) -> Vec<u8> {
         ColumnType::Int => (COL_TAG_INT, None),
         ColumnType::Float => (COL_TAG_FLOAT, None),
         ColumnType::Bool => (COL_TAG_BOOL, None),
+        ColumnType::Date => (COL_TAG_DATE, None),
+        ColumnType::Timestamp => (COL_TAG_TIMESTAMP, None),
         ColumnType::String(max_len) => (COL_TAG_STRING, Some(max_len)),
     };
     let mut buf = Vec::new();
@@ -725,6 +731,8 @@ pub(crate) fn deserialize_catalog_column_row(data: &[u8]) -> Result<CatalogColum
         COL_TAG_INT => ColumnType::Int,
         COL_TAG_FLOAT => ColumnType::Float,
         COL_TAG_BOOL => ColumnType::Bool,
+        COL_TAG_DATE => ColumnType::Date,
+        COL_TAG_TIMESTAMP => ColumnType::Timestamp,
         COL_TAG_STRING => {
             if data.len() < p + 2 {
                 return Err(StorageError::Internal(
@@ -816,6 +824,16 @@ mod tests {
         let bytes = serialize_catalog_column_row(&col);
         let back = deserialize_catalog_column_row(&bytes).unwrap();
         assert_eq!(col, back);
+    }
+
+    #[test]
+    fn column_row_serde_roundtrip_datetime() {
+        for ty in [ColumnType::Date, ColumnType::Timestamp] {
+            let col = sample_col("d", 1, ty);
+            let bytes = serialize_catalog_column_row(&col);
+            let back = deserialize_catalog_column_row(&bytes).unwrap();
+            assert_eq!(col, back);
+        }
     }
 
     #[test]

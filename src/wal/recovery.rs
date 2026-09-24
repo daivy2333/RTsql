@@ -21,6 +21,11 @@ pub struct RecoveryResult {
     pub aborted_tx_ids: HashSet<u64>,
     pub uncommitted_tx_ids: HashSet<u64>,
     pub redo_count: usize,
+    /// MS17-T02 Iter002（design D8）：位点携带的事务分配器水位（LSN 捕获后
+    /// 读取；16B 旧格式位点/无位点为 `None`）。`Database::open` 以
+    /// max(WAL 观测最大 id, 本水位) 推进分配器，checkpoint 截断 WAL 后
+    /// 高水位前提仍然健全。
+    pub checkpoint_tx_watermark: Option<u64>,
 }
 
 /// R-T0b-R7 (D10) + T8-R2：重放期的磁盘版本多映射，按表分桶。
@@ -396,7 +401,7 @@ impl RecoveryManager {
             return Ok(RecoveryResult::default());
         }
 
-        // 消费 checkpoint 位点（16B 语义与 CheckpointManager 一致）：
+        // 消费 checkpoint 位点（24B 兼容读，语义与 CheckpointManager 一致）：
         // 位点缺失/损坏（<16B）/ LSN 超出 WAL 文件长度（代际失效）→ 全量重放（0）；
         // 有效位点语义 = 只重放记录偏移 ≥ site 的数据记录（位点前缀已由刷脏页覆盖）
         let site = super::checkpoint::read_site_file(&db_path.with_extension("checkpoint"))?;
@@ -404,15 +409,21 @@ impl RecoveryManager {
             .map_err(|e| WalError::IoError(e.to_string()))?
             .len();
         let redo_from = match site {
-            Some((lsn, _)) if lsn <= wal_len => lsn,
+            Some(s) if s.lsn <= wal_len => s.lsn,
             _ => 0,
         };
+        // MS17-T02 Iter002（design D8）：水位独立于 redo_from 携带——代际失效
+        // 的位点只作废 lsn 过滤，水位仍 ≤ 真实历史 max，推进分配器恒安全
+        let checkpoint_tx_watermark = site.and_then(|s| s.tx_watermark);
 
         let mut reader = WalReader::open(&wal_path)?;
         let records = reader.read_all_with_lsn()?;
 
         if records.is_empty() {
-            return Ok(RecoveryResult::default());
+            return Ok(RecoveryResult {
+                checkpoint_tx_watermark,
+                ..Default::default()
+            });
         }
 
         // Step 1: Classify transactions（分类始终覆盖全部记录，不因位点裁剪）
@@ -490,6 +501,7 @@ impl RecoveryManager {
             aborted_tx_ids,
             uncommitted_tx_ids,
             redo_count,
+            checkpoint_tx_watermark,
         })
     }
 

@@ -13,7 +13,7 @@ use crate::storage::catalog::{CatalogColumnRow, CatalogRow};
 use crate::storage::page_format::ColumnType;
 
 /// `new <name|path>`：已存在拒绝 → 建父目录 → open 建库 + close checkpoint → 静默。
-pub(super) async fn new_db(target: &str) -> ExitStatus {
+pub(super) async fn new_db(target: &str, key: Option<&str>) -> ExitStatus {
     let db_path = match resolve::resolve_db_path(target) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
@@ -35,6 +35,7 @@ pub(super) async fn new_db(target: &str) -> ExitStatus {
     // work 为空闭包：open 建库（0 字节写头 + catalog bootstrap）+ close 落盘即全部工作
     super::execute_command_inner(
         &db_path,
+        key,
         move |_db| Box::pin(async { ExitStatus::Success }),
         sigint_future,
         sigterm_future,
@@ -99,7 +100,7 @@ pub(super) async fn list(format: Option<FormatArg>) -> ExitStatus {
 }
 
 /// `schema <db>`：逐用户表输出一行 CREATE TABLE DDL；空库无输出、静默 exit 0。
-pub(super) async fn schema(db: &str) -> ExitStatus {
+pub(super) async fn schema(db: &str, key: Option<&str>) -> ExitStatus {
     let db_path = match resolve::resolve_db_path(db) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
@@ -109,6 +110,7 @@ pub(super) async fn schema(db: &str) -> ExitStatus {
     }
     super::execute_command_inner(
         &db_path,
+        key,
         move |db| {
             Box::pin(async move {
                 // 系统表不可经 SQL 查询，DDL 数据只能走内部 catalog 读 API
@@ -141,7 +143,7 @@ pub(super) async fn schema(db: &str) -> ExitStatus {
 
 /// `dump <db>`：逐用户表输出 DDL 行 + 全行 INSERT 语句流（SQL 文本导出）；
 /// 空库无输出、静默 exit 0。catalog 表序即输出序。
-pub(super) async fn dump(db: &str) -> ExitStatus {
+pub(super) async fn dump(db: &str, key: Option<&str>) -> ExitStatus {
     let db_path = match resolve::resolve_db_path(db) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
@@ -151,6 +153,7 @@ pub(super) async fn dump(db: &str) -> ExitStatus {
     }
     super::execute_command_inner(
         &db_path,
+        key,
         move |db| {
             Box::pin(async move {
                 let catalog = db.table_manager.catalog();
@@ -174,7 +177,19 @@ pub(super) async fn dump(db: &str) -> ExitStatus {
                         Err(status) => return status,
                     };
                     for row in rows {
-                        let values: Vec<String> = row.iter().map(sql_literal).collect();
+                        // MS13 T5: 日期族列输出类型化字面量（值已经 value_to_json
+                        // 渲染为 DA5 字符串）；其余列走既有 sql_literal。行序 =
+                        // SELECT * 恒等投影 = catalog 列序（column_index 升序）。
+                        let values: Vec<String> = row
+                            .iter()
+                            .zip(columns.iter())
+                            .map(|(v, col)| match col.column_type {
+                                ColumnType::Date | ColumnType::Timestamp => {
+                                    typed_datetime_literal(v, &col.column_type)
+                                }
+                                _ => sql_literal(v),
+                            })
+                            .collect();
                         let insert = format!(
                             "INSERT INTO {} VALUES ({});",
                             quote_ident(&table.table_name),
@@ -267,10 +282,26 @@ fn sql_literal(v: &serde_json::Value) -> String {
     }
 }
 
+/// MS13 T5：日期族列的类型化字面量（dump 往返 plan 期解析通路）。值已经是
+/// DA5 字符串（value_to_json 日期族渲染），包裹 `DATE '...'`/`TIMESTAMP '...'`
+/// 后与 `build_insert` 的 TypedString 臂往返；Null 值仍输出 NULL。
+fn typed_datetime_literal(v: &serde_json::Value, col_type: &ColumnType) -> String {
+    match v {
+        serde_json::Value::String(s) => {
+            let prefix = match col_type {
+                ColumnType::Timestamp => "TIMESTAMP",
+                _ => "DATE",
+            };
+            format!("{} '{}'", prefix, s.replace('\'', "''"))
+        }
+        _ => sql_literal(v),
+    }
+}
+
 /// `restore <db> <file|->`：目标须为空库；读 dump SQL 文本逐条静默执行
 /// （每条独立 auto-commit，逐条生效），成功静默 exit 0。执行期任一语句失败
 /// 立即停止：exit 3 序号定位，失败前语句已生效。
-pub(super) async fn restore(db: &str, file: &str) -> ExitStatus {
+pub(super) async fn restore(db: &str, file: &str, key: Option<&str>) -> ExitStatus {
     let db_path = match resolve::resolve_db_path(db) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
@@ -283,6 +314,7 @@ pub(super) async fn restore(db: &str, file: &str) -> ExitStatus {
     let db_path_in_work = db_path.clone();
     super::execute_command_inner(
         &db_path,
+        key,
         move |db| {
             Box::pin(async move {
                 // 空库前置（D8）：先空库检查后读文件（避免对拒绝目标白读大文件）
@@ -365,6 +397,7 @@ pub(super) async fn import_csv(
     file: &str,
     csv_flag: bool,
     format: Option<FormatArg>,
+    key: Option<&str>,
 ) -> ExitStatus {
     // 当前唯一支持格式必须显式声明；先于一切 IO
     if !csv_flag {
@@ -384,6 +417,7 @@ pub(super) async fn import_csv(
     let db_path_in_work = db_path.clone();
     super::execute_command_inner(
         &db_path,
+        key,
         move |db| {
             Box::pin(async move {
                 let meta = match db.get_table(&table).await {
@@ -463,9 +497,14 @@ pub(super) async fn import_csv(
                             }
                         }
                     }
-                    // 表名/值序：表名用实参原文（与 get_table 比对同形）；全列
-                    // schema 序，不用列清单形式（planner INSERT 仅支持全列 VALUES）
-                    let insert = format!("INSERT INTO {} VALUES ({});", table, values.join(", "));
+                    // 表名/值序：表名经 quote_ident 包裹（转义名可达；get_table
+                    // 比对与错误信息仍用实参原文）；全列 schema 序，不用列清单
+                    // 形式（planner INSERT 仅支持全列 VALUES）
+                    let insert = format!(
+                        "INSERT INTO {} VALUES ({});",
+                        quote_ident(&table),
+                        values.join(", ")
+                    );
                     match db.execute_sql(&insert).await {
                         Response::AffectedRows { count } => imported += count,
                         Response::Error { message } => {
@@ -520,6 +559,11 @@ fn csv_value(field: &str, col_type: &ColumnType) -> Result<serde_json::Value, St
             "false" => Ok(serde_json::Value::Bool(false)),
             _ => Err(format!("invalid BOOL value '{}'", field)),
         },
+        // MS13: 日期族字段按字符串透传，写入时经 INSERT 强制解析通路落类型
+        //（非法值在 INSERT 处报错，fail-fast 既有语义）
+        ColumnType::Date | ColumnType::Timestamp => {
+            Ok(serde_json::Value::String(field.to_string()))
+        }
         ColumnType::String(_) => Ok(serde_json::Value::String(field.to_string())),
     }
 }
@@ -567,8 +611,458 @@ fn column_type_sql(column_type: &ColumnType) -> &'static str {
         ColumnType::Int => "INT",
         ColumnType::Float => "FLOAT",
         ColumnType::Bool => "BOOL",
+        ColumnType::Date => "DATE",
+        ColumnType::Timestamp => "TIMESTAMP",
         ColumnType::String(_) => "STRING",
     }
+}
+
+/// resolve + 库文件存在检查；命中已有 schema/dump 先例（General exit 1）。
+fn resolve_existing_db(db: &str) -> Result<std::path::PathBuf, ExitStatus> {
+    let db_path = match resolve::resolve_db_path(db) {
+        Ok(p) => p,
+        Err(e) => return Err(ExitStatus::General(e)),
+    };
+    if !db_path.exists() {
+        return Err(ExitStatus::General(format!(
+            "{} does not exist",
+            db_path.display()
+        )));
+    }
+    Ok(db_path)
+}
+
+/// 三分析命令拉取全表行 + schema 列（名称, 类型）；列序 = schema 列序（catalog
+/// `column_index` 升序）。错误经 SQL 失败面（exit 3）由调用方经 `sql_failure_status`
+/// 映射——不复用 `select_all_rows` 的 General 臂（dump 语义）。
+async fn fetch_table_rows(
+    db: &Database,
+    table: &str,
+) -> Result<(Vec<(String, ColumnType)>, Vec<Vec<serde_json::Value>>), String> {
+    let catalog = db.table_manager.catalog();
+    let mut columns = catalog
+        .scan_columns(table)
+        .await
+        .map_err(|e| format!("failed to scan catalog: {}", e))?;
+    columns.sort_by_key(|col| col.column_index);
+    let col_pairs: Vec<(String, ColumnType)> = columns
+        .iter()
+        .map(|col| (col.column_name.clone(), col.column_type.clone()))
+        .collect();
+    let sql = select_all_sql(table);
+    let statements = parse_stage(&sql)
+        .await
+        .map_err(|e| format!("failed to fetch rows from {table}: {e}"))?;
+    let Some(stmt) = statements.first() else {
+        return Err(format!(
+            "failed to fetch rows from {table}: empty statement list"
+        ));
+    };
+    let stmt_text = stmt.to_string();
+    let plan = plan_stage(db, &stmt_text, stmt, false)
+        .await
+        .map_err(|e| format!("failed to fetch rows from {table}: {e}"))?;
+    match execute_stage(db, plan, false).await {
+        Response::QueryResult { rows } => Ok((col_pairs, rows)),
+        Response::Error { message } => Err(format!("failed to fetch rows from {table}: {message}")),
+        other => Err(format!(
+            "failed to fetch rows from {table}: unexpected response {:?}",
+            other
+        )),
+    }
+}
+
+/// 分析命令的 SELECT * SQL（含 quote_ident 转义，与 dump/select_all_rows 一致）。
+fn select_all_sql(table: &str) -> String {
+    format!("SELECT * FROM {}", quote_ident(table))
+}
+
+/// 分析行集渲染 + emit_stdout（render 四态 + 退出码 0/1）。
+fn render_rows(
+    format: Option<FormatArg>,
+    columns: &[String],
+    rows: Vec<Vec<serde_json::Value>>,
+) -> ExitStatus {
+    let text = render(kind(format), columns, &QueryPayload::Rows(rows));
+    match emit_stdout(&text) {
+        Ok(()) => ExitStatus::Success,
+        Err(e) => ExitStatus::General(e),
+    }
+}
+
+/// `stats <db> <table>`：全量拉取后 CLI 侧计算每列行数/null率/distinct/
+/// min/max/分位数；分位数仅数值列（升序、p50 偶数双值平均、p90/p99 最近邻秩）。
+pub(super) async fn stats(
+    db: &str,
+    table: &str,
+    format: Option<FormatArg>,
+    key: Option<&str>,
+) -> ExitStatus {
+    let db_path = match resolve_existing_db(db) {
+        Ok(p) => p,
+        Err(status) => return status,
+    };
+    let table = table.to_string();
+    super::execute_command_inner(
+        &db_path,
+        key,
+        move |db| {
+            Box::pin(async move {
+                let (columns, rows) = match fetch_table_rows(db, &table).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return super::sql_failure_status(1, 1, &e, &select_all_sql(&table), false)
+                    }
+                };
+                let out_rows = compute_stats_rows(&columns, &rows);
+                let header: Vec<String> = [
+                    "column",
+                    "type",
+                    "row_count",
+                    "null_rate",
+                    "distinct",
+                    "min",
+                    "max",
+                    "p50",
+                    "p90",
+                    "p99",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+                render_rows(format, &header, out_rows)
+            })
+        },
+        sigint_future,
+        sigterm_future,
+    )
+    .await
+}
+
+/// stats 每列统计行（pure：可单测）。日期族 min/max 按 DA5 字符串字典序 =
+/// 时间序；Bool false<true；空表零除保护 → null。
+pub(super) fn compute_stats_rows(
+    columns: &[(String, ColumnType)],
+    rows: &[Vec<serde_json::Value>],
+) -> Vec<Vec<serde_json::Value>> {
+    let mut out = Vec::with_capacity(columns.len());
+    for (idx, (name, col_type)) in columns.iter().enumerate() {
+        let total = rows.len();
+        let null_count = rows
+            .iter()
+            .filter(|r| r.get(idx).map(|v| v.is_null()).unwrap_or(true))
+            .count();
+        let null_rate = if total == 0 {
+            100.0_f64
+        } else {
+            round2(null_count as f64 / total as f64 * 100.0)
+        };
+        let distinct: usize = rows
+            .iter()
+            .filter_map(|r| r.get(idx))
+            .filter(|v| !v.is_null())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let (min, max) = column_min_max(col_type, rows.iter().filter_map(|r| r.get(idx)));
+        let (p50, p90, p99) = if matches!(col_type, ColumnType::Int | ColumnType::Float) {
+            column_percentiles(rows.iter().filter_map(|r| r.get(idx)))
+        } else {
+            (None, None, None)
+        };
+        out.push(vec![
+            serde_json::Value::String(name.clone()),
+            serde_json::Value::String(column_type_sql(col_type).to_string()),
+            serde_json::json!(total as i64),
+            json_number(null_rate),
+            serde_json::json!(distinct as i64),
+            min.unwrap_or(serde_json::Value::Null),
+            max.unwrap_or(serde_json::Value::Null),
+            p50.map(json_number).unwrap_or(serde_json::Value::Null),
+            p90.map(json_number).unwrap_or(serde_json::Value::Null),
+            p99.map(json_number).unwrap_or(serde_json::Value::Null),
+        ]);
+    }
+    out
+}
+
+/// f64 → JSON 数字：能精确表示为 i64 时输出整数，否则 f64（NaN/Inf → Null）。
+fn json_number(x: f64) -> serde_json::Value {
+    if !x.is_finite() {
+        return serde_json::Value::Null;
+    }
+    if x.fract() == 0.0 && x >= i64::MIN as f64 && x < (i64::MAX as f64 + 1.0) {
+        serde_json::json!(x as i64)
+    } else {
+        serde_json::Number::from_f64(x)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// 二位小数四舍五入。
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// 列 min/max（None = 全 null / 类型不可比）。全 null 列返回 (None, None)。
+fn column_min_max<'a>(
+    col_type: &ColumnType,
+    values: impl Iterator<Item = &'a serde_json::Value>,
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    let mut min: Option<serde_json::Value> = None;
+    let mut max: Option<serde_json::Value> = None;
+    for v in values {
+        if v.is_null() {
+            continue;
+        }
+        let comparable = match col_type {
+            ColumnType::Int => v.as_i64().map(serde_json::Value::from),
+            ColumnType::Float => v
+                .as_f64()
+                .and_then(serde_json::Number::from_f64)
+                .map(serde_json::Value::Number),
+            ColumnType::Bool => v.as_bool().map(serde_json::Value::Bool),
+            ColumnType::String(_) | ColumnType::Date | ColumnType::Timestamp => {
+                v.as_str().map(|s| serde_json::Value::String(s.to_string()))
+            }
+        };
+        let Some(c) = comparable else { continue };
+        min = Some(match &min {
+            None => c.clone(),
+            Some(cur) => {
+                if json_lt(&c, cur) {
+                    c.clone()
+                } else {
+                    cur.clone()
+                }
+            }
+        });
+        max = Some(match &max {
+            None => c.clone(),
+            Some(cur) => {
+                if json_gt(&c, cur) {
+                    c.clone()
+                } else {
+                    cur.clone()
+                }
+            }
+        });
+    }
+    (min, max)
+}
+
+fn json_lt(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    match (a, b) {
+        (serde_json::Value::Number(x), serde_json::Value::Number(y)) => {
+            let x = x.as_f64().unwrap_or(f64::NAN);
+            let y = y.as_f64().unwrap_or(f64::NAN);
+            x < y
+        }
+        (serde_json::Value::String(x), serde_json::Value::String(y)) => x < y,
+        (serde_json::Value::Bool(x), serde_json::Value::Bool(y)) => !x && *y,
+        // 类型不可比的列不进 column_min_max；同列调用语义保证类型一致
+        _ => false,
+    }
+}
+
+fn json_gt(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    match (a, b) {
+        (serde_json::Value::Number(x), serde_json::Value::Number(y)) => {
+            let x = x.as_f64().unwrap_or(f64::NAN);
+            let y = y.as_f64().unwrap_or(f64::NAN);
+            x > y
+        }
+        (serde_json::Value::String(x), serde_json::Value::String(y)) => x > y,
+        (serde_json::Value::Bool(x), serde_json::Value::Bool(y)) => *x && !y,
+        _ => false,
+    }
+}
+
+/// 数值列分位数（f64 列集）。p50 偶数双值平均、p90/p99 最近邻秩。
+/// 全 null → (None, None, None)。
+fn column_percentiles<'a>(
+    values: impl Iterator<Item = &'a serde_json::Value>,
+) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let mut nums: Vec<f64> = values
+        .filter_map(|v| v.as_f64())
+        .filter(|f| f.is_finite())
+        .collect();
+    if nums.is_empty() {
+        return (None, None, None);
+    }
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = nums.len();
+    let p50 = if n % 2 == 1 {
+        nums[n / 2]
+    } else {
+        let lo = nums[n / 2 - 1];
+        let hi = nums[n / 2];
+        round2((lo + hi) / 2.0)
+    };
+    let rank = |p: f64| -> f64 {
+        let r = (p * n as f64 / 100.0).ceil() as usize;
+        nums[r.min(n).saturating_sub(1)]
+    };
+    (Some(p50), Some(rank(90.0)), Some(rank(99.0)))
+}
+
+/// `sample <db> <table> [N]`：全量拉取后 reservoir sampling（rand 0.8）。
+/// N 缺省 10；N=0 用法错 exit 2（手动校验）。
+pub(super) async fn sample(
+    db: &str,
+    table: &str,
+    n: Option<usize>,
+    format: Option<FormatArg>,
+    key: Option<&str>,
+) -> ExitStatus {
+    if let Some(0) = n {
+        return ExitStatus::Usage("sample size N must be at least 1".to_string());
+    }
+    let n = n.unwrap_or(10);
+    let db_path = match resolve_existing_db(db) {
+        Ok(p) => p,
+        Err(status) => return status,
+    };
+    let table = table.to_string();
+    super::execute_command_inner(
+        &db_path,
+        key,
+        move |db| {
+            Box::pin(async move {
+                let (columns, rows) = match fetch_table_rows(db, &table).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return super::sql_failure_status(1, 1, &e, &select_all_sql(&table), false)
+                    }
+                };
+                let sampled = reservoir_sample(rows, n);
+                let header: Vec<String> = columns.iter().map(|(n, _)| n.clone()).collect();
+                render_rows(format, &header, sampled)
+            })
+        },
+        sigint_future,
+        sigterm_future,
+    )
+    .await
+}
+
+/// 标准 reservoir sampling（前 N 直接收取，其后以 i/N 概率换出）——rand 0.8
+/// `thread_rng` + `gen_range(0..=i)`。M ≤ N 时直接返回全部行。
+fn reservoir_sample(rows: Vec<Vec<serde_json::Value>>, n: usize) -> Vec<Vec<serde_json::Value>> {
+    let total = rows.len();
+    if total <= n {
+        return rows;
+    }
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut reservoir = Vec::with_capacity(n);
+    let mut iter = rows.into_iter().enumerate();
+    for _ in 0..n {
+        if let Some((_, row)) = iter.next() {
+            reservoir.push(row);
+        } else {
+            return reservoir;
+        }
+    }
+    // 此后每行以 1/(n+i) 概率换入（0..=(n+i-1) 含下界上界随机索引 j，j<n 则换）
+    for (i, (_, row)) in iter.enumerate() {
+        let j = rng.gen_range(0..=(n + i));
+        if j < n {
+            reservoir[j] = row;
+        }
+    }
+    reservoir
+}
+
+/// `profile <db> <table>`：每列类型/min/max/String 列 top-k（k 默认 5 上限 20）。
+/// top-k 频次降序、并列字典序升序、排除 NULL。
+pub(super) async fn profile(
+    db: &str,
+    table: &str,
+    top: Option<usize>,
+    format: Option<FormatArg>,
+    key: Option<&str>,
+) -> ExitStatus {
+    let k = top.unwrap_or(5);
+    if !(1..=20).contains(&k) {
+        return ExitStatus::Usage("--top must be between 1 and 20".to_string());
+    }
+    let db_path = match resolve_existing_db(db) {
+        Ok(p) => p,
+        Err(status) => return status,
+    };
+    let table = table.to_string();
+    super::execute_command_inner(
+        &db_path,
+        key,
+        move |db| {
+            Box::pin(async move {
+                let (columns, rows) = match fetch_table_rows(db, &table).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return super::sql_failure_status(1, 1, &e, &select_all_sql(&table), false)
+                    }
+                };
+                let out_rows = compute_profile_rows(&columns, &rows, k);
+                let header: Vec<String> = ["column", "type", "min", "max", "top_k"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                render_rows(format, &header, out_rows)
+            })
+        },
+        sigint_future,
+        sigterm_future,
+    )
+    .await
+}
+
+/// profile 每列画像行（pure）。top_k 仅 String 列：频次降序 + 并列字典序升序。
+pub(super) fn compute_profile_rows(
+    columns: &[(String, ColumnType)],
+    rows: &[Vec<serde_json::Value>],
+    k: usize,
+) -> Vec<Vec<serde_json::Value>> {
+    let mut out = Vec::with_capacity(columns.len());
+    for (idx, (name, col_type)) in columns.iter().enumerate() {
+        let (min, max) = column_min_max(col_type, rows.iter().filter_map(|r| r.get(idx)));
+        let top_k = if matches!(col_type, ColumnType::String(_)) {
+            Some(top_k_string(rows.iter().filter_map(|r| r.get(idx)), k))
+        } else {
+            None
+        };
+        out.push(vec![
+            serde_json::Value::String(name.clone()),
+            serde_json::Value::String(column_type_sql(col_type).to_string()),
+            min.unwrap_or(serde_json::Value::Null),
+            max.unwrap_or(serde_json::Value::Null),
+            top_k
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        ]);
+    }
+    out
+}
+
+/// String 列 top-k：频次降序 + 并列字典序升序，取前 k，格式 `v(c), v(c)`。
+fn top_k_string<'a>(values: impl Iterator<Item = &'a serde_json::Value>, k: usize) -> String {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for v in values {
+        if v.is_null() {
+            continue;
+        }
+        if let Some(s) = v.as_str() {
+            *counts.entry(s.to_string()).or_insert(0) += 1;
+        }
+    }
+    let mut entries: Vec<(String, usize)> = counts.into_iter().collect();
+    entries.sort_by(|(a, ac), (b, bc)| bc.cmp(ac).then_with(|| a.cmp(b)));
+    entries
+        .into_iter()
+        .take(k)
+        .map(|(v, c)| format!("{v}({c})"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]

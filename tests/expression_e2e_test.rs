@@ -485,6 +485,10 @@ async fn try_cast_rejected() {
 }
 
 /// R3/S4：未知目标类型显式拒绝（计划期，不兜底 String）
+///
+/// MS13 校准（datetime-type-system R5 将 DATE 纳入 CAST 目标族，BH-1 同型
+/// 先例）：示例类型 DATE → TIME（TIME 仍为计划期拒绝的未知目标，断言意图
+/// 不变）。
 #[tokio::test]
 async fn cast_unknown_target_type_rejected() {
     let (db, _dir) = open_db().await;
@@ -492,7 +496,7 @@ async fn cast_unknown_target_type_rejected() {
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
     let msg = error_message(
-        db.execute_sql("SELECT v FROM t WHERE CAST(v AS DATE) = v")
+        db.execute_sql("SELECT v FROM t WHERE CAST(v AS TIME) = v")
             .await,
     );
     assert!(

@@ -5,7 +5,7 @@ use crate::storage::page_format::Key;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-/// SQL 列类型（M9: 支持 Int/String/Null/Float/Bool）
+/// SQL 列类型（M9: 支持 Int/String/Null/Float/Bool；MS13: + Date/Timestamp）
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnType {
     /// 整数类型
@@ -16,6 +16,10 @@ pub enum ColumnType {
     Float,
     /// 布尔类型（BOOLEAN）
     Bool,
+    /// 日期类型（DATE，MS13：自 0001-01-01 起的天数）
+    Date,
+    /// 时间戳类型（TIMESTAMP，MS13：Unix epoch 微秒，无时区）
+    Timestamp,
 }
 
 /// 值类型错误
@@ -54,6 +58,10 @@ pub enum Value {
     Float(f64),
     /// 布尔值（M9: 新增）
     Bool(bool),
+    /// 日期值（MS13: 新增，自 0001-01-01 起的天数）
+    Date(i32),
+    /// 时间戳值（MS13: 新增，Unix epoch 微秒，无时区）
+    Timestamp(i64),
 }
 
 // 手动实现 Eq，因为 f64 不实现 Eq
@@ -72,6 +80,8 @@ impl Hash for Value {
             Value::Null => {}                           // Null 没有额外数据
             Value::Float(f) => f.to_bits().hash(state), // 使用位表示进行哈希
             Value::Bool(b) => b.hash(state),
+            Value::Date(d) => d.hash(state),
+            Value::Timestamp(t) => t.hash(state),
         }
     }
 }
@@ -86,6 +96,9 @@ impl Value {
                 Some(Key::new(&bytes))
             }
             Value::String(_) | Value::Null | Value::Float(_) | Value::Bool(_) => None,
+            // MS13: Date/Timestamp 不可键控（DA2——Date 列作 PK 走 MS16 非
+            // Int 键列路由回退，B-Tree 零改动）
+            Value::Date(_) | Value::Timestamp(_) => None,
         }
     }
 
@@ -127,6 +140,10 @@ impl Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
 
+            // MS13: 日期族同类型比较（跨族由兜底返回 false）
+            (Value::Date(a), Value::Date(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+
             // 跨类型比较：Int vs Float（隐式转换）
             (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
@@ -146,6 +163,10 @@ impl Value {
             (Value::String(a), Value::String(b)) => Ok(a > b),
             (Value::Float(a), Value::Float(b)) => Ok(a > b),
             (Value::Bool(a), Value::Bool(b)) => Ok(a > b),
+
+            // MS13: 日期族同类型时间序比较
+            (Value::Date(a), Value::Date(b)) => Ok(a > b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a > b),
 
             // 跨类型比较：Int vs Float
             (Value::Int(a), Value::Float(b)) => Ok((*a as f64) > *b),
@@ -167,6 +188,10 @@ impl Value {
             (Value::Float(a), Value::Float(b)) => Ok(a < b),
             (Value::Bool(a), Value::Bool(b)) => Ok(a < b),
 
+            // MS13: 日期族同类型时间序比较
+            (Value::Date(a), Value::Date(b)) => Ok(a < b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a < b),
+
             // 跨类型比较：Int vs Float
             (Value::Int(a), Value::Float(b)) => Ok((*a as f64) < *b),
             (Value::Float(a), Value::Int(b)) => Ok(*a < (*b as f64)),
@@ -187,6 +212,10 @@ impl Value {
             (Value::Float(a), Value::Float(b)) => Ok(a >= b),
             (Value::Bool(a), Value::Bool(b)) => Ok(a >= b),
 
+            // MS13: 日期族同类型时间序比较
+            (Value::Date(a), Value::Date(b)) => Ok(a >= b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a >= b),
+
             // 跨类型比较：Int vs Float
             (Value::Int(a), Value::Float(b)) => Ok((*a as f64) >= *b),
             (Value::Float(a), Value::Int(b)) => Ok(*a >= (*b as f64)),
@@ -206,6 +235,10 @@ impl Value {
             (Value::String(a), Value::String(b)) => Ok(a <= b),
             (Value::Float(a), Value::Float(b)) => Ok(a <= b),
             (Value::Bool(a), Value::Bool(b)) => Ok(a <= b),
+
+            // MS13: 日期族同类型时间序比较
+            (Value::Date(a), Value::Date(b)) => Ok(a <= b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a <= b),
 
             // 跨类型比较：Int vs Float
             (Value::Int(a), Value::Float(b)) => Ok((*a as f64) <= *b),
@@ -236,6 +269,9 @@ impl Value {
             (Value::Int(a), Value::Float(b)) => (*a as f64) < *b,
             (Value::Float(a), Value::Int(b)) => *a < (*b as f64),
             (Value::String(a), Value::String(b)) => a < b,
+            // MS13: 日期族同类型 MIN/MAX 比较（跨族 false 兜底不变）
+            (Value::Date(a), Value::Date(b)) => a < b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a < b,
             _ => false,
         }
     }
@@ -260,6 +296,8 @@ impl Value {
             Value::Null => ValueRef::Null,
             Value::Float(f) => ValueRef::Float(*f),
             Value::Bool(b) => ValueRef::Bool(*b),
+            Value::Date(d) => ValueRef::Date(*d),
+            Value::Timestamp(t) => ValueRef::Timestamp(*t),
         }
     }
 }
@@ -272,6 +310,99 @@ impl fmt::Display for Value {
             Value::Null => write!(f, "NULL"),
             Value::Float(n) => write!(f, "{}", n),
             Value::Bool(b) => write!(f, "{}", b),
+            // MS13: DA5 显示格式（日期族不带引号）
+            Value::Date(d) => write!(f, "{}", super::datetime::format_date(*d)),
+            Value::Timestamp(t) => write!(f, "{}", super::datetime::format_timestamp(*t)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    #[test]
+    fn datetime_equality_is_strict_same_type() {
+        assert!(Value::Date(100).equals(&Value::Date(100)));
+        assert!(!Value::Date(100).equals(&Value::Date(101)));
+        // 跨族：日期 vs 数值/字符串/时间戳一律 false（比较严格）
+        assert!(!Value::Date(100).equals(&Value::Int(100)));
+        assert!(!Value::Date(100).equals(&Value::String("2024-01-15".into())));
+        assert!(!Value::Timestamp(0).equals(&Value::Date(0)));
+    }
+
+    #[test]
+    fn datetime_ordering_is_time_order() {
+        let a = Value::Date(100);
+        let b = Value::Date(200);
+        assert_eq!(a.lt(&b), Ok(true));
+        assert_eq!(a.gt(&b), Ok(false));
+        assert_eq!(a.ge(&b), Ok(false));
+        assert_eq!(a.le(&b), Ok(true));
+        let t1 = Value::Timestamp(1_000);
+        let t2 = Value::Timestamp(2_000);
+        assert_eq!(t1.lt(&t2), Ok(true));
+        assert_eq!(t2.gt(&t1), Ok(true));
+    }
+
+    #[test]
+    fn datetime_cross_type_ordering_is_type_error() {
+        assert_eq!(
+            Value::Date(0).lt(&Value::Int(0)),
+            Err(ValueError::TypeMismatch)
+        );
+        assert_eq!(
+            Value::Date(0).gt(&Value::String("x".into())),
+            Err(ValueError::TypeMismatch)
+        );
+        assert_eq!(
+            Value::Timestamp(0).lt(&Value::Date(0)),
+            Err(ValueError::TypeMismatch)
+        );
+        assert_eq!(
+            Value::Date(0).lt(&Value::Null),
+            Err(ValueError::NullComparison)
+        );
+    }
+
+    #[test]
+    fn datetime_hash_and_display() {
+        // Hash 可用且区分变体
+        let mut h1 = DefaultHasher::new();
+        Value::Date(5).hash(&mut h1);
+        let mut h2 = DefaultHasher::new();
+        Value::Date(5).hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+        let mut h3 = DefaultHasher::new();
+        Value::Timestamp(5).hash(&mut h3);
+        assert_ne!(h1.finish(), h3.finish());
+        // Display = DA5 格式（日期族无引号，区别于 String 的引号惯例）
+        assert_eq!(Value::Date(0).to_string(), "0001-01-01");
+        assert_eq!(
+            Value::Timestamp(1_234_567).to_string(),
+            "1970-01-01 00:00:01.234567"
+        );
+    }
+
+    #[test]
+    fn datetime_not_keyable_and_ref_roundtrip() {
+        assert_eq!(Value::Date(10).to_key(), None);
+        assert_eq!(Value::Timestamp(10).to_key(), None);
+        assert_eq!(Value::Date(10).as_value_ref(), ValueRef::Date(10));
+        assert_eq!(ValueRef::Timestamp(10).to_value(), Value::Timestamp(10));
+        assert_eq!(Value::Date(3).as_value_ref().to_value(), Value::Date(3));
+    }
+
+    #[test]
+    fn datetime_agg_semantics_preserved() {
+        // MIN/MAX 经 lt_agg：同型可比，跨族 false 兜底
+        assert!(Value::Date(1).lt_agg(&Value::Date(2)));
+        assert!(!Value::Date(2).lt_agg(&Value::Date(1)));
+        assert!(Value::Timestamp(1).lt_agg(&Value::Timestamp(2)));
+        assert!(!Value::Date(1).lt_agg(&Value::Timestamp(1)));
+        // SUM/AVG 经 add/div：保持 Null 兜底（不误加）
+        assert_eq!(Value::Date(1).add(&Value::Date(1)), Value::Null);
+        assert_eq!(Value::Timestamp(1).div(&Value::Int(2)), Value::Null);
     }
 }

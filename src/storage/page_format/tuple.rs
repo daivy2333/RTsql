@@ -1,11 +1,13 @@
 //! Tuple serialization/deserialization for data page rows.
 //!
 //! Binary format per column:
-//!   Int    = [0x01][8 bytes i64 LE]
-//!   String = [0x02][2 bytes len LE][N bytes UTF-8]
-//!   Null   = [0x03]
-//!   Float  = [0x04][8 bytes f64 LE]
-//!   Bool   = [0x05][1 byte 0/1]
+//!   Int       = [0x01][8 bytes i64 LE]
+//!   String    = [0x02][2 bytes len LE][N bytes UTF-8]
+//!   Null      = [0x03]
+//!   Float     = [0x04][8 bytes f64 LE]
+//!   Bool      = [0x05][1 byte 0/1]
+//!   Date      = [0x06][4 bytes i32 LE] (MS13: days since 0001-01-01)
+//!   Timestamp = [0x07][8 bytes i64 LE] (MS13: Unix epoch microseconds)
 
 use crate::executor::ValueRef;
 use crate::storage::{Result, StorageError};
@@ -18,6 +20,10 @@ const TAG_STRING: u8 = 0x02;
 const TAG_NULL: u8 = 0x03;
 const TAG_FLOAT: u8 = 0x04;
 const TAG_BOOL: u8 = 0x05;
+/// MS13: Date tag (payload 4 bytes LE).
+const TAG_DATE: u8 = 0x06;
+/// MS13: Timestamp tag (payload 8 bytes LE).
+const TAG_TIMESTAMP: u8 = 0x07;
 
 /// Column type descriptor used as the schema for serialization / deserialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +36,10 @@ pub enum ColumnType {
     Float,
     /// Boolean column.
     Bool,
+    /// Date column (MS13: days since 0001-01-01).
+    Date,
+    /// Timestamp column (MS13: Unix epoch microseconds, no time zone).
+    Timestamp,
 }
 
 /// Return the total number of bytes required to serialize the given values
@@ -44,6 +54,8 @@ pub fn compute_tuple_size(values: &[Value], schema: &[ColumnType]) -> usize {
             Value::Null => 1,
             Value::Float(_) => 1 + 8,
             Value::Bool(_) => 1 + 1,
+            Value::Date(_) => 1 + 4,
+            Value::Timestamp(_) => 1 + 8,
         })
         .sum()
 }
@@ -103,6 +115,22 @@ pub fn serialize_tuple(values: &[Value], schema: &[ColumnType], buf: &mut [u8]) 
                 buf[pos] = TAG_BOOL;
                 buf[pos + 1] = if *b { 1 } else { 0 };
                 pos += 2;
+            }
+            Value::Date(d) => {
+                if pos + 5 > buf.len() {
+                    return Err(err_too_small());
+                }
+                buf[pos] = TAG_DATE;
+                buf[pos + 1..pos + 5].copy_from_slice(&d.to_le_bytes());
+                pos += 5;
+            }
+            Value::Timestamp(t) => {
+                if pos + 9 > buf.len() {
+                    return Err(err_too_small());
+                }
+                buf[pos] = TAG_TIMESTAMP;
+                buf[pos + 1..pos + 9].copy_from_slice(&t.to_le_bytes());
+                pos += 9;
             }
         }
     }
@@ -189,6 +217,31 @@ pub fn deserialize_tuple(data: &[u8], schema: &[ColumnType]) -> Result<Vec<Value
                 }
                 values.push(Value::Bool(data[pos] != 0));
                 pos += 1;
+            }
+            TAG_DATE => {
+                if pos + 4 > data.len() {
+                    return Err(eof("expected 4 bytes for date"));
+                }
+                let bytes = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
+                values.push(Value::Date(i32::from_le_bytes(bytes)));
+                pos += 4;
+            }
+            TAG_TIMESTAMP => {
+                if pos + 8 > data.len() {
+                    return Err(eof("expected 8 bytes for timestamp"));
+                }
+                let bytes = [
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
+                ];
+                values.push(Value::Timestamp(i64::from_le_bytes(bytes)));
+                pos += 8;
             }
             other => {
                 return Err(StorageError::Io(io::Error::new(
@@ -288,6 +341,31 @@ pub fn deserialize_value_refs<'a>(
                 }
                 values.push(ValueRef::Bool(data[pos] != 0));
                 pos += 1;
+            }
+            TAG_DATE => {
+                if pos + 4 > data.len() {
+                    return Err(eof("expected 4 bytes for date"));
+                }
+                let bytes = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
+                values.push(ValueRef::Date(i32::from_le_bytes(bytes)));
+                pos += 4;
+            }
+            TAG_TIMESTAMP => {
+                if pos + 8 > data.len() {
+                    return Err(eof("expected 8 bytes for timestamp"));
+                }
+                let bytes = [
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
+                ];
+                values.push(ValueRef::Timestamp(i64::from_le_bytes(bytes)));
+                pos += 8;
             }
             other => {
                 return Err(StorageError::Io(io::Error::new(
@@ -500,5 +578,57 @@ mod tests {
         assert_eq!(refs[3], ValueRef::Text("hi"));
         assert_eq!(refs[4], ValueRef::Null);
         assert_eq!(refs[5], ValueRef::Bool(false));
+    }
+
+    #[test]
+    fn serialize_date_roundtrip() {
+        let v = roundtrip_single(Value::Date(19792), ColumnType::Date);
+        assert_eq!(v, Value::Date(19792));
+    }
+
+    #[test]
+    fn serialize_timestamp_roundtrip() {
+        let v = roundtrip_single(
+            Value::Timestamp(1_705_306_200_123_456),
+            ColumnType::Timestamp,
+        );
+        assert_eq!(v, Value::Timestamp(1_705_306_200_123_456));
+    }
+
+    #[test]
+    fn datetime_tags_have_declared_widths() {
+        // Date = tag + 4B LE；Timestamp = tag + 8B LE
+        let schema = [ColumnType::Date];
+        assert_eq!(compute_tuple_size(&[Value::Date(0)], &schema), 5);
+        let schema = [ColumnType::Timestamp];
+        assert_eq!(compute_tuple_size(&[Value::Timestamp(0)], &schema), 9);
+    }
+
+    #[test]
+    fn deserialize_truncated_date_and_timestamp() {
+        let data = [0x06, 1, 2]; // TAG_DATE + 2/4 字节负载
+        assert!(deserialize_tuple(&data, &[ColumnType::Date]).is_err());
+        let data = [0x07, 1, 2, 3, 4, 5, 6, 7]; // TAG_TIMESTAMP + 7/8 字节负载
+        assert!(deserialize_tuple(&data, &[ColumnType::Timestamp]).is_err());
+    }
+
+    #[test]
+    fn deserialize_unknown_tag_rejected() {
+        let data = [0x08, 0, 0, 0];
+        assert!(deserialize_tuple(&data, &[ColumnType::Int]).is_err());
+        assert!(deserialize_value_refs(&data, &[ColumnType::Int]).is_err());
+    }
+
+    #[test]
+    fn deserialize_value_refs_datetime_roundtrip() {
+        let mut data = vec![0x06];
+        data.extend_from_slice(&19792i32.to_le_bytes());
+        data.push(0x07);
+        data.extend_from_slice(&42i64.to_le_bytes());
+        let schema = [ColumnType::Date, ColumnType::Timestamp];
+        let refs = deserialize_value_refs(&data, &schema).unwrap();
+        assert_eq!(refs, vec![ValueRef::Date(19792), ValueRef::Timestamp(42)]);
+        assert_eq!(refs[0].to_value(), Value::Date(19792));
+        assert_eq!(refs[1].to_value(), Value::Timestamp(42));
     }
 }

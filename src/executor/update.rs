@@ -21,6 +21,8 @@ fn key_value_type_name(v: &Value) -> &'static str {
         Value::Null => "Null",
         Value::Float(_) => "Float",
         Value::Bool(_) => "Bool",
+        Value::Date(_) => "Date",
+        Value::Timestamp(_) => "Timestamp",
     }
 }
 
@@ -118,6 +120,20 @@ impl Executor for UpdateExecutor {
             }
         }
 
+        // MS13 T4（决策 2）：SET 目标列为日期族时强制解析/拒绝（同族值/Null
+        // 原样、String 强制解析、其余 InvalidDateTime）。先于 Step 2 读与
+        // Step 6 写，非法值零副作用；未知列维持 Step 3 既有 ColumnNotFound。
+        let new_value = match self
+            .table_meta
+            .columns
+            .iter()
+            .find(|(name, _)| name == &self.column_name)
+            .map(|(_, ct)| ct.clone())
+        {
+            Some(ct) => crate::executor::datetime::coerce_datetime_write(&self.new_value, &ct)?,
+            None => self.new_value.clone(),
+        };
+
         // Step 2: Read old tuple from data page (M20 closure form, .to_vec() for WAL ownership)
         let (_version_header, old_tuple_bytes) =
             read_tuple_from_data_page(&self.buffer_pool, old_row_id, |vh, bytes| {
@@ -133,7 +149,7 @@ impl Executor for UpdateExecutor {
             .iter()
             .position(|(name, _)| name == &self.column_name)
             .ok_or_else(|| StorageError::ColumnNotFound(self.column_name.clone()))?;
-        values[col_idx] = self.new_value.clone();
+        values[col_idx] = new_value.clone();
 
         // Step 4: Serialize new tuple
         let size = compute_tuple_size(&values, &self.schema);
@@ -184,7 +200,7 @@ impl Executor for UpdateExecutor {
         //   entry first, then insert the new key. delete() resolves the
         //   row_to_key reverse mapping via search, so updating the old entry
         //   first would make that delete clear the new row's mapping.
-        let new_key = self.new_value.to_key();
+        let new_key = new_value.to_key();
         if self.column_name != self.table_meta.pk_column {
             self.table_meta
                 .index_manager

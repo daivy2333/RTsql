@@ -119,6 +119,22 @@ impl Predicate for ComparisonPredicate {
             return Ok(Ternary::Unknown);
         }
 
+        // MS13 T5（决策 2）：日期族参与的比较严格同类型——任一侧为
+        // Date/Timestamp 且两侧非同变体（含 Date×Timestamp 与日期×非日期族）
+        // 时显式类型错误（datetime-type-system R4「比较严格」）。既有五类型
+        // 互比的 equals-false 兜底不受影响（R7 零回归）。
+        if matches!(left_val, Value::Date(_) | Value::Timestamp(_))
+            || matches!(right_val, Value::Date(_) | Value::Timestamp(_))
+        {
+            let same_variant = matches!(
+                (&left_val, &right_val),
+                (Value::Date(_), Value::Date(_)) | (Value::Timestamp(_), Value::Timestamp(_))
+            );
+            if !same_variant {
+                return Err(Box::new(ValueError::TypeMismatch));
+            }
+        }
+
         let result = match self.op {
             ComparisonOp::Eq => Ok(left_val.equals(&right_val)),
             ComparisonOp::Ne => Ok(!left_val.equals(&right_val)),
@@ -423,6 +439,9 @@ impl Expression for ParameterExpression {
             Value::Float(f) => ValueRef::Float(*f),
             Value::Bool(b) => ValueRef::Bool(*b),
             Value::Null => ValueRef::Null,
+            // MS13: 日期族为 Copy 变体，直接回借
+            Value::Date(d) => ValueRef::Date(*d),
+            Value::Timestamp(t) => ValueRef::Timestamp(*t),
             Value::String(_) => ValueRef::Null, // M37 TODO: Arc<str> zero-copy
         })
     }
@@ -438,13 +457,16 @@ impl Expression for ParameterExpression {
 }
 
 /// CAST target types (MS11-T01): strict four-family mapping; unknown types are
-/// rejected at planning time by the planner's strict converter.
+/// rejected at planning time by the planner's strict converter. MS13 T5 adds
+/// the Date/Timestamp targets (datetime-type-system R5).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CastType {
     Int,
     Float,
     String,
     Bool,
+    Date,
+    Timestamp,
 }
 
 /// CASE expression (MS11-T01). The searched form is built directly; the simple
@@ -488,6 +510,9 @@ impl Expression for CaseExpression {
             Value::Float(f) => Ok(ValueRef::Float(f)),
             Value::Bool(b) => Ok(ValueRef::Bool(b)),
             Value::Null => Ok(ValueRef::Null),
+            // MS13: 日期族为 Copy 变体，直接回借
+            Value::Date(d) => Ok(ValueRef::Date(d)),
+            Value::Timestamp(t) => Ok(ValueRef::Timestamp(t)),
             Value::String(_) => Err(
                 "CASE string results are not available on the zero-copy evaluate_ref path".into(),
             ),
@@ -534,6 +559,9 @@ impl Expression for CoalesceExpression {
             Value::Float(f) => Ok(ValueRef::Float(f)),
             Value::Bool(b) => Ok(ValueRef::Bool(b)),
             Value::Null => Ok(ValueRef::Null),
+            // MS13: 日期族为 Copy 变体，直接回借
+            Value::Date(d) => Ok(ValueRef::Date(d)),
+            Value::Timestamp(t) => Ok(ValueRef::Timestamp(t)),
             Value::String(_) => Err(
                 "COALESCE string results are not available on the zero-copy evaluate_ref path"
                     .into(),
@@ -586,6 +614,32 @@ impl CastExpression {
             (CastType::String, Value::Int(n)) => Value::String(n.to_string()),
             (CastType::String, Value::Float(f)) => Value::String(f.to_string()),
             (CastType::String, Value::Bool(b)) => Value::String(b.to_string()),
+            // MS13 T5（D8）：日期族 CAST 矩阵——String 解析严格（失败显式
+            // 错误）、格式化按 DA5、Timestamp→Date 截断到日、Date→Timestamp
+            // 零点扩展；数值/Bool×日期族落入既有 `_` 拒绝。
+            (CastType::Date, Value::Date(_)) => value.clone(),
+            (CastType::Timestamp, Value::Timestamp(_)) => value.clone(),
+            (CastType::Date, Value::String(s)) => {
+                let d = crate::executor::datetime::parse_date(s).ok_or(ValueError::TypeMismatch)?;
+                Value::Date(d)
+            }
+            (CastType::Timestamp, Value::String(s)) => {
+                let t = crate::executor::datetime::parse_timestamp(s)
+                    .ok_or(ValueError::TypeMismatch)?;
+                Value::Timestamp(t)
+            }
+            (CastType::String, Value::Date(d)) => {
+                Value::String(crate::executor::datetime::format_date(*d))
+            }
+            (CastType::String, Value::Timestamp(t)) => {
+                Value::String(crate::executor::datetime::format_timestamp(*t))
+            }
+            (CastType::Date, Value::Timestamp(t)) => {
+                Value::Date(crate::executor::datetime::ts_to_date_serial(*t))
+            }
+            (CastType::Timestamp, Value::Date(d)) => {
+                Value::Timestamp(crate::executor::datetime::date_serial_to_ts(*d))
+            }
             // Bool↔numeric and every other cross-family conversion is rejected
             _ => return Err(ValueError::TypeMismatch),
         })
@@ -609,6 +663,9 @@ impl Expression for CastExpression {
             Value::Float(f) => Ok(ValueRef::Float(f)),
             Value::Bool(b) => Ok(ValueRef::Bool(b)),
             Value::Null => Ok(ValueRef::Null),
+            // MS13: 日期族为 Copy 变体，直接回借（DA8 矩阵扩展见 cast_value）
+            Value::Date(d) => Ok(ValueRef::Date(d)),
+            Value::Timestamp(t) => Ok(ValueRef::Timestamp(t)),
             Value::String(_) => Err(
                 "CAST string results are not available on the zero-copy evaluate_ref path".into(),
             ),
@@ -617,6 +674,154 @@ impl Expression for CastExpression {
 
     fn set_parameter_value(&self, param_name: &str, value: &Value) -> bool {
         self.expr.set_parameter_value(param_name, value)
+    }
+}
+
+/// Arithmetic operator for [`BinaryArithExpression`] (MS13 T4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// Arithmetic binary expression (MS13 T4): `+`/`-`/`*`/`/` over numeric
+/// operands — the compilation path for WITH-FORM arithmetic projection items
+/// (`SELECT id + 1 FROM t`, no-from-select R3) and WHERE arithmetic
+/// comparison legs. INTERVAL legs are probed before this node and compile to
+/// [`IntervalArithExpression`] (design D11), so this node never carries
+/// intervals. NULL propagates to NULL; a non-numeric operand is a runtime
+/// type error (strict typing); Int/Int division truncates toward zero and a
+/// zero divisor yields NULL (the existing `Value::div` aggregate convention).
+#[derive(Debug)]
+pub struct BinaryArithExpression {
+    pub left: ExpressionRef,
+    pub op: ArithOp,
+    pub right: ExpressionRef,
+}
+
+impl BinaryArithExpression {
+    fn eval(l: &Value, op: ArithOp, r: &Value) -> Result<Value, ValueError> {
+        if l.is_null() || r.is_null() {
+            return Ok(Value::Null);
+        }
+        // 严格数值面：非数值操作数显式类型错误（四操作符统一语义）。
+        if !matches!(l, Value::Int(_) | Value::Float(_))
+            || !matches!(r, Value::Int(_) | Value::Float(_))
+        {
+            return Err(ValueError::TypeMismatch);
+        }
+        Ok(match op {
+            // 复用既有聚合算术（Int/Int→Int 截断除、零除→Null、跨族提升 Float）
+            ArithOp::Add => l.add(r),
+            ArithOp::Div => l.div(r),
+            ArithOp::Sub => match (l, r) {
+                (Value::Int(a), Value::Int(b)) => Value::Int(a - b),
+                (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
+                (Value::Int(a), Value::Float(b)) => Value::Float(*a as f64 - b),
+                (Value::Float(a), Value::Int(b)) => Value::Float(a - *b as f64),
+                _ => unreachable!("numeric guard above"),
+            },
+            ArithOp::Mul => match (l, r) {
+                (Value::Int(a), Value::Int(b)) => Value::Int(a * b),
+                (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
+                (Value::Int(a), Value::Float(b)) => Value::Float(*a as f64 * b),
+                (Value::Float(a), Value::Int(b)) => Value::Float(a * *b as f64),
+                _ => unreachable!("numeric guard above"),
+            },
+        })
+    }
+}
+
+impl Expression for BinaryArithExpression {
+    fn evaluate(&self, row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let l = self.left.evaluate(row)?;
+        let r = self.right.evaluate(row)?;
+        Self::eval(&l, self.op, &r)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    fn evaluate_ref<'a>(
+        &'a self,
+        row: &'a [ValueRef<'_>],
+    ) -> Result<ValueRef<'a>, Box<dyn std::error::Error + Send + Sync>> {
+        // Same shape as CASE/COALESCE/CAST: materialize and reuse the owned
+        // path; Int/Float/Null results are Copy and come back as borrowed
+        // views directly.
+        let owned: Vec<Value> = row.iter().map(ValueRef::to_value).collect();
+        match self.evaluate(&owned)? {
+            Value::Int(n) => Ok(ValueRef::Int(n)),
+            Value::Float(f) => Ok(ValueRef::Float(f)),
+            Value::Null => Ok(ValueRef::Null),
+            _ => Err("Arithmetic results are numeric; non-numeric here is a bug".into()),
+        }
+    }
+
+    fn set_parameter_value(&self, param_name: &str, value: &Value) -> bool {
+        self.left.set_parameter_value(param_name, value)
+            | self.right.set_parameter_value(param_name, value)
+    }
+}
+
+/// INTERVAL 算术表达式（MS13 T7，design D11）：`<date/timestamp> ± INTERVAL`。
+/// 月份部分按同日锚定截月末（DA8）先应用，微秒部分线性加减，方向（Sub）
+/// 在求值期取负；NULL 左操作数传播为 NULL；左操作数非 Date/Timestamp 为
+/// 运行时类型错误（严格类型；`op` 由 planner 只构造 Add/Sub，其余在求值期
+/// 拒绝为 bug 面）。结果日历范围 0001-01-01..9999-12-31 越界显式报错。
+#[derive(Debug)]
+pub struct IntervalArithExpression {
+    pub left: ExpressionRef,
+    pub op: ArithOp,
+    pub interval: crate::executor::datetime::IntervalParts,
+}
+
+impl IntervalArithExpression {
+    fn eval(&self, l: &Value) -> Result<Value, String> {
+        if l.is_null() {
+            return Ok(Value::Null);
+        }
+        let (months, micros) = match self.op {
+            ArithOp::Add => (self.interval.months as i64, self.interval.micros),
+            ArithOp::Sub => (-(self.interval.months as i64), -self.interval.micros),
+            _ => return Err("INTERVAL arithmetic only supports + and -".to_string()),
+        };
+        match l {
+            Value::Date(d) => Ok(Value::Date(
+                crate::executor::datetime::add_interval_to_date(*d, months, micros)?,
+            )),
+            Value::Timestamp(t) => Ok(Value::Timestamp(
+                crate::executor::datetime::add_interval_to_ts(*t, months, micros)?,
+            )),
+            _ => Err(ValueError::TypeMismatch.to_string()),
+        }
+    }
+}
+
+impl Expression for IntervalArithExpression {
+    fn evaluate(&self, row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let l = self.left.evaluate(row)?;
+        self.eval(&l).map_err(|e| e.into())
+    }
+
+    fn evaluate_ref<'a>(
+        &'a self,
+        row: &'a [ValueRef<'_>],
+    ) -> Result<ValueRef<'a>, Box<dyn std::error::Error + Send + Sync>> {
+        // Same shape as CASE/COALESCE/CAST: materialize and reuse the owned
+        // path; Date/Timestamp/Null results are Copy and come back as
+        // borrowed views directly.
+        let owned: Vec<Value> = row.iter().map(ValueRef::to_value).collect();
+        match self.evaluate(&owned)? {
+            Value::Date(d) => Ok(ValueRef::Date(d)),
+            Value::Timestamp(t) => Ok(ValueRef::Timestamp(t)),
+            Value::Null => Ok(ValueRef::Null),
+            _ => Err("INTERVAL arithmetic results are date-family; other shapes are a bug".into()),
+        }
+    }
+
+    fn set_parameter_value(&self, param_name: &str, value: &Value) -> bool {
+        self.left.set_parameter_value(param_name, value)
     }
 }
 
