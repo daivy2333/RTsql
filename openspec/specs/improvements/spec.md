@@ -83,7 +83,7 @@
 - **问题**: `Value::clone()` 在聚合/排序/JOIN 中反复调用
 - **方案**: `Value::Text` 内部 `Arc<str>` + `Cow<'_, str>` 延迟分配
 - **依赖**: M20（已完成）
-- **状态**: planned（P4）
+- **状态**: planned（MS22 候选——2026-09-24 初版后第一批路线规划，量化定稿后立项；原 P4）
 - **Legacy**: O020
 
 ## I021: M39 INSERT 批量执行
@@ -92,7 +92,7 @@
 - **问题**: 多值 INSERT 逐行执行
 - **方案**: `bulk_insert(keys)` + `append_batch(records)`
 - **依赖**: M20（已完成）
-- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，先 bench 逐行路径占比再决定，初版优先；原 MS08-T09 排期撤销）
+- **状态**: planned（MS22 候选——2026-09-24 初版后第一批路线规划，量化定稿后立项；先 bench 逐行路径占比再决定；原 MS08-T09 排期撤销，2026-09-14 MS08 剥离退还）
 - **Legacy**: O021
 
 ## Phase 5 高级优化
@@ -104,7 +104,7 @@
 - **方案**: `Key` 内部 `Vec<u8>` 变长编码
 - **预期**: 索引空间 ~70% 缩减
 - **依赖**: 无
-- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，初版优先；原 MS08-T05 排期撤销）
+- **状态**: planned（MS22 候选——2026-09-24 初版后第一批路线规划，量化定稿后立项；原 MS08-T05 排期撤销，2026-09-14 MS08 剥离退还）
 - **Legacy**: O024, D02 successor
 
 ## I025: M33 B+Tree 节点级锁
@@ -123,7 +123,7 @@
 - **方案**: 连续页合并写 + `writev()` 向量化
 - **预期**: Checkpoint 5-10x
 - **依赖**: M31（已完成）+ M48（I013）
-- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，初版优先；原 MS08-T03 排期撤销）
+- **状态**: planned（MS22 候选——2026-09-24 初版后第一批路线规划，量化定稿后立项；原 MS08-T03 排期撤销，2026-09-14 MS08 剥离退还）
 - **Legacy**: O026, D12 下游
 
 ## I028: M45 io_uring 批量提交
@@ -161,7 +161,7 @@
 - **问题**: 页驱逐按 LRU 而非树拓扑刷盘——checkpoint 后的运行期修改使磁盘 B-Tree 含洞（父页指向未刷盘子页）与孤儿页（裸读实测 `scan_all` 184/10000 + `InvalidPageType` 洞页）。恢复侧已由 `redo_count > 0` 时索引去信任 + 重放后重建消解（MS10-T02 R7/R8），但运行期检查点间的磁盘树仍处于撕裂状态；MS12 整库加密若引入页级 transform 将放大对磁盘树一致性的依赖
 - **候选方案**: 结构感知刷盘（子树后序）/ checkpoint 树快照 / no-steal 驱逐——均为 BufferPool 驱逐策略重设计，MS10-T02 design D10 拒绝并入
 - **量化支撑**: D10 恢复重建代价实测 40k 行→8.86s、160k 行→40.7s（100 页池随机访存主导；撕裂树运行期根修可同时压缩该恢复代价）
-- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，先量化撕裂增长与恢复代价再决定，初版优先；原 MS08-T07 排期撤销）
+- **状态**: planned（未排期——MS22 Non-goal，撕裂增长与恢复代价量化后另行评估；原 MS08-T07 排期撤销，2026-09-14 MS08 剥离退还）
 
 ## I032: `BufferPool::mark_tx_aborted` 空实现补全
 
@@ -196,7 +196,7 @@
 - **证据**: MS10-T04 Act Blocker Handoff + Plan Review 独立复现（2026-09-09，revision `5c42ec8`）
 - **影响**: 常量表达式查询、`SELECT current_setting()` 类无表探测不可达；agent/脚本日常探测用法受挫
 - **方案**: planner 增加 no-FROM SELECT 臂（单行虚拟输入），属引擎能力扩展，需独立 change
-- **状态**: planned（已排期 MS13-T03 小项，2026-09-12 路线重排）
+- **状态**: promoted（MS13-T03 已实施——`SingleRowExecutor` 虚拟单行 + 九项拒绝面点名，spec `no-from-select`，change 归档 `openspec/changes/archive/2026-09-23-ms13-analytics-functions/`；台账状态补转勘误 2026-09-24）
 
 ## I036: planner 简单 PK 等值 + 非 Int 字面量路由 Filter(Scan) 对无键行不可达
 
@@ -223,7 +223,7 @@
 - **证据**: MS10-T05 Iteration 001 001-rework Plan Context Risks 预判 + 实施后语义成立（2026-09-09，归档 change 同上）；`gc_table` 为可选维护路径（M10）
 - **影响**: 含无键行的表长期频繁 UPDATE 场景下旧版本空间不回收；无正确性影响
 - **方案**: GC 增加数据页链全扫模式（不经索引）或无键链登记结构；需评估成本后独立 change
-- **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，先量化含无键行表的版本空间增长再决定，初版优先；原 MS08-T08 排期撤销）
+- **状态**: planned（MS22 候选——2026-09-24 初版后第一批路线规划，量化定稿后立项；原 MS08-T08 排期撤销，2026-09-14 MS08 剥离退还）
 
 ## I039: 多代 dump/restore 表名引号膨胀（ObjectName Display 即表名）
 
@@ -268,7 +268,7 @@
 - **证据**: MS11-T03 Iteration 001 Act Remaining Issues #1/#2（2026-09-11，归档 change `2026-09-10-ms11-t03-scalar-functions`；Plan Review 独立核实实现契约与公式）
 - **影响**: 极端输入下 panic/非有限值；常规分析负载不可达，无当前正确性问题
 - **方案**: abs 改 `checked_abs` 显式溢出报 `ValueError` 或文档化回绕语义；round 对 |digits| 设上限截断或文档化——随下次触碰 `function.rs` 的 change 顺带评估，需用户裁定方向
-- **状态**: planned（已排期 MS13-T02 随带——语义方向届时裁定，2026-09-12 路线重排）
+- **状态**: promoted（MS13-T02 已实施——abs 改 `checked_abs` 显式溢出错误、round ±308 SQLite 对齐饱和，spec `sql-scalar-functions` R3 修改，change 归档 `openspec/changes/archive/2026-09-23-ms13-analytics-functions/`；台账状态补转勘误 2026-09-24）
 
 ## I044: 标量函数名大小写不敏感缺 SQL 层测试见证
 
@@ -277,7 +277,7 @@
 - **证据**: MS11-T03 Plan Review Finding F1（2026-09-11，归档 change 同上；大写变体 grep + 两处规范化点核实）
 - **影响**: 未来重构函数名匹配路径时大小写语义可能静默回归；无当前正确性问题
 - **方案**: `tests/scalar_function_test.rs` 增加大写/混合大小写变体用例（可选测试加固，随下次触碰函数面的 change 顺带实施）
-- **状态**: planned（已排期 MS13-T02 随带实施，2026-09-12 路线重排）
+- **状态**: promoted（MS13-T02 已实施——`scalar_function_test` 增至 32 含大写/混合变体见证，change 归档 `openspec/changes/archive/2026-09-23-ms13-analytics-functions/`；台账状态补转勘误 2026-09-24）
 
 ## I045: 主 specs Purpose 占位与 TBD/TODO 残留（validate --specs 持续 WARNING）
 
@@ -321,7 +321,7 @@
 - **问题**: 提交路径逐事务 fsync（原 MS03 原范围项，曾排期 MS08-T06 未实施）
 - **方案**: 组提交 / 多事务合并 fsync
 - **前置**: 做前先验证 fsync 是否真瓶颈（原 MS08 实测纪律保留）
-- **状态**: planned（2026-09-14 MS08 剥离退还登记——未排期候选，初版优先）
+- **状态**: planned（MS22 候选——2026-09-24 初版后第一批路线规划，量化定稿后立项；2026-09-14 MS08 剥离退还登记）
 
 ## I050: RowLockTable DashMap 化
 
@@ -329,7 +329,7 @@
 - **问题**: 行锁表为非并发友好结构（原 MS03 原范围项，曾排期 MS08-T04 未实施）
 - **方案**: RowLockTable 迁移 DashMap
 - **前置**: 先做 mini-bench 决定是否值得做（原 MS08 实测纪律保留）
-- **状态**: planned（2026-09-14 MS08 剥离退还登记——未排期候选，初版优先）
+- **状态**: planned（MS22 候选——2026-09-24 初版后第一批路线规划，量化定稿后立项；2026-09-14 MS08 剥离退还登记）
 
 ## I051: CI workflow（构建/测试自动化流水线）
 
@@ -394,7 +394,7 @@
 - **用户方向**（2026-09-24）: 两个或多个 db 文件经命令行关联检索；跨库增删查改；跨库取视图物化为新库（「数据库视作表」）
 - **方案**: SQLite ATTACH 同型（嵌入式正统设计；PostgreSQL 单连接锁死单库为反例）——`Database` 增 attach 注册表 `Map<别名, AttachedFile>`（各持 table_manager/storage/BufferPool）+ 表名命名空间「别名.表」解析（I039 落地的 11 处表名消费点扩展）+ 每文件独立 RC 快照；文件锁为 try_lock 不等待，交叉 attach 死锁结构性不可能（一方直接 `DatabaseLocked` exit 4）。两期拆分：一期只读跨查 + CTAS（`CREATE TABLE AS SELECT`，单独即单库通用 SQL 增益；`new` + attach + CTAS 组合覆盖物化全场景）；二期跨文件 DML（每文件独立提交、非原子 v1 语义文档化——SQLite 跨 attach 原子提交亦需 master journal 级机制）
 - **身份过滤器判定**: 异步/嵌入式/CLI 三词全沾（attach 文件走同一异步扫描路径 / 无 daemon 多文件互查的正统设计 / 一行命令跨库抽取合并分析、agent 场景强化）——判定依据见 R25 分析「定位裁定与决策过滤器」节
-- **状态**: planned（2026-09-24 用户方向登记，未排期；初版 MS17 交付后评估；与 crate 化路线 B 顺风——attach 注册表催生「多文件会话」抽象）
+- **状态**: planned（已排期 MS20 一期 T01/二期 T02——2026-09-24 初版后第一批路线规划；与 crate 化路线 B 顺风——attach 注册表催生「多文件会话」抽象）
 
 ## I060: WAL 与 checkpoint 伴生文件加密
 
@@ -411,7 +411,7 @@
 - **证据**: 2026-09-24 用户手动部署验证时发现（本会话 `rtsql --help` 子命令清单确认无 delete/drop 类命令；improvements 台账与 tasks 路线均无此条目，无重复登记）
 - **影响**: 手工 rm 需要用户了解伴生文件布局（`.db`/`.wal`/`.checkpoint`），漏删伴生文件会残留脏现场；agent/脚本管理场景缺一行式命令，`list` 可枚举但不可回收
 - **方案**: 新增 `rtsql delete <db>`（或 `drop-database`）子命令——复用 `resolve_existing_db` 定位（裸名集中存储区 / 含 `/` 路径），删除主文件与 `.wal`/`.checkpoint` 伴生文件并报告释放结果；打开中（advisory 文件锁占用）SHALL 显式拒绝；加密库为文件级操作无需密钥；命令命名、dry-run/确认交互、路径形态边界与 `install.sh --purge-data` 语义关系随 change 调查定稿
-- **状态**: planned（2026-09-24 用户方向登记，未排期）
+- **状态**: planned（已排期 MS19-T01——2026-09-24 初版后第一批路线规划）
 
 ## I062: close()/checkpoint 在无未决 WAL 记录时跳过全量 checkpoint
 
@@ -420,7 +420,7 @@
 - **证据**: 2026-09-24 SQLite 对比测量（README 对比板块、R26 runbook：50 次时延循环）；代码面 `src/database.rs:250-251`
 - **影响**: agent/脚本高频 one-shot 场景每次多付毫秒级固定开销；无正确性影响
 - **方案**: checkpoint 前检查 WAL 未决记录（WalWriter 已有文件长度查询，writer.rs:180-188）为零/低于阈值时跳过重写直接返回；「close 即落盘」承诺语义不变——无未决记录时本无落盘工作；注意与 I064 文档口径一致
-- **状态**: planned（2026-09-24 用户方向登记，未排期；小改动高收益）
+- **状态**: planned（已排期 MS18-T01——2026-09-24 初版后第一批路线规划；小改动高收益）
 
 ## I063: CLI tokio runtime 规格评估（multi_thread 默认 → 按负载选 current_thread）
 
@@ -429,7 +429,7 @@
 - **证据**: 2026-09-24 SQLite 对比测量（README 对比板块、R26 runbook）；代码面 `src/main.rs:3`
 - **影响**: CLI 内存占用 ~4x 与部分启动时延；无正确性影响；Server 面独立 runtime 不受影响
 - **方案**: CLI 面实测 `#[tokio::main(flavor = "current_thread")]`（或 Builder 定制）——需验证引擎内部 `spawn_blocking`（WAL/页 I/O）与 DataScan 预取在 current_thread 下的行为与吞吐；以 RSS/时延/吞吐三组数据决定是否切换（MS08「先量化再决定」纪律适用）
-- **状态**: planned（2026-09-24 用户方向登记，先量化再决定）
+- **状态**: planned（已排期 MS18-T02——2026-09-24 初版后第一批路线规划；先量化再决定）
 
 ## I064: WAL 提交持久化语义文档化（每 commit 一次 write_batch + sync_all）
 
@@ -456,7 +456,79 @@
 - **证据**: tasks 长期方向 K37（原有记录）；2026-09-24 SQLite 对比测量（RSS 16.7MiB、扫描吞吐差距——分配器因素为推断，未单独 profile）
 - **影响**: 分配密集路径的吞吐与常驻内存；无正确性影响
 - **方案**: 先 profile 分配热点（MS08「先量化再决定」纪律），再评估 jemalloc/mimalloc 以 feature-gated 依赖引入（crate 化后可作为微内核拓扑的可选件 feature，呼应 R25）；与 I020（clone 消除）、I065（流式化减少物化）互补——先减分配次数还是先换分配器，以 profile 数据定序
-- **状态**: planned（2026-09-24 用户方向登记，未排期）
+- **状态**: planned（MS22 候选——2026-09-24 初版后第一批路线规划，量化定稿后立项）
+
+## I067: REPL 交互模式与元命令
+
+- **分类**: 功能 / CLI 交互形态
+- **问题**: 无 REPL（readline/多行输入/历史，无任何 stdin 读取代码）与元命令（`.tables`/`.schema`/`.mode`/`.import`/`.dump`/`.quit` 等）；非交互生命周期子命令已覆盖 `.tables`/`.schema`/`.dump` 的多数场景（list/schema/dump），交互式探索场景仍缺位
+- **证据**: R18 主题 3 差距清单两行（REPL「中：新 cli/ 模块；执行后端复用 lib（不经网络）」、元命令「小-中：REPL 层实现；.dump 需语句反序列化」）+ 主题 7 用户决策记录（2026-09-05：非交互优先，REPL 不是核心可作后续可选）
+- **影响**: 交互式使用/教学场景不可用；agent/脚本场景不受影响（非交互面已完整）
+- **方案**: 新 `src/cli/` REPL 模块（readline/多行/历史），执行后端复用 lib；元命令逐个独立验收（`.open`/`.databases` 见 R18 主题 6 设计空间表）
+- **状态**: planned（用户裁定 2026-09-05 降为后续可选，未排期）
+
+## I068: ALTER TABLE 与二级索引（CREATE/DROP INDEX）
+
+- **分类**: 功能 / SQL DDL 面
+- **问题**: 语句面无 `ALTER TABLE ADD/DROP COLUMN` 与 `CREATE INDEX`/`DROP INDEX`（索引仅 PK 自动建）；同面缺口还有 `CREATE VIEW`/`TRUNCATE`/`EXPLAIN`（R18 主题 2 语句清单）
+- **证据**: R18 主题 2（`src/parser/planner/mod.rs:90-93` 6 种语句臂，其余 `UnsupportedStatement`）+ 主题 3 差距清单「ALTER TABLE ADD/DROP COLUMN、CREATE INDEX | 中-大：触及 catalog/序列化/重建路径」
+- **影响**: 列结构演进只能 dump→改 DDL→restore 重建；非 PK 查询列无二级索引可用
+- **方案**: ALTER 与 CREATE INDEX 各触及 catalog/序列化/重建路径，评估中-大，需独立 change（VIEW/TRUNCATE/EXPLAIN 届时一并裁定是否并入范围）
+- **状态**: planned（已排期 MS21-T01/T02——2026-09-24 初版后第一批路线规划）
+
+## I069: DECIMAL/BLOB 列类型
+
+- **分类**: 功能 / 类型系统
+- **问题**: 列类型 6 类（Int/String/Float/Bool + MS13 的 Date/Timestamp），无 DECIMAL/BLOB——精确小数以 Float 近似、二进制数据无承载类型
+- **证据**: R18 主题 3 差距清单「DATE/TIMESTAMP/DECIMAL/BLOB | 大：改序列化格式，深水区应靠后」；前两类已由 MS13-T01 落地，DECIMAL/BLOB 未做
+- **影响**: 金额类精确计算与二进制存储场景不可用；常规分析负载不受影响
+- **方案**: tuple TAG/catalog COL_TAG 扩展的格式变更深水区，参照 MS13 日期类型先例独立规划
+- **状态**: planned（long-term，未排期）
+
+## I070: 错误信息可操作化（特性名携带与错误分类）
+
+- **分类**: 可用性 / 错误报告
+- **问题**: `UnsupportedStatement`/`UnsupportedExpression` 不携带特性名（报错无法直接得知不支持什么）；PG 协议错误码统一 58000；CLI 退出码分类（0/1/2/3/4/5）与各 change 点名文案已零散落地，系统性的 PlanError 特性名与错误分类未做
+- **证据**: R18 主题 3 差距清单「错误信息可操作化 | UnsupportedStatement/Expression 无上下文；PG 统一 58000 | 小：PlanError 携带特性名；错误码分类」
+- **影响**: 排错需读源码或试错；协议面错误不可按类消费
+- **方案**: `PlanError` 携带特性名 + 错误分类（评估小改动面），可独立小 change 或随下次触碰错误面的 change 顺带
+- **状态**: planned（已排期 MS19-T02——2026-09-24 初版后第一批路线规划）
+
+## I071: PG Extended Query 与 serve 子命令复活
+
+- **分类**: 功能 / 网络协议
+- **问题**: PG 层仅 Simple Protocol，无 Extended Query（prepared statement）；`psql` 及依赖协议扩展的生态工具不可用；server 保留为库能力，无 `rtsql serve` 入口
+- **证据**: R18 主题 3 差距清单「PG Extended Query | 对内置 CLI 形态优先级下降（REPL 不需要）；对 psql 生态工具仍有价值」+ 主题 4 规划输入 3（2026-09-05 用户形态决策：server 代码停止投入，将来可选 `rtsql serve` 复活；原 MS09-T03 移除）
+- **影响**: 仅影响 psql 生态消费者；非交互 CLI 形态与嵌入式库用法不受影响
+- **方案**: 届时随 `rtsql serve` 子命令复活一并评估；协议扩展对 server 库能力独立成立
+- **状态**: planned（用户裁定降级未排期，2026-09-05/06）
+
+## I072: 文件级备份/移动配对语义验证与文档化
+
+- **分类**: 文档 / 数据安全边界
+- **问题**: 文件对（`.db` + `.wal`）是移动/备份的最小单位——只拷主文件在 checkpoint 后等价、否则丢尾部事务；`with_extension("wal")` 的扩展名替换语义下移动/重命名/拷贝的配对行为未实测，用户文档也未声明「备份首选 dump/restore 逻辑导出」
+- **证据**: R18 主题 5 推论（文件对最小单位 + 逻辑导出首选）+ 未确认项 5（`.wal` 与主文件移动/重命名配对行为未实测）
+- **影响**: 用户以文件拷贝做备份可能静默丢尾部事务且无文档提示
+- **方案**: 实测移动/拷贝/重命名配对行为矩阵 + README 文档化备份边界（dump/restore 首选）；验证+文档小项，与 I061（删库子命令）同面可顺带
+- **状态**: planned（未排期——可随 MS19-T01 同面顺带，届时裁定）
+
+## I073: 主流平台构建验证（x86_64-linux-musl 静态与 macOS）
+
+- **分类**: 分发 / 平台验证
+- **问题**: RISC-V 64 musl 静态交叉构建已验证（`build-riscv64-musl.sh`，change `2026-09-24-riscv64-musl-build-artifacts`），但 x86_64-linux-musl 全静态与 macOS（`FileExt` 理论可用）均未实测，macOS 下测试套件未运行过；安装脚本宣称目标 Linux/macOS
+- **证据**: R18 主题 8 事实（musl 全静态可行——「本机未装 musl target，未实测」）+ 未确认项 8（musl 全静态与 macOS 构建未实测）
+- **影响**: macOS 支持无验证记录；musl 静态是容器/scratch 部署前提
+- **方案**: 装对应 rustup target 实测 cargo build + 测试套件 + CLI 冒烟，结果回写 README/分发文档；与 I052（预编译矩阵）相关但独立——本条是平台可编译性验证，I052 是发布设施
+- **状态**: planned（未排期）
+
+## I074: workspace crate 化路线 B（微内核数据库形态）
+
+- **分类**: 架构 / 模块化（long-term 方向）
+- **问题**: 单 crate 单体（src/ 11 模块）；两条真实依赖环（database→pipeline→executor→database、storage↔transaction 经 VersionHeader）、Response 错层（core 反向依赖 network）、99 处 `pub(crate)` 可见性耦合——可选件（net/crypto/cli）feature 化与多拓扑组合在单体上不可达
+- **证据**: R25 分析（2026-09-24 读码：F1 依赖图谱 / F2 依赖环 / F3 词表熔接点 Value/PhysicalPlan≈20 变体/ColumnType / F4 现成接缝 AsyncStorage/REGISTRY / F6 Response 错层 / F7 加密 feature-ready / F8 无 CI）+ 四刀迁移顺序草图（词表下沉→存储域→语言域→组装层+可选件）；2026-09-24 用户裁定初版后启动路线 B
+- **影响**: 纯结构重构，无行为收益；断环可能重塑执行器装配协议，返工成本以「周」计（R25 边界段）
+- **方案**: 按 R25 四刀顺序，每刀独立验收全量 GREEN→GREEN、磁盘格式/行为零变化硬锚；启动前置条件包含 I051（CI）落地或等价的本地 feature 组合门纪律（F8：组合无人跑则缺陷无人发现）；`PhysicalPlan` 词表化 vs trait 化为第三刀单点架构决策需专项设计；matklad 告诫 crate 墙有真实成本——每刀以「边界值得墙」准入，两刀后停留也是合法终态；与 I059（多文件会话抽象）、I066（可选件 feature 化）顺风
+- **状态**: planned（2026-09-24 用户裁定初版后启动，未排期）
 
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
 <!-- arc: ARC-202609241843a --> 2 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609241843a/proposal.md

@@ -26,9 +26,11 @@
 
   | 依赖 | 版本 | 链接 | 用途 |
   |---|---|---|---|
-  | tokio | 1.x | https://docs.rs/tokio | async 运行时（rt-multi-thread, macros, sync, time, net, fs, io-util） |
+  | tokio | 1.x | https://docs.rs/tokio | async 运行时（rt-multi-thread, macros, sync, time, net, fs, io-util, signal） |
   | sqlparser-rs | 0.44 | https://docs.rs/sqlparser | SQL 解析 |
   | async-trait | 0.1 | https://docs.rs/async-trait | async trait 支持 |
+  | clap | 4 | https://docs.rs/clap | CLI 框架（derive/env，MS10-T01） |
+  | clap_complete | 4 | https://docs.rs/clap_complete | shell 补全生成（bash/zsh/fish，MS17-T03） |
   | thiserror | 1.0 | https://docs.rs/thiserror | 错误类型派生 |
   | anyhow | 1.0 | https://docs.rs/anyhow | 错误处理 |
   | futures | 0.3 | https://docs.rs/futures | 异步原语 |
@@ -38,7 +40,10 @@
   | rand | 0.8 | https://docs.rs/rand | 随机数 |
   | lru | 0.12 | https://docs.rs/lru | LRU 缓存（PlanCache） |
   | crc32fast | 1.4 | https://docs.rs/crc32fast | WAL CRC32 校验 |
-  | dashmap | 6 | https://docs.rs/dashmap | 并发 HashMap（BufferPool vis_map） |
+  | dashmap | 6 | https://docs.rs/dashmap | 并发 HashMap（BufferPool vis_map/loading_locks） |
+  | csv | 1 | https://docs.rs/csv | CSV 导入（`import --csv`，MS10-T05） |
+  | argon2 | 0.6 | https://docs.rs/argon2 | Argon2id 密钥派生（MS17-T01） |
+  | aes-gcm | 0.11 | https://docs.rs/aes-gcm | 页级 AES-256-GCM 加密（MS17-T01） |
 
 - **状态**: active
 - **Legacy**: R001
@@ -56,6 +61,7 @@
   | rusqlite | 0.31 | https://docs.rs/rusqlite | SQLite 对比测试 |
   | tempfile | 3.x | https://docs.rs/tempfile | 测试临时目录 |
   | which | 6.0 | https://docs.rs/which | 查找可执行文件 |
+  | libc | 0.2 | https://docs.rs/libc | 优雅停机测试信号注入（kill/SIGINT/SIGTERM，MS10-T02） |
 
 - **状态**: active
 - **Legacy**: R001
@@ -180,9 +186,7 @@
 - **类型**: change-archive
 - **路径**: `openspec/changes/archive/2026-08-26-2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages/`
 - **状态**: archived
-- **内容**: MS06-T03 + MS06-T04 一并实施
-  - **T03 (WAL 句柄复用)**: `WalWriter` 持 `Arc<std::sync::Mutex<std::fs::File>>` 单一持久句柄；5 个 IO 方法（`write_record` / `fsync` / `truncate_to` / `get_current_lsn` / `write_batch`）全部删除逐次 `OpenOptions::open`，改为 clone Arc → `spawn_blocking` → lock 内完成；错误语义与 LSN 文件位置语义保持；`tests/wal_handle_test.rs` 新增 4 测试（10K tx fd 净增量 < 10、LSN 偏移、truncate 后同句柄追加、4 任务并发一致）
-  - **T04 (Pipeline 三阶段拆分)**: `pipeline::execute_inner` 279 行单函数 → 编排器 + `pub async fn parse_stage` / `pub async fn plan_stage` / `pub async fn execute_stage`；cache-hit 早退重复块删除；profiling 三段顶层计时（parse/plan/execute）替代旧 `parse_and_plan` 合并计时，子指标 `table_metadata_lookup` / `executor_creation` / `executor_execution` 由 `profiling: bool` 守卫；`#[cfg(test)] mod tests` 8 阶段单测；`benches/pipeline_stages_bench.rs` 三阶段独立 criterion bench
+- **内容**: MS06-T03 + MS06-T04 一并实施——T03 `WalWriter` 持 `Arc<Mutex<File>>` 单一持久句柄（5 个 IO 方法去逐次 open，错误与 LSN 语义保持；`tests/wal_handle_test.rs` 4 测试）；T04 `pipeline::execute_inner` 279 行 → 编排器 + parse/plan/execute 三 pub stage + profiling 三段计时 + 8 阶段单测 + 三阶段 criterion bench（文件级明细见归档 carrier）
 - **关联能力 spec**:
   - `wal-writer-handle-reuse`（R1-R4：句柄复用 / 错误语义 / LSN 语义 / fd 上界可验证）
   - `pipeline-stage-decomposition`（R1-R8：parse 终止 / plan 终止 / execute 终止 / cache-hit 跳过 / DML 事务包裹 / DDL 缓存失效 / 阶段级可测 / 三段顶层计时 / 独立 bench）
@@ -195,37 +199,10 @@
 - **状态**: archived
 - **关联里程碑**: MS07-T01（基础能力建设 / 系统表 `__tables` / `__columns` + Schema 页；最大单点）
 - **Plan Review**: `accepted`（openspec-plan / 2026-08-26 18:58；RTM A1–A10 全部满足；11 项偏差 0 阻塞）
-- **内容**:
-  - 新增 `src/storage/catalog.rs`（~908 行）— `Catalog` 结构 + `bootstrap` / `open` / `insert_table` / `delete_table` / `scan_tables` / `scan_columns` / `update_table_tail` 7 方法 + 二进制行序列化 / 反序列化 + 链式 SlottedPage（`next_page_id` header 偏移 5..9） + 10 单元测试
-  - `src/storage/btree/index_manager.rs` — 新增 `pub fn root_page_id()` 访问器 + `pub fn from_root(buffer_pool, root_page_id)` 路径（直接 `AtomicU64::new(root_page_id.0)`，不调 `BTree::new`）
-  - `src/storage/data/table_manager.rs`（重写 ~345 行）— `new(buffer_pool, storage) -> Result<Arc<Self>>` async；`catalog: Arc<Catalog>` 字段 + `catalog()` 访问器 + `open_or_init()` 重建方法；`create_table` 末尾调 `catalog.insert_table`（失败时回滚 in-memory） + 保留名检查（`__tables` / `__columns` → `ReservedTableName`）；`drop_table` 同；新增 `write_tuple` 跨页同步 `data_page_tail`
-  - `src/database.rs` — `TableManager::new(buffer_pool, storage).await?` + `open_or_init().await?`；新增 `pub async fn close()` 调 `buffer_pool.flush_all()`（schema 持久化必须显式落盘）
-  - `src/executor/insert.rs` — `table_manager: Option<Arc<TableManager>>` + `with_table_manager(...)`；新路径走 `tm.write_tuple`，旧测试走 `write_tuple_to_data_page` fallback
-  - `src/storage/error.rs` — 新增 `StorageError::ReservedTableName(String)` 变体
-  - `src/storage/async_storage.rs` — 新增 `fn page_count(&self) -> u64` 方法（`TableManager::new` 据此分支 bootstrap/open）
-  - `src/storage/page_format/tuple.rs` — `ColumnType` 加 `#[derive(Eq)]`
-  - `src/storage/{mod,file_storage,data_page}.rs` — 适配签名
-  - `src/transaction/manager.rs` — 适配签名
-  - `src/{plan_cache.rs}` — 适配签名
-  - `tests/table_manager_test.rs` — 6 个测试 `setup()` 加 `storage` + `.await`（API 兼容）
-  - `tests/schema_persistence_test.rs`（新增 237 行 / 8 测试）— `test_create_table_writes_to_tables_page0` / `test_restart_recovers_table` / `test_restart_dml_works` / `test_drop_table_removes_from_catalog` / `test_restart_after_drop_table_gone` / `test_index_root_persists_across_restart` / `test_tables_is_reserved` / `test_data_page_tail_persists`
-  - 14 个其他 test 文件批量改 `TableManager::new` 签名（plan_exec / executor / gc / mvcc_* / version_chain / concurrent / join / wal_* / btree_test / index_manager_test / pg_messages_test / plan_cache_test 等）
-- **关联能力 spec**:
-  - `schema-persistence`（7 个 Requirement / 14 个 Scenario）
-    - R1: 系统表持久化 schema（New db bootstrap / Restart preserves DML / drop_table removes & persists）
-    - R2: IndexManager::from_root path（from_root binds / from_root does not allocate）
-    - R3: Reserved system table names（CREATE TABLE __tables rejected / DROP TABLE __tables rejected）
-    - R4: data_page_tail persistence（Cross-page INSERT persists tail）
-    - R5: page 0 / page 1 reservation（Fresh db allocates / Existing db recognizes）
-    - R6: Catalog operations under write lock（Concurrent CREATE TABLE serialized / Catalog write failure leaves HashMap consistent）
-    - R7: System tables bypass MVCC and WAL（Reads independent of transaction / DDL no WAL records）
+- **内容**: 新增 `src/storage/catalog.rs`（~908 行，7 方法 + 二进制行序列化 + 链式 SlottedPage，10 单测）+ `IndexManager::from_root`/`root_page_id` + `TableManager` 重写（async new/`open_or_init`/保留名检查/跨页 `write_tuple`）+ `Database::close()` + `InsertExecutor` `Option<Arc<TableManager>>` + `AsyncStorage::page_count` + `StorageError::ReservedTableName`（文件级明细见归档 carrier）；`tests/schema_persistence_test.rs` 8 测试 + 14 个其他测试文件批量签名适配
+- **关联能力 spec**: `schema-persistence`（7 Requirement / 14 Scenario：R1 系统表持久化 / R2 from_root / R3 保留名 / R4 tail 持久化 / R5 页 0/1 保留 / R6 catalog 写锁 / R7 系统表旁路 MVCC 与 WAL，明细见 spec）
 - **基线**: 534 tests pass（516 基线 + 10 catalog 单测 + 8 schema 集成测试）
-- **关键偏差**（已记录于 Act Response，0 阻塞）:
-  - `InsertExecutor` `Option<Arc<TableManager>>` + fallback（~40 处旧调用零修改通过）
-  - `update_table_tail` 用 append+delete 而非 in-place（SlottedPage 无 in-place API）
-  - `Database::close()` 新增（restart 测试必需）
-  - `test_data_page_tail_persists` 200 行直写替代 300 SQL INSERT（隔离 WAL buffer 满干扰）
-  - `AsyncStorage::page_count` 新增 trait 方法（bootstrap/open 分支必需）
+- **关键偏差**（已记录于 Act Response，0 阻塞）: InsertExecutor Option+fallback（~40 处旧调用零修改）、`update_table_tail` append+delete（SlottedPage 无 in-place API）、`Database::close()` 新增、tail 测试直写隔离 WAL buffer 干扰、`AsyncStorage::page_count` 新增——明细见归档 carrier
 - **遗留 Minor**（划归后续 change）:
   - K05 recovery 静默吞错（`src/wal/recovery.rs:146-148/162-165/174-177`）— 下一 change 修复
   - MS07-T02 drop_table 物理页释放 — 独立 change

@@ -20,9 +20,9 @@
 - **分类**: architecture
 - **范围**: 整个数据库系统
 - **不变量**:
-  - SQL Text → Parser (sqlparser) → PlanCache (LRU, SELECT only) → PlanBuilder → PhysicalPlan (20 节点) → Pipeline → Volcano Executor Tree → Storage (BufferPool → PageGuard / BTree → AtomicPageId / SlottedPage)
-  - 20 种 PhysicalPlan 节点：Scan / DataScan / IndexScan / IndexScanAll / Filter / Join / Aggregate / Having / Sort / Limit / SemiJoin / AntiJoin / SubqueryEval / DerivedScan / Projection / Insert / Update / Delete / CreateTable / DropTable（Projection 为 MS11-T01 新增——SELECT 派生列逐行求值节点）
-- **证据**: `src/database.rs`, `src/pipeline.rs`, `src/parser/planner.rs`, `src/executor/mod.rs`, `src/storage/buffer_pool.rs`
+  - SQL Text → Parser (sqlparser) → PlanCache (LRU, SELECT only) → PlanBuilder → PhysicalPlan (22 节点) → Pipeline → Volcano Executor Tree → Storage (BufferPool → PageGuard / BTree → AtomicPageId / SlottedPage)
+  - 22 种 PhysicalPlan 节点：Scan / DataScan / IndexScan / IndexScanAll / Filter / Join / NestedLoopJoin / Aggregate / Having / Sort / Limit / SemiJoin / AntiJoin / SubqueryEval / DerivedScan / Projection / SingleRow / Insert / Update / Delete / CreateTable / DropTable（Projection 为 MS11-T01 新增——SELECT 派生列逐行求值节点；NestedLoopJoin 为 MS09-T02 新增——非等值 JOIN；SingleRow 为 MS13-T03 新增——no-FORM 虚拟单行）
+- **证据**: `src/database.rs`, `src/pipeline.rs`, `src/executor/plan.rs`（枚举定义）, `src/parser/planner/`, `src/executor/mod.rs`, `src/storage/buffer_pool.rs`
 - **状态**: active
 - **Legacy**: A001-A012 系统架构图与节点表（来自 `openspec/specs/architecture/spec.md`）
 
@@ -33,7 +33,7 @@
 - **不变量**:
   - 索引页存 (key → row_id_pointer)，数据页存实际 row（独立管理）
   - 不采用 SQLite 聚簇索引模式
-- **证据**: `src/storage/btree/`, `src/storage/data/table_manager.rs:51`（data_page_head）
+- **证据**: `src/storage/btree/`, `src/storage/data/table_manager.rs:56`（data_page_head）
 - **状态**: active
 - **影响**: PK lookup 5.6x faster than SQLite（M17.5 实测），但文件大小 ~3x larger
 - **Legacy**: A001
@@ -72,7 +72,9 @@
   - Null = [Tag 0x03]
   - Float = [Tag 0x04][8 bytes f64]
   - Bool = [Tag 0x05][1 byte]
-- **证据**: `src/executor/value.rs`, `src/storage/data_page.rs`
+  - Date = [Tag 0x06][4 bytes LE]
+  - Timestamp = [Tag 0x07][8 bytes LE]
+- **证据**: `src/executor/value.rs`, `src/storage/page_format/tuple.rs`（TAG_DATE 0x06 / TAG_TIMESTAMP 0x07，MS13-T01）
 - **状态**: active
 - **Legacy**: A004
 
@@ -125,11 +127,11 @@
 - **分类**: domain
 - **范围**: 事务隔离
 - **不变量**:
-  - 唯一支持的隔离级别：Repeatable Read（M24 计划新增 Read Committed + Serializable）
+  - 隔离级别：Repeatable Read（默认，`Database::open` 行为与历史逐字节等价）+ Read Committed（`Database::open_with_isolation` 语句级已提交视图，MS09-T01）；Serializable 非目标
   - 读路径先查页级 `PageVisibilityInfo` 摘要（min_create_tx_id + all_visible），再回退到逐行 VersionHeader 检查
   - 不可见版本沿 `VersionHeader.next_version` 链查找
   - 纯内存优化，崩溃后自动降级为逐行检查（正确性不受影响）
-- **证据**: `src/storage/page_visibility.rs`, `src/transaction/snapshot.rs`
+- **证据**: `src/storage/page_visibility.rs`, `src/transaction/snapshot.rs`, `src/transaction/mod.rs`（IsolationLevel）
 - **状态**: active
 - **Legacy**: A011, R007, M21 spec
 
@@ -142,13 +144,13 @@
   |---|---|---|
   | Database::open | src/database.rs | 打开/创建数据库 |
   | Database::execute_sql | src/database.rs | 执行 SQL 语句 |
-  | BufferPool::get_page | src/storage/buffer_pool.rs | 获取页（两阶段锁） |
+  | BufferPool::get_page | src/storage/buffer_pool.rs | 获取页（DashMap + miss Sem + per-page loading lock，见 M17） |
   | BufferPool::with_page_data | src/storage/buffer_pool.rs | 零拷贝页访问闭包 |
   | PageGuard::page_data | src/storage/page_frame.rs | 零拷贝读取页数据 |
   | PageGuard::modify_page | src/storage/page_frame.rs | 修改页数据（自动 dirty） |
   | IndexManager::search | src/storage/btree/index_manager.rs | Async search |
   | BTree::from_root | src/storage/btree/btree.rs | 临时实例（写操作） |
-  | PlanBuilder::build | src/parser/planner.rs | SQL → PhysicalPlan |
+  | PlanBuilder::build_plan | src/parser/planner/mod.rs | SQL → PhysicalPlan |
   | Pipeline::execute | src/pipeline.rs | 执行管道入口 |
   | inject_correlated_values | src/executor/correlated.rs | 向谓词树注入外层列值 |
   | BTree::search_all | src/storage/btree/btree.rs | 返回所有匹配 RowId |
@@ -159,9 +161,9 @@
   | FileStorage.free_pages | src/storage/file_storage.rs | Mutex<Vec<u64>> free-list |
   | Server::new | src/network/server.rs | 创建服务器（addr, db, max_connections） |
   | Server::shutdown_token | src/network/server.rs | 获取 CancellationToken 用于优雅关闭 |
-  | TableMeta.data_page_head | src/storage/data/table_manager.rs:51 | 数据页链表头 |
+  | TableMeta.data_page_head | src/storage/data/table_manager.rs:56 | 数据页链表头 |
   | SlottedPageHeader.next_page_id | src/storage/page_format/slotted_page.rs:21 | 数据页链表指针 |
-  | IndexManager.scan_all | src/storage/btree/index_manager.rs:204 | BTree 全遍历 |
+  | IndexManager.scan_all | src/storage/btree/index_manager.rs:269 | BTree 全遍历 |
   | PageVisibilityInfo | src/storage/page_visibility.rs | 页面级可见性摘要 |
   | BufferPool::get_visibility | src/storage/buffer_pool.rs | 查询 visibility map |
   | BufferPool::update_visibility_on_insert | src/storage/buffer_pool.rs | INSERT 后更新可见性 |
@@ -190,7 +192,7 @@
   | subquery_eval.rs | src/executor/subquery_eval.rs | SubqueryEvalExecutor |
   | correlated.rs | src/executor/correlated.rs | inject_correlated_values |
   | predicate.rs | src/executor/predicate.rs | Predicate/Expression + ParameterExpression |
-  | planner.rs | src/parser/planner.rs | PlanBuilder（含子查询/关联检测） |
+  | planner/ | src/parser/planner/ | PlanBuilder 六模块（mod/query/expression/aggregate/subquery/ddl_dml，MS07-T03） |
   | data_page.rs | src/storage/data_page.rs | 数据页读写 + VersionHeader |
   | table_manager.rs | src/storage/data/table_manager.rs | TableMeta（data_page_head/tail） |
   | page_visibility.rs | src/storage/page_visibility.rs | PageVisibilityInfo（页面级 MVCC 摘要） |
@@ -218,7 +220,7 @@
   - 源码目录：src/
   - 存储层：src/storage/（buffer_pool、btree、page_format、file_storage、data）
   - 执行器：src/executor/（每个执行器独立文件）
-  - 解析器：src/parser/（planner、ast）
+  - 解析器：src/parser/（planner/ 六模块、ast）
   - 测试目录：tests/（集成测试）+ 文件内 #[cfg(test)]（单元测试）
   - 基准测试：benches/（criterion）
 - **状态**: active
