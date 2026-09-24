@@ -217,6 +217,30 @@ cargo bench
 
 仓库的 `benches/` 目录还包含 Criterion 基准和 SQLite 对比基准。RISC-V 64 Linux（musl）产物由 `build-riscv64-musl.sh` 生成，见上文「交叉构建 RISC-V 64 Linux（musl）」章节。
 
+## 性能与资源对比
+
+2026-09-24 在 Intel i9-13900HX（32 线程）Linux 机器上实测：RTsql 0.1.0（release 构建）对比 SQLite 3.37.2（`rusqlite` 链接的系统 `libsqlite3`，以及 `sqlite3` CLI）。两个引擎均使用默认配置，作用于同一张合成表 `bench (id INTEGER PRIMARY KEY, name TEXT, value INTEGER)`；RTsql 每条语句经 WAL 自动提交，SQLite 使用默认回滚日志。以下为单机现场观察，不是基准保证。
+
+引擎级操作（Criterion 进程内基准、直接调用引擎 API，20 样本均值；复现命令 `cargo bench --bench sqlite_compare`）：
+
+| 操作 | RTsql | SQLite | 更快 |
+|---|---|---|---|
+| INSERT 100 行（逐条提交） | 4.8 ms（约 20,800 行/秒） | 251.3 ms（约 400 行/秒） | RTsql ~52x |
+| 主键点查（1k 行表） | 1.57 µs | 6.80 µs | RTsql ~4.3x |
+| 1k 行全表扫描 | 297 µs | 98 µs | SQLite ~3x |
+
+CLI 级资源占用（一次性进程，加载 2,000 行后执行 `SELECT COUNT(*)`）：
+
+| 指标 | RTsql | sqlite3 |
+|---|---|---|
+| 加载耗时（2,000 条 INSERT） | 3.2 s | 5.3 s |
+| 峰值内存（RSS） | ~16.7 MiB | ~4.1 MiB |
+| 关闭后主数据库文件 | 300 KiB | 48 KiB |
+| 单次 `SELECT 1` 时延（50 次均值） | 10.8 ms | 1.2 ms |
+| 二进制体积 | 6.7 MB | 1.6 MB |
+
+解读：RTsql 的逐条写入路径与索引点查较快，但全表扫描目前慢于 SQLite，一次性调用还承载异步运行时与关闭时 checkpoint 的固定开销。SQLite 成熟三十余年，以上仅为 RTsql 当前位置的快照；下结论前请在自己的硬件上复跑基准。
+
 ## 已知限制
 
 - 支持 Linux 和 macOS 构建宿主；尚未实现 Windows 文件 I/O。RISC-V 64 Linux 以静态 musl 交叉构建产物交付，尚未在真实 RISC-V 硬件上验证。

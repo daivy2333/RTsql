@@ -425,4 +425,14 @@
 - **方案**: 独立 change 评估 WAL 帧与 checkpoint 载荷的加密/认证格式，明确密钥派生、nonce/tag、格式协商、旧明文库兼容、错误密钥拒绝与恢复失败边界；先确认威胁模型和兼容要求，再决定是否实施
 - **状态**: planned（2026-09-24 MS17 初版收尾登记；用户裁定为初版非目标，未排期）
 
+## I061: 删库子命令（`rtsql delete <db>` 管理命令行）
+
+- **分类**: 功能 / CLI 生命周期
+- **问题**: 无删库子命令——生命周期子命令只有 `new/list/schema/dump/restore/import`（`rtsql --help` 实证），SQL 层 `DROP TABLE` 只删表、库文件与伴生文件仍在；删库只能文件级 `rm <name>.db <name>.wal <name>.checkpoint` 三件套
+- **用户方向**（2026-09-24）: 卸载脚本 `install.sh --uninstall --purge-data` 虽有数据清理能力，但那是卸载场景；删库作为日常管理命令行也应存在
+- **证据**: 2026-09-24 用户手动部署验证时发现（本会话 `rtsql --help` 子命令清单确认无 delete/drop 类命令；improvements 台账与 tasks 路线均无此条目，无重复登记）
+- **影响**: 手工 rm 需要用户了解伴生文件布局（`.db`/`.wal`/`.checkpoint`），漏删伴生文件会残留脏现场；agent/脚本管理场景缺一行式命令，`list` 可枚举但不可回收
+- **方案**: 新增 `rtsql delete <db>`（或 `drop-database`）子命令——复用 `resolve_existing_db` 定位（裸名集中存储区 / 含 `/` 路径），删除主文件与 `.wal`/`.checkpoint` 伴生文件并报告释放结果；打开中（advisory 文件锁占用）SHALL 显式拒绝；加密库为文件级操作无需密钥；命令命名、dry-run/确认交互、路径形态边界与 `install.sh --purge-data` 语义关系随 change 调查定稿
+- **状态**: planned（2026-09-24 用户方向登记，未排期）
+
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
