@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-24（maintainer RISC-V musl 交叉构建收尾：change `2026-09-24-riscv64-musl-build-artifacts` 归档——单 Iteration 单 Cycle Plan Review accepted；specs 39→40（新增 riscv64-musl-build，4 Requirement）；新增仓库根 `build-riscv64-musl.sh`（固定 musl target 静态交叉构建）与 `.gitignore` `/dist/`；本轮统一提交一并纳入该 change 实施/收尾与范围外工作流（install.sh bashrc PATH、docs/SKILL.md→rtsql-docs/ 迁移、docs 路径勘误），提交基线 145bba4。前次 2026-09-24：MS17 初版收尾，1101 tests）
+> 最后更新：2026-09-24（milestone-planner 初版后第一批路线 MS18-MS22 入 tasks——MS18 one-shot 性能收口〔I062/I063〕/ MS19 CLI 管理面小收口〔I061/I070〕/ MS20 ATTACH 跨库交互〔I059 两期〕/ MS21 DDL 演进与二级索引〔I068〕/ MS22 实测驱动性能批〔8 候选，量化定稿后 ready〕；用户批准方向「功能+性能优先，排除微内核重构、加密、构建实测、分发」。improvements 同步：六条标注已排期 MSxx-Txx、I020/I021/I024/I026/I038/I049/I050/I066 标 MS22 候选、I031 标 MS22 Non-goal、I072 标可随 MS19-T01 顺带、I035/I043/I044 补转 promoted 勘误；产品代码零变化，1101 tests 结论沿用。前次 2026-09-24：I067-I074 登记与 K/D 域退役同步）
 > 同步状态：current
 
 ## 项目身份
@@ -73,27 +73,26 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 145bba4（此前已提交状态，origin/master 同点；本文件所在提交统一纳入 RISC-V musl 交叉构建 change 实施/收尾与范围外工作流）
-- **ahead of origin**: 1 commit（本文件所在提交）
-- **工作区**: 本文件所在统一提交覆盖 RISC-V 交叉构建 change 实施/收尾与范围外工作流（install.sh bashrc PATH、SKILL.md 迁移、docs 路径勘误）；提交完成后工作区 clean（`dist/` 产物 Git 忽略）
+- **提交基线**: 382e259（archivist 清理批次 ARC-202609241843a/b 统一提交，origin/master 同点）
+- **ahead of origin**: 0（382e259 已推送）
+- **工作区**: clean——本轮 docs 统一提交（tasks MS18-MS22 路线规划 + improvements 排期/候选标注与三处 promoted 勘误 + SNAPSHOT 刷新，并入库既有 I067-I074 登记与 tasks/SNAPSHOT/project-model/references 压缩勘误）
 - **最新 tag**: M11
-- **测试**: 1101 tests pass, 0 failures, 2 ignored（Rust 产品代码零变化，沿用 2026-09-24 MS17 初版收口结论）
-- **OpenSpec**: 40 specs（2026-09-24 新增 riscv64-musl-build；change 已归档；无活跃 change。注：新版 openspec CLI `validate --all --strict` 将 14 个 MS06–MS10 时代 spec 的占位 Purpose 标记为失败——既有状态，非本轮引入）
+- **测试**: 1101 tests pass, 0 failures, 2 ignored（本轮文档清理 Rust 产品代码零变化，沿用 2026-09-24 MS17 初版收口结论）
+- **OpenSpec**: 40 specs（其中 decisions/knowledge 为 2026-09-24 退役空壳，仍计入 validate；无活跃 change；清理 carrier `archive/2026-09-24-ARC-202609241843a/b`。注：新版 openspec CLI `validate --all --strict` 将 14 个 MS06–MS10 时代 spec 的占位 Purpose 标记为失败——既有状态，非本轮引入）
 
 ## 同步状态
 
-- `current` — 文档与代码一致；RISC-V musl 交叉构建 change 实施与收尾由本文件所在统一提交承载；40 specs 已合并，change 已归档，tasks/SNAPSHOT 已同步
+- `current` — 文档与代码一致；初版后第一批路线（tasks MS18-MS22，均 planned，无硬前置）规划入库；improvements 排期/候选标注与 I035/I043/I044 promoted 勘误同步完毕；产品代码零变化，1101 tests 结论沿用（2026-09-24 MS17 收口）；40 specs（含 2 退役空壳）validate 40 passed / 0 failed，无活跃 change，tasks/SNAPSHOT 已同步
 
 ## 权威文档
 
 - 公共规则: `CLAUDE.md`
 - 项目模型: `openspec/specs/project-model/spec.md` (Mxx)
-- 决策: `openspec/specs/decisions/spec.md` (Dxx)
-- 知识: `openspec/specs/knowledge/spec.md` (Kxx)
+- 决策/知识（已退役 2026-09-24）: `decisions`/`knowledge` spec 为空壳；历史 Dxx/Kxx 编号经其底部 arc 墓碑 → 清理 carrier `2026-09-24-ARC-202609241843b` proposal 映射解析；现役承载——当前约束 project-model（Mxx）、可复用方法论 R27 runbook、已验证结论 R28 analysis
 - 参考: `openspec/specs/references/spec.md` (Rxx)
 - 改进: `openspec/specs/improvements/spec.md` (Ixx)
 - 任务与路线: `.claude/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含 MS06–MS17 已完成 carriers，最新为 `archive/2026-09-23-ms17-initial-release/` 与 `archive/2026-09-24-riscv64-musl-build-artifacts/`）
+- 变更: `openspec/changes/`（无活跃 change；归档目录含 MS06–MS17 已完成 carriers 与清理 carriers，最新为 `archive/2026-09-24-riscv64-musl-build-artifacts/` 与 `archive/2026-09-24-ARC-202609241843a/b/`）
 - Legacy migration carrier: `.claude/legacy/2026-08-25-openspec-init-migration/`
 - 新增能力 spec:
   - `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）
