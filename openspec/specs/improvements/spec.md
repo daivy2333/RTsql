@@ -22,11 +22,11 @@
 
 ## Phase 1 基础设施（已完成）
 
-**I001-I003 全部完成**（M41/M30/M38，详见 R08-013 + K14-16 + D09-10）
+**I001-I003 全部完成**（M41/M30/M38，详见 R08-R13；原 K14-16/D09-10 随 2026-09-24 K/D 退役入清理 carrier，经 knowledge/decisions spec 底部 arc 墓碑可解析）
 
 ## Phase 2 存储引擎核心（已完成）
 
-**I004-I008 全部完成**（M20/M19/M21/M36/M19，详见 K17-19, K22, D11-12, R10-013）
+**I004-I008 全部完成**（M20/M19/M21/M36/M19，详见 R10-R13 与 R28 分析沉淀；原 K17-19/K22/D11-12 随 2026-09-24 K/D 退役入清理 carrier）
 
 ## Phase 3 并发控制
 
@@ -77,17 +77,6 @@
 - **状态**: promoted（MS09-T04 实施——`SubqueryEval`/`SemiJoin`/`AntiJoin` 三执行器关联臂语句级缓存 `HashMap<Vec<(String, Value)>, Vec<Vec<Value>>>`（design D6 修正 DA1 的 LRU 设想：语句界有界 HashMap 足够），spec `correlated-subquery-cache`，change 归档 `openspec/changes/archive/2026-09-13-ms09-engine-mvcc-closeout/`）
 - **Legacy**: O017
 
-## I018: M28 多层关联子查询
-
-✅ 已决断 [2026-09-12] — 用户批准归档（单层关联子查询缓存已排期 MS09-T04，多层嵌套无当前需求）；物理归档待 openspec-archivist 执行
-
-- **分类**: 功能 / 子查询
-- **问题**: 显式拒绝多层嵌套
-- **方案**: 递归遍历 + 多层注入
-- **依赖**: M27（I017）
-- **状态**: 已裁定归档（2026-09-12 用户批准，待 openspec-archivist 物理归档）
-- **Legacy**: O018
-
 ## I020: M37 clone 消除 Arc/Cow
 
 - **分类**: 性能 / 分配
@@ -136,17 +125,6 @@
 - **依赖**: M31（已完成）+ M48（I013）
 - **状态**: planned（2026-09-14 MS08 剥离退还——未排期候选，初版优先；原 MS08-T03 排期撤销）
 - **Legacy**: O026, D12 下游
-
-## I027: M43 并行扫描
-
-✅ 已决断 [2026-09-12] — 用户批准归档（风险收益比与 D-candidates 同级：复杂度高且既有测试未证明扫描争用）；物理归档待 openspec-archivist 执行
-
-- **分类**: 性能 / 并行
-- **问题**: 全表扫描单线程
-- **方案**: 按页范围分区 + `mpsc` 汇聚
-- **依赖**: M19（已完成）+ M22（I023）
-- **状态**: 已裁定归档（2026-09-12 用户批准，待 openspec-archivist 物理归档）
-- **Legacy**: O027
 
 ## I028: M45 io_uring 批量提交
 
@@ -435,4 +413,50 @@
 - **方案**: 新增 `rtsql delete <db>`（或 `drop-database`）子命令——复用 `resolve_existing_db` 定位（裸名集中存储区 / 含 `/` 路径），删除主文件与 `.wal`/`.checkpoint` 伴生文件并报告释放结果；打开中（advisory 文件锁占用）SHALL 显式拒绝；加密库为文件级操作无需密钥；命令命名、dry-run/确认交互、路径形态边界与 `install.sh --purge-data` 语义关系随 change 调查定稿
 - **状态**: planned（2026-09-24 用户方向登记，未排期）
 
+## I062: close()/checkpoint 在无未决 WAL 记录时跳过全量 checkpoint
+
+- **分类**: 性能 / CLI one-shot 路径
+- **问题**: `Database::close()` 无条件转调全量 checkpoint（`src/database.rs:250-251` → `checkpoint_manager.checkpoint`：刷脏页 + 写位点 + WAL 重写截断）——零写入会话（WAL 无未决记录）也全价执行；one-shot `SELECT 1` 实测 10.8ms/次（sqlite3 同负载 1.15ms），固定开销主要来自 runtime 构建与 close checkpoint
+- **证据**: 2026-09-24 SQLite 对比测量（README 对比板块、R26 runbook：50 次时延循环）；代码面 `src/database.rs:250-251`
+- **影响**: agent/脚本高频 one-shot 场景每次多付毫秒级固定开销；无正确性影响
+- **方案**: checkpoint 前检查 WAL 未决记录（WalWriter 已有文件长度查询，writer.rs:180-188）为零/低于阈值时跳过重写直接返回；「close 即落盘」承诺语义不变——无未决记录时本无落盘工作；注意与 I064 文档口径一致
+- **状态**: planned（2026-09-24 用户方向登记，未排期；小改动高收益）
+
+## I063: CLI tokio runtime 规格评估（multi_thread 默认 → 按负载选 current_thread）
+
+- **分类**: 性能 / CLI 资源占用
+- **问题**: `src/main.rs:3` `#[tokio::main]` 默认 multi_thread + num_cpus worker（实测机 32 线程）——one-shot CLI 无并发连接需求，实测峰值 RSS 16.7MiB（sqlite3 同负载 4.1MiB），worker 线程与运行时结构为大头（BufferPool 本身仅 100 页 ≈400KB）
+- **证据**: 2026-09-24 SQLite 对比测量（README 对比板块、R26 runbook）；代码面 `src/main.rs:3`
+- **影响**: CLI 内存占用 ~4x 与部分启动时延；无正确性影响；Server 面独立 runtime 不受影响
+- **方案**: CLI 面实测 `#[tokio::main(flavor = "current_thread")]`（或 Builder 定制）——需验证引擎内部 `spawn_blocking`（WAL/页 I/O）与 DataScan 预取在 current_thread 下的行为与吞吐；以 RSS/时延/吞吐三组数据决定是否切换（MS08「先量化再决定」纪律适用）
+- **状态**: planned（2026-09-24 用户方向登记，先量化再决定）
+
+## I064: WAL 提交持久化语义文档化（每 commit 一次 write_batch + sync_all）
+
+- **分类**: 文档 / 持久化语义
+- **问题**: WAL 写路径每 batch 追加后整体 `sync_all`（`src/wal/writer.rs:188-211`，含 LSN+CRC32），提交路径每语句一次 write_batch → 语句级持久；该保证未在用户文档明示——对比测量中 INSERT ~52x 优势易被误读为「靠丢耐久换速度」（实际为单日志单次 fsync 对 SQLite 回滚日志的多文件多 fsync）
+- **证据**: 代码面 `src/wal/writer.rs:72-79/188-211`；2026-09-24 对比测量（README 对比板块）
+- **影响**: 无行为影响；文档缺失使性能声明缺乏耐久性语境、易受质疑
+- **方案**: README/文档明确「每语句 commit 同步 fsync WAL，断电不丢已提交事务」及 checkpoint 的边界分工；纯文档小项，随下次文档变更顺带
+- **状态**: planned（2026-09-24 登记随带）
+
+## I065: 扫描结果流式化/分页（Response 物化架构，远期）
+
+- **分类**: 性能 / 执行器与响应架构（long-term）
+- **问题**: 全表扫描 1k 行 297µs vs SQLite 98µs（剔除 SQLite 侧 prepare 不对称后真实差距更大）——火山执行器逐行 MVCC 判定后将结果整体物化 `Vec<Vec<Value>>` 进 Response，大结果集的内存与时延随行数线性放大
+- **证据**: 2026-09-24 SQLite 对比测量（README 对比板块、R26 runbook）；Response 物化架构见 SNAPSHOT pipeline 描述
+- **影响**: 大表导出/分析吞吐受限；当前嵌入式单机与 agent 分析负载规模下不构成实际瓶颈
+- **方案**: 远期评估流式响应（分页/chunk 协议）——牵动 `network::protocol::Response`、CLI 渲染与 plan cache 交互面，需独立设计与 change；先量化真实负载中全扫占比再决定
+- **状态**: planned（long-term，2026-09-24 登记未排期）
+
+## I066: 分配器评估与切换（jemalloc/mimalloc）
+
+- **分类**: 性能 / 分配器
+- **问题**: 当前使用系统默认分配器（glibc malloc，SNAPSHOT 技术栈无自定义分配器依赖）——执行器热路径大量 String/Vec 小分配（扫描物化 `Vec<Vec<Value>>`、JOIN/聚合 clone、sqlparser/plan 构造）的吞吐与 RSS 受分配器行为影响；原 tasks 长期方向 K37，2026-09-24 用户指令转入台账
+- **证据**: tasks 长期方向 K37（原有记录）；2026-09-24 SQLite 对比测量（RSS 16.7MiB、扫描吞吐差距——分配器因素为推断，未单独 profile）
+- **影响**: 分配密集路径的吞吐与常驻内存；无正确性影响
+- **方案**: 先 profile 分配热点（MS08「先量化再决定」纪律），再评估 jemalloc/mimalloc 以 feature-gated 依赖引入（crate 化后可作为微内核拓扑的可选件 feature，呼应 R25）；与 I020（clone 消除）、I065（流式化减少物化）互补——先减分配次数还是先换分配器，以 profile 数据定序
+- **状态**: planned（2026-09-24 用户方向登记，未排期）
+
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
+<!-- arc: ARC-202609241843a --> 2 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609241843a/proposal.md

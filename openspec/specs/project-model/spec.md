@@ -94,18 +94,10 @@
                 ↓
       RecoveryManager → TransactionManager
   ```
+  - 事务 ID：`TransactionId` 全局 AtomicU64 单调递增分配，无锁（原 D09 决策记录与 K16 实测数据随 2026-09-24 K/D 退役移入清理 carrier，经 arc 指引可解析）
 - **证据**: `src/database.rs`, `src/storage/buffer_pool.rs`, `src/storage/btree/`, `src/wal/`
 - **状态**: active
 - **Legacy**: L013
-
-## M07: 两阶段锁 BufferPool（历史基线）
-
-- **分类**: architecture
-- **范围**: 缓存加载路径
-- **不变量**: 读锁→释放→I/O→写锁(double-check) 模式加载缺失页
-- **证据**: `src/storage/buffer_pool.rs:BufferPool::get_page`
-- **状态**: active（M31 演进后被 DashMap + per-page loading_locks 增强）
-- **Legacy**: L012, ADR-012
 
 ## M08: AtomicPageId 无锁访问
 
@@ -245,15 +237,33 @@
 - **状态**: active
 - **Legacy**: 项目特定规范（命名规范）
 
-## M16: 已知限制（不变量边界）
+## M17: BufferPool 并发模型（DashMap + Miss Semaphore + Per-Page Loading Locks）
 
-- **分类**: compatibility
-- **范围**: 系统行为边界
+- **分类**: architecture
+- **范围**: 缓存并发与页加载路径
 - **不变量**:
-  - TableManager 纯内存：表定义不持久化（M44 计划解决）
-  - 全表扫描性能已通过 M19 DataScan 优化至 1.8-2.4x 提速
-  - 文件大小 ~6.5x SQLite（固定 Key + 两层索引）
-  - 仅 Repeatable Read 隔离级别（M24 计划解决）
-- **证据**: `src/storage/data/table_manager.rs`（纯内存）
+  - `pages: DashMap<PageId, Arc<Mutex<PageFrame>>>`——cache hit 路径 lock-free（整体替代原 RwLock<HashMap> 两阶段锁加载模式）
+  - miss Semaphore（16 permits）约束并发页加载总量，防突发 IO 风暴
+  - per-page `loading_locks: DashMap<PageId, Arc<tokio::sync::Mutex<()>>>`——同页并发 miss 仅一次 read_page（miss Sem 只限总量，不保证同页 double-check 正确性；per-page lock 才保证）
+  - 锁顺序约定：`miss_sem.acquire() → loading_lock.lock() → pages.get() → clock_hand.read() → frame.lock()`；同序获取无环，异序可死锁
+  - `flush_all` 采用 collect-then-write（DashMap iter 持分片读锁，await 不得持锁跨页写）
+  - 淘汰保持 clock_hand `RwLock<Vec<PageId>>` 串行淘汰；公开 API 签名不变
+- **证据**: `src/storage/buffer_pool.rs`（pages/vis_map/loading_locks 字段与 get_page）；原决策与设计修正全文见 2026-09-24 清理 carrier（D12/K10/K11，经 arc 指引可解析）
 - **状态**: active
-- **Legacy**: snapshot.md "已知限制"
+- **Legacy**: D12, K10, K11（2026-09-24 K/D 退役迁入）；取代 M07 两阶段锁历史模型（M07 已归档同 carrier）
+
+## M18: 恢复路径索引去信任与重建不变量
+
+- **分类**: domain
+- **范围**: WAL 恢复 × B-Tree 索引一致性
+- **不变量**:
+  - BufferPool 页驱逐按 LRU 而非树拓扑刷盘——checkpoint 后的运行期修改使磁盘 B-Tree 同时含洞（已刷盘父页指向未刷盘子页，读为 `InvalidPageType`）与孤儿页（已刷盘但不可达）；任何 catalog root 同步策略都无法修复
+  - `redo_count > 0`（不洁关闭）时恢复路径零消费磁盘索引树：Update `old_row_id` 由数据页自建的磁盘版本多映射按 `max{rid < record.row_id}` 派生（同键版本链 rid 序 == LSN 序，行锁串行化保证），重放后从最终数据页重建各表 PK 索引（链尾回溯 + 重复 PK 显式报错）经 `replace_index_manager` 换入
+  - `redo_count == 0`（checkpoint-clean 关闭）时磁盘树可信（checkpoint 全量刷盘保证一致）
+  - 数据页不受此影响——WAL 位置寻址重放本就以数据页为权威
+  - 触碰驱逐/刷盘路径的性能改动（I031 撕裂树运行期根修、脏页批量写回类）实施前必须对照本条
+- **证据**: `src/wal/recovery.rs::rebuild_pk_indexes`；MS10-T02 design D10 + 003/004-rework Cycle（归档 change `openspec/changes/archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/`）；原全文见 2026-09-24 清理 carrier（K38，经 arc 指引可解析）
+- **状态**: active
+- **Legacy**: K38（2026-09-24 K/D 退役迁入）
+
+<!-- arc: ARC-202609241843b --> 2 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609241843b/proposal.md

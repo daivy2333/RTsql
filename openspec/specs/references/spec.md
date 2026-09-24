@@ -103,14 +103,14 @@
 
 - **类型**: analysis（已实施迁移）
 - **状态**: completed
-- **原因**: DataScan 已实施并归档到 M19 change；分析内容已沉淀到 K19 (实测性能) + M22 (数据页链表)
+- **原因**: DataScan 已实施并归档到 M19 change；分析内容沉淀于 R28 分析文档（K19 实测性能，2026-09-24 K/D 退役迁移）与 project-model M02（数据页链表；原文所引 M22 为旧体系编号，现行 project-model 无此条）
 - **Legacy**: R007
 
 ## R07: M21 页面级 MVCC 遗留项分析（已解决）
 
 - **类型**: analysis（已实施迁移）
 - **状态**: completed
-- **原因**: M21 遗留项 (DELETE mark_deleted + 惰性 set_all_visible + benchmark) 全部完成（commit `78a3b01`）；内容已沉淀到 K12 (mark_deleted) + K13 (惰性 set_all_visible)
+- **原因**: M21 遗留项 (DELETE mark_deleted + 惰性 set_all_visible + benchmark) 全部完成（commit `78a3b01`）；现行权威为 spec `mvcc-tombstone-visibility`（mark_deleted 机制已经 MS09 墓碑 slot 化取代）与 project-model M10/M17（当前约束）；原 K12/K13 随 2026-09-24 K/D 退役入清理 carrier
 - **Legacy**: R008
 
 ## 已归档 Change 索引
@@ -270,26 +270,26 @@
 ## R21: ISS01 min_create_tx_id=0 毒化 all-invisible 快路径
 
 - **类型**: issue
-- **路径**: `.claude/issues/ISS01-min-create-tx-id-zero-poisoning.md`
+- **路径**: `.claude/issues/archive/ISS01-min-create-tx-id-zero-poisoning.md`
 - **日期**: 2026-09-14
 - **用途**: 写路径首建页级可见性条目时 `min_create_tx_id` 被 `or_default()` 钉 0、`find_visible_version` all-invisible 快路径对该页永久失效（保守方向、损失优化）的缺陷台账；MS08 实测域量化与修复裁定的输入（002-rework Plan Review F4(c) 裁定残留）
-- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，哨兵语义双向闭合 0/MAX 毒化）
+- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，哨兵语义双向闭合 0/MAX 毒化）[ARCHIVED 2026-09-24]
 
 ## R22: ISS02 IN×JOIN 子查询计划期误报 Subquery returns multiple columns
 
 - **类型**: issue
-- **路径**: `.claude/issues/ISS02-in-subquery-join-plan-rejection.md`
+- **路径**: `.claude/issues/archive/ISS02-in-subquery-join-plan-rejection.md`
 - **日期**: 2026-09-14
 - **用途**: `IN (SELECT … JOIN …)` 计划期误报「requires single column」的缺陷台账——`get_subquery_first_column` 无 Join/NLJ 形态臂（等值 Hash 同源预存，`subquery.rs:437` fallback）、关联参数仅扫 WHERE 与 WHERE+JOIN 拒绝面的三面叠加边界；IN×JOIN 能力裁定与诊断文案修正决策的输入（MS09 Iteration 001 000-initial Plan Review F5 裁定残留）
-- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，最小诚实化拒绝；能力解锁留 improvement 候选）
+- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，最小诚实化拒绝；能力解锁留 improvement 候选）[ARCHIVED 2026-09-24]
 
 ## R23: ISS03 标量子查询 select-list 输出表头与行形状不一致
 
 - **类型**: issue
-- **路径**: `.claude/issues/ISS03-scalar-subquery-header-shape-mismatch.md`
+- **路径**: `.claude/issues/archive/ISS03-scalar-subquery-header-shape-mismatch.md`
 - **日期**: 2026-09-14
 - **用途**: `get_plan_output_columns` SubqueryEval 臂未计入执行器插入的标量列、表头 N 列对 N+1 值行（I034 同族缺口，SubqueryEval 臂在其修复范围外，e51c4a3 即预存）的缺陷台账；标量子查询输出形状修复独立小 change 规划的输入（MS09 Iteration 002 000-initial Plan Review F4 裁定残留）
-- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，SubqueryEval 臂按 `result_column_index` 插列）
+- **状态**: closed（2026-09-23 fixed → MS17-T02 change 归档，SubqueryEval 臂按 `result_column_index` 插列）[ARCHIVED 2026-09-24]
 
 ## R24: 进程内 close→reopen 数据库测试配方 Runbook
 
@@ -313,6 +313,22 @@
 - **路径**: `.claude/runbooks/sqlite-compare-benchmark.md`
 - **日期**: 2026-09-24
 - **用途**: RTsql 对 SQLite 的性能与资源快照采集——引擎级 criterion 三段（insert/pk lookup/full scan，`--noplot` 降时参）+ `estimates.json` 精确均值提取 + CLI 级 time -v 负载（单参数 128KB 上限、2000 行安全负载）/库文件体积/50 次 one-shot 时延/二进制体积；含双实例污染、pkill 自匹配、E2BIG 静默失败等实测失败处理；结果固化为双语 README「性能与资源对比」板块
+- **状态**: active
+
+## R27: 测试与基准诊断 Runbook（K20/K21/K34/K35 迁移）
+
+- **类型**: runbook
+- **路径**: `.claude/runbooks/test-bench-diagnosis.md`
+- **日期**: 2026-09-24
+- **用途**: Rust 测试/bench 过长与假死的症状分类诊断路径（死锁/无限循环/setup 过重三分）、criterion 基线纪律（`--save-baseline` 实施前留档）、独立 WAL bench 的 tempdir leak 模式与 bench 技巧集（共享 runtime/RTsqlDirect/Throughput/black_box/线程争用）；knowledge spec 退役迁移产物，基准对比操作另见 R17/R26
+- **状态**: active
+
+## R28: 引擎模式与历史知识沉淀（K/D 退役迁移）
+
+- **类型**: analysis
+- **路径**: `.claude/analysis/engine-patterns-legacy-knowledge.md`
+- **日期**: 2026-09-24
+- **用途**: knowledge spec 退役（2026-09-24 用户指令）后的现役踩坑根因、代码模式与历史性能实测数据集（K01-K04/K06-K09/K14-K19/K22-K33 按原编号逐字保留）；当前约束类 K10/K11/K38 已升格 project-model M17/M18，基准方法论已迁 R27，陈旧条目（K05/K12/K13/K36/K37）随 carrier 留档
 - **状态**: active
 
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

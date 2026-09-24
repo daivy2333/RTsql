@@ -365,8 +365,8 @@
 
 ## 长期方向（未规划具体里程碑）
 
-- **io_uring 集成 (K36)**：Linux 5.1+ tokio-uring 批量提交
-- **jemalloc/mimalloc 优化 (K37)**：减少 String/Vec 分配开销
+- **io_uring 集成**（改进项 I028）：Linux 5.1+ tokio-uring 批量提交
+- **jemalloc/mimalloc 优化 (K37)**：已转入 improvements 台账 **I066**（2026-09-24 用户指令，权威位置移至 `openspec/specs/improvements/spec.md`）
 
 ## 依赖关系图
 
