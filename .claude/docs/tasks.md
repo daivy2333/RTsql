@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-09-24（milestone-planner 初版后第一批路线规划 MS18-MS22：one-shot 性能收口 / CLI 管理面小收口 / ATTACH 跨库交互 / DDL 演进与二级索引 / 实测驱动性能批——用户批准方向「功能+性能优先，排除微内核重构、加密、构建实测、分发」；improvements 同步：I061/I062/I063/I059/I068/I070 标注已排期 MSxx-Txx、8 项标 MS22 候选、I035/I043/I044 补转 promoted 勘误。前次 2026-09-24：RISC-V musl 交叉构建收尾 + MS17 初版收尾 1101 tests）
+> 最后更新：2026-09-24（milestone-planner 初版后第一批路线规划 MS18-MS22：one-shot 性能收口 / CLI 管理面小收口 / ATTACH 跨库交互 / DDL 演进与二级索引 / 实测驱动性能批——用户批准方向「功能+性能优先，排除微内核重构、加密、构建实测、分发」；improvements 同步：I061/I062/I063/I059/I068/I070 标注已排期 MSxx-Txx、8 项标 MS22 候选、I035/I043/I044 补转 promoted 勘误。路线补充（同日）：无主小项涉及代码者入路线——I042 排期 MS19-T03、I072 并入 MS19-T01 顺带；纯文档 I045/I064 用户裁定暂缓。前次 2026-09-24：RISC-V musl 交叉构建收尾 + MS17 初版收尾 1101 tests）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -375,24 +375,25 @@
 - **Split signals**: current_thread 切换牵动引擎内部 `spawn_blocking`（WAL/页 I/O）深改时拆出独立 MS
 - **Related changes**: None
 
-### MS19：CLI 管理面小收口（删库子命令 + 错误可操作化） — planned
+### MS19：CLI 管理面小收口（删库子命令 + 错误可操作化 + 会话边界测试加固） — planned
 
 - **Status**: planned
 - **Dependencies**: None
-- **Outcome**: `rtsql delete <db>` 删库子命令闭环（I061——复用 `resolve_existing_db`，删除主文件与 `.wal`/`.checkpoint` 伴生文件并报告释放结果，打开中经 advisory 锁显式拒绝）；`PlanError` 携带特性名与错误分类（I070——`UnsupportedStatement`/`UnsupportedExpression` 点名不支持的能力，协议错误码分类面评估）
-- **Rationale**: 两项均为 CLI 应用层小项（各 1 个小 change），同属「日常管理与排错体验」主题——生命周期命令闭环 + 错误信息可操作；MS15/MS17 批处理先例，合并工作量适中且各项独立验收、单项失败不阻塞其余
+- **Outcome**: `rtsql delete <db>` 删库子命令闭环（I061——复用 `resolve_existing_db`，删除主文件与 `.wal`/`.checkpoint` 伴生文件并报告释放结果，打开中经 advisory 锁显式拒绝）；`PlanError` 携带特性名与错误分类（I070——`UnsupportedStatement`/`UnsupportedExpression` 点名不支持的能力，协议错误码分类面评估）；「会话事务活跃中遇边界子句」组合路径 e2e 锁定（I042——拒绝不改会话态、收尾回滚语义回归锁定）；文件对（`.db`+`.wal`）移动/拷贝/重命名配对行为实测与备份边界文档化（I072）
+- **Rationale**: 均为 CLI 应用层小项，同属「日常管理与排错体验」主题——生命周期命令闭环 + 错误信息可操作 + 既有组合语义回归锁定 + 数据安全边界文档化；MS15/MS17 批处理先例，各项独立验收、单项失败不阻塞其余
 - **Scope**:
 
 | Task | 目标 | 依据 |
 |---|---|---|
-| MS19-T01 | I061：`rtsql delete <db>` 子命令（命令命名、dry-run/确认交互、路径形态边界随 change 调查定稿） | improvements I061（2026-09-24 用户方向） |
+| MS19-T01 | I061：`rtsql delete <db>` 子命令（命令命名、dry-run/确认交互、路径形态边界随 change 调查定稿）；顺带 I072 文件对配对实测与备份边界文档化 | improvements I061/I072（2026-09-24 用户方向 + 路线补充） |
 | MS19-T02 | I070：PlanError 特性名携带 + 错误分类（评估小改动面） | improvements I070（R18 主题 3） |
+| MS19-T03 | I042：`tests/tx_statement_test.rs` 增加边界子句×活跃会话组合场景 e2e（可随 T01/T02 触碰 CLI 会话面时顺带） | improvements I042（MS11-T02 Review finding，2026-09-24 路线补充排期） |
 
-- **Non-goals**: REPL（I067）；备份配对验证文档（I072——可与 T01 同面顺带，届时裁定）；`install.sh --purge-data` 语义变更
-- **Workload**: 2 个独立小 change
-- **Stable baseline**: 生命周期子命令含 delete 闭环（`list` 可枚举、`delete` 可回收）；不支持语句/表达式报错直接可读特性名
-- **Verification boundary**: delete 子命令独立测试（伴生文件清理/锁占用拒绝/路径形态/释放报告）+ 错误面快照测试 + 全量零回归
-- **Diagnostic boundary**: `src/cli/lifecycle.rs`（+`resolve.rs`）与 `src/parser/planner` 错误构造面
+- **Non-goals**: REPL（I067）；`install.sh --purge-data` 语义变更；纯文档项 I045/I064（用户裁定暂缓）
+- **Workload**: 2-3 个独立小 change（T03 可并入 T01/T02 任一 change 顺带完成）
+- **Stable baseline**: 生命周期子命令含 delete 闭环；不支持语句/表达式报错直接可读特性名；会话边界组合语义有 e2e 锁定；备份边界有实测依据的文档声明
+- **Verification boundary**: delete 子命令独立测试（伴生文件清理/锁占用拒绝/路径形态/释放报告）+ 文件对配对行为矩阵实测记录 + 错误面快照测试 + tx_statement 组合场景 e2e + 全量零回归
+- **Diagnostic boundary**: `src/cli/lifecycle.rs`（+`resolve.rs`）、`src/cli/mod.rs` run_sql 会话路径与 `src/parser/planner` 错误构造面
 - **Split signals**: 错误分类牵动 PG 协议层大改时拆出；delete 交互设计膨胀时裁剪为最小语义
 - **Related changes**: None
 

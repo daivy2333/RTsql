@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-24（milestone-planner 初版后第一批路线 MS18-MS22 入 tasks——MS18 one-shot 性能收口〔I062/I063〕/ MS19 CLI 管理面小收口〔I061/I070〕/ MS20 ATTACH 跨库交互〔I059 两期〕/ MS21 DDL 演进与二级索引〔I068〕/ MS22 实测驱动性能批〔8 候选，量化定稿后 ready〕；用户批准方向「功能+性能优先，排除微内核重构、加密、构建实测、分发」。improvements 同步：六条标注已排期 MSxx-Txx、I020/I021/I024/I026/I038/I049/I050/I066 标 MS22 候选、I031 标 MS22 Non-goal、I072 标可随 MS19-T01 顺带、I035/I043/I044 补转 promoted 勘误；产品代码零变化，1101 tests 结论沿用。前次 2026-09-24：I067-I074 登记与 K/D 域退役同步）
+> 最后更新：2026-09-24（milestone-planner 初版后第一批路线 MS18-MS22 入 tasks——MS18 one-shot 性能收口〔I062/I063〕/ MS19 CLI 管理面小收口〔I061+I072 顺带/I070/I042〕/ MS20 ATTACH 跨库交互〔I059 两期〕/ MS21 DDL 演进与二级索引〔I068〕/ MS22 实测驱动性能批〔8 候选，量化定稿后 ready〕；用户批准方向「功能+性能优先，排除微内核重构、加密、构建实测、分发」。improvements 同步：八条标注已排期或顺带〔I061/I062/I063/I059/I068/I070/I042/I072〕、I020/I021/I024/I026/I038/I049/I050/I066 标 MS22 候选、I031 标 MS22 Non-goal、I035/I043/I044 补转 promoted 勘误；纯文档 I045/I064 用户裁定暂缓；产品代码零变化，1101 tests 结论沿用。前次 2026-09-24：I067-I074 登记与 K/D 域退役同步）
 > 同步状态：current
 
 ## 项目身份
@@ -82,7 +82,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 
 ## 同步状态
 
-- `current` — 文档与代码一致；初版后第一批路线（tasks MS18-MS22，均 planned，无硬前置）规划入库；improvements 排期/候选标注与 I035/I043/I044 promoted 勘误同步完毕；产品代码零变化，1101 tests 结论沿用（2026-09-24 MS17 收口）；40 specs（含 2 退役空壳）validate 40 passed / 0 failed，无活跃 change，tasks/SNAPSHOT 已同步
+- `current` — 文档与代码一致；初版后第一批路线（tasks MS18-MS22，均 planned，无硬前置）规划入库，含路线补充（涉及代码的无主小项 I042→MS19-T03、I072→MS19-T01 顺带；纯文档 I045/I064 暂缓）；improvements 排期/候选标注与 I035/I043/I044 promoted 勘误同步完毕；产品代码零变化，1101 tests 结论沿用（2026-09-24 MS17 收口）；40 specs（含 2 退役空壳）validate 40 passed / 0 failed，无活跃 change，tasks/SNAPSHOT 已同步
 
 ## 权威文档
 
