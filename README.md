@@ -1,6 +1,6 @@
 # RTsql
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Agent operations guide](docs/SKILL.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Agent operations guide](rtsql-docs/SKILL.md)
 
 RTsql is an embedded relational database written in Rust. It uses Tokio tasks for asynchronous I/O, stores each database in one main file, and provides a one-shot CLI for SQL execution and database management.
 
@@ -20,11 +20,11 @@ This repository currently targets Linux and macOS. It does not require a databas
 git clone git@github.com:daivy2333/RTsql.git
 cd RTsql
 ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
+source ~/.bashrc
 rtsql --version
 ```
 
-`install.sh` builds the release binary, installs it under `~/.local/bin`, installs completions for the current shell when available, and prints a PATH hint when needed. It does not use `sudo` or invoke a separate downloader; Cargo may fetch declared Rust dependencies during the build.
+`install.sh` builds the release binary, installs it under `~/.local/bin`, installs completions for the current shell when available, and adds the installation directory to `~/.bashrc` when needed. It does not use `sudo` or invoke a separate downloader; Cargo may fetch declared Rust dependencies during the build.
 
 Use another installation prefix or skip completions with:
 
@@ -34,6 +34,30 @@ Use another installation prefix or skip completions with:
 ```
 
 The prefix controls the binary location. Completion files remain in their standard per-user shell directories.
+
+### Cross-build for RISC-V 64 Linux (musl)
+
+Install the fixed Rust target, then build from the repository root:
+
+```bash
+rustup target add riscv64gc-unknown-linux-musl
+./build-riscv64-musl.sh
+```
+
+The default output is `dist/riscv64gc-unknown-linux-musl/`. Choose another output root with:
+
+```bash
+./build-riscv64-musl.sh --output-dir /tmp/rtsql-dist
+```
+
+A successful run leaves the `rtsql` binary, a versioned `.tar.gz` containing the binary and both READMEs, and `SHA256SUMS` in that directory. Verify the archive on the build host with:
+
+```bash
+cd dist/riscv64gc-unknown-linux-musl
+sha256sum --check SHA256SUMS
+```
+
+The script requires `riscv64-linux-musl-gcc`, GNU tar, and coreutils `sha256sum`. It passes the cross-linker to Cargo only for the current build subprocess, enables `+crt-static`, and does not modify global Cargo configuration. It does not use `sudo`, upload artifacts, or execute the RISC-V binary. Copy the archive and checksum to the target device for deployment, then run version, CRUD, encryption, and recovery checks on real RISC-V hardware; this repository does not claim those runtime checks from a cross-build alone.
 
 ### Create and query a database
 
@@ -214,7 +238,7 @@ The repository also contains Criterion benchmarks and SQLite comparison benchmar
 ## Documentation
 
 - [简体中文 README](README.zh-CN.md)
-- [Agent operations guide](docs/SKILL.md)
+- [Agent operations guide](rtsql-docs/SKILL.md)
 - [Project snapshot](.claude/docs/SNAPSHOT.md)
 - [Project roadmap](.claude/docs/tasks.md)
 - [OpenSpec behavior specifications](openspec/specs/)

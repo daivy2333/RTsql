@@ -1,4 +1,5 @@
 /target
+/dist/
 # Cargo.lock removed - binary applications should commit it for reproducible builds
 **/*.rs.bk
 *.pdb
