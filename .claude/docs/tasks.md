@@ -86,22 +86,23 @@
 
 - **Status**: planned
 - **Dependencies**: None（catalog 持久化通道由 MS07-T01 满足）
-- **Outcome**: `ALTER TABLE ADD/DROP COLUMN` 与 `CREATE INDEX`/`DROP INDEX` 可用（I068）——列结构演进不再依赖 dump→改 DDL→restore 重建，非 PK 查询列可建二级索引；`CREATE VIEW`/`TRUNCATE` 届时一并裁定是否并入范围（EXPLAIN 已转正为 MS25-T05 顺带项，2026-09-24 统一重排）
-- **Rationale**: SQL DDL 面最大功能缺口（R18 主题 2/3）；触及 catalog/序列化/重建路径的独立故障域，工作量中-大需独立阶段，与功能小项和性能批互不阻塞
+- **Outcome**: `ALTER TABLE ADD/DROP COLUMN` 与 `CREATE INDEX`/`DROP INDEX` 可用（I068）——列结构演进不再依赖 dump→改 DDL→restore 重建，非 PK 查询列可建二级索引；既有索引条目维护在删除与回滚路径上的一致性收口（回滚后键位点查与实际存活版本一致）；`CREATE VIEW`/`TRUNCATE` 届时一并裁定是否并入范围（EXPLAIN 已转正为 MS25-T05 顺带项，2026-09-24 统一重排）
+- **Rationale**: SQL DDL 面最大功能缺口（R18 主题 2/3）；触及 catalog/序列化/重建路径的独立故障域，工作量中-大需独立阶段，与功能小项和性能批互不阻塞。T03 与本阶段同主题相邻（同为索引条目维护面、共享 `src/storage/btree/` 索引管理与执行器诊断边界），按聚合规则并入而非独立成阶段
 - **Scope**:
 
 | Task | 目标 | 依据 |
 |---|---|---|
 | MS21-T01 | CREATE/DROP INDEX 二级索引（catalog 登记 + 执行器 + 查询路由可达 + 恢复重建） | improvements I068（R18 主题 3） |
 | MS21-T02 | ALTER TABLE ADD/DROP COLUMN（catalog/序列化/数据面演进） | 同上 |
+| MS21-T03 | 索引条目维护一致性收口（删除与回滚路径，阶段内优先执行——正确性红线属性）：① `TransactionManager::abort_cleanup_versions` A 趟对 rekey UPDATE 回滚的条目回退按 rekey 语义处理（现以 `find_key_by_row_id` 所得新键执行 `update(key, prev)`，而 prev 版本 tuple 携带旧键 → 回滚改键 UPDATE 后新键条目指向旧键版本、旧键条目缺失、旧键等值点查漏行，`src/transaction/manager.rs`）；② `upsert.rs::delete_conflict_row` 的 `SlotNotFound` 容忍臂与 `delete.rs` 同形态对齐（无元组可读时仍按搜索键执行 `index_manager.delete`；仅索引条目指向不存在 slot 的夹具/损坏态可达） | MS24 Iteration 001 Plan Review Minor 2（replan Cycle）与父 Cycle Minor 4，2026-09-26；同源于 `sql-write-surface` R6 索引还原面 |
 
-- **Non-goals**: DECIMAL/BLOB 类型（I069 深水区另议）；代价模型与 Join 重排（I016）；在线 schema 变更的并发语义精细化
-- **Workload**: 2-3 change（INDEX 与 ALTER 各自独立验收）
-- **Stable baseline**: 非 PK 列可建索引且查询计划可达、drop/restart 后索引一致；加列/删列后数据与 schema 持久化往返一致
-- **Verification boundary**: ALTER/INDEX 独立测试（含崩溃恢复两态一致）+ 全量零回归
-- **Diagnostic boundary**: `src/storage/catalog.rs` + `src/parser/planner/ddl_dml.rs` + `src/storage/btree/` 索引管理与执行器
-- **Split signals**: DROP COLUMN 触发全行重写格式变更过大时先收 ADD COLUMN + INDEX，DROP 另行评估
-- **Related changes**: None
+- **Non-goals**: DECIMAL/BLOB 类型（I069 深水区另议）；代价模型与 Join 重排（I016）；在线 schema 变更的并发语义精细化；已文档化的 UPSERT 仲裁内 F1 守卫角落（`sql-write-surface` R3 已知边界段——修复需反转「唯一列类型守卫先于仲裁」的产品语义顺序，另议）
+- **Workload**: 2-4 change（INDEX 与 ALTER 各自独立验收；T03 一致性收口可独立小 change，与 T01/T02 无耦合）
+- **Stable baseline**: 非 PK 列可建索引且查询计划可达、drop/restart 后索引一致；加列/删列后数据与 schema 持久化往返一致；删除与回滚（含 rekey）后 PK 与唯一索引条目与实际存活版本一致，旧键与唯一值点查均可达
+- **Verification boundary**: ALTER/INDEX 独立测试（含崩溃恢复两态一致）+ T03 的回滚/删除两态矩阵（rekey UPDATE 回滚点查、失败语句无残留、恢复两态）+ 全量零回归
+- **Diagnostic boundary**: `src/storage/catalog.rs` + `src/parser/planner/ddl_dml.rs` + `src/storage/btree/` 索引管理与执行器 + `src/executor/{delete,upsert}.rs` 条目清理臂 + `src/transaction/manager.rs::abort_cleanup_versions`
+- **Split signals**: DROP COLUMN 触发全行重写格式变更过大时先收 ADD COLUMN + INDEX，DROP 另行评估；T03 若牵动 `abort_cleanup_versions` A 趟整体重做（超出「A 趟保持现状」语义）时拆为独立 change
+- **Related changes**: None（T01/T02 尚未创建；T03 来源 change 已归档 `openspec/changes/archive/2026-09-25-ms24-write-surface-completion/`）
 
 ### MS22：实测驱动性能优化（第一批） — planned（范围量化定稿后转 ready）
 

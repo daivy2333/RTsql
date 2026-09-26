@@ -312,8 +312,8 @@
 
 - **类型**: issue
 - **路径**: `.claude/issues/ISS04-non-key-column-write-type-validation-missing.md`
-- **日期**: 2026-09-25
-- **用途**: 非键非唯一列的写入值与列声明类型全程无校验（String/Float 静默写入 INT 列，读回才暴露）的缺陷台账——`build_update`/`extract_insert_values` 无计划期类型门、执行器类型门仅覆盖 PK 与唯一列、`serialize_tuple` 无 schema 交叉校验；类型校验面立项裁定的输入（MS23 Iteration 001 Plan Review F4 裁定残留；唯一列与 PK 键列边缘已分别由 MS23 F1 修复与 MS16 收口）
-- **状态**: active
+- **日期**: 2026-09-25（关闭 2026-09-26）
+- **用途**: 非键非唯一列的写入值与列声明类型全程无校验（String/Float 静默写入 INT 列，读回才暴露）的缺陷台账——`build_update`/`extract_insert_values` 无计划期类型门、执行器类型门仅覆盖 PK 与唯一列、`serialize_tuple` 无 schema 交叉校验；类型校验面立项裁定的输入（MS23 Iteration 001 Plan Review F4 裁定残留；唯一列与 PK 键列边缘已分别由 MS23 F1 修复与 MS16 收口）。**已关闭**：`fixed`——由 change `2026-09-25-ms24-write-surface-completion` Iteration 000（R2 写入值类型一致门）端到端修复，行为规格 `openspec/specs/sql-write-surface/spec.md` R2，测试 `tests/write_type_conformance_test.rs`；台账保留为该修复面（`ColumnTypeMismatch` 错误面、FLOAT 升格、dump/restore/import 通道覆盖）的来源与边界记录
+- **状态**: closed（2026-09-26 fixed → change `2026-09-25-ms24-write-surface-completion` Iteration 000 R2 写入值类型一致门；台账保留为该修复面的来源与边界记录）
 
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
