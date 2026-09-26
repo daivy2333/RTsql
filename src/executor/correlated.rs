@@ -79,6 +79,7 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
         | PhysicalPlan::IndexScan(_)
         | PhysicalPlan::IndexScanAll(_)
         | PhysicalPlan::Insert(_)
+        | PhysicalPlan::Upsert(_)
         | PhysicalPlan::Update(_)
         | PhysicalPlan::Delete(_)
         | PhysicalPlan::CreateTable(_)

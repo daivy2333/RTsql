@@ -4,7 +4,9 @@
 
 use super::{WalError, WalReader, WalRecord};
 use crate::storage::data::TableMeta;
-use crate::storage::page_format::{deserialize_tuple, RowId, SlottedPage, SlottedPageRef};
+use crate::storage::page_format::{
+    deserialize_tuple, ColumnType, RowId, SlottedPage, SlottedPageRef,
+};
 use crate::storage::{
     update_version_header_in_data_page, write_tuple_to_data_page, BufferPool, IndexManager, PageId,
     TableManager,
@@ -86,8 +88,19 @@ fn insert_row_id_sorted(candidates: &mut Vec<RowId>, rid: RowId) {
 /// slot 键：可键控 slot 携带 PK 键；无键 slot 携带 tuple 原始字节（T8-R2
 /// keyless 桶的桶键）。
 type PreScanPage = crate::storage::Result<(u32, Vec<(PrescanSlotKey, RowId)>)>;
-/// 页扫描闭包产出（rebuild_pk_indexes）：(rid, header, PK key)。
-type RebuildScanPage = crate::storage::Result<(u32, Vec<(RowId, VersionHeader, Option<Vec<u8>>)>)>;
+/// 页扫描闭包产出（rebuild_pk_indexes）：(rid, header, PK key, 唯一列键)。
+/// 唯一列键向量与该表 qualifying UNIQUE 列序号表逐位对齐（MS23 Iter001）。
+type RebuildScanPage = crate::storage::Result<(
+    u32,
+    Vec<(
+        RowId,
+        VersionHeader,
+        Option<Vec<u8>>,
+        Vec<Option<Vec<u8>>>,
+    )>,
+)>;
+/// 重建扫描 slot 表：rid → (header, PK 键, 唯一列键)。
+type RebuildSlots = HashMap<RowId, (VersionHeader, Option<Vec<u8>>, Vec<Option<Vec<u8>>>)>;
 
 /// 预扫描 slot 键（T8-R2）：`Keyed` = PK 键字节；`Keyless` = tuple 原始字节。
 enum PrescanSlotKey {
@@ -206,6 +219,43 @@ fn extract_pk_key(table_meta: &Arc<TableMeta>, tuple_data: &[u8]) -> Option<Vec<
     let values = deserialize_tuple(tuple_data, &schema).ok()?;
     let pk_value = values.get(table_meta.pk_index)?;
     pk_value.to_key().map(|k| k.as_bytes().to_vec())
+}
+
+/// MS23 Iter001 (2.8/D9)：一次 tuple 反序列化同时提取 PK 键与各唯一列键
+/// （列序号由 `unique_cols` 给定，升序列序）。反序列化失败或值不可键控
+/// （NULL / 非 Int）→ 对应位 None——NULL 不入唯一索引，同运行期语义。
+///
+/// MS24 Iter001 replan (2.9/D9)：`pub(crate)` 供事务层回滚通道复用为墓碑
+/// 行的索引键派生单一来源（键派生规则零变化，仅可见性）。
+pub(crate) fn extract_index_keys(
+    table_meta: &Arc<TableMeta>,
+    unique_cols: &[usize],
+    tuple_data: &[u8],
+) -> (Option<Vec<u8>>, Vec<Option<Vec<u8>>>) {
+    let schema: Vec<_> = table_meta
+        .columns
+        .iter()
+        .map(|(_, ct)| ct.clone())
+        .collect();
+    match deserialize_tuple(tuple_data, &schema) {
+        Ok(values) => {
+            let pk = values
+                .get(table_meta.pk_index)
+                .and_then(|v| v.to_key())
+                .map(|k| k.as_bytes().to_vec());
+            let uniques = unique_cols
+                .iter()
+                .map(|i| {
+                    values
+                        .get(*i)
+                        .and_then(|v| v.to_key())
+                        .map(|k| k.as_bytes().to_vec())
+                })
+                .collect();
+            (pk, uniques)
+        }
+        Err(_) => (None, vec![None; unique_cols.len()]),
+    }
 }
 
 /// R-T0b-R7 (D10)：重放前对每张目录表扫描数据页链，构建磁盘版本多映射。
@@ -852,7 +902,36 @@ impl RecoveryManager {
                 ))
             })?;
 
-            // 1. 新索引实例（先分配，后释放旧树）
+            // MS23 Iter001 (2.8/D9)：qualifying UNIQUE 列（INT ∧ unique ∧
+            // 非 PK），升序列序——与 catalog `unique_roots` /
+            // `TableMeta.unique_indexes` 同序。旧库非 INT unique 标志列不在
+            // 其中（兼容边界：行为＝无唯一索引）。
+            let cols = table_manager
+                .catalog()
+                .scan_columns(&table_name)
+                .await
+                .map_err(|e| {
+                    WalError::RedoFailed(format!(
+                        "index rebuild: scan_columns for '{}' failed: {}",
+                        table_name, e
+                    ))
+                })?;
+            let unique_cols: Vec<usize> = cols
+                .iter()
+                .enumerate()
+                .filter(|(idx, c)| {
+                    c.unique
+                        && matches!(c.column_type, ColumnType::Int)
+                        && *idx != row.pk_index as usize
+                })
+                .map(|(idx, _)| idx)
+                .collect();
+            let unique_col_names: Vec<String> = unique_cols
+                .iter()
+                .map(|i| meta.columns[*i].0.clone())
+                .collect();
+
+            // 1. 新索引实例（PK + 逐唯一列；先分配，后释放旧树）
             let bp = buffer_pool.clone();
             let new_index = Arc::new(
                 tokio::task::spawn_blocking(move || IndexManager::new(bp))
@@ -865,9 +944,27 @@ impl RecoveryManager {
                         ))
                     })?,
             );
+            let mut new_unique_indexes: Vec<(usize, Arc<IndexManager>)> = Vec::new();
+            for col_idx in &unique_cols {
+                let bp = buffer_pool.clone();
+                let uindex = Arc::new(
+                    tokio::task::spawn_blocking(move || IndexManager::new(bp))
+                        .await
+                        .map_err(|e| {
+                            WalError::RedoFailed(format!("index rebuild join error: {}", e))
+                        })?
+                        .map_err(|e| {
+                            WalError::RedoFailed(format!(
+                                "index rebuild unique init for '{}' failed: {}",
+                                table_name, e
+                            ))
+                        })?,
+                );
+                new_unique_indexes.push((*col_idx, uindex));
+            }
 
-            // 2. 扫描最终数据页
-            let mut slots: HashMap<RowId, (VersionHeader, Option<Vec<u8>>)> = HashMap::new();
+            // 2. 扫描最终数据页（同一反序列化兼提 PK 键与唯一列键）
+            let mut slots: RebuildSlots = HashMap::new();
             let mut pointed: HashSet<RowId> = HashSet::new();
             let mut page_id = Some(meta.data_page_head);
             while let Some(pid) = page_id {
@@ -888,11 +985,20 @@ impl RecoveryManager {
                             else {
                                 continue;
                             };
-                            let key = extract_pk_key(&meta, &slot_data[VersionHeader::SIZE..]);
+                            let (key, ukeys) = extract_index_keys(
+                                &meta,
+                                &unique_cols,
+                                &slot_data[VersionHeader::SIZE..],
+                            );
                             if let Some(target) = vh.next_version() {
                                 pointed.insert(target);
                             }
-                            page_slots.push((RowId::new(pid.0 as u32, slot.logical_id), vh, key));
+                            page_slots.push((
+                                RowId::new(pid.0 as u32, slot.logical_id),
+                                vh,
+                                key,
+                                ukeys,
+                            ));
                         }
                         Ok((slotted.header().next_page_id, page_slots))
                     })
@@ -904,8 +1010,8 @@ impl RecoveryManager {
                         ))
                     })?;
 
-                for (rid, vh, key) in page_slots {
-                    slots.insert(rid, (vh, key));
+                for (rid, vh, key, ukeys) in page_slots {
+                    slots.insert(rid, (vh, key, ukeys));
                 }
                 page_id = if next_page == 0 {
                     None
@@ -915,14 +1021,17 @@ impl RecoveryManager {
             }
 
             // 3. 链尾回溯：不被指向的 slot 为链尾，new→old 取首个存活版本
+            //    （PK 判重 + 逐唯一列判重，跨链重复显式点名表列）
             let mut entries: HashMap<Vec<u8>, RowId> = HashMap::new();
+            let mut unique_entries: Vec<HashMap<Vec<u8>, RowId>> =
+                (0..unique_cols.len()).map(|_| HashMap::new()).collect();
             for tail_rid in slots.keys().copied().collect::<Vec<_>>() {
                 if pointed.contains(&tail_rid) {
                     continue;
                 }
                 let mut rid = tail_rid;
                 loop {
-                    let (vh, key) = &slots[&rid];
+                    let (vh, key, ukeys) = &slots[&rid];
                     if vh.is_deleted() {
                         if committed_tx_ids.contains(&vh.create_tx_id()) {
                             break; // 提交删除：整行不建条目
@@ -941,6 +1050,17 @@ impl RecoveryManager {
                             }
                             entries.insert(key.clone(), rid);
                         }
+                        for (j, ukey) in ukeys.iter().enumerate() {
+                            if let Some(ukey) = ukey {
+                                if unique_entries[j].contains_key(ukey) {
+                                    return Err(WalError::RedoFailed(format!(
+                                        "index rebuild: table '{}' duplicate value for UNIQUE column '{}' across chains",
+                                        table_name, unique_col_names[j]
+                                    )));
+                                }
+                                unique_entries[j].insert(ukey.clone(), rid);
+                            }
+                        }
                         break;
                     }
                     // 未提交版本 / 未提交删除：回溯旧版本
@@ -951,7 +1071,7 @@ impl RecoveryManager {
                 }
             }
 
-            // 4. 写入新索引 → 换入 → 持久化新根
+            // 4. 写入新索引（PK + 唯一）→ 整表 swap → 持久化新根（PK + 逐唯一）
             for (key, rid) in &entries {
                 new_index.insert(key, *rid).await.map_err(|e| {
                     WalError::RedoFailed(format!(
@@ -960,8 +1080,22 @@ impl RecoveryManager {
                     ))
                 })?;
             }
-            let old_index = table_manager
-                .replace_index_manager(&table_name, new_index.clone())
+            for (j, (_, uindex)) in new_unique_indexes.iter().enumerate() {
+                for (key, rid) in &unique_entries[j] {
+                    uindex.insert(key, *rid).await.map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "index rebuild unique insert into '{}' failed: {}",
+                            table_name, e
+                        ))
+                    })?;
+                }
+            }
+            let unique_roots: Vec<u32> = new_unique_indexes
+                .iter()
+                .map(|(_, u)| u.root_page_id().0 as u32)
+                .collect();
+            let (old_index, old_uniques) = table_manager
+                .replace_recovery_indexes(&table_name, new_index.clone(), new_unique_indexes)
                 .await
                 .map_err(|e| {
                     WalError::RedoFailed(format!(
@@ -979,14 +1113,36 @@ impl RecoveryManager {
                         table_name, e
                     ))
                 })?;
+            for (ordinal, root) in unique_roots.iter().enumerate() {
+                table_manager
+                    .catalog()
+                    .update_unique_index_root(&table_name, ordinal, *root)
+                    .await
+                    .map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "index rebuild catalog unique root update for '{}' failed: {}",
+                            table_name, e
+                        ))
+                    })?;
+            }
 
-            // 5. 旧树释放（洞容忍；失败 warn + 泄漏，先例 drop_table）
+            // 5. 旧树释放（PK + 旧唯一树；洞容忍；失败 warn + 泄漏，先例 drop_table）
             for page in old_index.collect_all_pages_tolerant().await {
                 if let Err(e) = buffer_pool.free_page(page).await {
                     eprintln!(
                         "[recovery] free old index page {:?} of '{}' failed: {}",
                         page, table_name, e
                     );
+                }
+            }
+            for (_, old_uindex) in &old_uniques {
+                for page in old_uindex.collect_all_pages_tolerant().await {
+                    if let Err(e) = buffer_pool.free_page(page).await {
+                        eprintln!(
+                            "[recovery] free old unique index page {:?} of '{}' failed: {}",
+                            page, table_name, e
+                        );
+                    }
                 }
             }
         }

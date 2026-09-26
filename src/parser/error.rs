@@ -47,6 +47,8 @@ pub enum PlanError {
     SubqueryReturnsMultipleColumns,
     /// IN 子查询计划含 JOIN 节点（MS17-T02/ISS02：点名 JOIN 的诚实拒绝）
     InSubqueryJoinUnsupported,
+    /// 建表约束点名拒绝（MS23：CHECK/FOREIGN KEY/方言项不再静默忽略）
+    UnsupportedConstraint(&'static str),
     /// 标量子查询返回空结果
     SubqueryReturnsEmpty,
     /// 不支持的子查询位置
@@ -105,6 +107,7 @@ impl fmt::Display for PlanError {
             PlanError::InSubqueryJoinUnsupported => {
                 write!(f, "IN subquery with JOIN is not supported")
             }
+            PlanError::UnsupportedConstraint(what) => write!(f, "Unsupported constraint: {}", what),
             PlanError::SubqueryReturnsEmpty => write!(f, "Scalar subquery returns empty result"),
             PlanError::UnsupportedSubqueryPosition => write!(f, "Unsupported subquery position"),
             PlanError::CorrelatedParamError(msg) => {

@@ -573,7 +573,10 @@ fn csv_value(field: &str, col_type: &ColumnType) -> Result<serde_json::Value, St
 /// 列序由调用方保证为 column_index 升序。类型映射 Int→INT / Float→FLOAT /
 /// Bool→BOOL / `String(_)`→STRING（planner `convert_data_type` 四族归一，restore
 /// 后恒等；存储长度不表达）。标识符恒双引号（内部 `"` 加倍）。约束序
-/// PRIMARY KEY → NOT NULL → UNIQUE。DEFAULT 不在 catalog 持久化面，不输出。
+/// PRIMARY KEY → NOT NULL → UNIQUE → DEFAULT。MS24 Iter000 (D7)：声明
+/// DEFAULT 的列渲染 ` DEFAULT <literal>`（日期族经 `typed_datetime_literal`
+/// 包裹、其余 `sql_literal`、`DEFAULT NULL` 字面渲染）——与 planner
+/// TypedString/字面量解析臂往返，dump→restore 保真。
 pub(crate) fn create_table_sql(table: &CatalogRow, columns: &[CatalogColumnRow]) -> String {
     let cols: Vec<String> = columns
         .iter()
@@ -591,6 +594,16 @@ pub(crate) fn create_table_sql(table: &CatalogRow, columns: &[CatalogColumnRow])
             }
             if col.unique {
                 part.push_str(" UNIQUE");
+            }
+            if let Some(default) = &col.default_value {
+                let json = crate::pipeline::value_to_json(default.clone());
+                let literal = match col.column_type {
+                    ColumnType::Date | ColumnType::Timestamp => {
+                        typed_datetime_literal(&json, &col.column_type)
+                    }
+                    _ => sql_literal(&json),
+                };
+                part.push_str(&format!(" DEFAULT {literal}"));
             }
             part
         })
@@ -1079,6 +1092,7 @@ mod tests {
             pk_column: pk.to_string(),
             column_count: 2,
             data_page_tail: 2,
+            unique_roots: Vec::new(),
         }
     }
 
@@ -1096,6 +1110,7 @@ mod tests {
             column_type: t,
             not_null,
             unique,
+            default_value: None,
         }
     }
 
@@ -1135,6 +1150,52 @@ mod tests {
         assert_eq!(
             ddl,
             "CREATE TABLE \"we\"\"ird\" (\"pk\" BOOL PRIMARY KEY NOT NULL UNIQUE);"
+        );
+    }
+
+    /// MS24 Iter000 (D7): DEFAULT 渲染——非日期族经 sql_literal、日期族
+    /// typed 字面量包裹、DEFAULT NULL 字面渲染、无 DEFAULT 不渲染。
+    #[test]
+    fn ddl_generator_renders_defaults() {
+        let t = table("t", "id");
+        let mut with_default = column(1, "name", ColumnType::String(255), false, false);
+        with_default.default_value = Some(crate::executor::Value::String("anon".to_string()));
+        let mut with_null_default = column(2, "note", ColumnType::Int, false, false);
+        with_null_default.default_value = Some(crate::executor::Value::Null);
+        let mut with_date_default = column(3, "d", ColumnType::Date, false, false);
+        with_date_default.default_value = Some(crate::executor::Value::Date(0));
+        let mut with_ts_default = column(4, "ts", ColumnType::Timestamp, false, false);
+        with_ts_default.default_value = Some(crate::executor::Value::Timestamp(0));
+
+        let ddl = create_table_sql(
+            &t,
+            &[
+                column(0, "id", ColumnType::Int, false, false),
+                with_default,
+                with_null_default,
+                with_date_default,
+                with_ts_default,
+            ],
+        );
+        assert!(
+            ddl.contains("\"name\" STRING DEFAULT 'anon'"),
+            "String DEFAULT must render: {ddl}"
+        );
+        assert!(
+            ddl.contains("\"note\" INT DEFAULT NULL"),
+            "DEFAULT NULL must render literally: {ddl}"
+        );
+        assert!(
+            ddl.contains("\"d\" DATE DEFAULT DATE '0001-01-01'"),
+            "Date DEFAULT must render as typed literal: {ddl}"
+        );
+        assert!(
+            ddl.contains("\"ts\" TIMESTAMP DEFAULT TIMESTAMP '1970-01-01 00:00:00'"),
+            "Timestamp DEFAULT must render as typed literal: {ddl}"
+        );
+        assert!(
+            !ddl.contains("\"id\" INT DEFAULT"),
+            "no-default column must not render a DEFAULT clause: {ddl}"
         );
     }
 

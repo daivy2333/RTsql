@@ -58,6 +58,18 @@ pub enum StorageError {
         actual: String,
     },
 
+    /// MS24 Iteration 000 (D3/ISS04)：一般写入类型门——非键列写入值变体与
+    /// 列声明类型不一致时点名拒绝（列名、期望类型、实际类型）。
+    #[error("column '{column}' expects {expected}, got {actual}")]
+    ColumnTypeMismatch {
+        column: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("NOT NULL constraint violation: column '{column}'")]
+    NullConstraintViolation { column: String },
+
     #[error("invalid {expected} value: '{value}'")]
     InvalidDateTime {
         value: String,

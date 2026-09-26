@@ -15,15 +15,18 @@ use crate::Value;
 use std::io;
 
 /// Tag bytes embedded in the serialized tuple stream.
-const TAG_INT: u8 = 0x01;
-const TAG_STRING: u8 = 0x02;
-const TAG_NULL: u8 = 0x03;
-const TAG_FLOAT: u8 = 0x04;
-const TAG_BOOL: u8 = 0x05;
+///
+/// MS24 Iter000: `pub(crate)` so the catalog's DEFAULT-value payload section
+/// reuses the exact same tag domain (single source — no value drift).
+pub(crate) const TAG_INT: u8 = 0x01;
+pub(crate) const TAG_STRING: u8 = 0x02;
+pub(crate) const TAG_NULL: u8 = 0x03;
+pub(crate) const TAG_FLOAT: u8 = 0x04;
+pub(crate) const TAG_BOOL: u8 = 0x05;
 /// MS13: Date tag (payload 4 bytes LE).
-const TAG_DATE: u8 = 0x06;
+pub(crate) const TAG_DATE: u8 = 0x06;
 /// MS13: Timestamp tag (payload 8 bytes LE).
-const TAG_TIMESTAMP: u8 = 0x07;
+pub(crate) const TAG_TIMESTAMP: u8 = 0x07;
 
 /// Column type descriptor used as the schema for serialization / deserialization.
 #[derive(Debug, Clone, PartialEq, Eq)]

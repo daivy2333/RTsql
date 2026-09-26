@@ -24,7 +24,10 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::storage::page_format::{ColumnType, SlottedPage, SlottedPageRef};
+use crate::storage::page_format::{
+    ColumnType, SlottedPage, SlottedPageRef, TAG_BOOL, TAG_DATE, TAG_FLOAT, TAG_INT, TAG_NULL,
+    TAG_STRING, TAG_TIMESTAMP,
+};
 use crate::storage::{AsyncStorage, BufferPool, Page, PageId, Result, StorageError};
 
 /// System table name for the table-of-tables.
@@ -59,6 +62,11 @@ pub struct CatalogRow {
     pub pk_column: String,
     pub column_count: u32,
     pub data_page_tail: u32,
+    /// MS23 Iteration 001 (D4): roots of the per-column UNIQUE indexes, in
+    /// ascending qualifying-column order (INT ∧ unique ∧ non-PK). Appended
+    /// to the row tail; a legacy row without the trailing section
+    /// deserializes as empty (compat read — no unique indexes).
+    pub unique_roots: Vec<u32>,
 }
 
 /// One row in the `__columns` SlottedPage.
@@ -70,6 +78,11 @@ pub struct CatalogColumnRow {
     pub column_type: ColumnType,
     pub not_null: bool,
     pub unique: bool,
+    /// MS24 Iteration 000 (D1): declared DEFAULT literal, persisted in the
+    /// row tail (`u8 has_default | tag | payload` when present). A legacy row
+    /// without the trailing block (or a `has_default = 0` block) reads as
+    /// `None` — flag-only semantics, no default application.
+    pub default_value: Option<crate::executor::Value>,
 }
 
 /// Persistent catalog for user tables. Holds the two system-table
@@ -272,6 +285,47 @@ impl Catalog {
                     return Ok(None);
                 }
                 row.index_root_page_id = new_root;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await
+    }
+
+    /// MS23 Iteration 001 (2.1/D4): update the Nth UNIQUE index root of an
+    /// existing row in `__tables` (`ordinal` = position among the table's
+    /// qualifying UNIQUE columns in ascending column order — the same order
+    /// `unique_roots` is serialized in). The deserialize→mutate→serialize
+    /// round-trip preserves every other field, including sibling unique
+    /// roots. Errors if the ordinal is out of range (internal inconsistency:
+    /// a unique index only exists when the row carries its root).
+    ///
+    /// No-op if the table does not exist.
+    pub async fn update_unique_index_root(
+        &self,
+        name: &str,
+        ordinal: usize,
+        new_root: u32,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                if ordinal >= row.unique_roots.len() {
+                    return Err(StorageError::Internal(format!(
+                        "update_unique_index_root: ordinal {} out of range for table '{}' ({})",
+                        ordinal,
+                        name,
+                        row.unique_roots.len()
+                    )));
+                }
+                row.unique_roots[ordinal] = new_root;
                 Ok(Some(serialize_catalog_row(&row)))
             },
         )
@@ -557,10 +611,21 @@ where
 /// Layout: u16 name_len | name_bytes | u32 head | u32 idx_root |
 ///         u32 pk_index | u16 pk_col_len | pk_col_bytes |
 ///         u32 column_count | u32 tail
+///         [ MS23 Iter001 appended: u32 unique_count | unique_count × u32 root ]
 pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
     let name_bytes = row.table_name.as_bytes();
     let pk_bytes = row.pk_column.as_bytes();
-    let total = 2 + name_bytes.len() + 4 + 4 + 4 + 2 + pk_bytes.len() + 4 + 4;
+    let total = 2
+        + name_bytes.len()
+        + 4
+        + 4
+        + 4
+        + 2
+        + pk_bytes.len()
+        + 4
+        + 4
+        + 4
+        + 4 * row.unique_roots.len();
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
     buf.extend_from_slice(name_bytes);
@@ -571,6 +636,10 @@ pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
     buf.extend_from_slice(pk_bytes);
     buf.extend_from_slice(&row.column_count.to_le_bytes());
     buf.extend_from_slice(&row.data_page_tail.to_le_bytes());
+    buf.extend_from_slice(&(row.unique_roots.len() as u32).to_le_bytes());
+    for root in &row.unique_roots {
+        buf.extend_from_slice(&root.to_le_bytes());
+    }
     debug_assert_eq!(buf.len(), total);
     buf
 }
@@ -628,6 +697,27 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
     let column_count = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
     p += 4;
     let data_page_tail = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
+    // MS23 Iter001 (D4) compat read: the trailing unique-roots section
+    // (`u32 count | count × u32 roots`) is optional. A legacy row ends at
+    // `tail` — an absent or incomplete trailing section deserializes as an
+    // empty `unique_roots` (behavior = no unique indexes). Same shape as the
+    // 24B checkpoint-site three-branch compat read (MS17-T02).
+    let mut unique_roots = Vec::new();
+    let rest = &data[p + 4..];
+    if rest.len() >= 4 {
+        let count = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+        if rest.len() >= 4 + count * 4 {
+            for i in 0..count {
+                let off = 4 + i * 4;
+                unique_roots.push(u32::from_le_bytes([
+                    rest[off],
+                    rest[off + 1],
+                    rest[off + 2],
+                    rest[off + 3],
+                ]));
+            }
+        }
+    }
     Ok(CatalogRow {
         table_name,
         data_page_head,
@@ -636,6 +726,7 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
         pk_column,
         column_count,
         data_page_tail,
+        unique_roots,
     })
 }
 
@@ -653,6 +744,8 @@ pub(crate) fn matches_catalog_row_name(data: &[u8], name: &str) -> bool {
 /// Layout: u16 table_name_len | table_name_bytes | u32 column_index |
 ///         u16 column_name_len | column_name_bytes | u8 col_type_tag |
 ///         (optional u16 string_max_len) | u8 not_null | u8 unique
+///         [ MS24 Iter000 appended when a DEFAULT is declared:
+///           u8 has_default=1 | u8 value_tag (tuple TAG_* domain) | payload ]
 pub(crate) fn serialize_catalog_column_row(row: &CatalogColumnRow) -> Vec<u8> {
     let table_name_bytes = row.table_name.as_bytes();
     let column_name_bytes = row.column_name.as_bytes();
@@ -676,6 +769,44 @@ pub(crate) fn serialize_catalog_column_row(row: &CatalogColumnRow) -> Vec<u8> {
     }
     buf.push(if row.not_null { 1 } else { 0 });
     buf.push(if row.unique { 1 } else { 0 });
+    // MS24 Iter000 (D1): the DEFAULT tail section is appended only when a
+    // default is declared, so rows without one stay byte-identical to the
+    // legacy layout. Payload widths mirror the tuple format (Int i64 LE /
+    // Float f64 LE / Bool 1B / Date i32 LE / Timestamp i64 LE / String
+    // u16-len + bytes / Null none).
+    if let Some(value) = &row.default_value {
+        buf.push(1);
+        match value {
+            crate::executor::Value::Int(n) => {
+                buf.push(TAG_INT);
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            crate::executor::Value::String(s) => {
+                buf.push(TAG_STRING);
+                buf.extend_from_slice(&(s.len() as u16).to_le_bytes());
+                buf.extend_from_slice(s.as_bytes());
+            }
+            crate::executor::Value::Null => {
+                buf.push(TAG_NULL);
+            }
+            crate::executor::Value::Float(f) => {
+                buf.push(TAG_FLOAT);
+                buf.extend_from_slice(&f.to_le_bytes());
+            }
+            crate::executor::Value::Bool(b) => {
+                buf.push(TAG_BOOL);
+                buf.push(if *b { 1 } else { 0 });
+            }
+            crate::executor::Value::Date(d) => {
+                buf.push(TAG_DATE);
+                buf.extend_from_slice(&d.to_le_bytes());
+            }
+            crate::executor::Value::Timestamp(t) => {
+                buf.push(TAG_TIMESTAMP);
+                buf.extend_from_slice(&t.to_le_bytes());
+            }
+        }
+    }
     buf
 }
 
@@ -756,6 +887,96 @@ pub(crate) fn deserialize_catalog_column_row(data: &[u8]) -> Result<CatalogColum
     }
     let not_null = data[p] != 0;
     let unique = data[p + 1] != 0;
+    p += 2;
+    // MS24 Iter000 (D1) compat read: the trailing DEFAULT section
+    // (`u8 has_default | [tag | payload]`) is optional. A legacy row (or a
+    // `has_default = 0` block) reads as `None` — same shape as the unique-
+    // roots tail read and the 24B checkpoint-site compat read.
+    let mut default_value = None;
+    if p < data.len() {
+        let has_default = data[p];
+        p += 1;
+        if has_default == 1 {
+            if data.len() < p + 1 {
+                return Err(StorageError::Internal(
+                    "catalog column row truncated (default tag)".into(),
+                ));
+            }
+            let tag = data[p];
+            p += 1;
+            let read_i64 = |data: &[u8], p: usize| -> Result<i64> {
+                if data.len() < p + 8 {
+                    return Err(StorageError::Internal(
+                        "catalog column row truncated (default payload)".into(),
+                    ));
+                }
+                Ok(i64::from_le_bytes([
+                    data[p],
+                    data[p + 1],
+                    data[p + 2],
+                    data[p + 3],
+                    data[p + 4],
+                    data[p + 5],
+                    data[p + 6],
+                    data[p + 7],
+                ]))
+            };
+            default_value = Some(match tag {
+                TAG_INT => crate::executor::Value::Int(read_i64(data, p)?),
+                TAG_STRING => {
+                    if data.len() < p + 2 {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    let len = u16::from_le_bytes([data[p], data[p + 1]]) as usize;
+                    p += 2;
+                    if data.len() < p + len {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    let s = std::str::from_utf8(&data[p..p + len])
+                        .map_err(|e| {
+                            StorageError::Internal(format!("invalid utf8 default value: {e}"))
+                        })?
+                        .to_string();
+                    crate::executor::Value::String(s)
+                }
+                TAG_NULL => crate::executor::Value::Null,
+                TAG_FLOAT => {
+                    crate::executor::Value::Float(f64::from_bits(read_i64(data, p)? as u64))
+                }
+                TAG_BOOL => {
+                    if data.len() < p + 1 {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    crate::executor::Value::Bool(data[p] != 0)
+                }
+                TAG_DATE => {
+                    if data.len() < p + 4 {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    crate::executor::Value::Date(i32::from_le_bytes([
+                        data[p],
+                        data[p + 1],
+                        data[p + 2],
+                        data[p + 3],
+                    ]))
+                }
+                TAG_TIMESTAMP => crate::executor::Value::Timestamp(read_i64(data, p)?),
+                other => {
+                    return Err(StorageError::Internal(format!(
+                        "unknown default value tag {other:#x}"
+                    )))
+                }
+            });
+        }
+    }
     Ok(CatalogColumnRow {
         table_name,
         column_index,
@@ -763,6 +984,7 @@ pub(crate) fn deserialize_catalog_column_row(data: &[u8]) -> Result<CatalogColum
         column_type,
         not_null,
         unique,
+        default_value,
     })
 }
 
@@ -796,6 +1018,7 @@ mod tests {
             pk_column: "id".to_string(),
             column_count: 2,
             data_page_tail: 7,
+            unique_roots: Vec::new(),
         }
     }
 
@@ -807,6 +1030,7 @@ mod tests {
             column_type: ty,
             not_null: false,
             unique: false,
+            default_value: None,
         }
     }
 
@@ -944,6 +1168,96 @@ mod tests {
         assert_eq!(scanned[0], row);
     }
 
+    // ===========================================================================
+    // MS23 Iteration 001 (2.1): catalog 表行尾随追加唯一索引根页
+    // ===========================================================================
+
+    /// 新格式往返：尾随 `u32 count | N × u32 roots` 段随行序列化并读回。
+    #[test]
+    fn catalog_row_with_unique_roots_roundtrip() {
+        let mut row = sample_row();
+        row.unique_roots = vec![41, 42];
+        let bytes = serialize_catalog_row(&row);
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(row, back);
+        assert_eq!(back.unique_roots, vec![41, 42]);
+    }
+
+    /// 旧格式兼容：无尾随段的行（旧版写入）读为空 unique_roots。
+    #[test]
+    fn legacy_layout_row_deserializes_with_empty_unique_roots() {
+        // 按旧版固定布局手工拼字节：u16 name_len | name | u32 head |
+        // u32 idx_root | u32 pk_index | u16 pk_len | pk | u32 count | u32 tail
+        let name = b"users";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(b"id");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+
+        let row = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(row.table_name, "users");
+        assert_eq!(row.index_root_page_id, 9);
+        assert!(
+            row.unique_roots.is_empty(),
+            "legacy row must deserialize with empty unique_roots, got {:?}",
+            row.unique_roots
+        );
+    }
+
+    /// `update_table_root` 的 deserialize→mutate→serialize 往返必须保住
+    /// 尾随追加字段（写回根不丢唯一根）。
+    #[tokio::test]
+    async fn update_table_root_preserves_unique_roots() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+
+        let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+            .await
+            .unwrap();
+        let mut row = sample_row();
+        row.unique_roots = vec![7, 8];
+        cat.insert_table(&row, &[]).await.unwrap();
+
+        cat.update_table_root("users", 99).await.unwrap();
+        let scanned = cat.scan_tables().await.unwrap();
+        assert_eq!(scanned[0].index_root_page_id, 99);
+        assert_eq!(
+            scanned[0].unique_roots,
+            vec![7, 8],
+            "root write-back must preserve appended unique roots"
+        );
+    }
+
+    /// `update_unique_index_root` 只改目标 ordinal 位，其余字段（含其他唯一根）不变。
+    #[tokio::test]
+    async fn update_unique_index_root_changes_only_target_ordinal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+
+        let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+            .await
+            .unwrap();
+        let mut row = sample_row();
+        row.unique_roots = vec![7, 8];
+        cat.insert_table(&row, &[]).await.unwrap();
+
+        cat.update_unique_index_root("users", 1, 99).await.unwrap();
+        let scanned = cat.scan_tables().await.unwrap();
+        assert_eq!(scanned[0].unique_roots, vec![7, 99]);
+        assert_eq!(scanned[0].index_root_page_id, 9, "PK root untouched");
+        assert_eq!(scanned[0].data_page_tail, 7, "other fields untouched");
+    }
+
     #[tokio::test]
     async fn reserved_table_name_check() {
         // Direct check: the names __tables / __columns should match the
@@ -951,5 +1265,85 @@ mod tests {
         // catalog module's own test suite.)
         assert_eq!(TABLES_SYSTEM_NAME, "__tables");
         assert_eq!(COLUMNS_SYSTEM_NAME, "__columns");
+    }
+
+    // ===========================================================================
+    // MS24 Iteration 000 (1.4/D1): catalog 列行 DEFAULT 尾段序列化
+    // ===========================================================================
+
+    /// 新格式往返：七变体 DEFAULT 值（含 DEFAULT NULL 保真）随行序列化并读回。
+    #[test]
+    fn column_row_with_default_roundtrip_all_variants() {
+        let cases = [
+            (ColumnType::Int, crate::executor::Value::Int(-42)),
+            (
+                ColumnType::String(255),
+                crate::executor::Value::String("anon".to_string()),
+            ),
+            (ColumnType::Int, crate::executor::Value::Null),
+            (ColumnType::Float, crate::executor::Value::Float(2.5)),
+            (ColumnType::Bool, crate::executor::Value::Bool(true)),
+            (ColumnType::Date, crate::executor::Value::Date(739_000)),
+            (
+                ColumnType::Timestamp,
+                crate::executor::Value::Timestamp(1_758_739_200_000_000),
+            ),
+        ];
+        for (ty, value) in cases {
+            let mut col = sample_col("c", 1, ty);
+            col.default_value = Some(value.clone());
+            let bytes = serialize_catalog_column_row(&col);
+            let back = deserialize_catalog_column_row(&bytes).unwrap();
+            assert_eq!(col, back, "roundtrip failed for {value:?}");
+            assert_eq!(back.default_value, Some(value));
+        }
+    }
+
+    /// 无 DEFAULT 行输出与旧格式逐字节一致（Preserve：兼容读 + 字节面不变）。
+    #[test]
+    fn no_default_row_output_is_byte_identical_to_legacy() {
+        let col = sample_col("c", 1, ColumnType::String(255));
+        let bytes = serialize_catalog_column_row(&col);
+        // 手工拼旧版固定布局字节流并比较
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&("users".len() as u16).to_le_bytes());
+        legacy.extend_from_slice(b"users");
+        legacy.extend_from_slice(&1u32.to_le_bytes());
+        legacy.extend_from_slice(&("c".len() as u16).to_le_bytes());
+        legacy.extend_from_slice(b"c");
+        legacy.push(COL_TAG_STRING);
+        legacy.extend_from_slice(&255u16.to_le_bytes());
+        legacy.push(0); // not_null
+        legacy.push(0); // unique
+        assert_eq!(
+            bytes, legacy,
+            "no-default row must not carry a tail section"
+        );
+    }
+
+    /// 旧格式兼容：无尾随段（及 has_default=0 形态）读为 None。
+    #[test]
+    fn legacy_column_row_without_default_reads_none() {
+        // 旧版固定布局：… u8 not_null | u8 unique（无尾随段）
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&(5u16).to_le_bytes());
+        legacy.extend_from_slice(b"users");
+        legacy.extend_from_slice(&0u32.to_le_bytes());
+        legacy.extend_from_slice(&(2u16).to_le_bytes());
+        legacy.extend_from_slice(b"id");
+        legacy.push(COL_TAG_INT);
+        legacy.push(0);
+        legacy.push(0);
+        let row = deserialize_catalog_column_row(&legacy).unwrap();
+        assert_eq!(row.default_value, None, "legacy row must read default None");
+
+        // 防御形态：has_default=0 → None
+        let mut zero_flag = legacy.clone();
+        zero_flag.push(0);
+        let row = deserialize_catalog_column_row(&zero_flag).unwrap();
+        assert_eq!(
+            row.default_value, None,
+            "has_default=0 must read default None"
+        );
     }
 }

@@ -1074,11 +1074,14 @@ fn test_schema_outputs_ddl() {
 #[test]
 fn test_schema_unique_roundtrip() {
     let dir = fixture();
+    // MS23 Iter001 校准：原夹具 `name STRING UNIQUE` 依赖旧的静默接受行为；
+    // 新契约（R4-S1）对非 INT 列 UNIQUE 点名拒绝，此处改用 INT UNIQUE 列，
+    // schema 渲染保真断言等价。
     let out = run_cli(
         dir.path(),
         &[
             "app",
-            "CREATE TABLE tags (id INT PRIMARY KEY, name STRING UNIQUE)",
+            "CREATE TABLE tags (id INT PRIMARY KEY, code INT UNIQUE)",
         ],
     );
     assert_eq!(out.code, Some(0), "create table failed: {}", out.stderr);
@@ -1092,7 +1095,7 @@ fn test_schema_unique_roundtrip() {
         out.stderr
     );
     assert!(
-        out.stdout.contains("\"name\" STRING UNIQUE"),
+        out.stdout.contains("\"code\" INT UNIQUE"),
         "UNIQUE constraint must be rendered: {:?}",
         out.stdout
     );
@@ -3222,5 +3225,470 @@ fn completions_hidden_and_usage_errors() {
     for args in [&["completions"][..], &["completions", "powershell"][..]] {
         let out = run_cli(dir.path(), args);
         assert_eq!(out.code, Some(2), "usage error expected: {args:?}");
+    }
+}
+
+// ===========================================================================
+// MS23 Iteration 000（1.6）——NOT NULL 违反的 CLI 错误面与会话接线
+// ===========================================================================
+
+/// (a) auto-commit INSERT 违反 NOT NULL → exit 3，错误含点名列名与
+/// statement k of n 模板（既有 Sql 失败路径渲染，无专用 CLI 臂）
+#[test]
+fn not_null_violation_auto_commit_exit3_with_template() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["app", "INSERT INTO users VALUES (1, NULL)"]);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr
+            .contains("NOT NULL constraint violation: column 'email'"),
+        "error must name the column: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("statement 1 of 1 failed"),
+        "error must carry the k-of-n template: {:?}",
+        out.stderr
+    );
+}
+
+/// (b) 显式事务内违反 → 自动回滚 + 事务上下文后缀，无残留行，随后可正常
+/// 写入。注：既有 MS11-T02 契约下事务内语句失败为 fail-fast exit 3
+/// （`sql_failure_status` → Sql；tx_statement_test R3/S4 既有断言锁定），
+/// Cycle 契约文本的「exit 0」为笔误——本用例按实际既有机制断言 exit 3，
+/// Deviation 记入 Act Response。
+#[test]
+fn not_null_violation_in_tx_rolls_back_and_reports() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    let out = run_cli(
+        dir.path(),
+        &["app", "BEGIN; INSERT INTO users VALUES (1, NULL)"],
+    );
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr
+            .contains("NOT NULL constraint violation: column 'email'"),
+        "error must name the column: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("statement 2 of 2 failed"),
+        "error must locate the failing statement: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr
+            .contains("previous statement(s) were not committed"),
+        "error must note the transaction-context rollback: {:?}",
+        out.stderr
+    );
+
+    // 回滚后无残留行
+    let out = run_cli(dir.path(), &["app", "SELECT COUNT(*) FROM users"]);
+    assert_eq!(out.code, Some(0));
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[0]]),
+        "no residue may survive the rollback"
+    );
+
+    // 随后可正常写入
+    let out = run_cli(
+        dir.path(),
+        &["app", "INSERT INTO users VALUES (2, 'a@b.c')"],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "write after rollback failed: {}",
+        out.stderr
+    );
+}
+
+// ===========================================================================
+// MS23 Iteration 001 (2.7) — 回滚唯一修复：回滚后同值可重插（R3-S7）
+// ===========================================================================
+
+/// CLI 会话显式 ROLLBACK 后同值可重插——abort 修复须清除残留唯一条目
+#[test]
+fn unique_insert_rollback_then_reinsert_same_value_succeeds() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    let out = run_cli(dir.path(), &["app", "BEGIN; INSERT INTO t VALUES (1, 100); ROLLBACK"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "explicit rollback session failed: {:?} {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    // 回滚后同值重插必须成功
+    let out = run_cli(dir.path(), &["app", "INSERT INTO t VALUES (1, 100)"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "reinsert after explicit rollback failed: {:?} {:?}",
+        out.stdout,
+        out.stderr
+    );
+}
+
+/// CLI 会话事务内语句失败（唯一冲突）自动回滚后同值可重插
+#[test]
+fn unique_conflict_auto_rollback_then_reinsert_succeeds() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+
+    // 事务内：语句 2 唯一冲突（code=100 与语句 1 重复）→ 自动回滚两条
+    let out = run_cli(
+        dir.path(),
+        &["app", "BEGIN; INSERT INTO t VALUES (1, 100); INSERT INTO t VALUES (2, 100)"],
+    );
+    assert_eq!(
+        out.code,
+        Some(3),
+        "expected fail-fast exit 3, got {:?} {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Duplicate key"),
+        "error must name the unique conflict: {:?}",
+        out.stderr
+    );
+
+    // 自动回滚后 code=100 已腾出，重插成功
+    let out = run_cli(dir.path(), &["app", "INSERT INTO t VALUES (1, 100)"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "reinsert after auto rollback failed: {:?} {:?}",
+        out.stdout,
+        out.stderr
+    );
+}
+
+// ===========================================================================
+// MS23 Iteration 001 (2.9) — UNIQUE 收口：dump/restore 往返
+// ===========================================================================
+
+/// R4-S4：INT UNIQUE 表 dump→restore 往返恒等——唯一强制在新库生效
+#[test]
+fn unique_table_dump_restore_enforcement_roundtrip() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)"],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["app", "INSERT INTO items VALUES (1, 100); INSERT INTO items VALUES (2, 200)"],
+    );
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    let dump_out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(dump_out.code, Some(0), "dump failed: {}", dump_out.stderr);
+    assert!(
+        dump_out.stdout.contains("UNIQUE"),
+        "dump DDL must render UNIQUE: {:?}",
+        dump_out.stdout
+    );
+
+    let dump_file = dir.path().join("dump.sql");
+    std::fs::write(&dump_file, &dump_out.stdout).unwrap();
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["restore", "b", dump_file.to_str().unwrap()]);
+    assert_eq!(out.code, Some(0), "restore failed: {}", out.stderr);
+
+    // 新库唯一强制生效：重复 code 拒绝，不同值成功
+    let out = run_cli(dir.path(), &["b", "INSERT INTO \"items\" VALUES (3, 100)"]);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "duplicate must be rejected in restored db: {:?} {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Duplicate key"),
+        "error must name the conflict: {:?}",
+        out.stderr
+    );
+    let out = run_cli(dir.path(), &["b", "INSERT INTO \"items\" VALUES (3, 300)"]);
+    assert_eq!(out.code, Some(0), "distinct insert failed: {}", out.stderr);
+}
+
+/// D6 消费裁定：自家 dump 的 `pk BOOL PRIMARY KEY NOT NULL UNIQUE` 形态
+/// restore 可达（PK 列 UNIQUE 消费为 PK 既有唯一性）
+#[test]
+fn pk_bool_unique_dump_form_restores() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE flagged (pk BOOL PRIMARY KEY NOT NULL UNIQUE, v INT)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["app", "INSERT INTO flagged VALUES (TRUE, 1)"]);
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    let dump_out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(dump_out.code, Some(0), "dump failed: {}", dump_out.stderr);
+    assert!(
+        dump_out
+            .stdout
+            .contains("\"pk\" BOOL PRIMARY KEY NOT NULL UNIQUE"),
+        "dump must render the pk-unique form: {:?}",
+        dump_out.stdout
+    );
+
+    let dump_file = dir.path().join("dump.sql");
+    std::fs::write(&dump_file, &dump_out.stdout).unwrap();
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["restore", "b", dump_file.to_str().unwrap()]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "restore of pk-unique dump form failed: {} {}",
+        out.stdout,
+        out.stderr
+    );
+
+    let out = run_cli(dir.path(), &["b", "SELECT COUNT(*) FROM \"flagged\""]);
+    assert_eq!(out.code, Some(0), "count failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[1]]));
+}
+
+// ===========================================================================
+// MS24 Iteration 000 (1.6/D7)：DEFAULT 持久化 → dump/schema 渲染 → restore
+// 往返保真（R1-S6）
+// ===========================================================================
+
+/// R1-S6：声明 DEFAULT 的建表 → dump DDL 含 DEFAULT 子句（日期族 typed
+/// 字面量）；new b + restore 后 schema 文本含 DEFAULT 且子集 INSERT 行为
+/// 与原库一致；`schema` 子命令渲染含 DEFAULT。
+#[test]
+fn test_dump_restore_roundtrip_preserves_defaults() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE cfg (id INT PRIMARY KEY, name STRING DEFAULT 'anon', score INT DEFAULT 0, seen DATE)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create table failed: {}", out.stderr);
+    // 种子行（含日期列 typed 字面量写入）
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "INSERT INTO cfg VALUES (1, 'seed', 7, DATE '2026-09-25')",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
+
+    // dump DDL 必须含 DEFAULT 渲染
+    let dump_out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(dump_out.code, Some(0), "dump failed: {}", dump_out.stderr);
+    assert!(
+        dump_out.stdout.contains("\"name\" STRING DEFAULT 'anon'"),
+        "dump DDL must render STRING DEFAULT: {:?}",
+        dump_out.stdout
+    );
+    assert!(
+        dump_out.stdout.contains("\"score\" INT DEFAULT 0"),
+        "dump DDL must render INT DEFAULT: {:?}",
+        dump_out.stdout
+    );
+    assert!(
+        dump_out.stdout.contains("INSERT INTO \"cfg\" VALUES"),
+        "dump must contain INSERT statements: {:?}",
+        dump_out.stdout
+    );
+
+    // restore 往返：dump 文本 → new b → restore b
+    let dump_file = dir.path().join("dump.sql");
+    std::fs::write(&dump_file, &dump_out.stdout).unwrap();
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+    let out = run_cli(dir.path(), &["restore", "b", dump_file.to_str().unwrap()]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "restore failed: stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    // restore 后 schema 渲染含 DEFAULT
+    let out = run_cli(dir.path(), &["schema", "b"]);
+    assert_eq!(out.code, Some(0), "schema failed: {}", out.stderr);
+    assert!(
+        out.stdout.contains("DEFAULT 'anon'") && out.stdout.contains("DEFAULT 0"),
+        "schema must render DEFAULT clauses: {:?}",
+        out.stdout
+    );
+
+    // restore 后子集 INSERT 行为与原库一致（省略列取 DEFAULT）
+    let out = run_cli(dir.path(), &["b", "INSERT INTO cfg (id) VALUES (2)"]);
+    assert_eq!(out.code, Some(0), "subset insert failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "b",
+            "SELECT id, name, score FROM \"cfg\" WHERE id = 2",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "select failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[2, "anon", 0]]),
+        "restored table must apply declared defaults"
+    );
+
+    // 原库同形态行为一致（会话内对照）
+    let out = run_cli(dir.path(), &["app", "INSERT INTO cfg (id) VALUES (2)"]);
+    assert_eq!(out.code, Some(0), "subset insert failed: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT id, name, score FROM cfg WHERE id = 2",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "select failed: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["rows"], serde_json::json!([[2, "anon", 0]]));
+}
+
+// ===========================================================================
+// MS24 Iteration 001 (2.5): UPSERT / REPLACE 计划期拒绝面的 CLI 错误面
+// ===========================================================================
+
+/// 计划期点名拒绝一律 exit 3 + stderr 点名文本；合法 upsert 形态 exit 0。
+#[test]
+fn test_upsert_rejection_error_face_exit_3() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE users (id INT PRIMARY KEY, name STRING, code INT UNIQUE)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "create table failed: {}", out.stderr);
+
+    // 组合冲突目标
+    let out = run_cli(
+        dir.path(),
+        &["app", "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT (id, code) DO NOTHING"],
+    );
+    assert_eq!(out.code, Some(3), "stdout: {:?} stderr: {:?}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains("does not match any PRIMARY KEY or UNIQUE constraint"),
+        "stderr must carry the named conflict-target message: {}",
+        out.stderr
+    );
+
+    // ON CONSTRAINT
+    let out = run_cli(
+        dir.path(),
+        &["app", "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT ON CONSTRAINT users_pk DO NOTHING"],
+    );
+    assert_eq!(out.code, Some(3), "stdout: {:?} stderr: {:?}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains("ON CONSTRAINT"),
+        "stderr must name ON CONSTRAINT: {}",
+        out.stderr
+    );
+
+    // DO UPDATE WHERE
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT (id) DO UPDATE SET name = 'b' WHERE id = 1",
+        ],
+    );
+    assert_eq!(out.code, Some(3), "stdout: {:?} stderr: {:?}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains("DO UPDATE WHERE is not supported"),
+        "stderr must name DO UPDATE WHERE: {}",
+        out.stderr
+    );
+
+    // ON DUPLICATE KEY UPDATE
+    let out = run_cli(
+        dir.path(),
+        &["app", "INSERT INTO users VALUES (1, 'a', 1) ON DUPLICATE KEY UPDATE name = 'b'"],
+    );
+    assert_eq!(out.code, Some(3), "stdout: {:?} stderr: {:?}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains("ON DUPLICATE KEY UPDATE is not supported"),
+        "stderr must name ON DUPLICATE KEY UPDATE: {}",
+        out.stderr
+    );
+
+    // 合法形态：DO NOTHING / DO UPDATE / REPLACE 均 exit 0
+    for sql in [
+        "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT DO NOTHING",
+        "INSERT INTO users VALUES (1, 'b', 2) ON CONFLICT (id) DO UPDATE SET name = excluded.name",
+        "REPLACE INTO users VALUES (1, 'c', 3)",
+    ] {
+        let out = run_cli(dir.path(), &["app", sql]);
+        assert_eq!(out.code, Some(0), "{sql} must succeed: {}", out.stderr);
     }
 }

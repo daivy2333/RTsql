@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 use crate::executor::Value;
-use crate::storage::btree::IndexManager;
+use crate::storage::btree::{CatalogRootSlot, IndexManager};
 use crate::storage::catalog::{
     Catalog, CatalogColumnRow, CatalogRow, COLUMNS_SYSTEM_NAME, TABLES_SYSTEM_NAME,
 };
@@ -50,9 +50,25 @@ impl ColumnSchema {
 pub struct TableMeta {
     pub name: String,
     pub columns: Vec<(String, ColumnType)>,
+    /// MS23: per-column NOT NULL flags, index-aligned with `columns`.
+    /// Catalog-persisted; enforced by the INSERT/UPDATE write paths.
+    pub not_null: Vec<bool>,
     pub pk_column: String,
     pub pk_index: usize,
     pub index_manager: Arc<IndexManager>,
+    /// MS23 Iteration 001 (2.3/D5): per-column UNIQUE indexes, one per
+    /// qualifying column (INT ∧ unique ∧ non-PK), bound to its column
+    /// ordinal, ascending by column order — the same order the catalog row
+    /// persists `unique_roots` in. PK-declared UNIQUE consumes the PK
+    /// index's existing uniqueness and never appears here. Empty for
+    /// tables without qualifying columns and for legacy rows (no trailing
+    /// catalog section) — flag-only semantics, no enforcement.
+    pub unique_indexes: Vec<(usize, Arc<IndexManager>)>,
+    /// MS24 Iteration 000 (D1): per-column declared DEFAULT literals,
+    /// index-aligned with `columns` (`None` = no default). Catalog-persisted
+    /// via the column row's DEFAULT tail section; consumed by the planner's
+    /// subset-INSERT fill channel. Empty-`Option` for legacy rows.
+    pub defaults: Vec<Option<Value>>,
     pub data_page_head: PageId,
     pub data_page_tail: Mutex<PageId>,
 }
@@ -146,8 +162,26 @@ impl TableManager {
     pub async fn attach_index_catalog_contexts(&self) {
         let tables = self.tables.read().await;
         for (name, meta) in tables.iter() {
-            meta.index_manager
-                .set_catalog_context(self.catalog.clone(), name.clone());
+            meta.index_manager.set_catalog_context(
+                self.catalog.clone(),
+                CatalogRootSlot::PrimaryKey {
+                    table: name.clone(),
+                },
+            );
+            // MS23 Iteration 001 (2.2/D5): restored UNIQUE trees get their
+            // slot contexts too, so root splits persist to
+            // `unique_roots[ordinal]`. `ordinal` is the tree's position in
+            // `unique_indexes` — ascending qualifying-column order, the same
+            // order the catalog row persists roots in.
+            for (ordinal, (_, uindex)) in meta.unique_indexes.iter().enumerate() {
+                uindex.set_catalog_context(
+                    self.catalog.clone(),
+                    CatalogRootSlot::Unique {
+                        table: name.clone(),
+                        ordinal,
+                    },
+                );
+            }
         }
     }
 
@@ -184,12 +218,59 @@ impl TableManager {
                 self.buffer_pool.clone(),
                 root_index_page,
             )?);
+
+            // MS23 Iteration 001 (2.3/D4): rebuild the per-column UNIQUE
+            // indexes from the catalog row's `unique_roots` (order: ascending
+            // qualifying column). A legacy row (no trailing section → empty
+            // roots) keeps flag-only semantics: no unique indexes, no
+            // enforcement — directly opening an old file works (R5-S4). A
+            // non-empty roots section must match the qualifying column count
+            // (rows written by the create path always do); a mismatch is a
+            // data anomaly surfaced as an internal error.
+            let unique_indexes = if row.unique_roots.is_empty() {
+                Vec::new()
+            } else {
+                let qualifying: Vec<usize> = cols
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, c)| {
+                        c.unique
+                            && matches!(c.column_type, ColumnType::Int)
+                            && *idx != pk_index
+                    })
+                    .map(|(idx, _)| idx)
+                    .collect();
+                if qualifying.len() != row.unique_roots.len() {
+                    return Err(StorageError::Internal(format!(
+                        "table '{}': catalog row has {} unique roots but {} qualifying UNIQUE columns",
+                        row.table_name,
+                        row.unique_roots.len(),
+                        qualifying.len()
+                    )));
+                }
+                let mut rebuilt = Vec::with_capacity(qualifying.len());
+                for (ordinal, col_idx) in qualifying.into_iter().enumerate() {
+                    let root = PageId(row.unique_roots[ordinal] as u64);
+                    let uindex = Arc::new(IndexManager::from_root(
+                        self.buffer_pool.clone(),
+                        root,
+                    )?);
+                    rebuilt.push((col_idx, uindex));
+                }
+                rebuilt
+            };
+
             let table_meta = Arc::new(TableMeta {
                 name: row.table_name.clone(),
+                not_null: cols.iter().map(|c| c.not_null).collect(),
+                // MS24 Iteration 000 (D1): declared DEFAULT literals read back
+                // from the column rows (legacy rows → None).
+                defaults: cols.iter().map(|c| c.default_value.clone()).collect(),
                 columns,
                 pk_column: pk,
                 pk_index,
                 index_manager,
+                unique_indexes,
                 data_page_head,
                 data_page_tail: Mutex::new(data_page_tail),
             });
@@ -214,23 +295,32 @@ impl TableManager {
     ) -> Result<()> {
         let columns = columns
             .into_iter()
-            .map(|(col_name, col_type)| (col_name, col_type, false, false))
+            .map(|(col_name, col_type)| (col_name, col_type, false, false, None))
             .collect();
         self.create_table_with_constraints(name, columns, pk).await
     }
 
     /// Register a new table, persisting per-column NOT NULL / UNIQUE flags to
-    /// the catalog (MS10-T05 Iter000 001-rework, T5-R1). The flags are
-    /// metadata only: no INSERT or recovery path enforces them. `create_table`
-    /// delegates here with both flags false, keeping legacy call sites'
-    /// observable behavior identical.
+    /// the catalog (MS10-T05 Iter000 001-rework, T5-R1). MS23: the NOT NULL
+    /// flag is carried into `TableMeta` and enforced by the INSERT/UPDATE
+    /// write paths; UNIQUE is enforced by dedicated per-column B-Trees
+    /// (Iteration 001) that are allocated here for qualifying columns
+    /// (INT ∧ unique ∧ non-PK), persisted via the catalog row's
+    /// `unique_roots`, and rebuilt on open. `create_table` delegates here
+    /// with both flags false, keeping legacy call sites' observable behavior
+    /// identical.
+    ///
+    /// MS24 Iteration 000 (D1): the tuple gains a fifth element — the column's
+    /// declared DEFAULT literal (`None` = no default), persisted in the
+    /// catalog column row's DEFAULT tail section and carried into
+    /// `TableMeta.defaults`.
     ///
     /// # Errors
     /// Same as [`TableManager::create_table`].
     pub async fn create_table_with_constraints(
         &self,
         name: &str,
-        columns: Vec<(String, ColumnType, bool, bool)>,
+        columns: Vec<(String, ColumnType, bool, bool, Option<Value>)>,
         pk: &str,
     ) -> Result<()> {
         // --- reserved name guard (BEFORE duplicate check) ---
@@ -249,7 +339,7 @@ impl TableManager {
         // --- validate PK column ---
         let pk_index = columns
             .iter()
-            .position(|(col_name, _, _, _)| col_name == pk)
+            .position(|(col_name, _, _, _, _)| col_name == pk)
             .ok_or_else(|| StorageError::ColumnNotFound(pk.to_string()))?;
 
         // --- allocate data page head ---
@@ -266,23 +356,71 @@ impl TableManager {
         let index_manager = Arc::new(
             tokio::task::spawn_blocking(move || IndexManager::new(bp))
                 .await??
-                .with_catalog_context(catalog, table_name),
+                .with_catalog_context(
+                    catalog,
+                    CatalogRootSlot::PrimaryKey {
+                        table: table_name,
+                    },
+                ),
         );
         let index_root_page_id = index_manager.root_page_id().0 as u32;
 
+        // --- MS23 Iteration 001 (2.3/D6): per-column UNIQUE indexes ---
+        // One dedicated B-Tree per qualifying column (INT ∧ unique ∧ non-PK),
+        // ascending column order. PK-declared UNIQUE consumes the PK index's
+        // existing uniqueness (no second tree); non-INT unique flags never
+        // reach a NEW table through the DDL path (2.4 rejects them) — a flag
+        // here via direct `create_table_with_constraints` calls simply
+        // doesn't qualify.
+        let mut unique_indexes = Vec::new();
+        let mut unique_roots = Vec::new();
+        for (idx, (_, col_type, _, unique, _)) in columns.iter().enumerate() {
+            if *unique && idx != pk_index && matches!(col_type, ColumnType::Int) {
+                let bp = self.buffer_pool.clone();
+                let catalog = self.catalog.clone();
+                let table_name = name.to_string();
+                let ordinal = unique_indexes.len();
+                let uindex = Arc::new(
+                    tokio::task::spawn_blocking(move || IndexManager::new(bp))
+                        .await??
+                        .with_catalog_context(
+                            catalog,
+                            CatalogRootSlot::Unique {
+                                table: table_name,
+                                ordinal,
+                            },
+                        ),
+                );
+                unique_roots.push(uindex.root_page_id().0 as u32);
+                unique_indexes.push((idx, uindex));
+            }
+        }
+
         // --- build TableMeta ---
-        // TableMeta 只承载 (name, type) 运行时形状：约束是 catalog 元数据，
-        // 不进入内存 schema（open_or_init 恢复路径同形状）。
+        // MS23: TableMeta 携带 per-column NOT NULL 标志（与 columns 列序对
+        // 齐），执行器写路径据此强制；UNIQUE 经 unique_indexes 在写路径强制。
         let schema_cols: Vec<(String, ColumnType)> = columns
             .iter()
-            .map(|(col_name, col_type, _, _)| (col_name.clone(), col_type.clone()))
+            .map(|(col_name, col_type, _, _, _)| (col_name.clone(), col_type.clone()))
+            .collect();
+        let not_null_flags: Vec<bool> = columns
+            .iter()
+            .map(|(_, _, not_null, _, _)| *not_null)
+            .collect();
+        // MS24 Iteration 000 (D1): per-column declared DEFAULT literals.
+        let defaults: Vec<Option<Value>> = columns
+            .iter()
+            .map(|(_, _, _, _, default)| default.clone())
             .collect();
         let table_meta = Arc::new(TableMeta {
             name: name.to_string(),
             columns: schema_cols,
+            not_null: not_null_flags,
+            defaults,
             pk_column: pk.to_string(),
             pk_index,
             index_manager,
+            unique_indexes,
             data_page_head: page_id,
             data_page_tail: Mutex::new(page_id),
         });
@@ -305,18 +443,23 @@ impl TableManager {
             pk_column: pk.to_string(),
             column_count: columns.len() as u32,
             data_page_tail: page_id.0 as u32,
+            // MS23 Iteration 001 (2.1/2.3): roots of the per-column UNIQUE
+            // indexes created above, in ascending qualifying-column order.
+            unique_roots,
         };
         let catalog_cols: Vec<CatalogColumnRow> = columns
             .iter()
             .enumerate()
             .map(
-                |(idx, (col_name, col_type, not_null, unique))| CatalogColumnRow {
+                |(idx, (col_name, col_type, not_null, unique, default))| CatalogColumnRow {
                     table_name: name.to_string(),
                     column_index: idx as u32,
                     column_name: col_name.clone(),
                     column_type: col_type.clone(),
                     not_null: *not_null,
                     unique: *unique,
+                    // MS24 Iteration 000 (D1): declared DEFAULT literal.
+                    default_value: default.clone(),
                 },
             )
             .collect();
@@ -361,14 +504,63 @@ impl TableManager {
         let meta = Arc::new(TableMeta {
             name: old.name.clone(),
             columns: old.columns.clone(),
+            not_null: old.not_null.clone(),
+            // MS24 Iteration 000 (D1): DEFAULT literals ride the TableMeta
+            // rebuild channel (inherited; opened tables read them from the
+            // catalog rows).
+            defaults: old.defaults.clone(),
             pk_column: old.pk_column.clone(),
             pk_index: old.pk_index,
             index_manager: new_index,
+            // MS23 Iteration 001 (2.3): UNIQUE trees are untouched by a PK
+            // swap (recovery swaps them through `replace_recovery_indexes`).
+            unique_indexes: old.unique_indexes.clone(),
             data_page_head: old.data_page_head,
             data_page_tail: Mutex::new(data_page_tail),
         });
         tables.insert(name.to_string(), meta);
         Ok(old_index)
+    }
+
+    /// MS23 Iteration 001 (2.8/D9): recovery-time whole-table index swap —
+    /// replaces the PK index AND every UNIQUE index in one step, returning
+    /// the previous instances so the caller can hole-tolerantly release
+    /// their (possibly torn) pages. The rebuilt `TableMeta` inherits every
+    /// other field, including the current in-memory `data_page_tail`. Must
+    /// run BEFORE `attach_index_catalog_contexts` (same precondition as
+    /// `replace_index_manager`), so the rebuilt instances receive the
+    /// catalog root-sync contexts.
+    pub async fn replace_recovery_indexes(
+        &self,
+        name: &str,
+        new_index: Arc<IndexManager>,
+        new_uniques: Vec<(usize, Arc<IndexManager>)>,
+    ) -> Result<(
+        Arc<IndexManager>,
+        Vec<(usize, Arc<IndexManager>)>,
+    )> {
+        let mut tables = self.tables.write().await;
+        let old = tables
+            .get(name)
+            .ok_or_else(|| StorageError::TableNotFound(name.to_string()))?;
+        let old_index = old.index_manager.clone();
+        let old_uniques = old.unique_indexes.clone();
+        let data_page_tail = *old.data_page_tail.lock().unwrap();
+        let meta = Arc::new(TableMeta {
+            name: old.name.clone(),
+            columns: old.columns.clone(),
+            not_null: old.not_null.clone(),
+            // MS24 Iteration 000 (D1): inherited (same channel as above).
+            defaults: old.defaults.clone(),
+            pk_column: old.pk_column.clone(),
+            pk_index: old.pk_index,
+            index_manager: new_index,
+            unique_indexes: new_uniques,
+            data_page_head: old.data_page_head,
+            data_page_tail: Mutex::new(data_page_tail),
+        });
+        tables.insert(name.to_string(), meta);
+        Ok((old_index, old_uniques))
     }
 
     /// Check whether a table with the given name exists.
@@ -411,13 +603,27 @@ impl TableManager {
 
         // Physical free (best effort): reduce the table's pages to the
         // storage free-list so subsequent allocate_page can reuse them.
-        let index_pages = match table_meta.index_manager.collect_all_pages().await {
+        let mut index_pages = match table_meta.index_manager.collect_all_pages().await {
             Ok(pages) => pages,
             Err(e) => {
                 eprintln!("[drop_table] collect_all_pages({}) failed: {}", name, e);
                 Vec::new()
             }
         };
+        // MS23 Iteration 001 (D10): release the per-column UNIQUE index
+        // trees too — same best-effort policy as the PK tree (collect
+        // failure warns and gives up, free failures warn per page).
+        for (_, uindex) in &table_meta.unique_indexes {
+            match uindex.collect_all_pages().await {
+                Ok(pages) => index_pages.extend(pages),
+                Err(e) => {
+                    eprintln!(
+                        "[drop_table] unique index collect_all_pages({}) failed: {}",
+                        name, e
+                    );
+                }
+            }
+        }
         let data_pages = self.collect_data_pages(table_meta.data_page_head).await;
 
         for page in index_pages.into_iter().chain(data_pages) {
@@ -508,8 +714,8 @@ mod tests {
         tm.create_table_with_constraints(
             "t",
             vec![
-                ("id".to_string(), ColumnType::Int, false, false),
-                ("name".to_string(), ColumnType::String(255), true, true),
+                ("id".to_string(), ColumnType::Int, false, false, None),
+                ("name".to_string(), ColumnType::String(255), true, true, None),
             ],
             "id",
         )
@@ -534,6 +740,263 @@ mod tests {
         assert!(
             !cols[0].not_null && !cols[0].unique,
             "legacy create_table must keep flags false: {cols:?}"
+        );
+    }
+
+    /// MS23-T02 (1.3): NOT NULL 标志经 TableMeta 抵达运行时——create 面直接
+    /// 携带，open_or_init 面自 catalog 读回，两构造路径标志一致。
+    #[tokio::test]
+    async fn table_meta_carries_not_null_flags_across_reopen() {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+
+        tm.create_table_with_constraints(
+            "t",
+            vec![
+                ("id".to_string(), ColumnType::Int, false, false, None),
+                ("name".to_string(), ColumnType::String(255), true, false, None),
+            ],
+            "id",
+        )
+        .await
+        .unwrap();
+
+        // 创建面：TableMeta 按列序直接携带标志
+        let meta = tm.get_table("t").await.unwrap();
+        assert_eq!(meta.not_null, vec![false, true], "create path must carry flags");
+
+        // 恢复面：新 TableManager 经 open_or_init 自 catalog 读回
+        let tm2 = TableManager::new(pool, storage).await.unwrap();
+        tm2.open_or_init().await.unwrap();
+        let meta2 = tm2.get_table("t").await.unwrap();
+        assert_eq!(meta2.not_null, vec![false, true], "reopen path must read back flags");
+    }
+
+    // ===========================================================================
+    // MS23 Iteration 001 (2.3): TableMeta 唯一索引承载与生命周期
+    // ===========================================================================
+
+    /// (a) create 面：INT UNIQUE 非 PK 列获得专属唯一索引，绑定列序号正确。
+    #[tokio::test]
+    async fn create_table_builds_unique_index_for_int_unique_column() {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool, storage).await.unwrap();
+
+        tm.create_table_with_constraints(
+            "t",
+            vec![
+                ("id".to_string(), ColumnType::Int, false, false, None),
+                ("code".to_string(), ColumnType::Int, false, true, None),
+                ("name".to_string(), ColumnType::String(255), false, false, None),
+            ],
+            "id",
+        )
+        .await
+        .unwrap();
+
+        let meta = tm.get_table("t").await.unwrap();
+        assert_eq!(
+            meta.unique_indexes.len(),
+            1,
+            "exactly one UNIQUE index for column 'code': {:?}",
+            meta.unique_indexes.iter().map(|(i, _)| i).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            meta.unique_indexes[0].0, 1,
+            "unique index must bind to column ordinal 1 ('code')"
+        );
+        // PK 列即便声明 unique 也不建第二索引（D6 消费裁定）
+        tm.create_table_with_constraints(
+            "pk_unique",
+            vec![
+                ("id".to_string(), ColumnType::Int, false, true, None),
+                ("v".to_string(), ColumnType::Int, false, false, None),
+            ],
+            "id",
+        )
+        .await
+        .unwrap();
+        let meta = tm.get_table("pk_unique").await.unwrap();
+        assert!(
+            meta.unique_indexes.is_empty(),
+            "PK column UNIQUE must consume PK uniqueness, no second index"
+        );
+    }
+
+    /// (b) 重开面：新 TableManager 经 open_or_init 自 catalog 根 from_root
+    /// 重建唯一索引，根页与创建面一致。
+    #[tokio::test]
+    async fn reopen_rebuilds_unique_indexes_from_catalog_roots() {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+
+        tm.create_table_with_constraints(
+            "t",
+            vec![
+                ("id".to_string(), ColumnType::Int, false, false, None),
+                ("code".to_string(), ColumnType::Int, false, true, None),
+            ],
+            "id",
+        )
+        .await
+        .unwrap();
+        let meta1 = tm.get_table("t").await.unwrap();
+        assert_eq!(meta1.unique_indexes.len(), 1);
+        let created_root = meta1.unique_indexes[0].1.root_page_id();
+
+        let tm2 = TableManager::new(pool, storage).await.unwrap();
+        tm2.open_or_init().await.unwrap();
+        let meta2 = tm2.get_table("t").await.unwrap();
+        assert_eq!(meta2.unique_indexes.len(), 1);
+        assert_eq!(
+            meta2.unique_indexes[0].0, 1,
+            "rebuild must bind to the same column ordinal"
+        );
+        assert_eq!(
+            meta2.unique_indexes[0].1.root_page_id(),
+            created_root,
+            "rebuild must load the catalog-persisted root"
+        );
+    }
+
+    /// (c) 非 INT unique 标志列（经 create_table_with_constraints 直呼构造）
+    /// 不建索引；重开路径同样静默跳过（R5-S4 兼容边界）。
+    #[tokio::test]
+    async fn non_int_unique_flag_column_gets_no_index() {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+
+        tm.create_table_with_constraints(
+            "t",
+            vec![
+                ("id".to_string(), ColumnType::Int, false, false, None),
+                ("name".to_string(), ColumnType::String(255), false, true, None),
+            ],
+            "id",
+        )
+        .await
+        .unwrap();
+
+        let meta = tm.get_table("t").await.unwrap();
+        assert!(
+            meta.unique_indexes.is_empty(),
+            "non-INT unique flag column must not get an index on create"
+        );
+
+        let tm2 = TableManager::new(pool, storage).await.unwrap();
+        tm2.open_or_init().await.unwrap();
+        let meta2 = tm2.get_table("t").await.unwrap();
+        assert!(
+            meta2.unique_indexes.is_empty(),
+            "non-INT unique flag column must stay unindexed on reopen"
+        );
+    }
+
+    /// (d) 旧格式 catalog 行（空 unique_roots）+ INT unique 标志：打开成功、
+    /// 行为＝无唯一索引（R5-S4：直接打开旧文件可用）。
+    #[tokio::test]
+    async fn legacy_row_with_int_unique_flag_opens_without_unique_index() {
+        use crate::storage::catalog::CatalogColumnRow;
+
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+
+        // 手工插入旧版形态的 catalog 行：INT unique 标志列、无尾随唯一根段
+        let head = pool.storage().allocate_page().await.unwrap();
+        let row = CatalogRow {
+            table_name: "legacy".to_string(),
+            data_page_head: head.0 as u32,
+            index_root_page_id: 0,
+            pk_index: 0,
+            pk_column: "id".to_string(),
+            column_count: 2,
+            data_page_tail: head.0 as u32,
+            unique_roots: Vec::new(),
+        };
+        let cols = vec![
+            CatalogColumnRow {
+                table_name: "legacy".to_string(),
+                column_index: 0,
+                column_name: "id".to_string(),
+                column_type: ColumnType::Int,
+                not_null: false,
+                unique: false,
+                default_value: None,
+            },
+            CatalogColumnRow {
+                table_name: "legacy".to_string(),
+                column_index: 1,
+                column_name: "code".to_string(),
+                column_type: ColumnType::Int,
+                not_null: false,
+                unique: true,
+                default_value: None,
+            },
+        ];
+        tm.catalog().insert_table(&row, &cols).await.unwrap();
+
+        tm.open_or_init().await.unwrap();
+        let meta = tm.get_table("legacy").await.unwrap();
+        assert_eq!(meta.columns.len(), 2);
+        assert!(
+            meta.unique_indexes.is_empty(),
+            "legacy row (empty roots) must open without unique indexes, got {:?}",
+            meta.unique_indexes.iter().map(|(i, _)| i).collect::<Vec<_>>()
+        );
+    }
+
+    // ===========================================================================
+    // MS24 Iteration 000 (1.4/D1): DEFAULT 持久化承载与重开读回
+    // ===========================================================================
+
+    /// create 面：TableMeta.defaults 按列序携带声明 DEFAULT（含 DEFAULT NULL
+    /// 保真与无 DEFAULT 的 None）；重开面：新 TableManager 经 open_or_init 自
+    /// catalog 列行 DEFAULT 尾段读回，两构造路径一致。
+    #[tokio::test]
+    async fn table_meta_carries_defaults_across_reopen() {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+
+        tm.create_table_with_constraints(
+            "t",
+            vec![
+                ("id".to_string(), ColumnType::Int, false, false, None),
+                ("score".to_string(), ColumnType::Int, false, false, Some(Value::Int(90))),
+                ("note".to_string(), ColumnType::String(255), false, false, Some(Value::Null)),
+            ],
+            "id",
+        )
+        .await
+        .unwrap();
+
+        // 创建面：defaults 与列序对齐
+        let meta = tm.get_table("t").await.unwrap();
+        assert_eq!(
+            meta.defaults,
+            vec![None, Some(Value::Int(90)), Some(Value::Null)],
+            "create path must carry declared defaults"
+        );
+
+        // 恢复面：重开读回（DEFAULT NULL 保真为 Some(Null)，非 None）
+        let tm2 = TableManager::new(pool, storage).await.unwrap();
+        tm2.open_or_init().await.unwrap();
+        let meta2 = tm2.get_table("t").await.unwrap();
+        assert_eq!(
+            meta2.defaults,
+            vec![None, Some(Value::Int(90)), Some(Value::Null)],
+            "reopen path must read defaults back from catalog rows"
         );
     }
 }

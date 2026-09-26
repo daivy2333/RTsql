@@ -169,7 +169,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 
 ## SQL and engine capabilities
 
-- **DDL and DML:** `CREATE TABLE`, `DROP TABLE`, `SELECT`, `INSERT`, `UPDATE`, and `DELETE`.
+- **DDL and DML:** `CREATE TABLE`, `DROP TABLE`, `SELECT`, `INSERT` (including `ON CONFLICT DO NOTHING` / `DO UPDATE` and `REPLACE INTO`), `UPDATE`, and `DELETE`.
 - **Queries:** `WHERE`, `JOIN`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, and `OFFSET`.
 - **Expressions:** `IN`, `BETWEEN`, `LIKE`, `IS NULL`, `NOT`, `CASE`, `COALESCE`, `CAST`, and arithmetic operators.
 - **Scalar functions:** `upper`, `lower`, `length`, `substr`, `replace`, `trim`, `abs`, `round`, `floor`, and `ceil`.
@@ -182,6 +182,28 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 - **Storage:** persistent schema, B-Tree primary-key indexes, WAL with frame checksums, checkpointing, crash recovery, and page reuse.
 
 The engine uses explicit type checks and three-valued predicate logic. It does not implicitly convert incompatible SQL types.
+
+### Constraints
+
+Every constraint a `CREATE TABLE` statement accepts is either enforced or rejected by name at plan time — a declared constraint is never silently ignored.
+
+- **NOT NULL** is enforced on `INSERT` and `UPDATE`. A violating write fails with `NOT NULL constraint violation: column '<name>'`, leaving no side effects.
+- **UNIQUE** is enforced for `INT` columns (primary-key columns excluded) through a dedicated internal unique index; duplicates are rejected with `Duplicate key`, `NULL` values are exempt, and enforcement survives restart and crash recovery. A `UNIQUE` declared on the primary-key column is consumed by the primary key's existing uniqueness and does not create a second index.
+- **Rejected at plan time (the table is not created):** `CHECK`, `FOREIGN KEY`, dialect-specific column options, `UNIQUE` on non-`INT` columns, and composite (multi-column) `UNIQUE`.
+- **Legacy compatibility:** databases created by older versions that contain non-`INT` `UNIQUE` columns open normally (those columns are not enforced); dumping and restoring such a table into a new database is rejected by the plan-time rules above. Rows written before `NOT NULL` enforcement that contain `NULL` in a `NOT NULL` column also fail on restore. Re-create the schema (moving non-`INT` `UNIQUE` columns to `INT` or dropping the declaration) and clean or backfill such rows before restoring.
+
+### Write surface
+
+`INSERT` and `UPDATE` accept the SQLite-subset write surface. A rejected write leaves no side effects: `INSERT`, `UPDATE`, `DO NOTHING` and `DO UPDATE` are fully validated before any row is touched, while a `REPLACE INTO` that fails validation after deleting the conflicting rows is rolled back with the deleted row's primary-key and unique-index entries restored.
+
+- **Column list:** `INSERT INTO t (col, ...) VALUES ...` accepts any subset of the table's columns in any order. Omitted columns take their declared `DEFAULT`, or `NULL` when no default is declared; a `NOT NULL` column filled that way is rejected by name. `DEFAULT` inside `VALUES` is equivalent to omitting that column. Declared defaults are persisted in the catalog, apply after restart, and are rendered by `rtsql dump` and `rtsql schema`.
+- **Value types:** a written value must match the column's declared type. `NULL` is exempt, date columns accept their typed literals, a `FLOAT` column accepts integer values (stored as the equivalent float), and any other cross-type write is rejected with `column '<name>' expects <TYPE>, got <type>`. The `dump` / `restore` / `import` paths run through the same rule.
+- **`ON CONFLICT DO NOTHING`:** conflicting rows are skipped and are not counted in the affected-row count.
+- **`ON CONFLICT (col) DO UPDATE SET ...`:** the conflicting row is updated in place. The right-hand side accepts a literal, `DEFAULT`, `excluded.<column>` (the row being inserted) or a bare column name (the conflicting row's old value), and several columns may be assigned at once. Only the assigned columns change.
+- **Conflict target:** omitting the target arbitrates the primary key and every unique index (primary key first, then unique columns in declaration order). An explicit target must be a single column that carries uniqueness — an `INT` primary key or a `UNIQUE` column.
+- **`REPLACE INTO`:** every conflicting row is deleted and the new row is inserted; one affected row is counted per inserted row.
+- **Rejected at plan time (CLI exit code 3):** composite and non-unique conflict targets, reported as `ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint`; `ON CONFLICT ON CONSTRAINT`; `DO UPDATE WHERE`; MySQL's `ON DUPLICATE KEY UPDATE`; `REPLACE INTO` combined with an `ON CONFLICT` clause; assignment right-hand sides other than a literal, `DEFAULT`, `excluded.<column>` or a column reference, which includes arithmetic and function expressions. The `INSERT OR ...` upsert dialect is not reachable with this engine's SQL dialect.
+- Primary-key and unique-index entries are maintained by all three actions, and the result survives restart and crash recovery.
 
 ## Encryption model
 

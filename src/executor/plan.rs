@@ -28,6 +28,9 @@ pub enum PhysicalPlan {
     Filter(FilterNode),
     /// 插入
     Insert(InsertNode),
+    /// 插入或冲突消解（MS24 Iter001：`ON CONFLICT DO NOTHING/DO UPDATE`、
+    /// `REPLACE INTO`）
+    Upsert(UpsertNode),
     /// 更新
     Update(UpdateNode),
     /// 删除
@@ -149,6 +152,59 @@ pub struct InsertNode {
     pub columns: Vec<String>,
     /// 值列表（每行一组值，支持批量插入）
     pub values: Vec<Vec<Value>>,
+}
+
+/// 冲突仲裁目标（MS24 Iter001 design D4）
+#[derive(Debug, Clone)]
+pub enum ConflictArbiter {
+    /// 省略冲突目标：仲裁 PK + 全部唯一索引（SQLite 语义，PK 先、唯一列按序）
+    All,
+    /// 显式单列目标：该列必须存在唯一性索引可仲裁（INT 声明 PK 或唯一索引列）
+    Column(usize),
+}
+
+/// DO UPDATE 赋值的右值形态（MS24 Iter001 design D4）
+#[derive(Debug, Clone)]
+pub enum UpsertValueExpr {
+    /// 字面量（`DEFAULT` 关键字已在计划期字面化为该列声明默认值或 NULL）
+    Literal(Value),
+    /// `excluded.col`——本行待插值（已 coerce/升格）
+    Excluded(usize),
+    /// 裸列名——冲突行的旧值
+    Old(usize),
+}
+
+/// DO UPDATE 的单列赋值（MS24 Iter001 design D4）
+#[derive(Debug, Clone)]
+pub struct UpsertAssignment {
+    /// 目标列位
+    pub column: usize,
+    /// 右值形态
+    pub expr: UpsertValueExpr,
+}
+
+/// 冲突动作（MS24 Iter001 design D4）
+#[derive(Debug, Clone)]
+pub enum ConflictAction {
+    /// `DO NOTHING`：冲突行跳过，不计入受影响行数
+    DoNothing,
+    /// `DO UPDATE SET ...`：冲突行原位更新
+    DoUpdate(Vec<UpsertAssignment>),
+    /// `REPLACE INTO`：冲突行删除后重插
+    Replace,
+}
+
+/// 插入或冲突消解节点（MS24 Iter001 design D4）
+#[derive(Debug, Clone)]
+pub struct UpsertNode {
+    /// 表名
+    pub table_name: String,
+    /// 值列表（D2 全宽填充后的行，与 `InsertNode.values` 同形）
+    pub values: Vec<Vec<Value>>,
+    /// 冲突仲裁目标
+    pub arbiter: ConflictArbiter,
+    /// 冲突动作
+    pub action: ConflictAction,
 }
 
 /// 更新节点（单行单列更新）

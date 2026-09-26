@@ -767,3 +767,806 @@ fn test_insert_non_literal_negation_rejected() {
         Ok(plan) => panic!("Expected UnsupportedValue rejection, got {:?}", plan),
     }
 }
+
+// ===========================================================================
+// MS23 Iteration 000 — 约束诚实化（R2）
+// ===========================================================================
+
+/// MS23 1.1（R2-S1）：列级 CHECK 建表计划期点名拒绝（不再静默丢弃）
+#[test]
+fn test_create_table_column_check_rejected() {
+    let sql = "CREATE TABLE t (a INT CHECK (a > 0))";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("Unsupported constraint: CHECK"),
+            "列级 CHECK 必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected CHECK rejection, got {:?}", plan),
+    }
+}
+
+/// MS23 1.1（R2-S2）：列级 FOREIGN KEY（REFERENCES）建表计划期点名拒绝
+#[test]
+fn test_create_table_column_foreign_key_rejected() {
+    let sql = "CREATE TABLE t (a INT REFERENCES o (x))";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("Unsupported constraint: FOREIGN KEY"),
+            "列级 FOREIGN KEY 必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected FOREIGN KEY rejection, got {:?}", plan),
+    }
+}
+
+/// MS23 1.1（R2-S3）：方言项（AUTO_INCREMENT）建表计划期点名拒绝
+#[test]
+fn test_create_table_dialect_specific_rejected() {
+    let sql = "CREATE TABLE t (id INT AUTO_INCREMENT)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("Unsupported constraint: dialect-specific"),
+            "方言项必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected dialect-specific rejection, got {:?}", plan),
+    }
+}
+
+/// MS23 1.1（Preserve 见证）：`NULL`/`COMMENT` 无语义期望选项维持忽略
+#[test]
+fn test_create_table_null_and_comment_options_still_ignored() {
+    let sql = "CREATE TABLE t (a INT NULL, b INT COMMENT 'note')";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::CreateTable(node) => {
+            assert_eq!(node.columns.len(), 2);
+            assert!(node.columns.iter().all(|c| c.constraints.is_empty()));
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+/// MS23 1.2（R2-S4）：表级 CHECK 建表计划期点名拒绝
+#[test]
+fn test_create_table_table_level_check_rejected() {
+    let sql = "CREATE TABLE t (a INT, CONSTRAINT chk CHECK (a > 0))";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("Unsupported constraint: CHECK"),
+            "表级 CHECK 必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected table-level CHECK rejection, got {:?}", plan),
+    }
+}
+
+/// MS23 1.2（R2-S4）：表级 FOREIGN KEY 建表计划期点名拒绝
+#[test]
+fn test_create_table_table_level_foreign_key_rejected() {
+    let sql = "CREATE TABLE t (a INT, b INT, FOREIGN KEY (a) REFERENCES o (x))";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("Unsupported constraint: FOREIGN KEY"),
+            "表级 FOREIGN KEY 必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected table-level FOREIGN KEY rejection, got {:?}", plan),
+    }
+}
+
+/// MS23 1.2（Preserve 见证）：表级 PRIMARY KEY 既有消费路径保持
+#[test]
+fn test_create_table_table_level_primary_key_still_works() {
+    let sql = "CREATE TABLE t (a INT, b INT, PRIMARY KEY (a))";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::CreateTable(node) => {
+            assert_eq!(node.primary_key, Some("a".to_string()));
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+// ===========================================================================
+// MS23 Iteration 001 — UNIQUE DDL 策略面（R4）
+// ===========================================================================
+
+/// MS23 2.4（R4-S1）：非 INT 列级 UNIQUE 建表点名拒绝（×5 类型矩阵）
+#[test]
+fn test_create_table_non_int_column_unique_rejected() {
+    let cases = [
+        ("CREATE TABLE t (code VARCHAR(10) UNIQUE)", "String"),
+        ("CREATE TABLE t (f FLOAT UNIQUE)", "Float"),
+        ("CREATE TABLE t (b BOOL UNIQUE)", "Bool"),
+        ("CREATE TABLE t (d DATE UNIQUE)", "Date"),
+        ("CREATE TABLE t (ts TIMESTAMP UNIQUE)", "Timestamp"),
+    ];
+    for (sql, ty) in cases {
+        let stmts = parse_sql(sql).unwrap();
+        let mut builder = PlanBuilder::new();
+        let result = builder.build_plan(&stmts[0]);
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("UNIQUE") && e.to_string().contains("INT"),
+                "{ty} 列 UNIQUE 必须点名仅支持 INT，实际: {e}"
+            ),
+            Ok(plan) => panic!("Expected UNIQUE rejection for {ty}, got {:?}", plan),
+        }
+    }
+}
+
+/// MS23 2.4（R4-S2）：表级单列 UNIQUE(col) 等价映射列级标志——plan 中该列
+/// 携带 Unique 约束（to_schema_column 折叠后 catalog 持久化与 dump 渲染自动正确）
+#[test]
+fn test_create_table_table_level_single_column_unique_maps_to_column_flag() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, code INT, UNIQUE (code))";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::CreateTable(node) => {
+            let code = node
+                .columns
+                .iter()
+                .find(|c| c.name == "code")
+                .expect("column 'code' must exist");
+            assert!(
+                code.constraints
+                    .iter()
+                    .any(|c| matches!(c, ColumnConstraint::Unique)),
+                "table-level UNIQUE(code) must map onto the column: {:?}",
+                code.constraints
+            );
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+/// MS23 2.4（R4-S3）：表级组合 UNIQUE 点名拒绝
+#[test]
+fn test_create_table_composite_unique_rejected() {
+    let sql = "CREATE TABLE t (a INT, b INT, UNIQUE (a, b))";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("UNIQUE"),
+            "组合 UNIQUE 必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected composite UNIQUE rejection, got {:?}", plan),
+    }
+}
+
+/// MS23 2.4（D6 消费裁定）：PK 列声明的 UNIQUE 消费为 PK 既有唯一性——
+/// 建表成功不拒绝（自家 dump 的 `pk BOOL PRIMARY KEY NOT NULL UNIQUE`
+/// 形态 restore 恒可达）；第二索引由承载面跳过 PK 列保证不建
+#[test]
+fn test_create_table_pk_column_unique_accepted() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY UNIQUE, v INT)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::CreateTable(node) => {
+            assert_eq!(node.primary_key, Some("id".to_string()));
+            let id = node.columns.iter().find(|c| c.name == "id").unwrap();
+            assert!(
+                id.constraints
+                    .iter()
+                    .any(|c| matches!(c, ColumnConstraint::Unique)),
+                "PK column UNIQUE flag stays on the column (consumed by carrying face)"
+            );
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+/// MS23 2.4（R4-S1 表级面）：表级单列 UNIQUE 指向非 INT 列同样点名拒绝
+#[test]
+fn test_create_table_table_level_single_column_unique_non_int_rejected() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(10), UNIQUE (name))";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("UNIQUE") && e.to_string().contains("INT"),
+            "表级单列 UNIQUE 指向非 INT 列必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected non-INT UNIQUE rejection, got {:?}", plan),
+    }
+}
+
+// ===========================================================================
+// MS24 Iteration 000 (1.5/D2): 子集列清单 INSERT 与 DEFAULT 填充
+// ===========================================================================
+
+fn setup_builder_with_defaults() -> PlanBuilder {
+    let mut builder = PlanBuilder::new();
+    builder.register_table(
+        "users",
+        vec!["id".into(), "name".into(), "score".into()],
+        "id",
+    );
+    // name 列声明 DEFAULT 'anon'；id/score 无声明
+    builder.set_table_defaults(
+        "users",
+        vec![
+            None,
+            Some(rtsql::executor::Value::String("anon".to_string())),
+            None,
+        ],
+    );
+    builder
+}
+
+/// 子集清单（省略 name）计划构造成功且输出恒全宽——省略位填声明 DEFAULT。
+#[test]
+fn subset_list_plan_fills_declared_default() {
+    let sql = "INSERT INTO users (id, score) VALUES (1, 90)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_with_defaults();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Insert(node) => {
+            assert_eq!(node.columns, vec!["id", "score"]);
+            assert_eq!(node.values[0].len(), 3, "输出恒全宽（表列数）");
+            assert_eq!(node.values[0][0], rtsql::executor::Value::Int(1));
+            assert_eq!(
+                node.values[0][1],
+                rtsql::executor::Value::String("anon".to_string()),
+                "省略位必须填声明 DEFAULT"
+            );
+            assert_eq!(node.values[0][2], rtsql::executor::Value::Int(90));
+        }
+        other => panic!("Expected Insert, got {:?}", other),
+    }
+}
+
+/// 省略位无声明 DEFAULT 时填 NULL。
+#[test]
+fn subset_list_plan_fills_null_for_omitted_without_default() {
+    let sql = "INSERT INTO users (id) VALUES (2)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_with_defaults();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Insert(node) => {
+            assert_eq!(
+                node.values[0],
+                vec![
+                    rtsql::executor::Value::Int(2),
+                    rtsql::executor::Value::String("anon".to_string()),
+                    rtsql::executor::Value::Null,
+                ],
+                "无声明 DEFAULT 的省略位必须填 NULL"
+            );
+        }
+        other => panic!("Expected Insert, got {:?}", other),
+    }
+}
+
+/// VALUES 中的 DEFAULT 关键字等价省略——取该列声明 DEFAULT 或 NULL。
+#[test]
+fn default_keyword_maps_to_declared_default_or_null() {
+    let sql = "INSERT INTO users (id, name, score) VALUES (1, DEFAULT, DEFAULT)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_with_defaults();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Insert(node) => {
+            assert_eq!(
+                node.values[0],
+                vec![
+                    rtsql::executor::Value::Int(1),
+                    rtsql::executor::Value::String("anon".to_string()),
+                    rtsql::executor::Value::Null,
+                ],
+                "DEFAULT 关键字位必须取声明 DEFAULT（name）/ NULL（score）"
+            );
+        }
+        other => panic!("Expected Insert, got {:?}", other),
+    }
+}
+
+/// 子集未知列维持计划期点名拒绝（既有意图承接）。
+#[test]
+fn subset_unknown_column_rejected_at_plan_time() {
+    let sql = "INSERT INTO users (id, zz) VALUES (1, 2)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_with_defaults();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("zz"),
+            "未知列必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected unknown-column rejection, got {:?}", plan),
+    }
+}
+
+/// 子集重复列维持计划期点名拒绝（既有意图承接）。
+#[test]
+fn subset_duplicate_column_rejected_at_plan_time() {
+    let sql = "INSERT INTO users (id, id) VALUES (1, 2)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_with_defaults();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("Duplicate"),
+            "重复列必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected duplicate-column rejection, got {:?}", plan),
+    }
+}
+
+// ===========================================================================
+// MS24 Iteration 001 (2.1/D4): ON CONFLICT / REPLACE INTO 计划表示与解析分派
+// ===========================================================================
+
+/// users：id INT PK / name STRING（DEFAULT 'anon'）/ score INT 唯一索引列。
+fn setup_builder_upsert() -> PlanBuilder {
+    let mut builder = PlanBuilder::new();
+    builder.register_table(
+        "users",
+        vec!["id".into(), "name".into(), "score".into()],
+        "id",
+    );
+    builder.set_pk_column_type("users", rtsql::storage::ColumnType::Int);
+    builder.set_table_defaults(
+        "users",
+        vec![
+            None,
+            Some(rtsql::executor::Value::String("anon".to_string())),
+            None,
+        ],
+    );
+    // score 列承载唯一索引（MS23 unique_indexes 的列位序）
+    builder.set_table_unique_columns("users", vec![2]);
+    builder
+}
+
+/// 目标省略 = 全仲裁（PK + 全部唯一索引），动作 DO NOTHING；values 为 D2 全宽行。
+#[test]
+fn on_conflict_without_target_uses_all_arbiter() {
+    let sql = "INSERT INTO users (id, name) VALUES (1, 'Alice') ON CONFLICT DO NOTHING";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Upsert(node) => {
+            assert_eq!(node.table_name, "users");
+            assert!(
+                matches!(node.arbiter, rtsql::executor::ConflictArbiter::All),
+                "省略目标必须全仲裁，实际: {:?}",
+                node.arbiter
+            );
+            assert!(
+                matches!(node.action, rtsql::executor::ConflictAction::DoNothing),
+                "实际: {:?}",
+                node.action
+            );
+            assert_eq!(
+                node.values[0],
+                vec![
+                    rtsql::executor::Value::Int(1),
+                    rtsql::executor::Value::String("Alice".to_string()),
+                    rtsql::executor::Value::Null,
+                ],
+                "UpsertNode.values 必须是 D2 全宽填充后的行"
+            );
+        }
+        other => panic!("Expected Upsert, got {:?}", other),
+    }
+}
+
+/// 显式单列目标命中 INT 声明 PK 列 → Column(0)。
+#[test]
+fn on_conflict_single_pk_target_resolves_column_arbiter() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO NOTHING";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Upsert(node) => assert!(
+            matches!(node.arbiter, rtsql::executor::ConflictArbiter::Column(0)),
+            "显式 PK 单列目标必须仲裁该列，实际: {:?}",
+            node.arbiter
+        ),
+        other => panic!("Expected Upsert, got {:?}", other),
+    }
+}
+
+/// 显式单列目标命中唯一索引列 → Column(2)。
+#[test]
+fn on_conflict_single_unique_target_resolves_column_arbiter() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (score) DO NOTHING";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Upsert(node) => assert!(
+            matches!(node.arbiter, rtsql::executor::ConflictArbiter::Column(2)),
+            "显式唯一列目标必须仲裁该列，实际: {:?}",
+            node.arbiter
+        ),
+        other => panic!("Expected Upsert, got {:?}", other),
+    }
+}
+
+/// 组合多列目标点名拒绝（引擎无组合唯一约束，SQLite 语义文案）。
+#[test]
+fn on_conflict_composite_target_rejected() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (id, score) DO NOTHING";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("does not match any PRIMARY KEY or UNIQUE constraint"),
+            "组合目标必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected composite-target rejection, got {:?}", plan),
+    }
+}
+
+/// 非唯一、非键列目标点名拒绝。
+#[test]
+fn on_conflict_non_unique_column_target_rejected() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (name) DO NOTHING";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("does not match any PRIMARY KEY or UNIQUE constraint"),
+            "非唯一列目标必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected non-unique-target rejection, got {:?}", plan),
+    }
+}
+
+/// 非 INT 声明 PK 列目标点名拒绝（`to_key` 仅 Int 产键，无索引条目可仲裁）。
+#[test]
+fn on_conflict_non_int_pk_target_rejected() {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("kv", vec!["k".into(), "v".into()], "k");
+    builder.set_pk_column_type("kv", rtsql::storage::ColumnType::String(100));
+
+    let sql = "INSERT INTO kv (k, v) VALUES ('a', 1) ON CONFLICT (k) DO NOTHING";
+    let stmts = parse_sql(sql).unwrap();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("does not match any PRIMARY KEY or UNIQUE constraint"),
+            "非 INT 声明 PK 目标必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected non-INT-PK-target rejection, got {:?}", plan),
+    }
+}
+
+/// `ON CONFLICT ON CONSTRAINT <name>` 点名拒绝。
+#[test]
+fn on_conflict_on_constraint_rejected() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT ON CONSTRAINT users_pk DO NOTHING";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("ON CONSTRAINT"),
+            "ON CONSTRAINT 必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected ON CONSTRAINT rejection, got {:?}", plan),
+    }
+}
+
+/// `DO UPDATE ... WHERE` v1 点名拒绝。
+#[test]
+fn do_update_where_rejected() {
+    let sql =
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET name = 'b' WHERE id = 1";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("DO UPDATE WHERE is not supported"),
+            "DO UPDATE WHERE 必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected DO UPDATE WHERE rejection, got {:?}", plan),
+    }
+}
+
+/// MySQL `ON DUPLICATE KEY UPDATE` 点名拒绝。
+#[test]
+fn on_duplicate_key_update_rejected() {
+    let sql = "INSERT INTO users (id, name) VALUES (1, 'a') ON DUPLICATE KEY UPDATE name = 'b'";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("ON DUPLICATE KEY UPDATE is not supported"),
+            "ON DUPLICATE KEY UPDATE 必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected ON DUPLICATE KEY UPDATE rejection, got {:?}", plan),
+    }
+}
+
+/// `REPLACE INTO` 与 `ON CONFLICT` 并存点名拒绝。
+#[test]
+fn replace_into_with_on_conflict_rejected() {
+    let sql = "REPLACE INTO users (id) VALUES (1) ON CONFLICT DO NOTHING";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("REPLACE INTO"),
+            "REPLACE INTO 与 ON CONFLICT 并存必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected replace_into+on rejection, got {:?}", plan),
+    }
+}
+
+/// `REPLACE INTO` 映射为全仲裁 + Replace 动作。
+#[test]
+fn replace_into_maps_to_all_arbiter_replace_action() {
+    let sql = "REPLACE INTO users (id, name) VALUES (1, 'Alice')";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Upsert(node) => {
+            assert!(
+                matches!(node.arbiter, rtsql::executor::ConflictArbiter::All),
+                "REPLACE INTO 仲裁全部约束，实际: {:?}",
+                node.arbiter
+            );
+            assert!(
+                matches!(node.action, rtsql::executor::ConflictAction::Replace),
+                "实际: {:?}",
+                node.action
+            );
+        }
+        other => panic!("Expected Upsert, got {:?}", other),
+    }
+}
+
+/// DO UPDATE 赋值三形态：字面量 / `excluded.col`（新行值）/ 裸列名（旧行值）。
+#[test]
+fn do_update_assignment_three_forms() {
+    let sql = "INSERT INTO users (id, name, score) VALUES (1, 'new', 5) \
+               ON CONFLICT (id) DO UPDATE SET name = 'lit', score = excluded.score";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Upsert(node) => match node.action {
+            rtsql::executor::ConflictAction::DoUpdate(assignments) => {
+                assert_eq!(assignments.len(), 2, "多列赋值必须逐项承载");
+                assert_eq!(assignments[0].column, 1);
+                assert!(
+                    matches!(
+                        assignments[0].expr,
+                        rtsql::executor::UpsertValueExpr::Literal(_)
+                    ),
+                    "字面量赋值形态，实际: {:?}",
+                    assignments[0].expr
+                );
+                assert_eq!(assignments[1].column, 2);
+                assert!(
+                    matches!(
+                        assignments[1].expr,
+                        rtsql::executor::UpsertValueExpr::Excluded(2)
+                    ),
+                    "excluded.col 必须解析为待插行值位，实际: {:?}",
+                    assignments[1].expr
+                );
+            }
+            other => panic!("Expected DoUpdate, got {:?}", other),
+        },
+        other => panic!("Expected Upsert, got {:?}", other),
+    }
+}
+
+/// DO UPDATE 裸列名引用解析为旧行值位（`Old`）。
+#[test]
+fn do_update_bare_column_is_old_row_reference() {
+    let sql =
+        "INSERT INTO users (id, score) VALUES (1, 5) ON CONFLICT (id) DO UPDATE SET score = score";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Upsert(node) => match node.action {
+            rtsql::executor::ConflictAction::DoUpdate(assignments) => {
+                assert!(
+                    matches!(
+                        assignments[0].expr,
+                        rtsql::executor::UpsertValueExpr::Old(2)
+                    ),
+                    "裸列名必须解析为旧行值位，实际: {:?}",
+                    assignments[0].expr
+                );
+            }
+            other => panic!("Expected DoUpdate, got {:?}", other),
+        },
+        other => panic!("Expected Upsert, got {:?}", other),
+    }
+}
+
+/// DO UPDATE 的 `DEFAULT` 关键字在计划期字面化为该列声明 DEFAULT。
+#[test]
+fn do_update_default_keyword_literalized() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET name = DEFAULT";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Upsert(node) => match node.action {
+            rtsql::executor::ConflictAction::DoUpdate(assignments) => {
+                assert_eq!(assignments[0].column, 1);
+                match &assignments[0].expr {
+                    rtsql::executor::UpsertValueExpr::Literal(v) => assert_eq!(
+                        v,
+                        &rtsql::executor::Value::String("anon".to_string()),
+                        "DEFAULT 必须字面化为该列声明默认值"
+                    ),
+                    other => panic!("Expected Literal, got {:?}", other),
+                }
+            }
+            other => panic!("Expected DoUpdate, got {:?}", other),
+        },
+        other => panic!("Expected Upsert, got {:?}", other),
+    }
+}
+
+/// 无声明 DEFAULT 的列在 DO UPDATE 中字面化为 NULL。
+#[test]
+fn do_update_default_keyword_without_declared_default_is_null() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET score = DEFAULT";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Upsert(node) => match node.action {
+            rtsql::executor::ConflictAction::DoUpdate(assignments) => match &assignments[0].expr {
+                rtsql::executor::UpsertValueExpr::Literal(v) => {
+                    assert_eq!(v, &rtsql::executor::Value::Null)
+                }
+                other => panic!("Expected Literal, got {:?}", other),
+            },
+            other => panic!("Expected DoUpdate, got {:?}", other),
+        },
+        other => panic!("Expected Upsert, got {:?}", other),
+    }
+}
+
+/// 算术赋值表达式点名拒绝。
+#[test]
+fn do_update_arithmetic_expression_rejected() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET score = score + 1";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("score"),
+            "算术赋值必须点名拒绝并带出列名，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected arithmetic-assignment rejection, got {:?}", plan),
+    }
+}
+
+/// 函数赋值表达式点名拒绝。
+#[test]
+fn do_update_function_expression_rejected() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET name = upper(name)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("name"),
+            "函数赋值必须点名拒绝并带出列名，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected function-assignment rejection, got {:?}", plan),
+    }
+}
+
+/// DO UPDATE 未知赋值列沿用既有 ColumnNotFound 面。
+#[test]
+fn do_update_unknown_column_rejected() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET zz = 'x'";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("zz"),
+            "未知赋值列必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!(
+            "Expected unknown-assignment-column rejection, got {:?}",
+            plan
+        ),
+    }
+}
+
+/// DO UPDATE 复合左值（`t.col = ...`）点名拒绝。
+#[test]
+fn do_update_compound_lhs_rejected() {
+    let sql = "INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET users.name = 'x'";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder_upsert();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("name"),
+            "复合左值必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected compound-LHS rejection, got {:?}", plan),
+    }
+}

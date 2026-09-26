@@ -169,7 +169,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 
 ## SQL 与引擎能力
 
-- **DDL 与 DML：** `CREATE TABLE`、`DROP TABLE`、`SELECT`、`INSERT`、`UPDATE`、`DELETE`。
+- **DDL 与 DML：** `CREATE TABLE`、`DROP TABLE`、`SELECT`、`INSERT`（含 `ON CONFLICT DO NOTHING` / `DO UPDATE` 与 `REPLACE INTO`）、`UPDATE`、`DELETE`。
 - **查询：** `WHERE`、`JOIN`、`GROUP BY`、`HAVING`、`ORDER BY`、`LIMIT`、`OFFSET`。
 - **表达式：** `IN`、`BETWEEN`、`LIKE`、`IS NULL`、`NOT`、`CASE`、`COALESCE`、`CAST` 和算术运算符。
 - **标量函数：** `upper`、`lower`、`length`、`substr`、`replace`、`trim`、`abs`、`round`、`floor`、`ceil`。
@@ -182,6 +182,28 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 - **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。
 
 引擎使用显式类型检查和三值谓词逻辑，不会隐式转换不兼容的 SQL 类型。
+
+### 约束
+
+`CREATE TABLE` 接受的每一条约束要么被执行面强制，要么在计划期点名拒绝——声明的约束绝不会被静默忽略。
+
+- **NOT NULL** 在 `INSERT` 与 `UPDATE` 强制。违反的写入以 `NOT NULL constraint violation: column '<列名>'` 失败，零副作用。
+- **UNIQUE** 对 `INT` 列强制（主键列除外），经专属内部唯一索引实现；重复值以 `Duplicate key` 拒绝，`NULL` 豁免，且重启与崩溃恢复后强制保持。声明在主键列上的 `UNIQUE` 由主键既有唯一性消费，不建第二索引。
+- **计划期点名拒绝（表不创建）：** `CHECK`、`FOREIGN KEY`、方言特定列选项、非 `INT` 列的 `UNIQUE`、组合（多列）`UNIQUE`。
+- **存量兼容：** 旧版本创建的、含非 `INT` `UNIQUE` 列的数据库可正常打开（这些列不被强制）；但把这类表 dump 后 restore 进新库会被上述计划期规则拒绝。在 `NOT NULL` 强制落地前写入的、「NOT NULL 列含 NULL」的存量行同样会在 restore 时被拒。请先调整 schema（把非 `INT` `UNIQUE` 改为 `INT` 或去掉声明）并清理或回填此类数据，再执行 restore。
+
+### 写面
+
+`INSERT` 与 `UPDATE` 接受 SQLite 子集的写面。被拒绝的写入零副作用：`INSERT`、`UPDATE`、`DO NOTHING` 与 `DO UPDATE` 在触行之前完成全部校验；`REPLACE INTO` 在删除冲突行之后才校验失败时经语句回滚，被删行的主键与唯一索引条目一并还原。
+
+- **列清单：** `INSERT INTO t (col, ...) VALUES ...` 接受表列的任意子集且顺序任意。省略列取声明 `DEFAULT`，无声明则取 `NULL`；NOT NULL 列这样被填入 `NULL` 时点名拒绝。`VALUES` 中的 `DEFAULT` 等价于省略该列。声明默认值经 catalog 持久化、重启后生效，并由 `rtsql dump` 与 `rtsql schema` 渲染。
+- **值类型：** 写入值必须与列声明类型一致。`NULL` 豁免，日期列接受其类型化字面量，`FLOAT` 列接受整数值（以等价浮点存储），其余跨类型写入以 `column '<列名>' expects <类型>, got <类型>` 拒绝。`dump` / `restore` / `import` 通道经同一规则。
+- **`ON CONFLICT DO NOTHING`：** 冲突行被跳过，不计入受影响行数。
+- **`ON CONFLICT (col) DO UPDATE SET ...`：** 冲突行原位更新。右值接受字面量、`DEFAULT`、`excluded.<列名>`（待插行值）或裸列名（冲突行旧值），可一次赋值多列。仅被赋值列发生变化。
+- **冲突目标：** 省略目标时仲裁主键与全部唯一索引（先主键，再按声明序的唯一列）。显式目标必须是承载唯一性的单列——`INT` 主键列或 `UNIQUE` 列。
+- **`REPLACE INTO`：** 删除全部冲突行后插入新行；每个插入行计一个受影响行。
+- **计划期点名拒绝（CLI exit 3）：** 组合与非唯一冲突目标，报 `ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint`；`ON CONFLICT ON CONSTRAINT`；`DO UPDATE WHERE`；MySQL 的 `ON DUPLICATE KEY UPDATE`；`REPLACE INTO` 与 `ON CONFLICT` 子句并存；赋值右值除字面量、`DEFAULT`、`excluded.<列名>` 与列引用之外的一切形态（含算术与函数表达式）。`INSERT OR ...` 方言在本引擎 SQL 方言下不可达。
+- 三个动作都维护主键与唯一索引条目，结果在重启与崩溃恢复后保持。
 
 ## 加密模型
 

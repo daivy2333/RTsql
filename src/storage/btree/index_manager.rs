@@ -14,6 +14,21 @@ use tokio::sync::RwLock;
 
 use super::{AsyncPageLoader, BTree, SyncPageLoader};
 
+/// MS23 Iteration 001 (D5): which `__tables` slot this B-Tree's root
+/// persists to on every root change. A table can now own several index
+/// trees — the PK index plus one per qualifying UNIQUE column — and each
+/// tree's root lives in its own catalog slot.
+#[derive(Debug, Clone)]
+pub enum CatalogRootSlot {
+    /// The table's PK index root (`__tables.index_root_page_id`).
+    PrimaryKey { table: String },
+    /// The Nth UNIQUE index root (`__tables.unique_roots[ordinal]`).
+    /// `ordinal` is the position among the table's qualifying UNIQUE
+    /// columns in ascending column order — the same order the roots are
+    /// serialized in the catalog row.
+    Unique { table: String, ordinal: usize },
+}
+
 /// IndexManager: Async API wrapper for BTree
 /// Uses AtomicPageId for lock-free root page access (read operations)
 /// Write operations use spawn_blocking + temporary BTree instance
@@ -23,12 +38,14 @@ pub struct IndexManager {
     async_loader: AsyncPageLoader,    // 读操作用 async
     row_to_key: RwLock<HashMap<RowId, Vec<u8>>>,
     /// MS10-T02 Iter000 003-rework (R-T0b-R5): optional catalog context
-    /// `(catalog, table_name)` for root-change persistence. Attached by
+    /// `(catalog, root slot)` for root-change persistence. Attached by
     /// `TableManager` — at `create_table` directly, and for restored tables
     /// only AFTER crash recovery finished (replay-time root changes must not
     /// be persisted: the recovery load point stays fixed across re-recoveries).
     /// Direct constructions without a catalog (tests) leave it `None`.
-    catalog_ctx: Mutex<Option<(Arc<Catalog>, String)>>,
+    /// MS23 Iteration 001 (D5): the slot generalizes the context from "the
+    /// table's PK root" to "PK root or the Nth UNIQUE root".
+    catalog_ctx: Mutex<Option<(Arc<Catalog>, CatalogRootSlot)>>,
 }
 
 impl IndexManager {
@@ -75,9 +92,10 @@ impl IndexManager {
     /// every B-Tree root change (split on insert, shrink on delete merge) is
     /// persisted to the table's `__tables` row. Builder style keeps the
     /// `new` / `from_root` signatures (and every catalog-less caller)
-    /// unchanged.
-    pub fn with_catalog_context(self, catalog: Arc<Catalog>, table_name: String) -> Self {
-        *self.catalog_ctx.lock().unwrap() = Some((catalog, table_name));
+    /// unchanged. MS23 Iteration 001 (D5): the caller names the slot this
+    /// tree's root persists to (PK root or Nth UNIQUE root).
+    pub fn with_catalog_context(self, catalog: Arc<Catalog>, slot: CatalogRootSlot) -> Self {
+        *self.catalog_ctx.lock().unwrap() = Some((catalog, slot));
         self
     }
 
@@ -85,19 +103,28 @@ impl IndexManager {
     /// `TableManager` for tables restored by `open_or_init`, after crash
     /// recovery has completed — see the field docs for why replay must run
     /// without a context).
-    pub fn set_catalog_context(&self, catalog: Arc<Catalog>, table_name: String) {
-        *self.catalog_ctx.lock().unwrap() = Some((catalog, table_name));
+    pub fn set_catalog_context(&self, catalog: Arc<Catalog>, slot: CatalogRootSlot) {
+        *self.catalog_ctx.lock().unwrap() = Some((catalog, slot));
     }
 
     /// Persist a root change to the catalog row (R-T0b-R5). No-op without a
     /// catalog context. Errors propagate strictly — a failed catalog write
-    /// must not silently desynchronize the recoverable root.
+    /// must not silently desynchronize the recoverable root. MS23 Iteration
+    /// 001 (D5): dispatch by slot — PK root to `index_root_page_id`, UNIQUE
+    /// root to `unique_roots[ordinal]`.
     async fn sync_root_to_catalog(&self, new_root: PageId) -> Result<()> {
         let ctx = self.catalog_ctx.lock().unwrap().clone();
-        if let Some((catalog, table_name)) = ctx {
-            catalog
-                .update_table_root(&table_name, new_root.0 as u32)
-                .await?;
+        if let Some((catalog, slot)) = ctx {
+            match slot {
+                CatalogRootSlot::PrimaryKey { table } => {
+                    catalog.update_table_root(&table, new_root.0 as u32).await?;
+                }
+                CatalogRootSlot::Unique { table, ordinal } => {
+                    catalog
+                        .update_unique_index_root(&table, ordinal, new_root.0 as u32)
+                        .await?;
+                }
+            }
         }
         Ok(())
     }
