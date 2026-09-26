@@ -1,9 +1,10 @@
 # 非键列 INSERT/UPDATE 写入值与列声明类型之间无类型校验（类型不匹配值静默持久化）
 
-- Status: open
+- Status: closed
 - Filed: 2026-09-25
+- Closed: 2026-09-26
 - Source: Plan Review（MS23 Iteration 001 修复轮 Review F4 finding；Act Response Remaining Issues #3 同源）
-- Environment: Linux x86_64 / master 工作树（MS23 F1 修复轮后，全量 1152 tests 基线）/ Rust 2021 + Tokio / sqlparser-rs 0.44
+- Environment: Linux x86_64 / master 工作树（登记时为 MS23 F1 修复轮后，全量 1152 tests 基线；关闭时为 MS24 Iteration 000 交付后，全量 1239 tests）/ Rust 2021 + Tokio / sqlparser-rs 0.44
 
 ## 缺陷描述
 
@@ -24,12 +25,17 @@ None（缺陷在 MS23 Iteration 001 Plan Review 期间经代码审计定位，�
 
 ## 处置
 
-- Status: open，待用户决定立项（未排期 MS）。
-- 关联：发现源为 MS23 Plan Review F4；唯一列边缘已由 MS23 change `2026-09-24-ms23-constraint-enforcement` F1 修复收口（INT UNIQUE 列 KeyTypeMismatch 守卫，`src/executor/insert.rs`/`update.rs`）；PK 键列面由 MS16 既有键位门覆盖；本 Issue 指非键非唯一列的残余面。
-- 建议排查面：`build_update`/`extract_insert_values` 计划期类型门或执行器写入前置校验；`serialize_tuple` schema 交叉校验评估；dump/restore/import 通道类型面核查。
-- 立项注意：与既定「显式类型检查、不隐式转换」行为（README 类型语义段）对齐，避免修复引入隐式转换语义漂移。
+- Status: closed（2026-09-26，用户指令关闭）。关闭原因：`fixed`——缺陷面已由 change `2026-09-25-ms24-write-surface-completion` Iteration 000（R2 写入值类型一致门）端到端修复并通过验收，该 change 已收尾归档为 `openspec/changes/archive/2026-09-25-ms24-write-surface-completion/`。
+- 修复落点：`StorageError::ColumnTypeMismatch { column, expected, actual }` 新变体（`src/storage/error.rs`）；`InsertExecutor`（既有 UNIQUE 预检之后、serialize 之前）与 `UpdateExecutor`（碰撞预检之后、serialize 之前）逐列校验，NULL 豁免、日期族 String 经既有 coerce 落类型后一致、FLOAT 列整数值就地升格改写 `new_value`、其余跨类型点名拒绝且零副作用；dump/restore 与 CSV import 通道不误报（同一门覆盖）。行为规格：`openspec/specs/sql-write-surface/spec.md` R2「写入值类型一致门」。
+- 状态迁移记录：
+  - 2026-09-25 `open` → `scheduled`：用户批准并入 MS24 新增任务行 MS24-T03（tasks.md）。
+  - 2026-09-26 `scheduled` → `closed`：用户指令关闭；修复随 MS24 change 交付，`tests/write_type_conformance_test.rs` 13 用例矩阵（RED 先行 6 failed 见证）与全量 `cargo test` 1239 passed / 0 failed / 2 ignored 承载。
+- 关联背景：唯一列边缘已由 MS23 change `2026-09-24-ms23-constraint-enforcement` F1 修复收口（INT UNIQUE 列 `KeyTypeMismatch` 守卫）；PK 键列面由 MS16 既有键位门覆盖。
+- 登记时保留的判断（不改写）：「与既定『显式类型检查、不隐式转换』语义对齐，避免隐式转换漂移」——修复仅对 FLOAT 列做无损升格，未引入其他隐式转换。
+- 遗留（不属本 Issue 面，另行跟踪）：声明期 DEFAULT 字面量与列类型的校验缺失（Bool 列 `DEFAULT 1` 建表被接受、应用默认值时才被写入门拒绝）——tasks.md `MS24-T04`，`planned` 未实施。
 
 ## 证据
 
-- `openspec/changes/2026-09-24-ms23-constraint-enforcement/iterations/001-unique-enforcement/000-initial.md` — Plan Review（F4 定性与 F1 修复收口记录）与 Act Response（Remaining Issues #3）
-- 代码位点（2026-09-25 独立追读，MS23 F1 修复轮工作树）：`src/parser/planner/ddl_dml.rs:621-697`（build_update 无 SET 类型校验）、`src/executor/update.rs:110-121`（MS16 仅 PK 门）、`src/executor/value.rs:92-104`（`to_key` 仅 Int 产键）、`src/storage/page_format/tuple.rs:47-67`（serialize/compute 无 schema 交叉校验）
+- 登记时证据：`openspec/changes/archive/2026-09-24-ms23-constraint-enforcement/iterations/001-unique-enforcement/000-initial.md` — Plan Review（F4 定性与 F1 修复收口记录）与 Act Response（Remaining Issues #3）
+- 登记时代码位点（2026-09-25 独立追读，MS23 F1 修复轮工作树）：`src/parser/planner/ddl_dml.rs:621-697`（build_update 无 SET 类型校验）、`src/executor/update.rs:110-121`（MS16 仅 PK 门）、`src/executor/value.rs:92-104`（`to_key` 仅 Int 产键）、`src/storage/page_format/tuple.rs:47-67`（serialize/compute 无 schema 交叉校验）
+- 关闭时证据：`openspec/changes/archive/2026-09-25-ms24-write-surface-completion/iterations/000-type-gate-subset-insert/000-initial.md` — 任务 1.1-1.3 契约与 Act Response Verification 表（`cargo test --test write_type_conformance_test` 13 passed、RED 先行 6 failed；`cargo test --lib` 311 passed；全量 `cargo test` 1182 passed / 0 failed / 2 ignored exit 0）；行为规格 `openspec/specs/sql-write-surface/spec.md` R2 及其 6 场景；`openspec/changes/archive/2026-09-25-ms24-write-surface-completion/iterations/001-upsert-replace/001-replan.md` 采信后续全量 1239 tests（表面零变化）
