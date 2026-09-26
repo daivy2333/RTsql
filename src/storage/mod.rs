@@ -16,7 +16,8 @@ pub mod page_visibility;
 
 pub use async_storage::AsyncStorage;
 pub use btree::{
-    BTree, IndexManager, InternalNode, LeafNode, Node, SyncPageLoader, INTERNAL_NODE, LEAF_NODE,
+    BTree, CatalogRootSlot, IndexManager, InternalNode, LeafNode, Node, SyncPageLoader,
+    INTERNAL_NODE, LEAF_NODE,
 };
 pub use buffer_pool::BufferPool;
 pub use catalog::{

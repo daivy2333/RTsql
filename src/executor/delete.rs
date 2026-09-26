@@ -1,8 +1,11 @@
 //! Delete executor - delete by key
 
 use crate::executor::{ExecResult, Executor};
+use crate::storage::btree::IndexManager;
+use crate::storage::page_format::{deserialize_tuple, ColumnType};
 use crate::storage::{
-    write_tuple_to_data_page, BufferPool, PageId, Result, RowId, StorageError, TableMeta,
+    read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, PageId, Result, RowId,
+    StorageError, TableMeta,
 };
 use crate::transaction::{TransactionManager, VersionHeader};
 use crate::wal::{WALBuffer, WalRecord};
@@ -37,6 +40,38 @@ impl DeleteExecutor {
             wal_buffer,
         }
     }
+
+    /// MS23 Iteration 001 (2.7/D7): extract the deleted row's UNIQUE column
+    /// keys from the row's data-page slot, before the tombstone write.
+    /// Best-effort like the PK path: an unreadable slot (SlotNotFound
+    /// tolerance, test fixtures) yields no keys and the unique deletions are
+    /// skipped. NULL values never have entries (no key).
+    async fn unique_keys_of_row(&self, rid: RowId) -> Result<Vec<(Arc<IndexManager>, Vec<u8>)>> {
+        if self.table_meta.unique_indexes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tuple = match read_tuple_from_data_page(&self.buffer_pool, rid, |_, bytes| Ok(bytes.to_vec()))
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(StorageError::SlotNotFound(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let schema: Vec<ColumnType> = self
+            .table_meta
+            .columns
+            .iter()
+            .map(|(_, ct)| ct.clone())
+            .collect();
+        let values = deserialize_tuple(&tuple, &schema)?;
+        let mut keys = Vec::new();
+        for (col_idx, uindex) in &self.table_meta.unique_indexes {
+            if let Some(key) = values[*col_idx].to_key() {
+                keys.push((uindex.clone(), key.as_bytes().to_vec()));
+            }
+        }
+        Ok(keys)
+    }
 }
 
 #[async_trait::async_trait]
@@ -50,6 +85,14 @@ impl Executor for DeleteExecutor {
 
         // Search for row_id before deleting
         let row_id = self.table_meta.index_manager.search(&self.key).await?;
+
+        // MS23 Iteration 001 (2.7/D7): 唯一列键值提取——写墓碑前从 rid 处
+        // slot 数据反序列化行元组（SlotNotFound 容忍路径无元组可读，与 PK
+        // 同型跳过唯一删除）。
+        let unique_keys = match row_id.as_ref() {
+            Some(rid) => self.unique_keys_of_row(*rid).await?,
+            None => Vec::new(),
+        };
 
         // MS09 Iter000 (D1, I033): express the delete as an independent
         // tombstone version slot (create_tx = deleter, commit = delete
@@ -89,6 +132,12 @@ impl Executor for DeleteExecutor {
         }
 
         self.table_meta.index_manager.delete(&self.key).await?;
+
+        // MS23 Iteration 001 (2.7/D7): 删 PK 条目同区逐唯一列移除条目——
+        // 不移除则残留条目使后续同值插入假阳性 DuplicateKey。
+        for (uindex, key) in &unique_keys {
+            uindex.delete(key).await?;
+        }
 
         // M10: record the version object for commit/abort bookkeeping — the
         // tombstone slot when one was written, the deleted row's rid

@@ -108,14 +108,14 @@
 ## R06: M19 DataScan 路径分析（已实施）
 
 - **类型**: analysis（已实施迁移）
-- **状态**: completed
+- **状态**: completed；[ARCHIVED 2026-09-24] `.claude/analysis/archive/m19-datascan-path.md`（ARC-202609242151 Artifact-Archive）
 - **原因**: DataScan 已实施并归档到 M19 change；分析内容沉淀于 R28 分析文档（K19 实测性能，2026-09-24 K/D 退役迁移）与 project-model M02（数据页链表；原文所引 M22 为旧体系编号，现行 project-model 无此条）
 - **Legacy**: R007
 
 ## R07: M21 页面级 MVCC 遗留项分析（已解决）
 
 - **类型**: analysis（已实施迁移）
-- **状态**: completed
+- **状态**: completed；[ARCHIVED 2026-09-24] `.claude/analysis/archive/m21-page-visibility-incomplete.md`（ARC-202609242151 Artifact-Archive）
 - **原因**: M21 遗留项 (DELETE mark_deleted + 惰性 set_all_visible + benchmark) 全部完成（commit `78a3b01`）；现行权威为 spec `mvcc-tombstone-visibility`（mark_deleted 机制已经 MS09 墓碑 slot 化取代）与 project-model M10/M17（当前约束）；原 K12/K13 随 2026-09-24 K/D 退役入清理 carrier
 - **Legacy**: R008
 
@@ -306,6 +306,14 @@
 - **路径**: `.claude/analysis/engine-patterns-legacy-knowledge.md`
 - **日期**: 2026-09-24
 - **用途**: knowledge spec 退役（2026-09-24 用户指令）后的现役踩坑根因、代码模式与历史性能实测数据集（K01-K04/K06-K09/K14-K19/K22-K33 按原编号逐字保留）；当前约束类 K10/K11/K38 已升格 project-model M17/M18，基准方法论已迁 R27，陈旧条目（K05/K12/K13/K36/K37）随 carrier 留档
+- **状态**: active
+
+## R29: ISS04 非键列 INSERT/UPDATE 写入值类型校验缺失（类型不匹配值静默持久化）
+
+- **类型**: issue
+- **路径**: `.claude/issues/ISS04-non-key-column-write-type-validation-missing.md`
+- **日期**: 2026-09-25
+- **用途**: 非键非唯一列的写入值与列声明类型全程无校验（String/Float 静默写入 INT 列，读回才暴露）的缺陷台账——`build_update`/`extract_insert_values` 无计划期类型门、执行器类型门仅覆盖 PK 与唯一列、`serialize_tuple` 无 schema 交叉校验；类型校验面立项裁定的输入（MS23 Iteration 001 Plan Review F4 裁定残留；唯一列与 PK 键列边缘已分别由 MS23 F1 修复与 MS16 收口）
 - **状态**: active
 
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

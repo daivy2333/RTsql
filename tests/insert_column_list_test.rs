@@ -13,6 +13,11 @@
 //! 数量不符）与无清单行长度不符在计划期明确拒绝（exit 3，零副作用，无
 //! panic）；清单与表列序一致行为逐字节保持。
 //!
+//! MS24 Iteration 000 校准（change 2026-09-25-ms24-write-surface-completion）：
+//! 列清单放宽为表列任意子集（R1），S3 部分清单用例按新语义重写（省略列取
+//! DEFAULT/NULL）；未知列/重复列/无清单行长度拒绝意图由本文件其余用例与
+//! planner_test 子集矩阵承接。
+//!
 //! RED 预测（修复前）：S1 行集断言失败（错位落库）、S2 无错误（affected 1）、
 //! S3/S5 panic（exit 101）、S4 无错误（affected 1）、S7（重复列）无错误；
 //! S6 一致锚点恒 GREEN。
@@ -119,32 +124,39 @@ async fn out_of_order_list_key_violation_rejected() {
     db.wal_buffer.shutdown().await;
 }
 
-/// R6-S3：部分清单计划期拒绝（panic 消除）——`(v) VALUES (9)` 报数量
-/// 不符明确错误，不触发序列化断言 panic。
-///
-/// RED（修复前实测）：触发 `tuple.rs:38` 断言 panic（exit 101）。
+/// R6-S3 → MS24 校准：部分清单在子集语义下合法——省略列（无声明 DEFAULT）
+/// 取 NULL，值按清单映射落位，无 panic。原防回归意图（计划期明确拒绝、
+/// 无 panic）由本文件未知列/重复列/无清单行长度用例与 planner_test 子集
+/// 矩阵承接；本用例转为见证子集合法语义与映射正确性。
 #[tokio::test]
-async fn partial_list_rejected_at_plan_time_no_panic() {
+async fn partial_list_inserts_omitted_columns_no_panic() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
     setup_p(&db).await;
 
-    let message = expect_error(
+    expect_affected(
         db.execute_sql("INSERT INTO p (v) VALUES (9)").await,
-        "部分清单 INSERT",
-    );
-    assert!(
-        message.contains("expects 2") && message.contains("got 1"),
-        "错误文案必须点名期望与实际值数，实际: {message}"
+        "部分清单 INSERT（子集语义）",
     );
 
+    // 省略列 id 取 NULL → 无键行（既有 NULL 键语义落库）；v=9 经清单映射落位
     assert_count(
         &db,
-        "SELECT COUNT(*) FROM p",
-        serde_json::json!(0),
-        "被拒绝的 INSERT 不得落库",
+        "SELECT COUNT(*) FROM p WHERE v = 9",
+        serde_json::json!(1),
+        "子集 INSERT 行必须落库",
     )
     .await;
+    match db.execute_sql("SELECT id, v FROM p").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!(null), serde_json::json!(9)]],
+                "省略位必须填 NULL、显式位按清单落位，实际: {rows:?}"
+            );
+        }
+        other => panic!("Expected QueryResult，实际 {other:?}"),
+    }
 
     db.wal_buffer.shutdown().await;
 }

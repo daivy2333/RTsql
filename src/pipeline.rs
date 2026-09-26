@@ -5,7 +5,7 @@ use crate::executor::{
     HavingExecutor, IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig,
     JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, PhysicalPlan,
     ProjectionExecutor, ScanExecutor, SemiJoinExecutorV2, SingleRowExecutor, SortExecutor,
-    SubqueryEvalExecutor, UpdateExecutor, Value,
+    SubqueryEvalExecutor, UpdateExecutor, UpsertExecutor, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::{parse_sql, PlanBuilder};
@@ -114,13 +114,17 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
             database.plan_cache.clear();
             response
         }
-        PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => {
+        PhysicalPlan::Insert(_)
+        | PhysicalPlan::Upsert(_)
+        | PhysicalPlan::Update(_)
+        | PhysicalPlan::Delete(_) => {
             // DML must run inside a real transaction (MS06-T01 spec).
             let tx = database.transaction_manager.begin().await;
             let tx_id = tx.id();
 
             let table_name = match &plan {
                 PhysicalPlan::Insert(n) => &n.table_name,
+                PhysicalPlan::Upsert(n) => &n.table_name,
                 PhysicalPlan::Update(n) => &n.table_name,
                 PhysicalPlan::Delete(n) => &n.table_name,
                 _ => unreachable!("is_dml guarantees a DML plan"),
@@ -533,6 +537,21 @@ pub(crate) fn create_executor_from_plan(
                     database.transaction_manager.clone(),
                     node.values,
                     tx_id.expect("DML Insert requires a transaction id"),
+                    Some(database.wal_buffer.clone()),
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Upsert(node) => {
+                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                Ok(Box::new(UpsertExecutor::with_table_manager(
+                    table_meta,
+                    Some(database.table_manager.clone()),
+                    database.buffer_pool.clone(),
+                    database.transaction_manager.clone(),
+                    node.arbiter.clone(),
+                    node.action.clone(),
+                    node.values,
+                    tx_id.expect("DML Upsert requires a transaction id"),
                     Some(database.wal_buffer.clone()),
                 )) as Box<dyn Executor + Send>)
             }
@@ -1110,6 +1129,17 @@ async fn register_table(
                 {
                     builder.set_pk_column_type(&table_meta.name, pk_type.clone());
                 }
+                // MS24 Iteration 000 (D1): 传递 per-column 声明 DEFAULT，
+                // 子集 INSERT / DEFAULT 关键字填充在计划期消费。
+                builder.set_table_defaults(&table_meta.name, table_meta.defaults.clone());
+                // MS24 Iteration 001 (D4): 传递承载唯一索引的列位（升序），
+                // ON CONFLICT 冲突目标只仲裁 INT 声明 PK 或这些列。
+                let unique_columns: Vec<usize> = table_meta
+                    .unique_indexes
+                    .iter()
+                    .map(|(col_pos, _)| *col_pos)
+                    .collect();
+                builder.set_table_unique_columns(&table_meta.name, unique_columns);
             }
             Err(e) => return Err(format!("Table '{}' not found: {}", table_name, e)),
         }

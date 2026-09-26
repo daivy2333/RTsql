@@ -34,6 +34,7 @@ mod single_row;
 mod sort;
 mod subquery_eval;
 mod update;
+mod upsert;
 mod value;
 mod value_ref;
 
@@ -59,11 +60,12 @@ pub use join::JoinExecutor;
 pub use limit::LimitExecutor;
 pub use nested_loop_join::NestedLoopJoinExecutor;
 pub use plan::{
-    AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, CorrelatedParam,
-    CreateTableNode, DataScanNode, DeleteNode, DerivedScanNode, DropTableNode, FilterNode,
-    HavingNode, IndexScanAllNode, IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode,
-    NestedLoopJoinNode, OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
-    ScanNode, SemiJoinNode, SortNode, SubqueryEvalNode, UpdateNode,
+    AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, ConflictAction,
+    ConflictArbiter, CorrelatedParam, CreateTableNode, DataScanNode, DeleteNode, DerivedScanNode,
+    DropTableNode, FilterNode, HavingNode, IndexScanAllNode, IndexScanNode, InsertNode,
+    JoinCondition, JoinNode, LimitNode, NestedLoopJoinNode, OrderByColumn, OutputColumn,
+    PhysicalPlan, ProjectionItem, ProjectionNode, ScanNode, SemiJoinNode, SortNode,
+    SubqueryEvalNode, UpdateNode, UpsertAssignment, UpsertNode, UpsertValueExpr,
 };
 pub use predicate::{
     ArithOp, BinaryArithExpression, CaseExpression, CastExpression, CastType, CoalesceExpression,
@@ -79,6 +81,7 @@ pub use single_row::SingleRowExecutor;
 pub use sort::SortExecutor;
 pub use subquery_eval::SubqueryEvalExecutor;
 pub use update::UpdateExecutor;
+pub use upsert::UpsertExecutor;
 pub use value::{ColumnType, Value, ValueError};
 pub use value_ref::ValueRef;
 

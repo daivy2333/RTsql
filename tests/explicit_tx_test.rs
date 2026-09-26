@@ -400,3 +400,278 @@ async fn explicit_tx_reuses_tx_id_across_statements() {
         );
     }
 }
+
+// ===========================================================================
+// MS24 Iteration 001 replan 2.9 — 回滚后墓碑行的索引条目还原
+// （`mvcc-tombstone-visibility` ADDED R6 S1-S7 / `sql-constraint-enforcement`
+// MODIFIED R3 新增场景）
+//
+// 删除者事务回滚时，墓碑行在删除前最新存活版本的 PK 与唯一索引条目 SHALL
+// 全部还原：修复前条目在删除时已被清理、回滚时因墓碑 slot 无条目而无法定位
+// 而整体跳过，产生两类可观察错误结果——PK 等值点查漏行（行在全表扫描可见）
+// 与唯一值被释放后可再次插入（`UNIQUE` 静默失效）。
+// ===========================================================================
+
+/// R6/S1：DELETE 回滚后原行经 PK 等值点查可达（修复前点查为空）。
+#[tokio::test]
+async fn rollback_of_delete_restores_pk_point_lookup() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
+            .await,
+        "seed insert",
+    );
+
+    let tx = db.begin().await.unwrap();
+    expect_affected(
+        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        "in-tx delete",
+    );
+    db.rollback(tx).await.unwrap();
+
+    let rows = expect_rows(
+        db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+        "pk point lookup after delete rollback",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![serde_json::json!(1), serde_json::json!("a")]],
+        "回滚后 PK 等值点查必须可达"
+    );
+}
+
+/// R6/S2：DELETE 回滚后原唯一值仍被复现行占用（修复后可再次插入同值）。
+#[tokio::test]
+async fn rollback_of_delete_keeps_unique_value_occupied() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
+            .await,
+        "seed insert",
+    );
+
+    let tx = db.begin().await.unwrap();
+    expect_affected(
+        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        "in-tx delete",
+    );
+    db.rollback(tx).await.unwrap();
+
+    let resp = db
+        .execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
+        .await;
+    assert!(
+        matches!(resp, Response::Error { .. }),
+        "回滚后原唯一值必须仍被占用（UNIQUE 不得静默失效），got: {:?}",
+        resp
+    );
+}
+
+/// R6/S3：REPLACE 回滚后原行完整复现（PK 点查可达 + 原唯一值仍占用）。
+#[tokio::test]
+async fn rollback_of_replace_restores_row_fully() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
+            .await,
+        "seed insert",
+    );
+
+    let tx = db.begin().await.unwrap();
+    assert_eq!(
+        expect_affected(
+            db.execute_in_tx("REPLACE INTO t (id, code) VALUES (1, 300)", &tx)
+                .await,
+            "in-tx replace",
+        ),
+        1
+    );
+    db.rollback(tx).await.unwrap();
+
+    assert_eq!(
+        expect_rows(
+            db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            "pk point lookup after replace rollback",
+        ),
+        vec![vec![serde_json::json!(1), serde_json::json!(100)]],
+        "回滚后原行必须经点查完整复现"
+    );
+    let resp = db
+        .execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
+        .await;
+    assert!(
+        matches!(resp, Response::Error { .. }),
+        "回滚后原唯一值必须仍被占用，got: {:?}",
+        resp
+    );
+}
+
+/// R6/S4：同事务 update→delete 回滚后点查指向更新前版本（非本事务创建的
+/// 首个前驱版本）。
+#[tokio::test]
+async fn rollback_of_update_then_delete_restores_pre_update_version() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
+            .await,
+        "seed insert",
+    );
+
+    let tx = db.begin().await.unwrap();
+    expect_affected(
+        db.execute_in_tx("UPDATE t SET name = 'b' WHERE id = 1", &tx)
+            .await,
+        "in-tx update",
+    );
+    expect_affected(
+        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        "in-tx delete",
+    );
+    db.rollback(tx).await.unwrap();
+
+    assert_eq!(
+        expect_rows(
+            db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            "pk point lookup after update+delete rollback",
+        ),
+        vec![vec![serde_json::json!(1), serde_json::json!("a")]],
+        "回滚必须跳过本事务的 update 版本、指向更新前的存活版本"
+    );
+    assert_eq!(
+        expect_rows(
+            db.execute_sql("SELECT * FROM t").await,
+            "full scan after update+delete rollback",
+        )
+        .len(),
+        1,
+        "回滚后不得残留重复行"
+    );
+}
+
+/// R6/S5：单条 auto-commit 的失败 REPLACE（先删后校验）经语句级 abort 后
+/// 原行点查可达、扫描单行——修复前扫描可见但点查漏行。
+///
+/// 输入取非键 VARCHAR 列收 Int：仲裁（PK + 唯一列）通过 → 冲突行已删 →
+/// `insert_row` 一般类型门拒绝（design D5 步骤 6 顺序）。唯一列收非法类型
+/// 值会在 `arbitrate` 的 F1 守卫处提前拒绝，删除尚未发生，不覆盖本路径。
+#[tokio::test]
+async fn failed_replace_statement_leaves_no_index_residue() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE, note VARCHAR)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t (id, code, note) VALUES (1, 10, 'keep')")
+            .await,
+        "seed insert",
+    );
+
+    let resp = db
+        .execute_sql("REPLACE INTO t (id, code, note) VALUES (1, 10, 123)")
+        .await;
+    assert!(
+        matches!(resp, Response::Error { .. }),
+        "note 列收 Int 必须被类型门拒绝，got: {:?}",
+        resp
+    );
+
+    assert_eq!(
+        expect_rows(
+            db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            "pk point lookup after failed replace",
+        ),
+        vec![vec![
+            serde_json::json!(1),
+            serde_json::json!(10),
+            serde_json::json!("keep")
+        ]],
+        "失败 REPLACE 回滚后原行点查必须可达"
+    );
+    assert_eq!(
+        expect_rows(
+            db.execute_sql("SELECT * FROM t").await,
+            "full scan after failed replace",
+        )
+        .len(),
+        1,
+        "失败 REPLACE 回滚后扫描必须单行"
+    );
+    let resp = db
+        .execute_sql("INSERT INTO t (id, code, note) VALUES (2, 10, 'other')")
+        .await;
+    assert!(
+        matches!(resp, Response::Error { .. }),
+        "失败 REPLACE 回滚后原唯一值必须仍被占用，got: {:?}",
+        resp
+    );
+}
+
+/// R6/S6：回滚还原的索引条目经 checkpoint 持久化，干净重开两态一致。
+#[tokio::test]
+async fn rollback_index_restore_survives_clean_reopen() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("explicit_tx.db");
+
+    {
+        let db = Database::open(&path).await.unwrap();
+        expect_ok(
+            &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+            "create t",
+        );
+        expect_ok(
+            &db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
+                .await,
+            "seed insert",
+        );
+
+        let tx = db.begin().await.unwrap();
+        expect_affected(
+            db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+            "in-tx delete",
+        );
+        db.rollback(tx).await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    let db2 = Database::open(&path).await.unwrap();
+    assert_eq!(
+        expect_rows(
+            db2.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            "pk point lookup after clean reopen",
+        ),
+        vec![vec![serde_json::json!(1), serde_json::json!(100)]],
+        "干净重开后 PK 等值点查必须仍可达"
+    );
+    let resp = db2
+        .execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
+        .await;
+    assert!(
+        matches!(resp, Response::Error { .. }),
+        "干净重开后原唯一值必须仍被占用，got: {:?}",
+        resp
+    );
+    db2.wal_buffer.shutdown().await;
+}

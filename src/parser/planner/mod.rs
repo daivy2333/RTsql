@@ -17,6 +17,7 @@ mod query;
 mod subquery;
 
 use crate::executor::PhysicalPlan;
+use crate::executor::Value;
 use crate::parser::error::PlanError;
 use crate::storage::page_format::ColumnType;
 use sqlparser::ast::ObjectType;
@@ -106,6 +107,17 @@ pub struct PlanBuilder {
     /// (pk="") are not registered — unknown type = falls back to existing routing (only real
     /// tables can reach key-position equality, downgrade is unreachable).
     pub(crate) primary_key_types: HashMap<String, ColumnType>,
+    /// MS24 Iteration 000 (D1): Table name -> per-column declared DEFAULT
+    /// literals (index-aligned with the registered column list; `None` = no
+    /// default). Additive channel mirroring `set_pk_column_type`; consumed by
+    /// `map_insert_values` for subset-INSERT / DEFAULT-keyword fill.
+    pub(crate) table_defaults: HashMap<String, Vec<Option<Value>>>,
+    /// MS24 Iteration 001 (D4): Table name -> columns carrying a UNIQUE
+    /// index (ascending column position, the same order the catalog persists
+    /// unique roots in). Additive channel consumed by the `ON CONFLICT`
+    /// conflict-target resolution — a target column is arbitrable only if it
+    /// is an INT declared PK or listed here.
+    pub(crate) table_unique_columns: HashMap<String, Vec<usize>>,
     /// Set of inner table names when building a subquery (for detecting outer references).
     /// None when building a top-level query.
     pub(crate) inner_table_names: Option<Vec<String>>,
@@ -128,6 +140,8 @@ impl PlanBuilder {
             tables: HashMap::new(),
             primary_keys: HashMap::new(),
             primary_key_types: HashMap::new(),
+            table_defaults: HashMap::new(),
+            table_unique_columns: HashMap::new(),
             inner_table_names: None,
             building_subquery: false,
             join_column_layout: None,
@@ -147,6 +161,23 @@ impl PlanBuilder {
         self.primary_key_types.insert(name.to_lowercase(), ct);
     }
 
+    /// MS24 Iteration 000 (D1): Register the table's per-column declared
+    /// DEFAULT literals (additive channel — `register_table` signature
+    /// unchanged; the key is lowercase, consistent with `register_table`).
+    /// The vector is index-aligned with the registered column list.
+    pub fn set_table_defaults(&mut self, name: &str, defaults: Vec<Option<Value>>) {
+        self.table_defaults.insert(name.to_lowercase(), defaults);
+    }
+
+    /// MS24 Iteration 001 (D4): Register the columns carrying a UNIQUE index
+    /// (additive channel — `register_table` signature unchanged; the key is
+    /// lowercase, consistent with `register_table`). The vector holds column
+    /// positions in ascending order.
+    pub fn set_table_unique_columns(&mut self, name: &str, columns: Vec<usize>) {
+        self.table_unique_columns
+            .insert(name.to_lowercase(), columns);
+    }
+
     /// Build PhysicalPlan from Statement
     pub fn build_plan(&mut self, stmt: &Statement) -> Result<PhysicalPlan, PlanError> {
         // MS11-T02: transaction statements have no executor semantics on any
@@ -164,8 +195,10 @@ impl PlanBuilder {
                 table_name,
                 columns,
                 source,
+                on,
+                replace_into,
                 ..
-            } => self.build_insert(table_name, columns, source),
+            } => self.build_insert(table_name, columns, source, on, *replace_into),
             Statement::Update {
                 table,
                 assignments,

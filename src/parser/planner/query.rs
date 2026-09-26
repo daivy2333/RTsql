@@ -124,9 +124,10 @@ impl PlanBuilder {
             // MS13 T9: SingleRow 无输出列（no-FORM 输入节点，表头由其上的
             // ProjectionNode 承载）。
             PhysicalPlan::SingleRow => Vec::new(),
-            PhysicalPlan::Insert(_) | PhysicalPlan::Update(_) | PhysicalPlan::Delete(_) => {
-                Vec::new()
-            }
+            PhysicalPlan::Insert(_)
+            | PhysicalPlan::Upsert(_)
+            | PhysicalPlan::Update(_)
+            | PhysicalPlan::Delete(_) => Vec::new(),
             PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => Vec::new(),
         }
     }

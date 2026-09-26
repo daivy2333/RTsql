@@ -1,11 +1,16 @@
 use crate::storage::{
-    update_version_header_in_data_page, BufferPool, PageId, Result, RowId, StorageError, TableMeta,
+    read_tuple_from_data_page, update_version_header_in_data_page, BufferPool, PageId, Result,
+    RowId, StorageError, TableMeta,
 };
 use crate::transaction::{Snapshot, TransactionError, TransactionId};
 use crate::wal::{WALBuffer, WalRecord};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// 墓碑行索引还原时的版本链回溯上限（MS24 Iter001 replan 2.9/D9）——仅防御
+/// 损坏库的无环性；正常链长受版本链深度限制，远小于该值。
+const MAX_TOMBSTONE_CHAIN_WALK: usize = 64;
 
 /// Transaction state
 #[derive(Debug, Clone, PartialEq)]
@@ -268,6 +273,12 @@ impl TransactionManager {
     /// table (MS07-T04):
     /// - If it has a previous version, update index to point to previous
     /// - If it has no previous version, delete from index
+    ///
+    /// MS24 Iter001 replan (2.9/D9) 增加 B 趟：DELETE / REPLACE 的墓碑 slot
+    /// 从不进入索引（条目在删除时已清理），`find_key_by_row_id` 恒为 `None`，
+    /// 整段还原被跳过 → 回滚后被删行的 PK 与唯一条目不恢复（PK 等值点查漏行、
+    /// 唯一值被释放致 `UNIQUE` 静默失效）。两趟划分在任何索引写入之前一次性
+    /// 完成——这是处理顺序与 `record_version` 集合迭代顺序无关的唯一保证点。
     pub async fn abort_cleanup_versions(
         &self,
         tx_id: u64,
@@ -286,7 +297,25 @@ impl TransactionManager {
                 ))
             })?;
 
+            // A 趟 / B 趟划分（MS24 replan 2.9）：按「当前是否持有索引条目」
+            // 分桶——A 趟为 INSERT / UPDATE 形态（条目在位，现状回退或移除），
+            // B 趟为条目已随删除清理的墓碑（需从前驱存活版本还原）。
+            let mut indexed = Vec::new();
+            let mut tombstones = Vec::new();
             for row_id in row_ids {
+                if table_meta
+                    .index_manager
+                    .find_key_by_row_id(row_id)
+                    .await
+                    .is_some()
+                {
+                    indexed.push(row_id);
+                } else {
+                    tombstones.push(row_id);
+                }
+            }
+
+            for row_id in indexed {
                 let header = buffer_pool.read_version_header(row_id).await?;
 
                 let key = table_meta.index_manager.find_key_by_row_id(row_id).await;
@@ -299,6 +328,19 @@ impl TransactionManager {
                     }
                 }
 
+                // MS23 Iteration 001 (2.7/D8): 唯一索引同型修复——不修复则
+                // 回滚的 INSERT 残留唯一条目，后续同值插入假阳性
+                // DuplicateKey。
+                for (_, uindex) in &table_meta.unique_indexes {
+                    if let Some(key) = uindex.find_key_by_row_id(row_id).await {
+                        if let Some(prev_row_id) = header.next_version() {
+                            uindex.update(&key, prev_row_id).await?;
+                        } else {
+                            uindex.delete(&key).await?;
+                        }
+                    }
+                }
+
                 // MS07-T04: tombstone the aborted version. Index fixup alone
                 // leaves the tuple in its data-page slot, and snapshot-less
                 // scans (DataScan with `snapshot: None`) yield every slot
@@ -307,11 +349,18 @@ impl TransactionManager {
                 // T4/D2: create_tx_id = 0 + delete sentinel) makes scans skip
                 // it and — unlike the plain delete sentinel — marks it as
                 // belonging to no transaction, so the tombstone never
-                // suppresses the surviving predecessor versions. This also
-                // covers the DELETE case: the recorded rid is the tombstone
-                // slot itself (delete.rs), whose index lookup finds no key
-                // and skips fixup; neutralizing it lets the pre-delete
-                // version resurface ("no residue after rollback").
+                // suppresses the surviving predecessor versions.
+                update_version_header_in_data_page(buffer_pool, row_id, header.mark_aborted(), &[])
+                    .await?;
+            }
+
+            for row_id in tombstones {
+                restore_tombstone_index_entries(buffer_pool, table_meta, tx_id, row_id).await?;
+
+                // 与 A 趟同型的中性化：墓碑 slot 转为 aborted（create_tx_id = 0
+                // + delete 哨兵），扫描跳过且不抑制前驱存活版本——回滚后
+                // 「该删除未发生」。
+                let header = buffer_pool.read_version_header(row_id).await?;
                 update_version_header_in_data_page(buffer_pool, row_id, header.mark_aborted(), &[])
                     .await?;
             }
@@ -319,6 +368,77 @@ impl TransactionManager {
 
         Ok(())
     }
+}
+
+/// 墓碑行索引条目还原（MS24 Iter001 replan 2.9 / design D9）：从墓碑的
+/// `next_version()` 出发回溯版本链，跳过本事务创建的版本，取首个非本事务
+/// 版本为还原目标，经 `wal::recovery::extract_index_keys` 派生 PK 键与各
+/// 唯一列键后逐项 `insert` 还原（条目已在删除时移除）。
+///
+/// 终止与跳过条件（均不报错，与既有 `SlotNotFound` 容忍同型）：
+/// - 墓碑无前驱（`next_version()` 为 `None`）——本事务插入后同事务删除的
+///   新行形态，无存活版本可还原；
+/// - 链上全部版本均由本事务创建——同上；
+/// - 链回溯超出 `MAX_TOMBSTONE_CHAIN_WALK` 上限（仅防御损坏库的无环性）；
+/// - slot 缺失 / 目标版本本身是墓碑 / 键不可键控（无键行、NULL 唯一值）——
+///   对应位 `None`，`extract_index_keys` 已按此语义返回。
+async fn restore_tombstone_index_entries(
+    buffer_pool: &BufferPool,
+    table_meta: &Arc<TableMeta>,
+    tx_id: u64,
+    tombstone_row_id: RowId,
+) -> Result<()> {
+    let unique_cols: Vec<usize> = table_meta
+        .unique_indexes
+        .iter()
+        .map(|(col_idx, _)| *col_idx)
+        .collect();
+
+    let mut cursor = buffer_pool
+        .read_version_header(tombstone_row_id)
+        .await?
+        .next_version();
+    let mut steps = 0usize;
+
+    while let Some(row_id) = cursor {
+        if steps >= MAX_TOMBSTONE_CHAIN_WALK {
+            break;
+        }
+        steps += 1;
+
+        // 单次页读同时取出版本头与（命中还原目标时的）元组字节。
+        let read = read_tuple_from_data_page(buffer_pool, row_id, |header, bytes| {
+            let is_target = header.create_tx_id() != tx_id && !header.is_deleted();
+            Ok((header, is_target.then(|| bytes.to_vec())))
+        })
+        .await;
+
+        let Ok((header, tuple)) = read else {
+            break;
+        };
+
+        if header.create_tx_id() == tx_id {
+            // 本事务创建的版本（update→delete 形态）——继续回溯。
+            cursor = header.next_version();
+            continue;
+        }
+
+        if let Some(tuple) = tuple {
+            let (pk_key, unique_keys) =
+                crate::wal::recovery::extract_index_keys(table_meta, &unique_cols, &tuple);
+            if let Some(pk_key) = pk_key {
+                table_meta.index_manager.insert(&pk_key, row_id).await?;
+            }
+            for ((_, uindex), key) in table_meta.unique_indexes.iter().zip(unique_keys) {
+                if let Some(key) = key {
+                    uindex.insert(&key, row_id).await?;
+                }
+            }
+        }
+        break;
+    }
+
+    Ok(())
 }
 
 impl Default for TransactionManager {
