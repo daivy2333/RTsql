@@ -316,12 +316,12 @@ fn pure_column_group_by_unchanged() {
     );
 }
 
-/// R2 直出边界锁定（design D12「SELECT 序键前聚合后且全纯列名 → 直出零
-/// 变化」）：GROUP BY 序与 SELECT 键序交错的既有形态保持直出——行按
-/// GROUP BY 序产出、表头按 SELECT 序（既有错位行为，非本 change 引入，
-/// design R2 记载）。行集合（测试内排序）锁定。
+/// MS25 T9 校准（design D9，alpha delta `aggregate-output-shape` R2）：GROUP BY
+/// 序与 SELECT 键序交错的形态不再直出——直出行的值序是 GROUP BY 序而表头序是
+/// SELECT 序，两者不同时须经条件包装按 SELECT 序取值（既有错位行为结束）。行集合
+/// （测试内排序）锁定为对齐后的形状。
 #[test]
-fn groupby_order_interleave_keeps_direct_path() {
+fn groupby_order_interleave_aligned_to_select_order() {
     let dir = TempDir::new().unwrap();
     setup_group_db(dir.path());
 
@@ -335,16 +335,16 @@ fn groupby_order_interleave_keeps_direct_path() {
         ["id", "dept", "count_star"],
         "表头按 SELECT 序: {cols:?}"
     );
-    // 直出路径行 = group_key（GROUP BY 序）++ 聚合：[dept, id, count]；
-    // HashMap 迭代序非确定 → 测试内按键排序后比较集合。
+    // 条件包装后行 = SELECT 序：[id, dept, count]；HashMap 迭代序非确定 →
+    // 测试内按键排序后比较集合。
     let mut sorted: Vec<Vec<i64>> = rows
         .iter()
         .map(|r| {
             vec![
-                r[0].as_str()
+                r[0].as_i64().unwrap(),
+                r[1].as_str()
                     .map(|s| s.bytes().map(|b| b as i64).sum())
                     .unwrap_or(-1),
-                r[1].as_i64().unwrap(),
                 r[2].as_i64().unwrap(),
             ]
         })
@@ -353,11 +353,11 @@ fn groupby_order_interleave_keeps_direct_path() {
     assert_eq!(
         sorted,
         vec![
-            vec![97, 1, 1], // 'a', id=1, count=1
-            vec![97, 2, 1], // 'a', id=2, count=1
-            vec![98, 3, 1], // 'b', id=3, count=1
+            vec![1, 97, 1], // id=1, 'a', count=1
+            vec![2, 97, 1], // id=2, 'a', count=1
+            vec![3, 98, 1], // id=3, 'b', count=1
         ],
-        "直出行形状 [dept, id, count] 保持: {sorted:?}"
+        "行值按 SELECT 序 [id, dept, count] 对齐表头: {sorted:?}"
     );
 }
 

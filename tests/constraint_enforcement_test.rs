@@ -25,7 +25,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 
 async fn expect_error(db: &Database, sql: &str, needle: &str) {
     match db.execute_sql(sql).await {
-        Response::Error { message } => assert!(
+        Response::Error { message, .. } => assert!(
             message.contains(needle),
             "expected error containing {needle:?}, got: {message}"
         ),
@@ -60,8 +60,10 @@ async fn insert_null_rejected_naming_column() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL, name VARCHAR(100))")
-        .await;
+    db.execute_sql(
+        "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL, name VARCHAR(100))",
+    )
+    .await;
 
     expect_error(
         &db,
@@ -216,7 +218,12 @@ async fn update_key_not_found_takes_priority() {
         .await;
     expect_affected(&db, "INSERT INTO users VALUES (1, 'a@b.c')", 1).await;
 
-    expect_error(&db, "UPDATE users SET email = NULL WHERE id = 999", "Key not found").await;
+    expect_error(
+        &db,
+        "UPDATE users SET email = NULL WHERE id = 999",
+        "Key not found",
+    )
+    .await;
 
     db.wal_buffer.shutdown().await;
 }
@@ -311,7 +318,12 @@ async fn update_set_unique_to_existing_value_rejected_keeps_old() {
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
     expect_affected(&db, "INSERT INTO items VALUES (2, 200)", 1).await;
 
-    expect_error(&db, "UPDATE items SET code = 200 WHERE id = 1", "Duplicate key").await;
+    expect_error(
+        &db,
+        "UPDATE items SET code = 200 WHERE id = 1",
+        "Duplicate key",
+    )
+    .await;
 
     // 原值保持：id=1 仍是 100
     match db.execute_sql("SELECT code FROM items WHERE id = 1").await {
@@ -505,8 +517,7 @@ async fn cross_chain_duplicate_unique_value_fails_recovery_named() {
 
         // 注入：绕过执行器唯一预检，直写数据页第二条 committed 链 (2, 100)
         let meta = db.table_manager.get_table("items").await.unwrap();
-        let schema: Vec<ColumnType> =
-            meta.columns.iter().map(|(_, ct)| ct.clone()).collect();
+        let schema: Vec<ColumnType> = meta.columns.iter().map(|(_, ct)| ct.clone()).collect();
         let values = vec![
             rtsql::executor::Value::Int(2),
             rtsql::executor::Value::Int(100),
@@ -514,14 +525,10 @@ async fn cross_chain_duplicate_unique_value_fails_recovery_named() {
         let size = compute_tuple_size(&values, &schema);
         let mut buf = vec![0u8; size];
         serialize_tuple(&values, &schema, &mut buf).unwrap();
-        let rid = write_tuple_to_data_page(
-            &db.buffer_pool,
-            &meta,
-            &VersionHeader::new(999, None),
-            &buf,
-        )
-        .await
-        .unwrap();
+        let rid =
+            write_tuple_to_data_page(&db.buffer_pool, &meta, &VersionHeader::new(999, None), &buf)
+                .await
+                .unwrap();
         db.buffer_pool.write_commit_tx_id(rid, 999).await.unwrap();
         // 注入槽无 WAL 记录——直写必须手动落盘，否则 drop 即丢失
         db.buffer_pool.flush_all().await.unwrap();
@@ -566,7 +573,8 @@ async fn drop_table_with_unique_index_releases_pages_for_reuse() {
         other => panic!("Expected AffectedRows for DROP, got {:?}", other),
     }
 
-    db.execute_sql("CREATE TABLE fresh (id INT PRIMARY KEY)").await;
+    db.execute_sql("CREATE TABLE fresh (id INT PRIMARY KEY)")
+        .await;
     expect_affected(&db, "INSERT INTO fresh VALUES (1)", 1).await;
     expect_count(&db, "fresh", 1).await;
 

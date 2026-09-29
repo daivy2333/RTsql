@@ -92,12 +92,7 @@ type PreScanPage = crate::storage::Result<(u32, Vec<(PrescanSlotKey, RowId)>)>;
 /// 唯一列键向量与该表 qualifying UNIQUE 列序号表逐位对齐（MS23 Iter001）。
 type RebuildScanPage = crate::storage::Result<(
     u32,
-    Vec<(
-        RowId,
-        VersionHeader,
-        Option<Vec<u8>>,
-        Vec<Option<Vec<u8>>>,
-    )>,
+    Vec<(RowId, VersionHeader, Option<Vec<u8>>, Vec<Option<Vec<u8>>>)>,
 )>;
 /// 重建扫描 slot 表：rid → (header, PK 键, 唯一列键)。
 type RebuildSlots = HashMap<RowId, (VersionHeader, Option<Vec<u8>>, Vec<Option<Vec<u8>>>)>;

@@ -139,7 +139,7 @@ SQL 标量函数能力（第一批，string 六件 + math 四件）。十个标�
 
 ### Requirement: 调用面与边界
 
-标量函数 SHALL 在 WHERE 与 SELECT 双侧可用：WHERE 中的函数谓词无论走下推（无 OR、非简单 PK 等值）还是 Filter 包装（含 OR）路径，结果 SHALL 一致且正确。以下既有拒绝面 SHALL 保持：SELECT 列表中函数项与聚合混用报错；HAVING 中引用标量函数不支持。ORDER BY 引用表达式项别名或函数调用 SHALL 保持既有静默行为（排序列不可解析时所有行视为相等、保持输入序、不报错）——本文档化既有语义，SHALL NOT 改变。`WHERE id = abs(-5)` 等主键列与函数比较 SHALL 走普通扫描路径并返回正确结果（SHALL NOT 误入索引点查）。
+标量函数 SHALL 在 WHERE 与 SELECT 双侧可用：WHERE 中的函数谓词无论走下推（无 OR、非简单 PK 等值）还是 Filter 包装（含 OR）路径，结果 SHALL 一致且正确。以下既有拒绝面 SHALL 保持：SELECT 列表中函数项与聚合混用报错；HAVING 中引用标量函数不支持。ORDER BY 引用表达式项的输出别名 SHALL 按输出列真实排序（语义详见 `order-by-alias-sorting` 能力）——原「排序列不可解析时所有行视为相等、保持输入序」的静默语义由本变更终止（校准段：原「既有语义锁定」场景的期望自本变更起翻转为真实排序，见下方同名场景）。`WHERE id = abs(-5)` 等主键列与函数比较 SHALL 走普通扫描路径并返回正确结果（SHALL NOT 误入索引点查）。
 
 #### Scenario: WHERE 下推路径结果正确
 
@@ -169,7 +169,7 @@ SQL 标量函数能力（第一批，string 六件 + math 四件）。十个标�
 
 - **GIVEN** 表 `t(name VARCHAR)` 按 INSERT 顺序含 `name='b'`、`name='a'`
 - **WHEN** `SELECT upper(name) AS u FROM t ORDER BY u`
-- **THEN** 退出码 0，输出顺序保持输入序（`B`、`A`），SHALL NOT 报错、SHALL NOT 按别名列排序
+- **THEN** 退出码 0，按输出列排序输出 `A`、`B`（SHALL NOT 保持输入序）——校准段：原「保持输入序」期望由 change `2026-09-26-ms25-sql-read-surface` 终止，场景名保留承载语料连续性，现行语义权威为 `order-by-alias-sorting`
 
 #### Scenario: 主键列与函数比较走普通路径
 

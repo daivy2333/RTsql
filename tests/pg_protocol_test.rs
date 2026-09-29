@@ -492,6 +492,7 @@ async fn test_response_mapping_error() {
     // Write Error response
     let response = Response::Error {
         message: "Table not found".to_string(),
+        sqlstate: None,
     };
     protocol
         .write_response(&mut server, &response)

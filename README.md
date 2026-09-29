@@ -88,6 +88,35 @@ rtsql --format table demo-restored "SELECT id, name, age FROM people ORDER BY id
 
 `dump` writes SQL text and does not encrypt that file. Protect the dump as you would any plaintext database export. `restore` requires an empty target database; pass `-` instead of a file path to read the dump from stdin.
 
+#### Backup boundaries and the database file family
+
+Prefer `dump` / `restore` for backups. A database on disk is a family of three files derived from one name — `<db>.db`, `<db>.wal`, and `<db>.checkpoint` — and a file-level copy is only as safe as the state you copied.
+
+Copying `<db>.db` alone is equivalent to a full backup **only after the writer closed cleanly** (one-shot commands checkpoint on close, so the WAL is already truncated). While a writer is still running, or after a crash, the main file holds only the checkpointed prefix: the measured rows below come from a session killed with `SIGKILL` after committing 937 of 938 rows, where the main file alone showed **1 of 938 rows** — silently incomplete, with no error on open.
+
+| Form | Result |
+|---|---|
+| Copy `<db>.db` after a clean close | Complete (1 of 1 rows) |
+| Copy `<db>.db` + `<db>.wal` after a clean close | Complete |
+| Copy `<db>.db` + `<db>.checkpoint` after a clean close | Complete |
+| Copy `<db>.db` alone with an uncheckpointed tail | **Incomplete: 1 of 938 rows** |
+| Copy `<db>.db` + `<db>.wal` with an uncheckpointed tail | Complete (938 rows, WAL replayed on open) |
+| Move the pair to another directory, names unchanged | Complete (938 rows) |
+| Rename the main file only, leaving the WAL behind | **Incomplete: 1 of 938 rows**, and the orphaned `<db>.wal` is ignored |
+
+Companion names are derived from the main file name, so any rename or move must carry `<db>.wal` and `<db>.checkpoint` along under the same base name. A file-level copy taken while a writer is active should include `<db>.wal`; otherwise close the writer first and verify with `rtsql <db> "SELECT count(*) FROM t"` on the copy.
+
+`rtsql delete <db>` removes one database family; `./install.sh --uninstall --purge-data` wipes the whole data directory during uninstall. Neither is recoverable through RTsql.
+
+### Delete a database
+
+```bash
+rtsql delete demo --dry-run
+rtsql delete demo
+```
+
+`delete` removes `<db>.db` together with its `.wal` and `.checkpoint` companions, reports the freed bytes per file, and exits 0. It is a file-level management operation: it does not open the database, does not validate content, and needs no `--key` even for an encrypted database. A database currently open in another session is refused with exit code 4 and nothing is deleted; a missing database is refused with exit code 1. Companion files that are already absent are reported as `absent` and are not an error.
+
 ### Create an encrypted database
 
 ```bash
@@ -146,6 +175,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql dump <db>` | Export DDL and rows as SQL text |
 | `rtsql restore <db> <file>` | Restore a dump into an empty database; `-` reads stdin |
 | `rtsql import <db> <table> <file> --csv` | Import CSV with a matching header row |
+| `rtsql delete <db> [--dry-run]` | Delete a database and its `.wal` / `.checkpoint` companions; `--dry-run` only lists them |
 | `rtsql stats <db> <table>` | Summarize count, null rate, distinct values, ranges, and numeric percentiles |
 | `rtsql sample <db> <table> [n]` | reservoir-sample rows; default `n` is 10 |
 | `rtsql profile <db> <table> [--top n]` | Profile columns and frequent String values; default top count is 5, maximum 20 |
@@ -256,12 +286,14 @@ CLI-level footprint (one-shot process loading 2,000 rows plus `SELECT COUNT(*)`)
 | Metric | RTsql | sqlite3 |
 |---|---|---|
 | Load time (2,000 inserts) | 3.2 s | 5.3 s |
-| Peak RSS | ~16.7 MiB | ~4.1 MiB |
+| Peak RSS | ~16.4 MiB | ~4.1 MiB |
 | Main database file after close | 300 KiB | 48 KiB |
-| One-shot `SELECT 1` latency (mean of 50 runs) | 10.8 ms | 1.2 ms |
+| One-shot `SELECT 1` latency (mean of 50 runs) | 6.5 ms | 1.2 ms |
 | Binary size | 6.7 MB | 1.6 MB |
 
-Reading the numbers: RTsql's per-statement insert path and index lookups are fast, its full-scan path is currently slower than SQLite's, and one-shot invocations carry the fixed cost of an async runtime and a checkpointing close. SQLite is three decades more mature; treat these tables as a snapshot of where RTsql stands today, and re-run the benchmarks on your own hardware before drawing conclusions.
+One-shot latency and peak RSS are re-measured values from 2026-09-26, after the zero-work close skip landed (read-only sessions no longer checkpoint on close; the default multi-thread runtime was retained after a measured flavor evaluation). The load-time row keeps its 2026-09-24 value because the load path is unchanged.
+
+Reading the numbers: RTsql's per-statement insert path and index lookups are fast, its full-scan path is currently slower than SQLite's, and one-shot invocations carry the fixed cost of an async runtime, while read-only closes no longer add a checkpoint on top (zero-work closes skip it). SQLite is three decades more mature; treat these tables as a snapshot of where RTsql stands today, and re-run the benchmarks on your own hardware before drawing conclusions.
 
 ## Known limitations
 

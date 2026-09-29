@@ -49,7 +49,7 @@ fn query_rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
 
 fn error_message(resp: Response) -> String {
     match resp {
-        Response::Error { message } => message,
+        Response::Error { message, .. } => message,
         other => panic!("Expected Error, got {other:?}"),
     }
 }

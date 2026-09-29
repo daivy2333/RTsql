@@ -33,7 +33,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 
 fn expect_error(resp: Response, what: &str) -> String {
     match resp {
-        Response::Error { message } => message,
+        Response::Error { message, .. } => message,
         other => panic!("{what} 应被拒绝为 Error，实际 {other:?}"),
     }
 }

@@ -24,7 +24,7 @@ fn rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
         Response::AffectedRows { count } => {
             panic!("expected QueryResult, got AffectedRows({count})")
         }
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             panic!("expected QueryResult, got Error: {message}")
         }
         Response::Pong => {
@@ -36,7 +36,7 @@ fn rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
 /// Helper: extract error message from an Error response.
 fn error_msg(resp: Response) -> String {
     match resp {
-        Response::Error { message } => message,
+        Response::Error { message, .. } => message,
         Response::Pong => "Pong".to_string(),
         _ => panic!("expected Error, got non-error response"),
     }
@@ -460,7 +460,7 @@ async fn test_multi_level_correlated_error() {
     // multi-level correlated - innermost refs dept.id which is in middle query's scope).
     // The multi-level detection would fire for truly cross-level refs.
     match resp {
-        Response::Error { ref message } if message.contains("Multi-level correlated") => {
+        Response::Error { ref message, .. } if message.contains("Multi-level correlated") => {
             // Expected for truly multi-level correlated subqueries
         }
         Response::QueryResult { rows: _ } => {
@@ -783,10 +783,17 @@ async fn test_in_subquery_join_multi_column_same_message() {
     );
 }
 
-/// R1-S3: WHERE + JOIN keeps the pre-existing `Unsupported statement type`
-/// rejection verbatim (Preserve witness for the surrounding surfaces).
+/// R1-S3: WHERE + JOIN keeps the JOIN-naming plan-time rejection (MS25 T1 D2
+/// calibration — the message is unified with the no-WHERE JOIN form; the
+/// rejection itself is unchanged).
+///
+/// Previously this case locked `Unsupported statement type` verbatim: D2
+/// lifts the top-level WHERE×JOIN rejection, so the subquery plan now builds
+/// (`Filter(Join)`) and `get_subquery_first_column`'s JOIN arm rejects it with
+/// the named message. The byte-for-byte lock is retired per the replan
+/// decision (user ruling 2026-09-27, option (a)).
 #[tokio::test]
-async fn test_in_subquery_where_join_keeps_existing_rejection() {
+async fn test_in_subquery_where_join_named_rejection() {
     let db = open_db().await;
     setup_o_r_s(&db).await;
 
@@ -798,8 +805,8 @@ async fn test_in_subquery_where_join_keeps_existing_rejection() {
     .await;
     let msg = error_msg(resp);
     assert!(
-        msg.contains("Unsupported statement type"),
-        "expected existing Unsupported statement type rejection, got: {msg}"
+        msg.contains("IN subquery with JOIN is not supported"),
+        "expected JOIN-naming rejection (unified with the no-WHERE form), got: {msg}"
     );
 }
 

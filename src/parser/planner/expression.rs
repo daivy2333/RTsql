@@ -31,23 +31,19 @@ impl PlanBuilder {
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                 let table = parts[0].value.to_lowercase();
                 let column = parts[1].value.to_lowercase();
+                self.resolve_qualified_column(&table, &column)
+            }
 
-                // 验证表存在
-                self.validate_table(&table)?;
-
-                // 验证列存在
-                let columns = self
-                    .tables
-                    .get(&table)
-                    .ok_or_else(|| PlanError::TableNotFound(table.clone()))?;
-                if !columns.iter().any(|c| c.to_lowercase() == column) {
-                    return Err(PlanError::ColumnNotFound(column));
-                }
-
-                Ok(ColumnRef {
-                    table: Some(table),
-                    column,
-                })
+            // MS20 T2: alias.table.col 三段列引用——前两段拼成已按限定名注册的
+            // 键（`"o.u"`），第三段为列。路由未命中时该键不存在，维持既有拒绝面。
+            Expr::CompoundIdentifier(parts) if parts.len() == 3 => {
+                let table = format!(
+                    "{}.{}",
+                    parts[0].value.to_lowercase(),
+                    parts[1].value.to_lowercase()
+                );
+                let column = parts[2].value.to_lowercase();
+                self.resolve_qualified_column(&table, &column)
             }
 
             // 纯列名格式
@@ -76,8 +72,27 @@ impl PlanBuilder {
                 }
             }
 
-            _ => Err(PlanError::UnsupportedExpression),
+            _ => Err(PlanError::UnsupportedExpression("COLUMN REFERENCE".into())),
         }
+    }
+
+    /// 限定列引用的共同解析体（`t.col` 与 MS20 T2 的 `alias.table.col`）——
+    /// 表必须已注册，列必须存在。
+    fn resolve_qualified_column(&self, table: &str, column: &str) -> Result<ColumnRef, PlanError> {
+        self.validate_table(table)?;
+
+        let columns = self
+            .tables
+            .get(table)
+            .ok_or_else(|| PlanError::TableNotFound(table.to_string()))?;
+        if !columns.iter().any(|c| c.to_lowercase() == column) {
+            return Err(PlanError::ColumnNotFound(column.to_string()));
+        }
+
+        Ok(ColumnRef {
+            table: Some(table.to_string()),
+            column: column.to_string(),
+        })
     }
 
     /// Convert sqlparser BinaryOperator to ComparisonOp
@@ -229,6 +244,61 @@ impl PlanBuilder {
     }
 
     /// Build ExpressionRef from Expr
+    /// 限定列表达式的共同解析体（`t.col` 与 MS20 T2 的 `alias.table.col`）：
+    /// 相关外层引用 → NLJ 组合行列布局 → 单表布局，既有优先级逐级不变。
+    fn qualified_column_expression(
+        &self,
+        table_ref: &str,
+        column_name: &str,
+    ) -> Result<ExpressionRef, PlanError> {
+        // Check if this is an outer (correlated) reference
+        if let Some(ref inner_tables) = self.inner_table_names {
+            if !inner_tables
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(table_ref))
+            {
+                let param_name = format!("{}.{}", table_ref, column_name);
+                return Ok(Arc::new(ParameterExpression::new(param_name)));
+            }
+        }
+
+        // MS09-T02: NLJ combined-row layout override (design D5a) —
+        // qualified names resolve to their table's layout offset +
+        // in-table position. Correlated outer refs were returned
+        // above, so this only sees the join's own tables.
+        if let Some(layout) = &self.join_column_layout {
+            let mut offset = 0;
+            for (table, columns) in layout {
+                if table == table_ref {
+                    return match columns.iter().position(|c| c.to_lowercase() == column_name) {
+                        Some(pos) => Ok(Arc::new(ColumnExpression {
+                            column_name: column_name.to_string(),
+                            column_index: offset + pos,
+                        })),
+                        None => Err(PlanError::ColumnNotFound(column_name.to_string())),
+                    };
+                }
+                offset += columns.len();
+            }
+            return Err(PlanError::TableNotFound(table_ref.to_string()));
+        }
+
+        // Resolve the table reference
+        let columns = self
+            .tables
+            .get(table_ref)
+            .ok_or_else(|| PlanError::ParseError(format!("Table '{}' not found", table_ref)))?;
+        let column_index = columns
+            .iter()
+            .position(|c| c.to_lowercase() == column_name)
+            // MS19 Iteration 002 (T5): 同上，限定名单表路径统一建模。
+            .ok_or_else(|| PlanError::ColumnNotFound(column_name.to_string()))?;
+        Ok(Arc::new(ColumnExpression {
+            column_name: column_name.to_string(),
+            column_index,
+        }))
+    }
+
     pub(crate) fn build_expression(
         &self,
         table_name: &str,
@@ -279,12 +349,10 @@ impl PlanBuilder {
                 let column_index = columns
                     .iter()
                     .position(|c| c.to_lowercase() == column_name)
-                    .ok_or_else(|| {
-                        PlanError::ParseError(format!(
-                            "Column '{}' not found in table '{}'",
-                            column_name, table_name
-                        ))
-                    })?;
+                    // MS19 Iteration 002 (T5): 列缺失与同函数的多表搜索臂
+                    // （ColumnNotFound，PG 42703）统一建模——原单表路径并入
+                    // ParseError（42601），同一缺陷两种分类。
+                    .ok_or_else(|| PlanError::ColumnNotFound(column_name.clone()))?;
                 Ok(Arc::new(ColumnExpression {
                     column_name,
                     column_index,
@@ -293,60 +361,22 @@ impl PlanBuilder {
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                 let table_ref = parts[0].value.to_lowercase();
                 let column_name = parts[1].value.to_lowercase();
-
-                // Check if this is an outer (correlated) reference
-                if let Some(ref inner_tables) = self.inner_table_names {
-                    if !inner_tables
-                        .iter()
-                        .any(|t| t.eq_ignore_ascii_case(&table_ref))
-                    {
-                        let param_name = format!("{}.{}", table_ref, column_name);
-                        return Ok(Arc::new(ParameterExpression::new(param_name)));
-                    }
-                }
-
-                // MS09-T02: NLJ combined-row layout override (design D5a) —
-                // qualified names resolve to their table's layout offset +
-                // in-table position. Correlated outer refs were returned
-                // above, so this only sees the join's own tables.
-                if let Some(layout) = &self.join_column_layout {
-                    let mut offset = 0;
-                    for (table, columns) in layout {
-                        if *table == table_ref {
-                            return match columns
-                                .iter()
-                                .position(|c| c.to_lowercase() == column_name)
-                            {
-                                Some(pos) => Ok(Arc::new(ColumnExpression {
-                                    column_name,
-                                    column_index: offset + pos,
-                                })),
-                                None => Err(PlanError::ColumnNotFound(column_name)),
-                            };
-                        }
-                        offset += columns.len();
-                    }
-                    return Err(PlanError::TableNotFound(table_ref));
-                }
-
-                // Resolve the table reference
-                let columns = self.tables.get(&table_ref).ok_or_else(|| {
-                    PlanError::ParseError(format!("Table '{}' not found", table_ref))
-                })?;
-                let column_index = columns
-                    .iter()
-                    .position(|c| c.to_lowercase() == column_name)
-                    .ok_or_else(|| {
-                        PlanError::ParseError(format!(
-                            "Column '{}' not found in table '{}'",
-                            column_name, table_ref
-                        ))
-                    })?;
-                Ok(Arc::new(ColumnExpression {
-                    column_name,
-                    column_index,
-                }))
+                self.qualified_column_expression(&table_ref, &column_name)
             }
+
+            // MS20 T2: alias.table.col 三段列引用——前两段拼成已注册的限定名
+            // 键（`"o.u"`），与两段臂共用同一解析体（含相关外层引用判定与
+            // NLJ 组合行列布局）。路由未命中时该键不存在，维持既有拒绝面。
+            Expr::CompoundIdentifier(parts) if parts.len() == 3 => {
+                let table_ref = format!(
+                    "{}.{}",
+                    parts[0].value.to_lowercase(),
+                    parts[1].value.to_lowercase()
+                );
+                let column_name = parts[2].value.to_lowercase();
+                self.qualified_column_expression(&table_ref, &column_name)
+            }
+
             Expr::Value(v) => {
                 // Constant value
                 let value = value_from_sqlparser(v)?;
@@ -372,7 +402,9 @@ impl PlanBuilder {
                         | DataType::Timestamp(_, TimezoneInfo::None) => Err(PlanError::ParseError(
                             format!("invalid DATE/TIMESTAMP literal: '{value}'"),
                         )),
-                        _ => Err(PlanError::UnsupportedExpression),
+                        _ => Err(PlanError::UnsupportedExpression(
+                            data_type.to_string().to_uppercase(),
+                        )),
                     },
                 }
             }
@@ -418,7 +450,11 @@ impl PlanBuilder {
                             SqlOp::Minus => ArithOp::Sub,
                             SqlOp::Multiply => ArithOp::Mul,
                             SqlOp::Divide => ArithOp::Div,
-                            _ => return Err(PlanError::UnsupportedExpression),
+                            _ => {
+                                return Err(PlanError::UnsupportedExpression(format!(
+                                    "ARITHMETIC OPERATOR {op}"
+                                )))
+                            }
                         };
                         Ok(Arc::new(BinaryArithExpression {
                             left: self.build_expression(table_name, left)?,
@@ -501,7 +537,11 @@ impl PlanBuilder {
                             ) => {
                                 args.push(self.build_expression(table_name, e)?);
                             }
-                            _ => return Err(PlanError::UnsupportedExpression),
+                            _ => {
+                                return Err(PlanError::UnsupportedExpression(
+                                    "COALESCE ARGUMENT".into(),
+                                ))
+                            }
                         }
                     }
                     if args.is_empty() {
@@ -571,7 +611,7 @@ impl PlanBuilder {
                         args,
                     }))
                 } else {
-                    Err(PlanError::UnsupportedExpression)
+                    Err(PlanError::UnsupportedExpression(func_name))
                 }
             }
             // MS11-T03: TRIM parses as a dedicated sqlparser variant, not
@@ -626,7 +666,7 @@ impl PlanBuilder {
                     Err(PlanError::UnsupportedValue)
                 }
             }
-            _ => Err(PlanError::UnsupportedExpression),
+            _ => Err(PlanError::UnsupportedExpression("EXPRESSION".into())),
         }
     }
 
@@ -671,9 +711,9 @@ impl PlanBuilder {
                             return Ok(pred);
                         }
                         // Try to convert to comparison operator
-                        let comp_op = self
-                            .convert_comparison_op(op)
-                            .ok_or(PlanError::UnsupportedExpression)?;
+                        let comp_op = self.convert_comparison_op(op).ok_or_else(|| {
+                            PlanError::UnsupportedExpression(format!("COMPARISON OPERATOR {op}"))
+                        })?;
                         let left_expr = self.build_expression(table_name, left)?;
                         let right_expr = self.build_expression(table_name, right)?;
                         Ok(Arc::new(ComparisonPredicate {
@@ -790,7 +830,7 @@ impl PlanBuilder {
             } => Ok(Arc::new(NotPredicate {
                 inner: self.build_where(table_name, inner)?,
             })),
-            _ => Err(PlanError::UnsupportedExpression),
+            _ => Err(PlanError::UnsupportedExpression("PREDICATE".into())),
         }
     }
 }

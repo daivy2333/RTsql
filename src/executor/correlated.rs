@@ -84,8 +84,26 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
         | PhysicalPlan::Delete(_)
         | PhysicalPlan::CreateTable(_)
         | PhysicalPlan::DropTable(_) => {}
+        PhysicalPlan::CreateTableAsSelect(node) => {
+            // MS20 T4: CTAS 包着一条完整 SELECT，递归其下计划（谓词/表达式
+            // 参数注入与 `Projection` 语义由源计划自身承担）。
+            inject_correlated_values(&node.select, param_values);
+        }
+        PhysicalPlan::SetOperation(node) => {
+            // MS25 T3: 复合两侧的谓词/表达式参数注入（两侧均为完整 SELECT）
+            inject_correlated_values(&node.left, param_values);
+            inject_correlated_values(&node.right, param_values);
+        }
+        PhysicalPlan::Distinct(node) => {
+            // MS25 T2: 无自有谓词，递归输入（其下的 Projection 臂承担表达式
+            // 参数注入）。
+            inject_correlated_values(&node.input, param_values);
+        }
         // MS13 T9: no-FORM 输入节点无谓词、无子计划
         PhysicalPlan::SingleRow => {}
+        // MS25 T6: EXPLAIN 只渲染不执行（子查询内不可达 EXPLAIN 语句），
+        // 被观测计划不参与参数注入。
+        PhysicalPlan::Explain(_) => {}
     }
 }
 

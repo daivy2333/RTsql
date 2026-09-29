@@ -23,7 +23,7 @@ fn rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
         Response::AffectedRows { count } => {
             panic!("expected QueryResult, got AffectedRows({count})")
         }
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             panic!("expected QueryResult, got Error: {message}")
         }
         Response::Pong => {
@@ -35,7 +35,7 @@ fn rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
 /// Helper: extract error message from an Error response.
 fn error_msg(resp: Response) -> String {
     match resp {
-        Response::Error { message } => message,
+        Response::Error { message, .. } => message,
         Response::Pong => "Pong".to_string(),
         _ => panic!("expected Error, got non-error response"),
     }

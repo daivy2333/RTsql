@@ -11,6 +11,11 @@ use std::collections::HashMap;
 pub struct OrderByColumn {
     pub column: String,
     pub asc: bool,
+    /// MS25 T7（design D8）：输出别名键的求值表达式。`Some` = 该键按顶层
+    /// 投影输出名解析（decorate-sort-undecorate：`SortExecutor` 在未投影的
+    /// 输入行上求值后按键排序）；`None` = 既有列名键（按 `columns` 位置取值）。
+    /// 复合语句尾 ORDER BY 与聚合查询的别名键维持列名键。
+    pub expr: Option<ExpressionRef>,
 }
 
 /// 物理计划节点（同步结构，M5 异步执行）
@@ -37,6 +42,8 @@ pub enum PhysicalPlan {
     Delete(DeleteNode),
     /// 创建表
     CreateTable(CreateTableNode),
+    /// CTAS：`CREATE TABLE <name> AS <SELECT>`（MS20 T4）
+    CreateTableAsSelect(CreateTableAsSelectNode),
     /// 删除表
     DropTable(DropTableNode),
     /// 排序节点（ORDER BY）
@@ -61,6 +68,16 @@ pub enum PhysicalPlan {
     DerivedScan(DerivedScanNode),
     /// 投影表达式节点（MS11-T01 Iter001 — SELECT 派生列）
     Projection(ProjectionNode),
+    /// 去重节点（MS25 T2 — `SELECT DISTINCT`，作用于已就绪的输出行形状）
+    Distinct(DistinctNode),
+    /// 集合操作节点（MS25 T3 — `UNION [ALL]` / `INTERSECT` / `EXCEPT`）
+    SetOperation(SetOperationNode),
+    /// 计划树文本输出节点（MS25 T6 — `EXPLAIN <SELECT>`）
+    ///
+    /// 仅包装被观测的内层计划：pipeline 构造臂**不构造内层执行器**（派生表急切
+    /// 物化与任何执行器副作用都不触发），文本由 `plan_format::render_plan_tree`
+    /// 纯函数渲染。
+    Explain(ExplainNode),
     /// 无 FROM 虚拟单行输入节点（MS13 T9 — no-FORM SELECT）
     ///
     /// 恰产出一行空行（`vec![]`），供其上的 ProjectionNode 逐项求值；无负载
@@ -316,6 +333,17 @@ pub struct CreateTableNode {
     pub primary_key: Option<String>,
 }
 
+/// CTAS 节点（MS20 T4）：`CREATE TABLE <name> AS <SELECT>` 物化到主库
+#[derive(Debug, Clone)]
+pub struct CreateTableAsSelectNode {
+    /// 主库目标表名（扁平名；附加库目标已在计划期拒绝）
+    pub table_name: String,
+    /// 物化源 SELECT 计划
+    pub select: Box<PhysicalPlan>,
+    /// SELECT 输出列名（= 物化表列名，序同输出形状）
+    pub columns: Vec<String>,
+}
+
 /// 删除表节点
 #[derive(Debug, Clone)]
 pub struct DropTableNode {
@@ -390,6 +418,24 @@ pub struct JoinNode {
     pub output_columns: Vec<OutputColumn>,
 }
 
+/// Nested Loop Join 语义类型（MS25 T1 — design D1 加性字段）
+///
+/// `Inner` 为既有形态（仅产出匹配组合）。`Left` 为左外连接：左行无匹配时
+/// 产出该左行并以 NULL 补齐右侧列。`Full` 为全外连接：两侧都补齐。`RIGHT
+/// JOIN` 由 planner 交换左右输入后按 `Left` 承载（左输入 = 原右表，未匹配的
+/// 原左行丢弃），故本枚举不设 `Right` 变体——计划期的左右交换在节点的
+/// `left`/`right` 上可见。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NestedLoopJoinType {
+    /// INNER JOIN（既有形态）
+    #[default]
+    Inner,
+    /// LEFT OUTER JOIN
+    Left,
+    /// FULL OUTER JOIN（两侧都补齐）
+    Full,
+}
+
 /// Nested Loop Join 节点（MS09-T02 — 非等值/混合 ON，plan 期启发式路由）
 ///
 /// 对左输入每行 × 右输入每行的组合行（左行 ++ 右行）求值完整 ON 谓词，
@@ -405,6 +451,8 @@ pub struct NestedLoopJoinNode {
     pub predicate: PredicateRef,
     /// 输出列映射（与 JoinNode 同型）
     pub output_columns: Vec<OutputColumn>,
+    /// MS25 T1：连接语义（`Inner` = 变更前逐字节一致的既有形态）
+    pub join_type: NestedLoopJoinType,
 }
 
 /// 聚合节点（GROUP BY + 聚合函数）
@@ -419,6 +467,11 @@ pub struct AggregateNode {
     pub group_by: Vec<String>,
     pub group_key_exprs: Vec<ExpressionRef>,
     pub aggregates: Vec<AggregateFunc>,
+    /// MS25 T8（design D9）：与 `aggregates` 同序的参数列输入行索引。`Some`
+    /// 由计划期在 JOIN 基座的组合布局上解析（`column_indices` 的按名折叠不
+    /// 参与决策）；`None` = 无参数（`COUNT(*)`）或单表面——后者沿既有按名
+    /// 查找语义逐字节不变。
+    pub aggregate_arg_indices: Vec<Option<usize>>,
     pub output_columns: Vec<String>,
     pub table_name: String,
     pub column_indices: HashMap<String, usize>,
@@ -537,4 +590,52 @@ pub struct ProjectionNode {
     pub items: Vec<ProjectionItem>,
     /// 输出列名（CLI 表头来源，`get_plan_output_columns` 直接返回）
     pub columns: Vec<String>,
+}
+
+/// 去重节点（MS25 T2 — `SELECT DISTINCT`）
+///
+/// 插入位置在「输出行形状已就绪」处：纯列清单在 `Sort` 之下即输出形状，
+/// 表达式项在顶层 `Projection` 之上。行形状与输出列名与输入一致（本节点不
+/// 改列）。
+#[derive(Debug, Clone)]
+pub struct DistinctNode {
+    /// 输入计划（产出待去重的输出行）
+    pub input: Box<PhysicalPlan>,
+}
+
+/// 集合操作种类（MS25 T3）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOpKind {
+    /// `UNION` / `UNION ALL`（去重由节点的 `all` 标志切换）
+    Union,
+    /// `INTERSECT`（去重交集）
+    Intersect,
+    /// `EXCEPT`（去重差集）
+    Except,
+}
+
+/// 集合操作节点（MS25 T3 — `UNION [ALL]` / `INTERSECT` / `EXCEPT`）
+///
+/// 两侧计划各自产出其分支的输出行（列数已由 planner 校验相等）；复合输出列名
+/// 取左侧列名。`all` 仅对 `Union` 有意义（`UNION ALL` 保留重复与序），
+/// `INTERSECT`/`EXCEPT` 的 `ALL` 量化词在计划期点名拒绝（SQLite 对齐）。
+#[derive(Debug, Clone)]
+pub struct SetOperationNode {
+    /// 左分支计划
+    pub left: Box<PhysicalPlan>,
+    /// 右分支计划
+    pub right: Box<PhysicalPlan>,
+    /// 操作种类
+    pub op: SetOpKind,
+    /// `UNION ALL` = 保留重复行（其他形态恒去重）
+    pub all: bool,
+    /// 复合输出列名（= 左侧列名）
+    pub columns: Vec<String>,
+}
+
+/// 计划树包装节点（MS25 T6 — `EXPLAIN <SELECT>`）
+#[derive(Debug, Clone)]
+pub struct ExplainNode {
+    /// 被观测的内层计划（渲染对象，从不执行）
+    pub input: Box<PhysicalPlan>,
 }

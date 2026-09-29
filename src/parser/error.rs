@@ -9,16 +9,18 @@ pub enum PlanError {
     ParseError(String),
     /// 不支持的值类型
     UnsupportedValue,
-    /// 不支持的语句类型
-    UnsupportedStatement,
+    /// 不支持的语句类型（载荷为被拒能力名，MS19-T02）
+    UnsupportedStatement(String),
     /// 无效查询
     InvalidQuery(String),
-    /// 不支持的表达式类型
-    UnsupportedExpression,
+    /// 不支持的表达式类型（载荷为被拒能力名，MS19-T02）
+    UnsupportedExpression(String),
     /// 缺少必要字段
     MissingField(String),
     /// CREATE TABLE 空列定义
     EmptyColumnDefinition,
+    /// CTAS 输出列类型冲突（载荷为列名与参与类型，MS20-T04）
+    CtasColumnTypeConflict(String),
     /// CREATE TABLE 多主键
     MultiplePrimaryKey,
     /// WHERE 列不存在
@@ -59,6 +61,8 @@ pub enum PlanError {
     NotInWithNull,
     /// 事务语句/边界子句拒绝（MS11-T02；消息即全文）
     TransactionStatement(String),
+    /// ATTACH 语句拒绝（MS20 T1；消息即全文）
+    AttachStatement(String),
 }
 
 impl fmt::Display for PlanError {
@@ -66,12 +70,19 @@ impl fmt::Display for PlanError {
         match self {
             PlanError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             PlanError::UnsupportedValue => write!(f, "Unsupported value type"),
-            PlanError::UnsupportedStatement => write!(f, "Unsupported statement type"),
+            PlanError::UnsupportedStatement(name) => {
+                write!(f, "Unsupported statement type: {}", name)
+            }
             PlanError::InvalidQuery(msg) => write!(f, "Invalid query: {}", msg),
-            PlanError::UnsupportedExpression => write!(f, "Unsupported expression type"),
+            PlanError::UnsupportedExpression(name) => {
+                write!(f, "Unsupported expression type: {}", name)
+            }
             PlanError::MissingField(field) => write!(f, "Missing required field: {}", field),
             PlanError::EmptyColumnDefinition => {
                 write!(f, "Empty column definition in CREATE TABLE")
+            }
+            PlanError::CtasColumnTypeConflict(detail) => {
+                write!(f, "CTAS column type conflict: {}", detail)
             }
             PlanError::MultiplePrimaryKey => write!(f, "Multiple primary keys in CREATE TABLE"),
             PlanError::ColumnNotFound(col) => write!(f, "Column not found: {}", col),
@@ -115,8 +126,94 @@ impl fmt::Display for PlanError {
             }
             PlanError::NotInWithNull => write!(f, "NOT IN subquery contains NULL values"),
             PlanError::TransactionStatement(msg) => write!(f, "{}", msg),
+            PlanError::AttachStatement(msg) => write!(f, "{}", msg),
         }
     }
 }
 
 impl std::error::Error for PlanError {}
+
+impl PlanError {
+    /// PG 协议 SQLSTATE 分类（MS19-T02：能力面拒绝 0A000、解析 42601、
+    /// 表 42P01、列 42703、列名歧义 42702，其余未分类 58000 兜底）。
+    pub fn sqlstate(&self) -> &'static str {
+        match self {
+            PlanError::ParseError(_) => "42601",
+            PlanError::UnsupportedValue
+            | PlanError::UnsupportedStatement(_)
+            | PlanError::UnsupportedExpression(_)
+            | PlanError::UnsupportedJoinType
+            | PlanError::UnsupportedConstraint(_)
+            | PlanError::UnsupportedSubqueryPosition
+            | PlanError::InSubqueryJoinUnsupported
+            | PlanError::TransactionStatement(_)
+            | PlanError::AttachStatement(_) => "0A000",
+            PlanError::TableNotFound(_) => "42P01",
+            PlanError::ColumnNotFound(_) | PlanError::GroupByColumnNotFound(_) => "42703",
+            PlanError::AmbiguousColumn(_) => "42702",
+            _ => "58000",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R3：SQLSTATE 分类表全变体可枚举（MS19-T02）。
+    #[test]
+    fn planerror_sqlstate_mapping() {
+        let cases: Vec<(PlanError, &str)> = vec![
+            (PlanError::ParseError("boom".into()), "42601"),
+            (PlanError::UnsupportedValue, "0A000"),
+            (PlanError::UnsupportedStatement("MERGE".into()), "0A000"),
+            (
+                PlanError::UnsupportedExpression("PREDICATE".into()),
+                "0A000",
+            ),
+            (PlanError::UnsupportedJoinType, "0A000"),
+            (PlanError::UnsupportedConstraint("CHECK"), "0A000"),
+            (PlanError::UnsupportedSubqueryPosition, "0A000"),
+            (PlanError::InSubqueryJoinUnsupported, "0A000"),
+            (PlanError::TransactionStatement("SAVEPOINT".into()), "0A000"),
+            (PlanError::AttachStatement("ATTACH".into()), "0A000"),
+            (PlanError::TableNotFound("t".into()), "42P01"),
+            (PlanError::ColumnNotFound("c".into()), "42703"),
+            (PlanError::GroupByColumnNotFound("c".into()), "42703"),
+            (PlanError::AmbiguousColumn("c".into()), "42702"),
+            // 未分类错误维持 58000 兜底
+            (PlanError::InvalidQuery("q".into()), "58000"),
+            (PlanError::MissingField("f".into()), "58000"),
+            (PlanError::EmptyColumnDefinition, "58000"),
+            (PlanError::CtasColumnTypeConflict("c".into()), "58000"),
+            (PlanError::MultiplePrimaryKey, "58000"),
+            (PlanError::InvalidConstraint("c".into()), "58000"),
+            (PlanError::MissingOnClause, "58000"),
+            (PlanError::NonAggregatedColumn("c".into()), "58000"),
+            (PlanError::InvalidAggregateArgument("a".into()), "58000"),
+            (PlanError::HavingNonAggregatedReference("c".into()), "58000"),
+            (PlanError::SubqueryReturnsMultipleRow, "58000"),
+            (PlanError::SubqueryReturnsMultipleColumns, "58000"),
+            (PlanError::SubqueryReturnsEmpty, "58000"),
+            (PlanError::CorrelatedParamError("e".into()), "58000"),
+            (PlanError::NotInWithNull, "58000"),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(err.sqlstate(), expected, "{:?}", err);
+        }
+    }
+
+    /// R2：两变体 Display 追加能力名，既有文案框架保持。
+    #[test]
+    fn unsupported_variants_display_capability_name() {
+        assert_eq!(
+            PlanError::UnsupportedStatement("MERGE".into()).to_string(),
+            "Unsupported statement type: MERGE"
+        );
+        assert_eq!(
+            PlanError::UnsupportedExpression("ARITHMETIC OPERATOR %".into()).to_string(),
+            "Unsupported expression type: ARITHMETIC OPERATOR %"
+        );
+    }
+}

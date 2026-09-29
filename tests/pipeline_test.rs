@@ -99,7 +99,7 @@ async fn test_pipeline_create_table() {
         rtsql::network::protocol::Response::AffectedRows { count } => {
             assert_eq!(count, 0);
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("CREATE TABLE failed: {}", message);
         }
         _ => panic!("Expected AffectedRows response"),
@@ -111,7 +111,7 @@ async fn test_pipeline_create_table() {
         rtsql::network::protocol::Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 0); // Empty table
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("SELECT failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -140,7 +140,7 @@ async fn test_pipeline_create_table_already_exists() {
         .await;
 
     match response {
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             assert!(message.contains("already exists"));
         }
         _ => panic!("Expected Error response for duplicate table"),
@@ -169,7 +169,7 @@ async fn test_pipeline_drop_table() {
         rtsql::network::protocol::Response::AffectedRows { count } => {
             assert_eq!(count, 0);
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("DROP TABLE failed: {}", message);
         }
         _ => panic!("Expected AffectedRows response"),
@@ -178,7 +178,7 @@ async fn test_pipeline_drop_table() {
     // Verify table is dropped - should fail to query
     let response = db.execute_sql("SELECT * FROM users").await;
     match response {
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             assert!(message.contains("not found") || message.contains("does not exist"));
         }
         _ => panic!("Expected Error response for non-existent table"),
@@ -204,7 +204,7 @@ async fn test_pipeline_drop_table_if_exists() {
     // DROP TABLE without IF EXISTS on non-existent table should fail
     let response = db.execute_sql("DROP TABLE nonexistent").await;
     match response {
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             assert!(message.contains("not found"));
         }
         _ => panic!("Expected Error response for non-existent table"),
@@ -240,7 +240,7 @@ async fn test_pipeline_where_select() {
             // Should return Alice (30) and Charlie (35)
             assert_eq!(rows.len(), 2, "Expected 2 rows with age > 28");
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("SELECT with WHERE failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -276,7 +276,7 @@ async fn test_pipeline_where_select_and() {
             // Should return only Alice (30)
             assert_eq!(rows.len(), 1, "Expected 1 row with age > 25 AND age < 35");
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("SELECT with WHERE AND failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -312,7 +312,7 @@ async fn test_pipeline_where_select_or() {
             // Should return Bob (25) and Charlie (35)
             assert_eq!(rows.len(), 2, "Expected 2 rows with age < 26 OR age > 34");
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("SELECT with WHERE OR failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -347,7 +347,7 @@ async fn test_pipeline_where_string_comparison() {
         rtsql::network::protocol::Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "Expected 1 row with name = 'Bob'");
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("SELECT with string WHERE failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -381,7 +381,7 @@ async fn test_pipeline_full_flow() {
         rtsql::network::protocol::Response::AffectedRows { count } => {
             assert_eq!(count, 1, "Expected 1 row affected");
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("INSERT failed: {}", message);
         }
         other => panic!("Unexpected response type: {:?}", other),
@@ -456,7 +456,7 @@ async fn test_select_order_by_asc() {
             assert_eq!(rows[2][0], serde_json::json!(3)); // id
             assert_eq!(rows[2][2], serde_json::json!(35)); // age
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("SELECT with ORDER BY ASC failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -501,7 +501,7 @@ async fn test_select_order_by_desc_with_limit() {
             assert_eq!(rows[1][0], serde_json::json!(1)); // id
             assert_eq!(rows[1][2], serde_json::json!(30)); // age
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("SELECT with ORDER BY DESC LIMIT failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -551,7 +551,7 @@ async fn test_select_where_order_by_limit() {
             // Row 1: Date (id=4, price=15.0)
             assert_eq!(rows[1][0], serde_json::json!(4)); // id
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("SELECT with WHERE + ORDER BY + LIMIT failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -600,7 +600,7 @@ async fn test_pipeline_join_execution_basic() {
                 assert_eq!(row.len(), 2, "Expected 2 columns per row");
             }
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("JOIN query failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),
@@ -643,7 +643,7 @@ async fn test_pipeline_join_with_null_keys() {
             assert_eq!(rows[0][0], serde_json::json!(1)); // a.id
             assert_eq!(rows[0][1], serde_json::json!(1)); // b.id
         }
-        rtsql::network::protocol::Response::Error { message } => {
+        rtsql::network::protocol::Response::Error { message, .. } => {
             panic!("JOIN with NULL keys failed: {}", message);
         }
         _ => panic!("Expected QueryResult response"),

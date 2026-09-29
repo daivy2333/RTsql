@@ -43,6 +43,9 @@ pub struct AntiJoinExecutor {
     right_plan: Option<PhysicalPlan>,
     /// Database reference for per-row rebuild (None = independent subquery)
     database: Option<Arc<Database>>,
+    /// MS20 T2: cross-db route table re-applied on every correlated
+    /// right-plan rebuild (empty outside an ATTACH session).
+    routed_tables: Arc<crate::pipeline::RoutedTables>,
     /// MS09 Iter000 (D4): statement-start Read Committed snapshot re-applied
     /// on every correlated right-plan rebuild (`None` under RepeatableRead).
     snapshot: Option<Snapshot>,
@@ -78,6 +81,7 @@ impl AntiJoinExecutor {
             right_plan: config.right_plan,
             database: config.database,
             snapshot: config.snapshot,
+            routed_tables: config.routed_tables,
             left_column_indices: config.left_column_indices,
             right_column_indices: config.right_column_indices,
             right_hashmap: None,
@@ -232,6 +236,7 @@ impl Executor for AntiJoinExecutor {
                                                     database,
                                                     None,
                                                     self.snapshot.clone(),
+                                                    &self.routed_tables,
                                                 )
                                                 .await?;
                                             let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =

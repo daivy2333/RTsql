@@ -1570,3 +1570,418 @@ fn do_update_compound_lhs_rejected() {
         Ok(plan) => panic!("Expected compound-LHS rejection, got {:?}", plan),
     }
 }
+
+// ===========================================================================
+// MS19 Iteration 001 — 错误可操作化（R2：计划错误携带能力名）
+// ===========================================================================
+
+/// R2-S1：不支持语句点名能力——MERGE 走顶层 catch-all，报错含语句关键字。
+#[test]
+fn unsupported_statement_names_capability() {
+    let sql = "MERGE INTO users USING users ON users.id = users.id \
+               WHEN MATCHED THEN UPDATE SET name = 'x'";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.starts_with("Unsupported statement type: MERGE"),
+                "不支持语句必须点名能力，实际: {msg}"
+            );
+        }
+        Ok(plan) => panic!("Expected UnsupportedStatement rejection, got {:?}", plan),
+    }
+}
+
+/// R2-S1 补充：非 Table 的 DROP 走语句类别臂，报错含 `DROP <对象>`。
+#[test]
+fn unsupported_statement_names_drop_object_type() {
+    let sql = "DROP VIEW v";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.starts_with("Unsupported statement type: DROP VIEW"),
+                "非 Table 的 DROP 必须点名对象类型，实际: {msg}"
+            );
+        }
+        Ok(plan) => panic!("Expected UnsupportedStatement rejection, got {:?}", plan),
+    }
+}
+
+/// R2-S2：不支持表达式点名能力——列间取模（算术算子臂）点名能力名。
+#[test]
+fn unsupported_expression_names_capability() {
+    let sql = "SELECT id % name FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.starts_with("Unsupported expression type: "),
+                "不支持表达式必须点名能力，实际: {msg}"
+            );
+            assert!(
+                msg.len() > "Unsupported expression type: ".len(),
+                "点名内容不得为空，实际: {msg}"
+            );
+        }
+        Ok(plan) => panic!("Expected UnsupportedExpression rejection, got {:?}", plan),
+    }
+}
+
+/// R2-S3 / R4-S2：既有点名拒绝变体文案逐字节不变（CHECK/FK、IN 子查询 JOIN、
+/// 会话外事务语句）——本变更只补两个 Unsupported* 变体的能力名。
+#[test]
+fn explicit_rejection_messages_unchanged() {
+    for (sql, expected) in [
+        (
+            "CREATE TABLE t (a INT CHECK (a > 0))",
+            "Unsupported constraint: CHECK",
+        ),
+        (
+            "CREATE TABLE t (a INT REFERENCES o (x))",
+            "Unsupported constraint: FOREIGN KEY",
+        ),
+        ("BEGIN", "transaction statements (BEGIN/COMMIT/ROLLBACK) are only supported in an rtsql CLI session"),
+    ] {
+        let stmts = parse_sql(sql).unwrap();
+        let mut builder = PlanBuilder::new();
+        match builder.build_plan(&stmts[0]) {
+            Err(e) => assert_eq!(e.to_string(), expected, "{sql}"),
+            Ok(plan) => panic!("{sql}: expected rejection, got {:?}", plan),
+        }
+    }
+
+    // IN 子查询含 JOIN 的诚实拒绝（ISS02 既有文案）
+    let sql = "SELECT o.x FROM o WHERE o.x IN (SELECT r.a FROM r JOIN s ON r.a = s.b)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    builder.register_table("o", vec!["x".into()], "x");
+    builder.register_table("r", vec!["a".into()], "a");
+    builder.register_table("s", vec!["b".into()], "b");
+    match builder.build_plan(&stmts[0]) {
+        Err(e) => assert_eq!(e.to_string(), "IN subquery with JOIN is not supported"),
+        Ok(plan) => panic!("{sql}: expected rejection, got {:?}", plan),
+    }
+}
+
+// ===========================================================================
+// MS19 Iteration 002 — 列解析静默面收口（T4：投影严格解析 + 别名表头）
+// ===========================================================================
+
+/// R6-S1：纯列路径的未知裸列 SHALL 计划期点名拒绝（现状静默回落 identity，
+/// 返回全列全数据）。
+#[test]
+fn unknown_projection_column_rejected() {
+    let sql = "SELECT nosuchcol FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    match builder.build_plan(&stmts[0]) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("nosuchcol"), "拒绝必须点名未知列，实际: {msg}");
+        }
+        Ok(plan) => panic!("Expected unknown projection column rejection, got {plan:?}"),
+    }
+}
+
+/// R6-S2：已知列 + 未知列混合 SHALL 整体点名拒绝（不得只解析出已知子集）。
+#[test]
+fn mixed_known_unknown_rejected() {
+    let sql = "SELECT id, nosuchcol FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    match builder.build_plan(&stmts[0]) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("nosuchcol"),
+                "混合清单必须点名未知列，实际: {msg}"
+            );
+        }
+        Ok(plan) => panic!("Expected mixed projection rejection, got {plan:?}"),
+    }
+}
+
+/// R6-S3：两段限定名的未知列 SHALL 点名拒绝。
+#[test]
+fn unknown_qualified_column_rejected() {
+    let sql = "SELECT users.nosuchcol FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    match builder.build_plan(&stmts[0]) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("nosuchcol"),
+                "限定名必须点名未知列，实际: {msg}"
+            );
+        }
+        Ok(plan) => panic!("Expected unknown qualified column rejection, got {plan:?}"),
+    }
+}
+
+/// R6-S4：可解析投影形态逐字节零回归——通配符恒等、子集、重排、重复列、
+/// 有效限定名各自的 DataScan 投影索引形状。
+#[test]
+fn resolvable_projection_shapes_unchanged() {
+    for (sql, expected) in [
+        ("SELECT * FROM users", vec![]),
+        ("SELECT id FROM users", vec![0]),
+        ("SELECT name FROM users", vec![1]),
+        ("SELECT name, id FROM users", vec![1, 0]),
+        ("SELECT id, id FROM users", vec![0, 0]),
+        ("SELECT users.id, name FROM users", vec![0, 1]),
+        ("SELECT ID, Name FROM users", vec![0, 1]),
+    ] {
+        let stmts = parse_sql(sql).unwrap();
+        let mut builder = setup_builder();
+        match builder
+            .build_plan(&stmts[0])
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        {
+            PhysicalPlan::DataScan(node) => assert_eq!(node.projection, expected, "{sql}"),
+            other => panic!("{sql}: expected DataScan, got {other:?}"),
+        }
+    }
+}
+
+/// R7-S1：纯非聚合查询的 `col AS alias` SHALL 走既有顶层 Projection 通路，
+/// 表头 = 别名（现状别名被当基列名解析、静默退化为全 schema 恒等）。
+#[test]
+fn alias_header_plan_shape() {
+    let sql = "SELECT name AS n FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    match builder.build_plan(&stmts[0]) {
+        Ok(PhysicalPlan::Projection(node)) => {
+            assert_eq!(node.columns, vec!["n"], "表头必须是别名");
+            assert_eq!(node.items.len(), 1);
+            assert_eq!(node.items[0].name, "n");
+        }
+        Ok(other) => panic!("Expected Projection for aliased column, got {other:?}"),
+        Err(e) => panic!("Expected aliased column to plan, got error: {e}"),
+    }
+}
+
+/// R7-S2：未知列的别名项 SHALL 点名拒绝该列。
+#[test]
+fn unknown_alias_column_rejected() {
+    let sql = "SELECT nosuchcol AS x FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    match builder.build_plan(&stmts[0]) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("nosuchcol"), "必须点名未知列，实际: {msg}");
+        }
+        Ok(plan) => panic!("Expected unknown alias column rejection, got {plan:?}"),
+    }
+}
+
+// ===========================================================================
+// MS19 Iteration 002 — 列解析静默面收口（T5：列缺失重分类 ColumnNotFound）
+// ===========================================================================
+
+/// R8-S1：WHERE 谓词列缺失 SHALL 走 `ColumnNotFound`（文案 `Column not found:
+/// {col}`、PG 42703），与多表搜索臂同模（现状被建模为 `ParseError` / 42601）。
+#[test]
+fn where_column_missing_column_not_found() {
+    let sql = "SELECT id FROM users WHERE nosuch = 1";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    match builder.build_plan(&stmts[0]) {
+        Err(e) => assert_eq!(e.to_string(), "Column not found: nosuch"),
+        Ok(plan) => panic!("Expected ColumnNotFound, got {plan:?}"),
+    }
+}
+
+/// R8-S2：值表达式参数列缺失同模重分类。
+#[test]
+fn expression_arg_column_missing() {
+    let sql = "SELECT abs(nosuch) FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    match builder.build_plan(&stmts[0]) {
+        Err(e) => assert_eq!(e.to_string(), "Column not found: nosuch"),
+        Ok(plan) => panic!("Expected ColumnNotFound, got {plan:?}"),
+    }
+}
+
+/// R8-S3：JOIN ON 条件列缺失的既有 `ColumnNotFound` 路径零回归（NLJ 布局臂）。
+#[test]
+fn join_layout_zero_regression() {
+    let sql = "SELECT o.x FROM o JOIN r ON o.nosuch = r.a";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    builder.register_table("o", vec!["x".into()], "x");
+    builder.register_table("r", vec!["a".into()], "a");
+    match builder.build_plan(&stmts[0]) {
+        Err(e) => assert_eq!(e.to_string(), "Column not found: nosuch"),
+        Ok(plan) => panic!("Expected ColumnNotFound, got {plan:?}"),
+    }
+}
+
+// ===========================================================================
+// MS19 Iteration 002 — 列解析静默面收口（T6：ORDER BY 键计划期校验）
+// ===========================================================================
+
+/// R9-S1：不可解析的排序键 SHALL 计划期点名拒绝（单键与混合键两形态；现状
+/// 静默跳过该键、不排序不报错）。
+#[test]
+fn unknown_order_by_key_rejected() {
+    for sql in [
+        "SELECT id FROM users ORDER BY nosuch",
+        "SELECT id FROM users ORDER BY nosuch, name DESC",
+    ] {
+        let stmts = parse_sql(sql).unwrap();
+        let mut builder = setup_builder();
+        match builder.build_plan(&stmts[0]) {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("nosuch"), "{sql}: 必须点名排序键，实际: {msg}");
+            }
+            Ok(plan) => panic!("{sql}: Expected unknown ORDER BY key rejection, got {plan:?}"),
+        }
+    }
+}
+
+/// R9-S2：既有可达排序形态的 Sort 节点形状零回归——基础列排序键、表达式查询
+/// 的基础列排序键（输入全形状，键不在投影内）、聚合投影名排序键。
+#[test]
+fn reachable_order_by_shapes_unchanged() {
+    // (sql, 期望 order_by, 期望 columns, 期望 projection)
+    for (sql, order_by, columns, projection) in [
+        (
+            "SELECT id FROM users ORDER BY name DESC",
+            vec![("name".to_string(), false)],
+            vec!["id".to_string(), "name".to_string()],
+            vec![0usize],
+        ),
+        (
+            "SELECT id + 1 AS d FROM users ORDER BY name DESC",
+            vec![("name".to_string(), false)],
+            vec!["id".to_string(), "name".to_string()],
+            vec![],
+        ),
+        (
+            "SELECT name, COUNT(*) FROM users GROUP BY name ORDER BY count_star",
+            vec![("count_star".to_string(), true)],
+            vec!["name".to_string(), "count_star".to_string()],
+            vec![],
+        ),
+    ] {
+        let stmts = parse_sql(sql).unwrap();
+        let mut builder = setup_builder();
+        let plan = builder
+            .build_plan(&stmts[0])
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        // 表达式查询的顶层 Projection 包在 Sort 之外（别名表头由 Projection
+        // 拥有，排序键仍是全形状输入的基础列）——比对 Sort 节点本身。
+        let node = match plan {
+            PhysicalPlan::Sort(node) => node,
+            PhysicalPlan::Projection(proj) => match *proj.input {
+                PhysicalPlan::Sort(node) => node,
+                other => panic!("{sql}: expected Sort under Projection, got {other:?}"),
+            },
+            other => panic!("{sql}: expected Sort, got {other:?}"),
+        };
+        let actual_order_by: Vec<(String, bool)> = node
+            .order_by
+            .iter()
+            .map(|o| (o.column.clone(), o.asc))
+            .collect();
+        assert_eq!(actual_order_by, order_by, "{sql}");
+        assert_eq!(node.columns, columns, "{sql}");
+        assert_eq!(node.projection, projection, "{sql}");
+    }
+}
+
+// ============================================================================
+// MS25 Iteration 004 / Cycle 002 (T12/T13) — 聚合参数解析与限定通配点名
+// ============================================================================
+
+/// T12-S3：单表面未知聚合参数 → `ColumnNotFound` 点名（静默 0 终止）。
+///
+/// RED（Cycle 002 前实测）：`SELECT count(nosuch) FROM users` 返回
+/// `{"columns":["count_nosuch"],"rows":[[0]]}` exit 0——单表面参数恒 `None`，
+/// 执行器名字查找落空后 `extract_value` 静默 `Value::Null`，COUNT 计 0。
+#[test]
+fn unknown_agg_arg_single_table_rejected() {
+    let stmts = parse_sql("SELECT count(nosuch) FROM users").unwrap();
+    let mut builder = setup_builder();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("Column not found") && msg.contains("nosuch"),
+                "单表面未知聚合参数必须点名，实际: {msg}"
+            );
+        }
+        Ok(plan) => panic!("Expected ColumnNotFound rejection, got {:?}", plan),
+    }
+}
+
+/// T12-S4：聚合参数引用 SELECT 输出别名 → `ColumnNotFound` 点名（别名不作列解析）。
+///
+/// RED（Cycle 002 前实测）：`SELECT upper(name) AS u, count(u) FROM users GROUP BY u`
+/// 的 `count(u)` 全组为 0（"u" 非输入列，名字查找落空静默 NULL）。
+#[test]
+fn alias_agg_arg_rejected() {
+    let stmts = parse_sql("SELECT upper(name) AS u, count(u) FROM users GROUP BY u").unwrap();
+    let mut builder = setup_builder();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("Column not found") && msg.contains('u'),
+                "聚合参数引用输出别名必须按列缺失点名，实际: {msg}"
+            );
+        }
+        Ok(plan) => panic!("Expected ColumnNotFound rejection, got {:?}", plan),
+    }
+}
+
+/// T13-S1：限定通配 `t.*` 三基座拒绝文案点名能力（泛化 `SELECT ITEM` 终止）。
+///
+/// RED（Cycle 002 前实测）：单表面与 JOIN 基座均报
+/// `Unsupported statement type: SELECT ITEM`——兜底臂未点名实际能力。
+#[test]
+fn qualified_wildcard_capability_named() {
+    for sql in [
+        "SELECT users.* FROM users",
+        "SELECT users.* FROM users JOIN orders ON users.id = orders.user_id",
+    ] {
+        let stmts = parse_sql(sql).unwrap();
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("orders", vec!["id".into(), "user_id".into()], "id");
+        let result = builder.build_plan(&stmts[0]);
+
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.starts_with("Unsupported statement type: QUALIFIED WILDCARD"),
+                    "限定通配必须点名能力，实际: {msg}（{sql}）"
+                );
+            }
+            Ok(plan) => panic!("Expected rejection for {sql}, got {:?}", plan),
+        }
+    }
+}

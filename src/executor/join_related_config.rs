@@ -20,4 +20,9 @@ pub struct JoinRelatedConfig {
     /// MS09 Iter000 (D4): statement-start Read Committed snapshot, re-applied
     /// on every correlated right-plan rebuild (`None` under RepeatableRead).
     pub snapshot: Option<Snapshot>,
+    /// MS20 T2: statement-level cross-db route table (qualified flat name ->
+    /// attached `Database`), re-applied on every correlated right-plan rebuild.
+    /// Empty for the lib path and for single-database sessions, which keeps
+    /// the rebuild path byte-for-byte unchanged.
+    pub routed_tables: Arc<crate::pipeline::RoutedTables>,
 }

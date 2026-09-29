@@ -32,9 +32,19 @@ pub enum Request {
 /// Response types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    QueryResult { rows: Vec<Vec<serde_json::Value>> },
-    AffectedRows { count: u64 },
-    Error { message: String },
+    QueryResult {
+        rows: Vec<Vec<serde_json::Value>>,
+    },
+    AffectedRows {
+        count: u64,
+    },
+    /// `sqlstate` 为 PG 协议 SQLSTATE 分类（MS19-T02）；`None` 时字段不参与
+    /// JSON 序列化，输出与本变更前逐字节一致，PG 侧回落 58000。
+    Error {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sqlstate: Option<String>,
+    },
     Pong,
 }
 
@@ -112,5 +122,32 @@ impl Protocol for JsonProtocol {
         stream.flush().await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R3 场景 4 通道：None 时 JSON 输出逐字节不变（既有协议兼容见证）。
+    #[test]
+    fn response_error_json_omits_none_sqlstate() {
+        let json = serde_json::to_string(&Response::Error {
+            message: "boom".to_string(),
+            sqlstate: None,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"Error":{"message":"boom"}}"#);
+    }
+
+    /// R3 场景 4：携带分类时字段出现。
+    #[test]
+    fn response_error_json_includes_sqlstate_when_present() {
+        let json = serde_json::to_string(&Response::Error {
+            message: "boom".to_string(),
+            sqlstate: Some("0A000".to_string()),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"Error":{"message":"boom","sqlstate":"0A000"}}"#);
     }
 }

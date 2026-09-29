@@ -16,7 +16,7 @@ use tempfile::tempdir;
 fn assert_affected(resp: Response, what: &str, expected: u64) {
     match resp {
         Response::AffectedRows { count } => assert_eq!(count, expected, "{what}"),
-        Response::Error { message } => panic!("{what} failed: {message}"),
+        Response::Error { message, .. } => panic!("{what} failed: {message}"),
         other => panic!("{what}: unexpected response {other:?}"),
     }
 }
@@ -24,7 +24,7 @@ fn assert_affected(resp: Response, what: &str, expected: u64) {
 fn rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
     match resp {
         Response::QueryResult { rows } => rows,
-        Response::Error { message } => panic!("{what} failed: {message}"),
+        Response::Error { message, .. } => panic!("{what} failed: {message}"),
         other => panic!("{what}: unexpected response {other:?}"),
     }
 }

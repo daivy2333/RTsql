@@ -312,6 +312,9 @@ fn correlated_on_injection() {
         })),
         predicate: Arc::clone(&join_pred),
         output_columns: Vec::new(),
+        // MS25 T1 加性字段：本用例构造的是既有 INNER 形态（注入路径见证，
+        // 与连接语义无关），显式给出既有取值。
+        join_type: rtsql::executor::NestedLoopJoinType::Inner,
     });
 
     // 单次注入覆盖两条通路：o.y 经 NLJ 臂的谓词注入；o.x 经臂递归进入左
@@ -352,31 +355,40 @@ fn correlated_on_injection() {
     );
 }
 
-/// T13 可选见证：WHERE + 非等值 JOIN 维持计划期拒绝（两种 join 节点同语义）。
+/// MS25 T1（design D2，replan 校准白名单①——前提退役改写）：WHERE + 非等值
+/// JOIN 由计划期拒绝转为可用。
 ///
-/// `query.rs` WHERE 处理的 `matches!` 扩展前，NLJ 基计划会漏接为
-/// table_name "unknown" 的单表 WHERE 路径（错误行为而非既有拒绝）；
-/// 本用例锁定扩展后的拒绝面。
+/// 本用例此前（T13 可选见证）锁定 `WHERE + 非等值 JOIN` 的计划期拒绝
+/// （`Unsupported statement type`）——该拒绝面正是 D2 解除的对象，故按 replan
+/// 裁定（用户 2026-09-27 方案 (a)）改写为本能力的**可用性见证**：同一查询经
+/// 组合行布局编译后可达且结果正确。`query.rs` WHERE 处理的 `matches!` 扩展前，
+/// NLJ 基计划会漏接为 table_name "unknown" 的单表 WHERE 路径（错误行为而非既有
+/// 拒绝）。
 #[tokio::test]
-async fn where_over_non_equi_join_stays_rejected() {
+async fn where_over_non_equi_join_reachable() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     exec_ok(&db, "CREATE TABLE r (a INT)").await;
     exec_ok(&db, "CREATE TABLE s (b INT)").await;
+    exec_ok(&db, "INSERT INTO r VALUES (1)").await;
+    exec_ok(&db, "INSERT INTO r VALUES (2)").await;
+    exec_ok(&db, "INSERT INTO s VALUES (2)").await;
+    exec_ok(&db, "INSERT INTO s VALUES (3)").await;
 
-    let resp = db
-        .execute_sql("SELECT r.a, s.b FROM r JOIN s ON r.a < s.b WHERE r.a > 0")
-        .await;
-    match resp {
-        Response::Error { message } => {
-            assert!(
-                message.contains("Unsupported statement type"),
-                "WHERE + 非等值 JOIN 必须维持计划期拒绝，实际 {message:?}"
-            );
-        }
-        other => panic!("WHERE + 非等值 JOIN 应被拒绝，实际 {other:?}"),
-    }
+    let rows = sort_rows_i64(query_rows(
+        db.execute_sql("SELECT r.a, s.b FROM r JOIN s ON r.a < s.b WHERE r.a > 0")
+            .await,
+    ));
+    assert_eq!(
+        rows,
+        vec![
+            vec![json!(1), json!(2)],
+            vec![json!(1), json!(3)],
+            vec![json!(2), json!(3)]
+        ],
+        "WHERE + 非等值 JOIN 必须按组合行布局编译并可达（谓词作用于组合行）"
+    );
 
     db.wal_buffer.shutdown().await;
 }

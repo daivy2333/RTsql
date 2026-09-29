@@ -247,6 +247,14 @@ impl Database {
     /// MS07-T05: close() now performs a full checkpoint — dirty pages are
     /// flushed, the checkpoint site is written and the WAL is rewritten
     /// truncated, so the next open replays (almost) nothing.
+    ///
+    /// MS18-T01: the checkpoint is skipped entirely when there is nothing
+    /// pending — no WAL record appended since the last checkpoint and no
+    /// dirty buffer-pool page (a read-only session on an already
+    /// checkpoint-clean database). Such a session has nothing to persist, so
+    /// the site and WAL are left byte for byte untouched. Pending work of
+    /// any kind — DML records, DDL dirty pages, crash-recovery replayed
+    /// pages — still takes the full checkpoint path.
     pub async fn close(&self) -> Result<()> {
         self.checkpoint().await
     }

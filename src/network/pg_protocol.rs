@@ -302,8 +302,10 @@ impl Protocol for PgProtocol {
 
                 Ok(())
             }
-            Response::Error { message } => {
-                let (severity, code) = ("ERROR", "58000");
+            Response::Error { message, sqlstate } => {
+                // MS19-T02: classified by error category; unclassified errors
+                // keep the 58000 fallback.
+                let (severity, code) = ("ERROR", sqlstate.as_deref().unwrap_or("58000"));
                 self.write_buf
                     .extend_from_slice(&pg_messages::error_response(severity, code, message));
                 self.write_buf

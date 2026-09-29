@@ -740,7 +740,7 @@ async fn build_big_wal(dir: &Path, n: i64) {
             let resp = db
                 .execute_in_tx(&format!("INSERT INTO t VALUES ({})", i), &tx)
                 .await;
-            if let Response::Error { message } = resp {
+            if let Response::Error { message, .. } = resp {
                 panic!("insert {} failed: {}", i, message);
             }
         }
@@ -3346,11 +3346,17 @@ fn unique_insert_rollback_then_reinsert_same_value_succeeds() {
     let dir = fixture();
     let out = run_cli(
         dir.path(),
-        &["app", "CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)"],
+        &[
+            "app",
+            "CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)",
+        ],
     );
     assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
 
-    let out = run_cli(dir.path(), &["app", "BEGIN; INSERT INTO t VALUES (1, 100); ROLLBACK"]);
+    let out = run_cli(
+        dir.path(),
+        &["app", "BEGIN; INSERT INTO t VALUES (1, 100); ROLLBACK"],
+    );
     assert_eq!(
         out.code,
         Some(0),
@@ -3376,14 +3382,20 @@ fn unique_conflict_auto_rollback_then_reinsert_succeeds() {
     let dir = fixture();
     let out = run_cli(
         dir.path(),
-        &["app", "CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)"],
+        &[
+            "app",
+            "CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)",
+        ],
     );
     assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
 
     // 事务内：语句 2 唯一冲突（code=100 与语句 1 重复）→ 自动回滚两条
     let out = run_cli(
         dir.path(),
-        &["app", "BEGIN; INSERT INTO t VALUES (1, 100); INSERT INTO t VALUES (2, 100)"],
+        &[
+            "app",
+            "BEGIN; INSERT INTO t VALUES (1, 100); INSERT INTO t VALUES (2, 100)",
+        ],
     );
     assert_eq!(
         out.code,
@@ -3419,12 +3431,18 @@ fn unique_table_dump_restore_enforcement_roundtrip() {
     let dir = fixture();
     let out = run_cli(
         dir.path(),
-        &["app", "CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)"],
+        &[
+            "app",
+            "CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)",
+        ],
     );
     assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
     let out = run_cli(
         dir.path(),
-        &["app", "INSERT INTO items VALUES (1, 100); INSERT INTO items VALUES (2, 200)"],
+        &[
+            "app",
+            "INSERT INTO items VALUES (1, 100); INSERT INTO items VALUES (2, 200)",
+        ],
     );
     assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
 
@@ -3634,11 +3652,21 @@ fn test_upsert_rejection_error_face_exit_3() {
     // 组合冲突目标
     let out = run_cli(
         dir.path(),
-        &["app", "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT (id, code) DO NOTHING"],
+        &[
+            "app",
+            "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT (id, code) DO NOTHING",
+        ],
     );
-    assert_eq!(out.code, Some(3), "stdout: {:?} stderr: {:?}", out.stdout, out.stderr);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
     assert!(
-        out.stderr.contains("does not match any PRIMARY KEY or UNIQUE constraint"),
+        out.stderr
+            .contains("does not match any PRIMARY KEY or UNIQUE constraint"),
         "stderr must carry the named conflict-target message: {}",
         out.stderr
     );
@@ -3646,9 +3674,18 @@ fn test_upsert_rejection_error_face_exit_3() {
     // ON CONSTRAINT
     let out = run_cli(
         dir.path(),
-        &["app", "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT ON CONSTRAINT users_pk DO NOTHING"],
+        &[
+            "app",
+            "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT ON CONSTRAINT users_pk DO NOTHING",
+        ],
     );
-    assert_eq!(out.code, Some(3), "stdout: {:?} stderr: {:?}", out.stdout, out.stderr);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
     assert!(
         out.stderr.contains("ON CONSTRAINT"),
         "stderr must name ON CONSTRAINT: {}",
@@ -3663,7 +3700,13 @@ fn test_upsert_rejection_error_face_exit_3() {
             "INSERT INTO users VALUES (1, 'a', 1) ON CONFLICT (id) DO UPDATE SET name = 'b' WHERE id = 1",
         ],
     );
-    assert_eq!(out.code, Some(3), "stdout: {:?} stderr: {:?}", out.stdout, out.stderr);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
     assert!(
         out.stderr.contains("DO UPDATE WHERE is not supported"),
         "stderr must name DO UPDATE WHERE: {}",
@@ -3673,11 +3716,21 @@ fn test_upsert_rejection_error_face_exit_3() {
     // ON DUPLICATE KEY UPDATE
     let out = run_cli(
         dir.path(),
-        &["app", "INSERT INTO users VALUES (1, 'a', 1) ON DUPLICATE KEY UPDATE name = 'b'"],
+        &[
+            "app",
+            "INSERT INTO users VALUES (1, 'a', 1) ON DUPLICATE KEY UPDATE name = 'b'",
+        ],
     );
-    assert_eq!(out.code, Some(3), "stdout: {:?} stderr: {:?}", out.stdout, out.stderr);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
     assert!(
-        out.stderr.contains("ON DUPLICATE KEY UPDATE is not supported"),
+        out.stderr
+            .contains("ON DUPLICATE KEY UPDATE is not supported"),
         "stderr must name ON DUPLICATE KEY UPDATE: {}",
         out.stderr
     );
@@ -3691,4 +3744,369 @@ fn test_upsert_rejection_error_face_exit_3() {
         let out = run_cli(dir.path(), &["app", sql]);
         assert_eq!(out.code, Some(0), "{sql} must succeed: {}", out.stderr);
     }
+}
+
+// ===========================================================================
+// MS19 Iteration 000 (T1): 生命周期子命令 delete
+// （cli-noninteractive-shell「生命周期子命令 delete」R1 场景 1-7；
+//   场景 8「既有子命令与主命令零回归」由既有用例集 + 全量回归承担）
+// ===========================================================================
+
+/// R1-S1 删除裸名库并报告释放：exit 0 + 逐文件报告主文件与 `.wal` 的释放
+/// 字节数 + 三个可能路径均不存在 + `list` 不再枚举。
+#[test]
+fn test_delete_happy_bare_name_reports_freed() {
+    let dir = fixture();
+    seed_users(dir.path());
+    let db = dir.path().join("db/app.db");
+    let wal = db.with_extension("wal");
+    let ckpt = db.with_extension("checkpoint");
+    let db_len = std::fs::metadata(&db).unwrap().len();
+    let wal_len = std::fs::metadata(&wal).unwrap().len();
+
+    let out = run_cli(dir.path(), &["delete", "app"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout
+            .contains(&format!("deleted {} ({db_len} bytes)", db.display())),
+        "stdout must report the main file with freed bytes: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains(&format!("deleted {} ({wal_len} bytes)", wal.display())),
+        "stdout must report the WAL companion with freed bytes: {:?}",
+        out.stdout
+    );
+    assert!(
+        !db.exists() && !wal.exists() && !ckpt.exists(),
+        "all three possible paths must be gone"
+    );
+
+    let out = run_cli(dir.path(), &["list"]);
+    assert_eq!(out.code, Some(0), "list failed: {}", out.stderr);
+    assert!(
+        !out.stdout.contains("app.db"),
+        "list must no longer enumerate the deleted database: {:?}",
+        out.stdout
+    );
+}
+
+/// R1-S2 `--dry-run` 只列出不删除：清单与实删同形（`would delete` 前缀）、
+/// 全部文件仍在、库仍可执行查询。
+#[test]
+fn test_delete_dry_run_keeps_files() {
+    let dir = fixture();
+    seed_users(dir.path());
+    let db = dir.path().join("db/app.db");
+    let db_len = std::fs::metadata(&db).unwrap().len();
+
+    let out = run_cli(dir.path(), &["delete", "app", "--dry-run"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout
+            .contains(&format!("would delete {} ({db_len} bytes)", db.display())),
+        "stdout must list the main file with its size: {:?}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("deleted "),
+        "dry-run must not report any deletion: {:?}",
+        out.stdout
+    );
+    assert!(db.exists(), "main file must survive dry-run");
+
+    let out = run_cli(dir.path(), &["app", "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "database must still open after dry-run: {}",
+        out.stderr
+    );
+}
+
+/// R1-S3 库打开中显式拒绝且零删除：测试进程持 advisory 独占锁 → exit 4 +
+/// `database is locked` 前缀 + 无任何删除报告 + 主文件与伴生原样保留；
+/// 释放锁后同一命令 exit 0（锁探测不残留副作用）。
+#[test]
+fn test_delete_locked_rejects_without_deletion() {
+    let dir = fixture();
+    seed_users(dir.path());
+    let db = dir.path().join("db/app.db");
+    let wal = db.with_extension("wal");
+
+    let holder = std::fs::File::open(&db).unwrap();
+    holder.try_lock().expect("test process acquires flock");
+
+    let out = run_cli(dir.path(), &["delete", "app"]);
+    assert_eq!(
+        out.code,
+        Some(4),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.starts_with("database is locked"),
+        "stderr must start with 'database is locked', got: {:?}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("deleted"),
+        "lock conflict must report no deletion: {:?}",
+        out.stdout
+    );
+    assert!(
+        db.exists() && wal.exists(),
+        "lock conflict must leave every file intact"
+    );
+
+    drop(holder);
+    let out = run_cli(dir.path(), &["delete", "app"]);
+    assert_eq!(out.code, Some(0), "after release: {}", out.stderr);
+    assert!(
+        !db.exists(),
+        "delete must succeed once the lock is released"
+    );
+}
+
+/// R1-S4 库不存在：exit 1 + stderr 点名解析后的路径。
+#[test]
+fn test_delete_missing_db_errors() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["delete", "nosuchdb"]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    let resolved = dir.path().join("db/nosuchdb.db");
+    assert!(
+        out.stderr.contains(&resolved.display().to_string()),
+        "stderr must name the resolved path {}, got: {:?}",
+        resolved.display(),
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("does not exist"),
+        "stderr must use the existing missing-db wording, got: {:?}",
+        out.stderr
+    );
+}
+
+/// R1-S5 路径形态与伴生清理：含 `/` 的路径直开，主文件与 `.wal` /
+/// `.checkpoint` 三文件全部删除并逐文件报告。
+#[test]
+fn test_delete_path_form_with_companions() {
+    let dir = fixture();
+    let db = dir.path().join("data/x.db");
+    let out = run_cli(dir.path(), &["new", db.to_str().unwrap()]);
+    assert_eq!(out.code, Some(0), "new failed: {}", out.stderr);
+
+    let wal = db.with_extension("wal");
+    let ckpt = db.with_extension("checkpoint");
+    // 伴生齐备（new 的 close 已产出；缺失则补写以确保本用例覆盖三文件形态）
+    if !wal.exists() {
+        std::fs::write(&wal, b"wal-bytes").unwrap();
+    }
+    if !ckpt.exists() {
+        std::fs::write(&ckpt, b"site-bytes").unwrap();
+    }
+    let db_len = std::fs::metadata(&db).unwrap().len();
+
+    let out = run_cli(dir.path(), &["delete", db.to_str().unwrap()]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout
+            .contains(&format!("deleted {} ({db_len} bytes)", db.display())),
+        "stdout must report the main file: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains(&wal.display().to_string())
+            && out.stdout.contains(&ckpt.display().to_string()),
+        "stdout must report both companions: {:?}",
+        out.stdout
+    );
+    assert!(
+        !db.exists() && !wal.exists() && !ckpt.exists(),
+        "path form must delete the whole file family"
+    );
+}
+
+/// R1-S6 头部无效文件仍可删：delete 是文件级管理操作，不初始化不校验，
+/// 随机字节内容同样可删（exit 0）。
+#[test]
+fn test_delete_corrupt_file_deletable() {
+    let dir = fixture();
+    let db = dir.path().join("db/corrupt.db");
+    std::fs::write(&db, b"definitely not an rtsql header").unwrap();
+
+    let out = run_cli(dir.path(), &["delete", "corrupt"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(!db.exists(), "corrupt file must be deletable");
+}
+
+/// R1-S7 伴生缺失跳过：只有主文件时报 `absent` 行且 exit 0（不算错误）。
+#[test]
+fn test_delete_absent_companions_skipped() {
+    let dir = fixture();
+    let db = dir.path().join("db/solo.db");
+    std::fs::write(&db, b"solo").unwrap();
+    let db_len = std::fs::metadata(&db).unwrap().len();
+    let wal = db.with_extension("wal");
+    let ckpt = db.with_extension("checkpoint");
+
+    let out = run_cli(dir.path(), &["delete", "solo"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout
+            .contains(&format!("deleted {} ({db_len} bytes)", db.display())),
+        "stdout must report the main file: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains(&format!("absent {}", wal.display())),
+        "missing WAL companion must be reported as absent: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains(&format!("absent {}", ckpt.display())),
+        "missing checkpoint companion must be reported as absent: {:?}",
+        out.stdout
+    );
+    assert!(!db.exists(), "main file must be deleted");
+}
+
+// ===========================================================================
+// MS19 Iteration 001 — 错误可操作化（R2-S1 CLI 面：不支持语句点名能力）
+// ===========================================================================
+
+/// R2-S1：MERGE 走 CLI 主命令 → 退出码 3，stderr 点名 MERGE。
+#[test]
+fn test_unsupported_statement_names_capability_cli() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "MERGE INTO users USING users ON users.id = users.id \
+             WHEN MATCHED THEN UPDATE SET name = 'x'",
+        ],
+    );
+    assert_eq!(out.code, Some(3), "stderr: {:?}", out.stderr);
+    assert!(
+        out.stderr.contains("MERGE"),
+        "错误信息必须点名不支持的能力: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Unsupported statement type"),
+        "既有文案框架必须保持: {:?}",
+        out.stderr
+    );
+}
+
+/// R4-S1（退出码矩阵零回归见证）：不支持表达式的退出码仍为 3。
+#[test]
+fn test_unsupported_expression_exit_code_unchanged() {
+    let dir = fixture();
+    seed_users(dir.path());
+    let out = run_cli(dir.path(), &["app", "SELECT id % name FROM users"]);
+    assert_eq!(out.code, Some(3), "stderr: {:?}", out.stderr);
+    assert!(
+        out.stderr.contains("Unsupported expression type"),
+        "stderr: {:?}",
+        out.stderr
+    );
+}
+
+// ===========================================================================
+// MS19 Iteration 002 — 列解析静默面收口（T4：投影严格解析 + 别名表头）
+// ===========================================================================
+
+/// R6-S1 CLI 面：未知投影列 → 退出码 3 且点名该列（现状静默返回全列全数据）。
+#[test]
+fn test_unknown_projection_column_cli() {
+    let dir = fixture();
+    seed_users(dir.path());
+    let out = run_cli(dir.path(), &["app", "SELECT nosuchcol FROM users"]);
+    assert_eq!(out.code, Some(3), "stderr: {:?}", out.stderr);
+    assert!(
+        out.stderr.contains("nosuchcol"),
+        "错误信息必须点名未知投影列: {:?}",
+        out.stderr
+    );
+}
+
+/// R7-S1 CLI 面：纯查询 `col AS alias` 表头 = 别名、行 = 该投影列
+/// （现状别名被当基列名解析，表头退化为全 schema）。
+#[test]
+fn test_alias_header_cli() {
+    let dir = fixture();
+    seed_users(dir.path());
+    let out = run_cli(
+        dir.path(),
+        &["app", "SELECT name AS n FROM users", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {:?}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).expect("json output");
+    assert_eq!(
+        v["columns"],
+        serde_json::json!(["n"]),
+        "表头必须是别名: {}",
+        out.stdout
+    );
+    assert_eq!(
+        v["rows"],
+        serde_json::json!([["Alice"]]),
+        "行必须是别名项对应的投影列: {}",
+        out.stdout
+    );
+}
+
+/// R9-S1 CLI 面：未知排序键 → 退出码 3 且点名该键（现状静默不排序）。
+#[test]
+fn test_unknown_order_by_key_cli() {
+    let dir = fixture();
+    seed_users(dir.path());
+    let out = run_cli(dir.path(), &["app", "SELECT id FROM users ORDER BY nosuch"]);
+    assert_eq!(out.code, Some(3), "stderr: {:?}", out.stderr);
+    assert!(
+        out.stderr.contains("nosuch"),
+        "错误信息必须点名未知排序键: {:?}",
+        out.stderr
+    );
 }
