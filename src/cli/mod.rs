@@ -6,18 +6,25 @@ pub mod resolve;
 
 use crate::database::Database;
 use crate::network::protocol::Response;
-use crate::parser::planner::{classify_transaction_statement, TxStatementKind};
+use crate::parser::planner::{
+    classify_attach_statement, classify_transaction_statement, AttachInfo, TxStatementKind,
+};
 use crate::parser::PlanBuilder;
-use crate::pipeline::{execute_stage, execute_stage_in_tx, parse_stage, plan_stage};
+use crate::pipeline::{
+    execute_stage_in_tx_routed, execute_stage_routed, parse_stage, plan_stage_routed, AttachRoute,
+    RoutedTables,
+};
 use crate::storage::StorageError;
 use crate::transaction::{IsolationLevel, TransactionSession};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use render::{render, OutputKind, QueryPayload};
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 /// 退出码分类：0 成功 / 1 一般错误 / 2 用法错误 / 3 SQL 错误 / 4 锁冲突 / 5 密钥错误。
 ///
@@ -124,6 +131,14 @@ enum Command {
         #[arg(long)]
         csv: bool,
     },
+    /// 删除数据库及其伴生文件（文件级操作，不校验库内容）
+    Delete {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+        /// 只列出将删除的文件与大小，不执行删除
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// 输出每列统计摘要（行数/null率/distinct/min/max/分位数）
     Stats {
         /// 裸名或含 `/` 的文件路径
@@ -208,6 +223,7 @@ async fn execute_command(args: &CliArgs) -> ExitStatus {
             file,
             csv,
         }) => lifecycle::import_csv(db, table, file, *csv, args.format, args.key.as_deref()).await,
+        Some(Command::Delete { db, dry_run }) => lifecycle::delete_db(db, *dry_run),
         Some(Command::Stats { db, table }) => {
             lifecycle::stats(db, table, args.format, args.key.as_deref()).await
         }
@@ -247,13 +263,17 @@ async fn execute_main_command(args: &CliArgs) -> ExitStatus {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
     };
-    // sql/format 按值捕获：work future 拥有它们，满足 for<'a> 的 HRTB 工厂约束
+    // sql/format/key 按值捕获：work future 拥有它们，满足 for<'a> 的 HRTB 工厂约束
     let sql = sql.clone();
     let format = args.format;
+    let key = args.key.clone();
     execute_command_inner(
         &db_path,
         args.key.as_deref(),
-        move |db| Box::pin(async move { run_sql(db, &sql, format).await }),
+        move |db| {
+            let key = key.clone();
+            Box::pin(async move { run_sql(db, &sql, format, key.as_deref()).await })
+        },
         sigint_future,
         sigterm_future,
     )
@@ -266,27 +286,30 @@ type SignalFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// 阶段 2 的工作负载 future（工厂参数注入，供结构测试替换为确定性源）。
 type WorkFuture<'a> = Pin<Box<dyn Future<Output = ExitStatus> + Send + 'a>>;
 
-/// SIGINT future；ctrl_c 安装失败时保持 pending（默认处置仍在，不伪造信号）。
+/// SIGINT future；处理器在**构造期**同步安装，`recv()` 等待信号。
+///
+/// MS25 T11：注册早于第一次 open 轮询——信号分支的首次轮询原本晚于
+/// `Database::open_with_key` 的同步前缀（文件锁获取），该窗口内的 SIGINT 按
+/// 默认处置终止进程（130 来自信号默认行为而非映射）。安装失败时保持 pending
+/// （默认处置仍在，不伪造信号）。
 fn sigint_future() -> SignalFuture {
-    Box::pin(async {
-        if tokio::signal::ctrl_c().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    })
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+        Ok(mut stream) => Box::pin(async move {
+            stream.recv().await;
+        }),
+        Err(_) => Box::pin(std::future::pending::<()>()),
+    }
 }
 
-/// SIGTERM future；安装失败或流关闭同样保持 pending，不伪造信号。
+/// SIGTERM future；同 `sigint_future` 的构造期安装（安装失败或流关闭保持
+/// pending，不伪造信号）。
 fn sigterm_future() -> SignalFuture {
-    Box::pin(async {
-        let received =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut stream) => stream.recv().await.is_some(),
-                Err(_) => false,
-            };
-        if !received {
-            std::future::pending::<()>().await;
-        }
-    })
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut stream) => Box::pin(async move {
+            stream.recv().await;
+        }),
+        Err(_) => Box::pin(std::future::pending::<()>()),
+    }
 }
 
 fn open_error_status(db_path: &Path, e: StorageError) -> ExitStatus {
@@ -320,13 +343,18 @@ async fn execute_command_inner(
     signal_int: impl Fn() -> SignalFuture + Send,
     signal_term: impl Fn() -> SignalFuture + Send,
 ) -> ExitStatus {
+    // MS25 T11：阶段 1 的信号 future 在 select 之前构造——处理器安装发生在
+    // 构造期（`signal()` 同步注册），因而早于 `Database::open_with_key` 的第一次
+    // 轮询及其同步前缀（文件锁获取）。阶段 2 仍按工厂生成新实例。
+    let phase1_sigint = signal_int();
+    let phase1_sigterm = signal_term();
     let db = tokio::select! {
         opened = Database::open_with_key(db_path, IsolationLevel::RepeatableRead, key) => match opened {
             Ok(db) => db,
             Err(e) => return open_error_status(db_path, e),
         },
-        _ = signal_int() => return ExitStatus::Signaled(2),
-        _ = signal_term() => return ExitStatus::Signaled(15),
+        _ = phase1_sigint => return ExitStatus::Signaled(2),
+        _ = phase1_sigterm => return ExitStatus::Signaled(15),
     };
 
     let status = tokio::select! {
@@ -350,7 +378,89 @@ async fn execute_command_inner(
     }
 }
 
-async fn run_sql(db: &Database, sql: &str, format: Option<FormatArg>) -> ExitStatus {
+/// MS20 T1（`sql-attach-session`，design D1）：附加库注册表——会话作用域，
+/// 不写 catalog、不产生伴生状态文件，随会话进程退出释放。
+///
+/// 别名（小写，与 `register_table` 键纪律一致）→ 打开的附加库实例。一期只读：
+/// 本 Iteration 只建立注册面与锁生命周期，查询路由由 Iteration 001 消费。
+/// 刻意不放在 `Database`——attach 是 CLI 会话概念，lib 执行路径零变化。
+#[derive(Default)]
+struct AttachSession {
+    dbs: HashMap<String, Arc<Database>>,
+}
+
+impl AttachSession {
+    fn contains(&self, alias: &str) -> bool {
+        self.dbs.contains_key(alias)
+    }
+
+    fn register(&mut self, alias: String, db: Database) {
+        self.dbs.insert(alias, Arc::new(db));
+    }
+}
+
+/// ATTACH 失败分类：文案与退出码语义类分离——文案由调用方统一套多语句上下文
+/// （`sql_failure_message`），语义类决定 `ExitStatus` 变体（锁 4 / 密钥 5 /
+/// 其余 3）。分类与 `open_error_status` 同型。
+enum AttachFailure {
+    Sql(String),
+    Locked(String),
+    InvalidKey(String),
+}
+
+/// ATTACH 执行面：路径解析 → 存在性前置 → 独占锁打开 → 注册。任一失败零副作用
+/// （注册表不变）。重复别名先于打开判定，避免同别名二次持锁。
+async fn attach_database(
+    session: &mut AttachSession,
+    info: &AttachInfo,
+    key: Option<&str>,
+) -> Result<(), AttachFailure> {
+    if session.contains(&info.alias) {
+        return Err(AttachFailure::Sql(format!(
+            "attach alias '{}' is already registered in this session",
+            info.alias
+        )));
+    }
+    let path = resolve::resolve_db_path(&info.path).map_err(AttachFailure::Sql)?;
+    // `Database::open_with_key` 对不存在的路径会静默建 0 字节新库，故 ATTACH
+    // 必须先查——拒绝语义与 `resolve_existing_db` 同型。
+    if !path.exists() {
+        return Err(AttachFailure::Sql(format!(
+            "{} does not exist",
+            path.display()
+        )));
+    }
+    // 附加库以主库同源参数打开（RR + 同一密钥通道）：加密面共用全局 --key。
+    let db = Database::open_with_key(&path, IsolationLevel::RepeatableRead, key)
+        .await
+        .map_err(|e| attach_open_failure(&path, e))?;
+    session.register(info.alias.clone(), db);
+    Ok(())
+}
+
+/// 打开失败 → 分类（`open_error_status` 三臂同型；General 归 SQL 失败类）。
+fn attach_open_failure(path: &Path, e: StorageError) -> AttachFailure {
+    match e {
+        StorageError::DatabaseLocked(_) => {
+            AttachFailure::Locked(format!("database is locked: {}", path.display()))
+        }
+        StorageError::InvalidKey(detail) => {
+            AttachFailure::InvalidKey(format!("invalid key: {detail}"))
+        }
+        other => AttachFailure::Sql(format!(
+            "failed to open attached database {}: {}",
+            path.display(),
+            other
+        )),
+    }
+}
+
+async fn run_sql(
+    db: &Database,
+    sql: &str,
+    format: Option<FormatArg>,
+    key: Option<&str>,
+) -> ExitStatus {
     let statements = match parse_stage(sql).await {
         Ok(statements) => statements,
         Err(e) => return ExitStatus::Sql(e),
@@ -363,10 +473,61 @@ async fn run_sql(db: &Database, sql: &str, format: Option<FormatArg>) -> ExitSta
     // 事务开启后的普通语句经 execute_stage_in_tx 执行（不再逐条 auto-commit），
     // 收尾与失败路径显式回滚会话事务（design D5）。
     let mut session = TransactionSession::new();
+    // MS20 T1：附加库注册表与 `TransactionSession` 同生命周期但正交
+    // （假设 11——注册面不碰主库数据，活跃事务内亦允许 attach）。
+    let mut attach_session = AttachSession::default();
 
     let total = statements.len();
     for (index, stmt) in statements.iter().enumerate() {
         let statement_text = stmt.to_string();
+        // MS20 T1：ATTACH 会话注册臂——不经 `TransactionSession`，与 MS11-T02
+        // 三分派互斥（非 ATTACH 语句恒 `Ok(None)`），既有分派逐字节不变。
+        match classify_attach_statement(stmt) {
+            Ok(Some(info)) => match attach_database(&mut attach_session, &info, key).await {
+                Ok(()) => {
+                    // D4 同构：注册语句无行集，渲染 Affected(0)
+                    if let Err(e) =
+                        emit_stdout(&render(kind(format), &[], &QueryPayload::Affected(0)))
+                    {
+                        rollback_session(db, &mut session).await;
+                        return ExitStatus::General(e);
+                    }
+                    continue;
+                }
+                Err(failure) => {
+                    // 失败路径与既有三分派同型：先回滚活跃会话事务（ATTACH 不改
+                    // 主库数据，但保持失败收口单一），再按语义类映射退出码。
+                    let in_tx = rollback_session(db, &mut session).await;
+                    let k = index + 1;
+                    return match failure {
+                        AttachFailure::Sql(text) => {
+                            sql_failure_status(k, total, &text, &statement_text, in_tx)
+                        }
+                        AttachFailure::Locked(text) => ExitStatus::Locked(sql_failure_message(
+                            k,
+                            total,
+                            &text,
+                            &statement_text,
+                            in_tx,
+                        )),
+                        AttachFailure::InvalidKey(text) => ExitStatus::InvalidKey(
+                            sql_failure_message(k, total, &text, &statement_text, in_tx),
+                        ),
+                    };
+                }
+            },
+            Ok(None) => {}
+            Err(e) => {
+                return sql_failure_status(
+                    index + 1,
+                    total,
+                    &e.to_string(),
+                    &statement_text,
+                    rollback_session(db, &mut session).await,
+                );
+            }
+        }
+
         match classify_transaction_statement(stmt) {
             Ok(Some(tx_kind)) => {
                 let outcome = match tx_kind {
@@ -396,13 +557,26 @@ async fn run_sql(db: &Database, sql: &str, format: Option<FormatArg>) -> ExitSta
                 }
             }
             Ok(None) => {
-                let plan = match plan_stage(db, &statement_text, stmt, false).await {
+                // MS20 T2：跨库路由上下文随语句穿线——计划期判定哪些限定名
+                // 解析到附加库，执行期据此取库。注册表为空时与既有路径等价。
+                let route = AttachRoute::new(attach_session.dbs.clone());
+                let mut routed = RoutedTables::new();
+                let plan = match plan_stage_routed(
+                    db,
+                    &statement_text,
+                    stmt,
+                    false,
+                    Some(&route),
+                    &mut routed,
+                )
+                .await
+                {
                     Ok(plan) => plan,
                     Err(e) => {
                         return sql_failure_status(
                             index + 1,
                             total,
-                            &e,
+                            &e.to_string(),
                             &statement_text,
                             rollback_session(db, &mut session).await,
                         );
@@ -411,8 +585,8 @@ async fn run_sql(db: &Database, sql: &str, format: Option<FormatArg>) -> ExitSta
                 let columns = PlanBuilder::new().get_plan_output_columns(&plan);
 
                 let response = match session.tx_id() {
-                    Some(tx_id) => execute_stage_in_tx(db, plan, tx_id).await,
-                    None => execute_stage(db, plan, false).await,
+                    Some(tx_id) => execute_stage_in_tx_routed(db, plan, tx_id, &routed).await,
+                    None => execute_stage_routed(db, plan, false, &routed).await,
                 };
                 match response {
                     Response::QueryResult { rows } => {
@@ -431,7 +605,7 @@ async fn run_sql(db: &Database, sql: &str, format: Option<FormatArg>) -> ExitSta
                             return ExitStatus::General(e);
                         }
                     }
-                    Response::Error { message } => {
+                    Response::Error { message, .. } => {
                         return sql_failure_status(
                             index + 1,
                             total,
@@ -462,6 +636,12 @@ async fn run_sql(db: &Database, sql: &str, format: Option<FormatArg>) -> ExitSta
             Err(e) => emit_stderr(&format!("uncommitted transaction rollback failed: {}", e)),
         }
     }
+    // MS20 T1（design D1）：附加库 best-effort close——一期只读无脏页，MS18 零工作
+    // 守卫使 close 无操作；结果忽略（进程退出时 flock 随 fd 释放兜底）。fail-fast
+    // 中途退出走同一兜底，无需在此展开。
+    for attached in attach_session.dbs.values() {
+        let _ = attached.close().await;
+    }
     ExitStatus::Success
 }
 
@@ -490,6 +670,24 @@ fn sql_failure_status(
     statement_text: &str,
     in_transaction: bool,
 ) -> ExitStatus {
+    ExitStatus::Sql(sql_failure_message(
+        k,
+        n,
+        error,
+        statement_text,
+        in_transaction,
+    ))
+}
+
+/// 逐条执行的失败文案（`sql_failure_status` 与 ATTACH 的锁/密钥失败类共用同一
+/// 构造点——退出码语义不同，消息形状逐字节一致）。
+fn sql_failure_message(
+    k: usize,
+    n: usize,
+    error: &str,
+    statement_text: &str,
+    in_transaction: bool,
+) -> String {
     let mut display = statement_text.to_string();
     if display.chars().count() > 200 {
         display = format!("{}...", display.chars().take(200).collect::<String>());
@@ -504,7 +702,7 @@ fn sql_failure_status(
             message.push_str("; previous statement(s) were committed");
         }
     }
-    ExitStatus::Sql(message)
+    message
 }
 
 /// TTY 默认 table，非 TTY 默认 json；显式 `--format` 覆盖。

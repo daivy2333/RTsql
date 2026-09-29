@@ -51,7 +51,7 @@ fn query_rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
 
 fn error_message(resp: Response) -> String {
     match resp {
-        Response::Error { message } => message,
+        Response::Error { message, .. } => message,
         other => panic!("Expected Error, got {other:?}"),
     }
 }
@@ -474,8 +474,11 @@ async fn having_scalar_function_rejected() {
     );
 }
 
-/// R5/S5：ORDER BY 引用表达式项别名静默保持输入序（既有语义锁定，SHALL NOT
-/// 报错、SHALL NOT 按别名列排序）。
+/// R5/S5：ORDER BY 引用表达式项别名按**输出列**真实排序。
+///
+/// MS25 T7（design D8，delta `sql-scalar-functions` R5 校准段镜像见证）：本
+/// 用例原为「静默保持输入序」的语义锁定，实现后按别名键真实排序。测试名保留
+/// ——承载语料连续性，改名会丢失 delta 与见证的对应关系。
 #[tokio::test]
 async fn order_by_expression_alias_keeps_input_order() {
     let (db, _dir) = open_db().await;
@@ -488,7 +491,7 @@ async fn order_by_expression_alias_keeps_input_order() {
     );
     assert_eq!(
         rows,
-        vec![vec![serde_json::json!("B")], vec![serde_json::json!("A")]]
+        vec![vec![serde_json::json!("A")], vec![serde_json::json!("B")]]
     );
 }
 

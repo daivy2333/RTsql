@@ -24,7 +24,7 @@ fn mk_insert(tx_id: u64, tag: u8, size: usize) -> WalRecord {
 
 /// 断言 Response 非 Error
 fn assert_ok(resp: rtsql::network::protocol::Response, ctx: &str) {
-    if let rtsql::network::protocol::Response::Error { message } = resp {
+    if let rtsql::network::protocol::Response::Error { message, .. } = resp {
         panic!("{} failed: {}", ctx, message);
     }
 }

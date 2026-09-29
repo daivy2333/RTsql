@@ -385,7 +385,7 @@ async fn rekey_collision_rejected_before_write_zero_side_effects() {
 
     // 修复前：无预检 → 成功 affected 1，行被静默改写（RED）
     match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             assert!(
                 message.to_lowercase().contains("duplicate"),
                 "碰撞 rekey 必须报 DuplicateKey，实际: {message}"

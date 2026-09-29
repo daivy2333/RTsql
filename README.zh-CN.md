@@ -88,6 +88,35 @@ rtsql --format table demo-restored "SELECT id, name, age FROM people ORDER BY id
 
 `dump` 输出 SQL 文本，不会加密该文件；应按明文数据库导出数据保护。`restore` 要求目标数据库为空；文件参数使用 `-` 时从 stdin 读取 dump。
 
+#### 备份边界与数据库文件族
+
+备份首选 `dump` / `restore` 逻辑导出。磁盘上的一个数据库是由同一名字派生的三个文件组成的文件族——`<db>.db`、`<db>.wal`、`<db>.checkpoint`——文件级拷贝是否安全只取决于你拷到的是哪个状态。
+
+**只在写入方干净关闭之后**（one-shot 命令在 close 时 checkpoint，WAL 已截断），单独拷贝 `<db>.db` 才等价于完整备份。写入进行中或崩溃之后，主文件只含已 checkpoint 的前缀：下表数据来自一个提交了 938 行中 937 行后被 `SIGKILL` 的会话，只拷主文件得到 **938 行中的 1 行**——静默不完整，打开时没有任何报错。
+
+| 形态 | 结果 |
+|---|---|
+| 干净关闭后只拷 `<db>.db` | 完整（1 行 / 1 行） |
+| 干净关闭后拷 `<db>.db` + `<db>.wal` | 完整 |
+| 干净关闭后拷 `<db>.db` + `<db>.checkpoint` | 完整 |
+| 有未 checkpoint 尾部时只拷 `<db>.db` | **不完整：938 行中的 1 行** |
+| 有未 checkpoint 尾部时成对拷 `<db>.db` + `<db>.wal` | 完整（938 行，打开时经 WAL 重放） |
+| 成对移动到另一目录（文件名不变） | 完整（938 行） |
+| 只重命名主文件（`.wal` 留在原处） | **不完整：938 行中的 1 行**，且孤立的 `<db>.wal` 被忽略 |
+
+伴生文件名由主文件名派生，因此任何重命名或移动都必须让 `<db>.wal` 与 `<db>.checkpoint` 随主文件以同一基名同行。写入进行中的文件级拷贝必须包含 `<db>.wal`；否则先让写入方关闭，再对副本执行 `rtsql <db> "SELECT count(*) FROM t"` 确认。
+
+`rtsql delete <db>` 删除单个数据库文件族；`./install.sh --uninstall --purge-data` 在卸载时清空整个数据目录。两者均不可通过 RTsql 恢复。
+
+### 删除数据库
+
+```bash
+rtsql delete demo --dry-run
+rtsql delete demo
+```
+
+`delete` 删除 `<db>.db` 及其 `.wal`、`.checkpoint` 伴生文件，逐文件报告释放的字节数并以退出码 0 结束。它是文件级管理操作：不开库、不校验内容，加密库也无需 `--key`。库正被其他会话打开时以退出码 4 显式拒绝且不删除任何文件；库不存在时以退出码 1 拒绝。伴生文件本就不存在时报 `absent`，不算错误。
+
 ### 创建加密数据库
 
 ```bash
@@ -146,6 +175,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql dump <db>` | 将 DDL 和数据导出为 SQL 文本 |
 | `rtsql restore <db> <file>` | 将 dump 恢复到空数据库；`-` 表示 stdin |
 | `rtsql import <db> <table> <file> --csv` | 按表头列名导入 CSV |
+| `rtsql delete <db> [--dry-run]` | 删除数据库及其 `.wal` / `.checkpoint` 伴生文件；`--dry-run` 只列出 |
 | `rtsql stats <db> <table>` | 汇总行数、空值率、去重值、范围和数值分位数 |
 | `rtsql sample <db> <table> [n]` | 使用蓄水池抽样；默认 `n` 为 10 |
 | `rtsql profile <db> <table> [--top n]` | 输出列画像和 String 高频值；默认 top 为 5，最大 20 |
@@ -256,12 +286,14 @@ CLI 级资源占用（一次性进程，加载 2,000 行后执行 `SELECT COUNT(
 | 指标 | RTsql | sqlite3 |
 |---|---|---|
 | 加载耗时（2,000 条 INSERT） | 3.2 s | 5.3 s |
-| 峰值内存（RSS） | ~16.7 MiB | ~4.1 MiB |
+| 峰值内存（RSS） | ~16.4 MiB | ~4.1 MiB |
 | 关闭后主数据库文件 | 300 KiB | 48 KiB |
-| 单次 `SELECT 1` 时延（50 次均值） | 10.8 ms | 1.2 ms |
+| 单次 `SELECT 1` 时延（50 次均值） | 6.5 ms | 1.2 ms |
 | 二进制体积 | 6.7 MB | 1.6 MB |
 
-解读：RTsql 的逐条写入路径与索引点查较快，但全表扫描目前慢于 SQLite，一次性调用还承载异步运行时与关闭时 checkpoint 的固定开销。SQLite 成熟三十余年，以上仅为 RTsql 当前位置的快照；下结论前请在自己的硬件上复跑基准。
+单次时延与峰值内存为 2026-09-26 重测值（零工作关闭跳过落地后：只读会话关闭不再执行 checkpoint；经实测评估保留默认多线程运行时）。加载耗时行保留 2026-09-24 数值，写入路径未变化。
+
+解读：RTsql 的逐条写入路径与索引点查较快，但全表扫描目前慢于 SQLite，一次性调用还承载异步运行时的固定开销，只读关闭不再叠加 checkpoint 开销（零工作关闭整体跳过）。SQLite 成熟三十余年，以上仅为 RTsql 当前位置的快照；下结论前请在自己的硬件上复跑基准。
 
 ## 已知限制
 

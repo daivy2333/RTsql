@@ -157,6 +157,33 @@ impl Predicate for ComparisonPredicate {
     }
 }
 
+/// Constant predicate (MS25 T1) — row selection independent of the row.
+///
+/// Compiled for a boolean-literal join condition (`JOIN … ON true` / `ON
+/// false`): the combination-row predicate kernel has no literal arm, and such
+/// a condition carries no column reference at all.
+#[derive(Debug, Clone, Copy)]
+pub struct ConstantPredicate {
+    pub value: bool,
+}
+
+impl Predicate for ConstantPredicate {
+    fn evaluate(&self, _row: &[Value]) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.value)
+    }
+
+    fn evaluate_ternary(
+        &self,
+        _row: &[Value],
+    ) -> Result<Ternary, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(if self.value {
+            Ternary::True
+        } else {
+            Ternary::False
+        })
+    }
+}
+
 /// Logical operators
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LogicalOp {

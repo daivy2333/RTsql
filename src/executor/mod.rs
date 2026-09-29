@@ -13,8 +13,10 @@ mod data_scan;
 pub(crate) mod datetime;
 mod delete;
 mod derived_scan;
+mod distinct;
 mod drop_table;
 mod executor_trait;
+mod explain;
 mod filter;
 mod function;
 mod having;
@@ -25,11 +27,13 @@ mod join;
 mod limit;
 mod nested_loop_join;
 mod plan;
+mod plan_format;
 mod predicate;
 mod projection;
 mod result;
 mod scan;
 mod semi_join;
+mod set_operation;
 mod single_row;
 mod sort;
 mod subquery_eval;
@@ -48,8 +52,10 @@ pub use create_table::CreateTableExecutor;
 pub use data_scan::DataScanExecutor;
 pub use delete::DeleteExecutor;
 pub use derived_scan::DerivedScanExecutor;
+pub use distinct::DistinctExecutor;
 pub use drop_table::DropTableExecutor;
 pub use executor_trait::Executor;
+pub use explain::ExplainExecutor;
 pub use filter::FilterExecutor;
 pub use function::{check_scalar_function, is_scalar_function, FunctionExpression};
 pub use having::HavingExecutor;
@@ -61,22 +67,24 @@ pub use limit::LimitExecutor;
 pub use nested_loop_join::NestedLoopJoinExecutor;
 pub use plan::{
     AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, ConflictAction,
-    ConflictArbiter, CorrelatedParam, CreateTableNode, DataScanNode, DeleteNode, DerivedScanNode,
-    DropTableNode, FilterNode, HavingNode, IndexScanAllNode, IndexScanNode, InsertNode,
-    JoinCondition, JoinNode, LimitNode, NestedLoopJoinNode, OrderByColumn, OutputColumn,
-    PhysicalPlan, ProjectionItem, ProjectionNode, ScanNode, SemiJoinNode, SortNode,
+    ConflictArbiter, CorrelatedParam, CreateTableAsSelectNode, CreateTableNode, DataScanNode,
+    DeleteNode, DerivedScanNode, DistinctNode, DropTableNode, ExplainNode, FilterNode, HavingNode,
+    IndexScanAllNode, IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode,
+    NestedLoopJoinNode, NestedLoopJoinType, OrderByColumn, OutputColumn, PhysicalPlan,
+    ProjectionItem, ProjectionNode, ScanNode, SemiJoinNode, SetOpKind, SetOperationNode, SortNode,
     SubqueryEvalNode, UpdateNode, UpsertAssignment, UpsertNode, UpsertValueExpr,
 };
 pub use predicate::{
     ArithOp, BinaryArithExpression, CaseExpression, CastExpression, CastType, CoalesceExpression,
-    ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, Expression,
-    ExpressionRef, IntervalArithExpression, IsNullPredicate, LikePredicate, LogicalOp,
+    ColumnExpression, ComparisonOp, ComparisonPredicate, ConstantExpression, ConstantPredicate,
+    Expression, ExpressionRef, IntervalArithExpression, IsNullPredicate, LikePredicate, LogicalOp,
     LogicalPredicate, NotPredicate, ParameterExpression, Predicate, PredicateRef, Ternary,
 };
 pub use projection::ProjectionExecutor;
 pub use result::ExecResult;
 pub use scan::ScanExecutor;
 pub use semi_join::SemiJoinExecutorV2;
+pub use set_operation::SetOperationExecutor;
 pub use single_row::SingleRowExecutor;
 pub use sort::SortExecutor;
 pub use subquery_eval::SubqueryEvalExecutor;

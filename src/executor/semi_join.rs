@@ -52,6 +52,9 @@ pub struct SemiJoinExecutorV2 {
     right_plan: Option<PhysicalPlan>,
     /// Database for creating executors from plans (correlated path)
     database: Option<Arc<Database>>,
+    /// MS20 T2: cross-db route table re-applied on every correlated
+    /// right-plan rebuild (empty outside an ATTACH session).
+    routed_tables: Arc<crate::pipeline::RoutedTables>,
     /// MS09 Iter000 (D4): statement-start Read Committed snapshot re-applied
     /// on every correlated right-plan rebuild (`None` under RepeatableRead).
     snapshot: Option<Snapshot>,
@@ -81,6 +84,7 @@ impl SemiJoinExecutorV2 {
             right_plan: config.right_plan,
             database: config.database,
             snapshot: config.snapshot,
+            routed_tables: config.routed_tables,
             correlated_rows_cache: HashMap::new(),
             phase: SemiJoinPhase::BuildRight,
             executed: false,
@@ -237,6 +241,7 @@ impl Executor for SemiJoinExecutorV2 {
                                                 db,
                                                 None,
                                                 self.snapshot.clone(),
+                                                &self.routed_tables,
                                             )
                                             .await?;
                                         let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =

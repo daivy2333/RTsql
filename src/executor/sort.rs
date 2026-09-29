@@ -58,8 +58,52 @@ impl SortExecutor {
             }
         }
 
+        // MS25 T7（design D8）：表达式键（输出别名键）逐行 decorate——在**未
+        // 投影的输入行**上求值键表达式，与 planner 编译时的行形状同源（Sort 恒
+        // 位于顶层 Projection 之下）。求值错误经 `Result` 传播，不被吞进比较
+        // 闭包（闭包只能返回 `Ordering`）。无表达式键时返回 `None`——比较路径
+        // 与既有逐字节相同。
+        //
+        // owned `Expression::evaluate` 是唯一允许的求值路径：`evaluate_ref`
+        // 零拷贝入口对 String 结果显式报错（同 ProjectionExecutor 约束）。
+        let keys: Option<Vec<Vec<Value>>> = if self.order_by.iter().all(|o| o.expr.is_none()) {
+            None
+        } else {
+            let mut decorated = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let mut row_keys = Vec::new();
+                for order_col in &self.order_by {
+                    if let Some(expr) = &order_col.expr {
+                        row_keys.push(expr.evaluate(row).map_err(|e| {
+                            crate::storage::StorageError::ExecutionError(format!(
+                                "Expression evaluation error: {}",
+                                e
+                            ))
+                        })?);
+                    }
+                }
+                decorated.push(row_keys);
+            }
+            Some(decorated)
+        };
+
         // Sort rows using the order_by specification (on the input row shape)
-        rows.sort_unstable_by(|a, b| self.compare_rows(a, b));
+        match keys {
+            None => rows.sort_unstable_by(|a, b| self.compare_rows(a, b, &[], &[])),
+            Some(keys) => {
+                // decorate 后每行携带「键值 + 行」，排序键在键值上比较，
+                // undecorate 交回原始输入行（投影裁剪在其后）。
+                let mut decorated: Vec<(Vec<Value>, Vec<Value>)> = rows
+                    .into_iter()
+                    .zip(keys)
+                    .map(|(row, row_keys)| (row_keys, row))
+                    .collect();
+                decorated.sort_unstable_by(|(a_keys, a), (b_keys, b)| {
+                    self.compare_rows(a, b, a_keys, b_keys)
+                });
+                rows = decorated.into_iter().map(|(_, row)| row).collect();
+            }
+        }
 
         // MS10-T01 Iter001: apply the output projection after sorting.
         self.sorted_rows = rows
@@ -70,26 +114,40 @@ impl SortExecutor {
         Ok(())
     }
 
-    /// Compare two rows based on order_by specification
-    fn compare_rows(&self, a: &[Value], b: &[Value]) -> Ordering {
+    /// Compare two rows based on order_by specification.
+    ///
+    /// `a_keys` / `b_keys` 是逐行 decorate 的表达式键值，按「`order_by` 中
+    /// 表达式键的先后序」对齐（列名键不占位）。列名键沿用 `columns` 位置
+    /// 查找——列集里不存在的键仍按既有语义跳过该键。
+    fn compare_rows(
+        &self,
+        a: &[Value],
+        b: &[Value],
+        a_keys: &[Value],
+        b_keys: &[Value],
+    ) -> Ordering {
+        let mut key_idx = 0usize;
         for order_col in &self.order_by {
-            // Find the index of the column in the result columns
-            let col_idx = self
-                .columns
-                .iter()
-                .position(|c| c.to_lowercase() == order_col.column.to_lowercase());
+            let ordering = if order_col.expr.is_some() {
+                let ordering = compare_values(&a_keys[key_idx], &b_keys[key_idx]);
+                key_idx += 1;
+                Some(ordering)
+            } else {
+                // Find the index of the column in the result columns
+                self.columns
+                    .iter()
+                    .position(|c| c.to_lowercase() == order_col.column.to_lowercase())
+                    .filter(|idx| *idx < a.len() && *idx < b.len())
+                    .map(|idx| compare_values(&a[idx], &b[idx]))
+            };
 
-            if let Some(idx) = col_idx {
-                if idx < a.len() && idx < b.len() {
-                    match compare_values(&a[idx], &b[idx]) {
-                        Ordering::Equal => continue,
-                        ordering => {
-                            if order_col.asc {
-                                return ordering;
-                            } else {
-                                return ordering.reverse();
-                            }
-                        }
+            match ordering {
+                Some(Ordering::Equal) | None => continue,
+                Some(ordering) => {
+                    if order_col.asc {
+                        return ordering;
+                    } else {
+                        return ordering.reverse();
                     }
                 }
             }

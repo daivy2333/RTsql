@@ -1,21 +1,24 @@
 use crate::database::Database;
 use crate::executor::{
-    AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableExecutor, DataScanExecutor,
-    DeleteExecutor, DerivedScanExecutor, DropTableExecutor, ExecResult, Executor, FilterExecutor,
-    HavingExecutor, IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig,
-    JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, PhysicalPlan,
-    ProjectionExecutor, ScanExecutor, SemiJoinExecutorV2, SingleRowExecutor, SortExecutor,
+    AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableAsSelectNode,
+    CreateTableExecutor, DataScanExecutor, DeleteExecutor, DerivedScanExecutor, DistinctExecutor,
+    DropTableExecutor, ExecResult, Executor, ExplainExecutor, FilterExecutor, HavingExecutor,
+    IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig, JoinExecutor,
+    JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, PhysicalPlan, ProjectionExecutor,
+    ScanExecutor, SemiJoinExecutorV2, SetOperationExecutor, SingleRowExecutor, SortExecutor,
     SubqueryEvalExecutor, UpdateExecutor, UpsertExecutor, Value,
 };
 use crate::network::protocol::Response;
-use crate::parser::{parse_sql, PlanBuilder};
+use crate::parser::{parse_sql, PlanBuilder, PlanError};
 use crate::profiling::{
     init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope,
 };
-use crate::storage::Result;
+use crate::storage::page_format::ColumnType as StorageColumnType;
+use crate::storage::{Result, StorageError};
 use crate::transaction::Snapshot;
 use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,6 +28,67 @@ use std::time::Instant;
 type CreateExecutorFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Box<dyn Executor + Send>>> + Send + 'a>,
 >;
+
+/// MS20 T2（`cross-db-namespace-query`）：语句级路由结果——**计划期实际判定
+/// 为附加库引用**的限定扁平名 → 附加库实例。
+///
+/// 执行面据此取库，而不是重新从计划节点的 `table_name` 推导：计划节点只
+/// 带扁平名（`"o.u"`），对扁平串 split 会与主库字面表名 `"o.u"` 混淆
+/// （R1/S4 的零回归守护约束）。键即 `register_table` 路由分支写入的键，
+/// 计划与执行两侧对同一 key 的判定天然一致。
+pub type RoutedTables = HashMap<String, RoutedTable>;
+
+/// MS20 T2：一条已路由的附加库引用。`local_name` 是该库 catalog 内的真实表名
+///（`"o.u"` → `"u"`）——catalog 以本地名索引，限定名只在会话路由层存在。
+#[derive(Clone)]
+pub struct RoutedTable {
+    pub db: Arc<Database>,
+    pub local_name: String,
+}
+
+/// MS20 T2：会话级附加库别名注册表（别名小写 → 打开的附加库实例）。
+///
+/// 由 CLI `AttachSession` 构造后随语句穿线；lib 执行路径恒 `None`，
+/// 行为逐字节零变化。一期只读：别名表只参与读面路由与写面拒绝。
+#[derive(Clone, Default)]
+pub struct AttachRoute {
+    dbs: HashMap<String, Arc<Database>>,
+}
+
+impl AttachRoute {
+    pub fn new(dbs: HashMap<String, Arc<Database>>) -> Self {
+        Self { dbs }
+    }
+
+    /// 首段是否命中已注册别名（别名键为小写，调用方传入的段已小写归一）。
+    pub fn is_registered(&self, alias: &str) -> bool {
+        self.dbs.contains_key(alias)
+    }
+
+    pub fn db_for_alias(&self, alias: &str) -> Option<&Arc<Database>> {
+        self.dbs.get(alias)
+    }
+}
+
+/// MS20 T2：表名提取的保留形态——既有扁平名（全部消费点的键，逐字节不变）
+/// 加拍平前的分段（路由判定的唯一依据）。
+#[derive(Clone)]
+struct TableRef {
+    /// `object_name_to_table_name` 结果——PlanBuilder / 计划节点 / 错误文案键
+    flat: String,
+    /// 逐段小写标识符；`len() == 1` 即裸名或字面含点表名
+    parts: Vec<String>,
+}
+
+impl TableRef {
+    fn new(name: &sqlparser::ast::ObjectName) -> Self {
+        let parts = crate::parser::ast::object_name_parts(name);
+        Self {
+            flat: parts.join("."),
+            parts,
+        }
+    }
+}
 
 pub async fn execute(database: &Database, sql: &str) -> Response {
     let profiling = is_profiling_enabled();
@@ -49,6 +113,35 @@ pub async fn parse_stage(sql: &str) -> std::result::Result<Vec<Statement>, Strin
     Ok(statements)
 }
 
+/// 解析阶段失败的 SQLSTATE（MS19-T02：语法错误统一 42601，含 "Empty SQL"
+/// 退化形态——`parse_stage` 保持返回 `String`，分类在漏斗点赋予）。
+const PARSE_SQLSTATE: &str = "42601";
+
+/// Pipeline 阶段 2 的类型化失败（MS19-T02）：`Display` 与既有 `String` 错误
+/// 逐字节等价（`Plan error: ` 前缀在此引入），额外携带 PG SQLSTATE 分类。
+#[derive(Debug, Clone)]
+pub struct PlanFailure {
+    pub message: String,
+    pub sqlstate: &'static str,
+}
+
+impl fmt::Display for PlanFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for PlanFailure {}
+
+impl From<PlanError> for PlanFailure {
+    fn from(e: PlanError) -> Self {
+        Self {
+            message: format!("Plan error: {}", e),
+            sqlstate: e.sqlstate(),
+        }
+    }
+}
+
 /// Pipeline 阶段 2：AST → PhysicalPlan。
 ///
 /// DDL 变体走 `PlanBuilder::new().build_plan`（不注册表，不做 table_metadata_lookup）。
@@ -60,11 +153,61 @@ pub async fn plan_stage(
     sql: &str,
     stmt: &Statement,
     profiling: bool,
-) -> std::result::Result<PhysicalPlan, String> {
+) -> std::result::Result<PhysicalPlan, PlanFailure> {
+    plan_stage_routed(
+        database,
+        sql,
+        stmt,
+        profiling,
+        None,
+        &mut RoutedTables::new(),
+    )
+    .await
+}
+
+/// MS20 T2：带跨库路由上下文的 `plan_stage`（既有签名为委托壳，lib 路径恒
+/// `route = None` → 行为逐字节不变）。
+///
+/// `route` 决定哪些限定名解析到附加库；`routed` 输出本语句实际路由的
+/// 限定名 → 附加库，供同语句的执行面取库。含附加库引用的语句跳过 plan
+/// cache 写——cache key 只含 SQL 文本，不含 attach 身份。
+pub async fn plan_stage_routed(
+    database: &Database,
+    sql: &str,
+    stmt: &Statement,
+    profiling: bool,
+    route: Option<&AttachRoute>,
+    routed: &mut RoutedTables,
+) -> std::result::Result<PhysicalPlan, PlanFailure> {
     match stmt {
-        Statement::CreateTable { .. } | Statement::Drop { .. } => PlanBuilder::new()
-            .build_plan(stmt)
-            .map_err(|e| format!("Plan error: {}", e)),
+        // MS20 T4: CTAS 两侧都要判定——写目标沿用 DDL 标记（附加库目标计划期
+        // 拒绝），物化源经 `register_table` 走跨库路由（可读附加库）。`CTAS`
+        // 不是 `Statement::Query`，不进 plan cache（DDL/DML 既有纪律）。
+        Statement::CreateTable { query: Some(_), .. } => {
+            let table_lookup_start = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let mut plan_builder = PlanBuilder::new();
+            if let Some(route) = route {
+                mark_attached_ddl_targets(&mut plan_builder, stmt, route);
+            }
+            register_table(database, &mut plan_builder, stmt, route, routed).await?;
+            if let Some(start) = table_lookup_start {
+                record_time("table_metadata_lookup", start.elapsed());
+            }
+            plan_builder.build_plan(stmt).map_err(PlanFailure::from)
+        }
+        Statement::CreateTable { .. } | Statement::Drop { .. } => {
+            let mut plan_builder = PlanBuilder::new();
+            // MS20 T3: DDL 走此分支（不经 `register_table`），写目标的附加库
+            // 引用判定在此独立完成——只需「首段命中别名」，不查 catalog。
+            if let Some(route) = route {
+                mark_attached_ddl_targets(&mut plan_builder, stmt, route);
+            }
+            plan_builder.build_plan(stmt).map_err(PlanFailure::from)
+        }
         _ => {
             let table_lookup_start = if profiling {
                 Some(Instant::now())
@@ -72,14 +215,14 @@ pub async fn plan_stage(
                 None
             };
             let mut plan_builder = PlanBuilder::new();
-            register_table(database, &mut plan_builder, stmt).await?;
+            register_table(database, &mut plan_builder, stmt, route, routed).await?;
             if let Some(start) = table_lookup_start {
                 record_time("table_metadata_lookup", start.elapsed());
             }
-            let plan = plan_builder
-                .build_plan(stmt)
-                .map_err(|e| format!("Plan error: {}", e))?;
-            if is_cacheable(stmt) {
+            let plan = plan_builder.build_plan(stmt).map_err(PlanFailure::from)?;
+            // MS20 T2: attach 身份不在 cache key 内——含附加库引用的语句不得
+            // 进缓存，否则同文本语句在「有/无该别名」的会话间互相污染。
+            if is_cacheable(stmt) && routed.is_empty() {
                 database.plan_cache.put(sql.to_string(), plan.clone());
             }
             Ok(plan)
@@ -96,6 +239,17 @@ pub async fn plan_stage(
 ///
 /// `profiling: true` 时，`executor_creation` 与 `executor_execution` 子指标在该阶段内记录。
 pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: bool) -> Response {
+    execute_stage_routed(database, plan, profiling, &RoutedTables::new()).await
+}
+
+/// MS20 T2：带路由上下文的 `execute_stage`（既有签名为委托壳，lib 路径恒空
+/// 路由表 → 行为逐字节不变）。扫描臂按计划期判定的 `RoutedTables` 取库。
+pub async fn execute_stage_routed(
+    database: &Database,
+    plan: PhysicalPlan,
+    profiling: bool,
+    routed: &RoutedTables,
+) -> Response {
     match &plan {
         PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
             let executor: Box<dyn Executor + Send> = match &plan {
@@ -111,6 +265,13 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
             };
             let response = execute_executor(executor).await;
             // 时序保持：DDL 执行后清缓存（与原 execute_inner 行为等价——成功后与失败后都清）。
+            database.plan_cache.clear();
+            response
+        }
+        PhysicalPlan::CreateTableAsSelect(node) => {
+            // MS20 T4：CTAS 是混合面（SELECT 物化 + 建表 + 落行），没有单一
+            // executor —— 走 `execute_ctas_routed`。缓存清理与 DDL 臂同款。
+            let response = execute_ctas_routed(database, node, profiling, routed).await;
             database.plan_cache.clear();
             response
         }
@@ -141,21 +302,22 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
             } else {
                 None
             };
-            let executor = match create_executor_from_plan(plan, database, Some(tx_id), None).await
-            {
-                Ok(e) => e,
-                Err(e) => {
-                    if let Some(abort_tables) = &abort_tables {
-                        let _ = database
-                            .transaction_manager
-                            .abort(tx, &database.buffer_pool, abort_tables)
-                            .await;
+            let executor =
+                match create_executor_from_plan(plan, database, Some(tx_id), None, routed).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        if let Some(abort_tables) = &abort_tables {
+                            let _ = database
+                                .transaction_manager
+                                .abort(tx, &database.buffer_pool, abort_tables)
+                                .await;
+                        }
+                        return Response::Error {
+                            message: e.to_string(),
+                            sqlstate: None,
+                        };
                     }
-                    return Response::Error {
-                        message: e.to_string(),
-                    };
-                }
-            };
+                };
             if let Some(start) = executor_creation_start {
                 record_time("executor_creation", start.elapsed());
             }
@@ -180,6 +342,7 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
                         {
                             return Response::Error {
                                 message: format!("Abort failed: {}", abort_err),
+                                sqlstate: None,
                             };
                         }
                     }
@@ -192,6 +355,7 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
                     {
                         return Response::Error {
                             message: format!("Commit failed: {}", commit_err),
+                            sqlstate: None,
                         };
                     }
                 }
@@ -211,11 +375,14 @@ pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: b
                 None
             };
             let executor =
-                match create_executor_from_plan(plan, database, None, statement_snapshot).await {
+                match create_executor_from_plan(plan, database, None, statement_snapshot, routed)
+                    .await
+                {
                     Ok(e) => e,
                     Err(e) => {
                         return Response::Error {
                             message: e.to_string(),
+                            sqlstate: None,
                         };
                     }
                 };
@@ -244,6 +411,258 @@ fn multi_statement_rejected(count: usize) -> Response {
         message: format!(
             "only a single statement is supported on this path (got {count} statements); use the CLI (rtsql) to run multi-statement scripts"
         ),
+        sqlstate: None,
+    }
+}
+
+/// MS20 T4：CTAS 物化执行（`execute_stage_routed` 混合臂的实现体）。
+///
+/// 顺序固定（design D5）：物化 SELECT → 类型推导 → 建表 → `flush_all` →
+/// 隐式事务落行。`flush_all` 必须在建表之后、任何数据 WAL 记录之前：catalog
+/// 不写 WAL，redo 按表名查 catalog 缺表即 `RedoFailed` 变砖；先 flush 让
+/// 「残留 schema 完整的空表」成为崩溃后唯一可达形态。
+///
+/// 零副作用：物化/类型推导/建表三处失败都在写入之前（既有表零变化）；落行失败
+/// 走 abort + 尽力 drop_table，同名可重试。
+async fn execute_ctas_routed(
+    database: &Database,
+    node: &CreateTableAsSelectNode,
+    profiling: bool,
+    routed: &RoutedTables,
+) -> Response {
+    // 0. 目标已存在 → 与建表通道同型（`DuplicateTable`）拒绝。提前于物化，
+    //    免去为注定失败的语句跑完整个源结果集；错误面与「物化后建表被拒」
+    //    一致，既有表零变化。
+    if database.table_manager.table_exists(&node.table_name) {
+        return Response::Error {
+            message: StorageError::DuplicateTable(node.table_name.clone()).to_string(),
+            sqlstate: None,
+        };
+    }
+
+    // 1. 物化源 SELECT（语句级快照，与查询路径同款；源可指向附加库）。
+    let statement_snapshot = database.statement_snapshot(None).await;
+    let create_start = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let mut select = match create_executor_from_plan(
+        *node.select.clone(),
+        database,
+        None,
+        statement_snapshot,
+        routed,
+    )
+    .await
+    {
+        Ok(executor) => executor,
+        Err(e) => {
+            return Response::Error {
+                message: e.to_string(),
+                sqlstate: None,
+            }
+        }
+    };
+    if let Some(start) = create_start {
+        record_time("executor_creation", start.elapsed());
+    }
+
+    let exec_start = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    loop {
+        match select.next().await {
+            Ok(Some(ExecResult::Row(values))) => rows.push(values),
+            // 源计划恒为 SELECT（`build_create_table_as_select` 产出），只有行
+            // 输出；RowId / AffectedRows 是写面信号，视为物化结束。
+            Ok(Some(_)) | Ok(None) => break,
+            Err(e) => {
+                return Response::Error {
+                    message: e.to_string(),
+                    sqlstate: None,
+                }
+            }
+        }
+    }
+    if let Some(start) = exec_start {
+        record_time("executor_execution", start.elapsed());
+    }
+
+    // 2. 类型推导（数据依赖）——不可行混合在此点名拒绝，catalog 仍零副作用。
+    let schema = match infer_ctas_column_types(&node.columns, &rows) {
+        Ok(schema) => schema,
+        Err(failure) => {
+            return Response::Error {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate().to_string()),
+            }
+        }
+    };
+
+    // 3. 建表：首列沿用「未声明主键时首列为隐式主键」既有语义。
+    let pk = node
+        .columns
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "id".to_string());
+    let columns: Vec<(String, StorageColumnType, bool, bool, Option<Value>)> = node
+        .columns
+        .iter()
+        .cloned()
+        .zip(schema)
+        .map(|(name, column_type)| (name, column_type, false, false, None))
+        .collect();
+    if let Err(e) = database
+        .table_manager
+        .create_table_with_constraints(&node.table_name, columns, &pk)
+        .await
+    {
+        return Response::Error {
+            message: e.to_string(),
+            sqlstate: None,
+        };
+    }
+
+    // 5. catalog 落盘（先于任何数据 WAL 记录——见函数文档的崩溃一致性约束）。
+    if let Err(e) = database.buffer_pool.flush_all().await {
+        let _ = database.table_manager.drop_table(&node.table_name).await;
+        return Response::Error {
+            message: format!("Flush failed after CTAS create: {e}"),
+            sqlstate: None,
+        };
+    }
+
+    // 6. 隐式事务落行。
+    let tx = database.transaction_manager.begin().await;
+    let tx_id = tx.id();
+    let table_meta = match database.table_manager.get_table(&node.table_name).await {
+        Ok(table_meta) => table_meta,
+        Err(e) => {
+            let _ = database
+                .transaction_manager
+                .abort(tx, &database.buffer_pool, &HashMap::new())
+                .await;
+            let _ = database.table_manager.drop_table(&node.table_name).await;
+            return Response::Error {
+                message: e.to_string(),
+                sqlstate: None,
+            };
+        }
+    };
+    let count = rows.len() as u64;
+    let mut insert = InsertExecutor::with_table_manager(
+        table_meta.clone(),
+        Some(database.table_manager.clone()),
+        database.buffer_pool.clone(),
+        database.transaction_manager.clone(),
+        rows,
+        tx_id,
+        Some(database.wal_buffer.clone()),
+    );
+    let mut insert_failure: Option<String> = None;
+    loop {
+        match insert.next().await {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(e) => {
+                insert_failure = Some(e.to_string());
+                break;
+            }
+        }
+    }
+
+    // 7. 收口：失败 → abort + 尽力 drop_table（零副作用：同名可重试）。
+    if let Some(message) = insert_failure {
+        let abort_tables = HashMap::from([(node.table_name.clone(), table_meta)]);
+        let _ = database
+            .transaction_manager
+            .abort(tx, &database.buffer_pool, &abort_tables)
+            .await;
+        let _ = database.table_manager.drop_table(&node.table_name).await;
+        return Response::Error {
+            message,
+            sqlstate: None,
+        };
+    }
+    if let Err(e) = database
+        .transaction_manager
+        .commit(tx, &database.buffer_pool)
+        .await
+    {
+        let _ = database.table_manager.drop_table(&node.table_name).await;
+        return Response::Error {
+            message: format!("Commit failed: {e}"),
+            sqlstate: None,
+        };
+    }
+    Response::AffectedRows { count }
+}
+
+/// MS20 T4：CTAS 输出列类型推导（design D5 step 3）。
+///
+/// 全 NULL → `STRING(255)`（沿用 DDL 路径 VARCHAR 默认长度，见
+/// `ColumnDef::to_schema_column`）；同型保留；`Int∪Float` → `FLOAT`
+/// （无损提升，与 MS24 FLOAT 列写面同语义）；其余混合点名拒绝。
+fn infer_ctas_column_types(
+    columns: &[String],
+    rows: &[Vec<Value>],
+) -> std::result::Result<Vec<StorageColumnType>, PlanError> {
+    let mut inferred: Vec<StorageColumnType> = Vec::with_capacity(columns.len());
+    for (index, name) in columns.iter().enumerate() {
+        let mut current: Option<StorageColumnType> = None;
+        for row in rows {
+            // 行宽不足的槽位按 NULL 参与推导（缺列不制造类型冲突）。
+            let Some(observed) = row.get(index).and_then(ctas_value_type) else {
+                continue;
+            };
+            current = Some(match (current, observed) {
+                (None, column_type) => column_type,
+                (Some(previous), column_type) if previous == column_type => previous,
+                // Int∪Float → FLOAT（无损提升，与 MS24 FLOAT 列写面同语义）
+                (Some(StorageColumnType::Int), StorageColumnType::Float)
+                | (Some(StorageColumnType::Float), StorageColumnType::Int) => {
+                    StorageColumnType::Float
+                }
+                (Some(previous), column_type) => {
+                    return Err(PlanError::CtasColumnTypeConflict(format!(
+                        "{name} ({}, {})",
+                        ctas_type_name(&previous),
+                        ctas_type_name(&column_type)
+                    )));
+                }
+            });
+        }
+        inferred.push(current.unwrap_or(StorageColumnType::String(255)));
+    }
+    Ok(inferred)
+}
+
+/// MS20 T4：单个 `Value` 的存储列类型；`NULL` 返回 `None`（参与任意类型）。
+fn ctas_value_type(value: &Value) -> Option<StorageColumnType> {
+    match value {
+        Value::Null => None,
+        Value::Int(_) => Some(StorageColumnType::Int),
+        Value::Float(_) => Some(StorageColumnType::Float),
+        Value::Bool(_) => Some(StorageColumnType::Bool),
+        Value::String(_) => Some(StorageColumnType::String(255)),
+        Value::Date(_) => Some(StorageColumnType::Date),
+        Value::Timestamp(_) => Some(StorageColumnType::Timestamp),
+    }
+}
+
+/// MS20 T4：类型点名文案（与 `insert.rs::column_type_name` 同款大写形态）。
+fn ctas_type_name(column_type: &StorageColumnType) -> &'static str {
+    match column_type {
+        StorageColumnType::Int => "INT",
+        StorageColumnType::String(_) => "STRING",
+        StorageColumnType::Float => "FLOAT",
+        StorageColumnType::Bool => "BOOL",
+        StorageColumnType::Date => "DATE",
+        StorageColumnType::Timestamp => "TIMESTAMP",
     }
 }
 
@@ -255,7 +674,12 @@ fn multi_statement_rejected(count: usize) -> Response {
 pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Response {
     let statements = match parse_stage(sql).await {
         Ok(s) => s,
-        Err(message) => return Response::Error { message },
+        Err(message) => {
+            return Response::Error {
+                message,
+                sqlstate: Some(PARSE_SQLSTATE.to_string()),
+            }
+        }
     };
     if statements.len() > 1 {
         return multi_statement_rejected(statements.len());
@@ -265,12 +689,18 @@ pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Respon
         None => {
             return Response::Error {
                 message: "No statement executed".to_string(),
+                sqlstate: None,
             }
         }
     };
     let plan = match plan_stage(database, sql, stmt, false).await {
         Ok(p) => p,
-        Err(message) => return Response::Error { message },
+        Err(failure) => {
+            return Response::Error {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate.to_string()),
+            }
+        }
     };
     execute_stage_in_tx(database, plan, tx_id).await
 }
@@ -285,6 +715,17 @@ pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Respon
 /// implicit path. A failed statement returns an error response and leaves
 /// the transaction alive for the caller to commit or roll back.
 pub async fn execute_stage_in_tx(database: &Database, plan: PhysicalPlan, tx_id: u64) -> Response {
+    execute_stage_in_tx_routed(database, plan, tx_id, &RoutedTables::new()).await
+}
+
+/// MS20 T2：带路由上下文的 `execute_stage_in_tx`（显式事务内跨库 SELECT 走此
+/// 路径——主库部分用会话事务，附加库部分各用自身快照，design 假设 4）。
+pub async fn execute_stage_in_tx_routed(
+    database: &Database,
+    plan: PhysicalPlan,
+    tx_id: u64,
+    routed: &RoutedTables,
+) -> Response {
     match &plan {
         PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
             let executor: Box<dyn Executor + Send> = match &plan {
@@ -302,16 +743,29 @@ pub async fn execute_stage_in_tx(database: &Database, plan: PhysicalPlan, tx_id:
             database.plan_cache.clear();
             response
         }
+        PhysicalPlan::CreateTableAsSelect(_) => {
+            // MS20 T4：CTAS 的物化面要求「建表 + 一次独立隐式事务」整体原子，
+            // 显式事务内的会话态（含用户已执行的写）不能被中途 abort /
+            // drop_table 破坏 —— 点名拒绝。拒绝点在 execute 之前、会话事务
+            // 之外，CLI 与 lib 两条在途路径共用同一文案。
+            Response::Error {
+                message: "CREATE TABLE AS SELECT is not supported inside a transaction".to_string(),
+                sqlstate: Some("0A000".to_string()),
+            }
+        }
         _ => {
             // MS09 Iter000 (D4): in-transaction statements take their
             // statement-start snapshot with the transaction's own id as the
             // reader (self writes stay visible via `is_visible_self`); the
             // default RepeatableRead path stays `None`.
             let statement_snapshot = database.statement_snapshot(Some(tx_id)).await;
-            match create_executor_from_plan(plan, database, Some(tx_id), statement_snapshot).await {
+            match create_executor_from_plan(plan, database, Some(tx_id), statement_snapshot, routed)
+                .await
+            {
                 Ok(executor) => execute_executor(executor).await,
                 Err(e) => Response::Error {
                     message: e.to_string(),
+                    sqlstate: None,
                 },
             }
         }
@@ -365,7 +819,10 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
             if let Some(start) = parse_start {
                 record_time("parse", start.elapsed());
             }
-            return Response::Error { message };
+            return Response::Error {
+                message,
+                sqlstate: Some(PARSE_SQLSTATE.to_string()),
+            };
         }
     };
     if let Some(start) = parse_start {
@@ -381,6 +838,7 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
         None => {
             return Response::Error {
                 message: "No statement executed".to_string(),
+                sqlstate: None,
             };
         }
     };
@@ -393,11 +851,14 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
     };
     let plan = match plan_stage(database, sql, stmt, profiling).await {
         Ok(p) => p,
-        Err(message) => {
+        Err(failure) => {
             if let Some(start) = plan_start {
                 record_time("plan", start.elapsed());
             }
-            return Response::Error { message };
+            return Response::Error {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate.to_string()),
+            };
         }
     };
     if let Some(start) = plan_start {
@@ -439,6 +900,7 @@ async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
             Err(e) => {
                 return Response::Error {
                     message: format!("Execution error: {}", e),
+                    sqlstate: None,
                 }
             }
         }
@@ -451,6 +913,33 @@ async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
     }
 }
 
+/// MS20 T2：计划节点的 `table_name` 若在本语句的路由表内则取该附加库实例，
+/// 否则取主库。键来自计划期判定（限定扁平名），不重新解析分段。
+fn routed_db<'a>(
+    routed: &'a RoutedTables,
+    database: &'a Database,
+    table_name: &'a str,
+) -> (&'a Database, &'a str) {
+    match routed.get(table_name) {
+        Some(entry) => (entry.db.as_ref(), entry.local_name.as_str()),
+        None => (database, table_name),
+    }
+}
+
+/// MS20 T2：按路由取附加库（或主库）的表元数据——catalog 以本地名索引，故
+/// 命中路由时以 `local_name` 取表。
+///
+/// 限定扁平名留在计划节点（`node.table_name`）与列引用上，不改写
+/// `TableMeta.name`：读执行器不消费该字段，写执行器不路由。
+async fn load_table_meta(
+    routed: &RoutedTables,
+    database: &Database,
+    table_name: &str,
+) -> crate::storage::Result<std::sync::Arc<crate::storage::data::TableMeta>> {
+    let (db, local_name) = routed_db(routed, database, table_name);
+    db.table_manager.get_table(local_name).await
+}
+
 /// Create executor from physical plan (recursive for Filter)
 ///
 /// `tx_id` is `Some(real_tx_id)` for DML nodes (Insert/Update/Delete) and `None`
@@ -461,53 +950,68 @@ async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
 /// D4) — `None` under the default RepeatableRead path, which keeps every scan
 /// construction byte-for-byte unchanged. It threads to all scan nodes and to
 /// subquery/derived-table rebuilds.
-pub(crate) fn create_executor_from_plan(
+///
+/// `routed` 是本语句计划期判定的跨库路由表（MS20 T2）：键为限定扁平名
+/// （`"o.u"`），值是该限定名所属的附加库实例。扫描臂据此取 schema、缓冲池与
+/// 事务管理器——**附加库必须用自己的 `transaction_manager`**：tx-id 空间按库
+/// 独立，串用主库实例会错误抑制墓碑（design D6）。写执行器臂不路由（附加库
+/// 写面在计划期已被拒绝）。
+pub(crate) fn create_executor_from_plan<'a>(
     plan: PhysicalPlan,
-    database: &Database,
+    database: &'a Database,
     tx_id: Option<u64>,
     snapshot: Option<Snapshot>,
-) -> CreateExecutorFuture<'_> {
+    routed: &'a RoutedTables,
+) -> CreateExecutorFuture<'a> {
     Box::pin(async move {
         match plan {
             PhysicalPlan::Filter(node) => {
                 // Recursively create input executor
-                let input =
-                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
-                        .await?;
+                let input = create_executor_from_plan(
+                    *node.input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
                 Ok(Box::new(
                     FilterExecutor::new(input, node.predicate).with_projection(node.projection),
                 ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Scan(node) => {
-                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(
-                    ScanExecutor::new(table_meta, database.buffer_pool.clone(), snapshot)
+                    ScanExecutor::new(table_meta, db.buffer_pool.clone(), snapshot)
                         .with_projection(node.projection),
                 ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::DataScan(node) => {
-                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(
                     DataScanExecutor::new(
                         table_meta,
-                        database.buffer_pool.clone(),
+                        db.buffer_pool.clone(),
                         snapshot,
                         node.predicate,
                         node.scan_cap,
-                        Some(database.transaction_manager.clone()),
+                        Some(db.transaction_manager.clone()),
                     )
                     .with_projection(node.projection),
                 ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::IndexScan(node) => {
-                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(
                     IndexScanExecutor::new(
                         table_meta,
-                        database.buffer_pool.clone(),
+                        db.buffer_pool.clone(),
                         node.key.as_bytes().to_vec(),
                         snapshot,
                     )
@@ -516,11 +1020,12 @@ pub(crate) fn create_executor_from_plan(
             }
 
             PhysicalPlan::IndexScanAll(node) => {
-                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(
                     IndexScanAllExecutor::new(
                         table_meta,
-                        database.buffer_pool.clone(),
+                        db.buffer_pool.clone(),
                         node.key.as_bytes().to_vec(),
                         snapshot,
                     )
@@ -586,41 +1091,60 @@ pub(crate) fn create_executor_from_plan(
                 panic!("DDL should be handled separately in execute()")
             }
 
+            // MS20 T4: CTAS 是混合面，由 `execute_ctas_routed` 物化，不存在
+            // 单一 executor。
+            PhysicalPlan::CreateTableAsSelect(_) => {
+                panic!("CTAS should be handled by execute_ctas_routed()")
+            }
+
             PhysicalPlan::Aggregate(node) => {
                 let AggregateNode {
                     input,
                     group_by,
                     group_key_exprs,
                     aggregates,
+                    aggregate_arg_indices,
                     output_columns,
                     table_name: _,
                     column_indices,
                 } = node;
                 let input_executor =
-                    create_executor_from_plan(*input, database, tx_id, snapshot.clone()).await?;
+                    create_executor_from_plan(*input, database, tx_id, snapshot.clone(), routed)
+                        .await?;
                 Ok(Box::new(AggregateExecutor::new(
                     input_executor,
                     group_by,
                     group_key_exprs,
                     aggregates,
+                    aggregate_arg_indices,
                     output_columns,
                     column_indices,
                 )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Having(node) => {
-                let input =
-                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
-                        .await?;
+                let input = create_executor_from_plan(
+                    *node.input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
                 Ok(Box::new(HavingExecutor::new(input, node.predicate))
                     as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Sort(node) => {
                 // Recursively create input executor
-                let input =
-                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
-                        .await?;
+                let input = create_executor_from_plan(
+                    *node.input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
                 Ok(Box::new(
                     SortExecutor::new(input, node.order_by, node.columns)
                         .with_projection(node.projection),
@@ -629,9 +1153,14 @@ pub(crate) fn create_executor_from_plan(
 
             PhysicalPlan::Limit(node) => {
                 // Recursively create input executor
-                let input =
-                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
-                        .await?;
+                let input = create_executor_from_plan(
+                    *node.input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
                 Ok(Box::new(LimitExecutor::new(input, node.limit, node.offset))
                     as Box<dyn Executor + Send>)
             }
@@ -644,14 +1173,24 @@ pub(crate) fn create_executor_from_plan(
                     extract_column_indices(&join_node.right)?;
 
                 // Build left executor recursively
-                let left_executor =
-                    create_executor_from_plan(*join_node.left, database, tx_id, snapshot.clone())
-                        .await?;
+                let left_executor = create_executor_from_plan(
+                    *join_node.left,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
 
                 // Build right executor recursively
-                let right_executor =
-                    create_executor_from_plan(*join_node.right, database, tx_id, snapshot.clone())
-                        .await?;
+                let right_executor = create_executor_from_plan(
+                    *join_node.right,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
 
                 Ok(Box::new(JoinExecutor::new(JoinConfig {
                     left_executor,
@@ -672,12 +1211,22 @@ pub(crate) fn create_executor_from_plan(
                 let (_, left_table_name) = extract_column_indices(&node.left)?;
 
                 // Build left and right executors recursively
-                let left_executor =
-                    create_executor_from_plan(*node.left, database, tx_id, snapshot.clone())
-                        .await?;
-                let right_executor =
-                    create_executor_from_plan(*node.right, database, tx_id, snapshot.clone())
-                        .await?;
+                let left_executor = create_executor_from_plan(
+                    *node.left,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
+                let right_executor = create_executor_from_plan(
+                    *node.right,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
 
                 Ok(Box::new(NestedLoopJoinExecutor::new(
                     left_executor,
@@ -685,6 +1234,7 @@ pub(crate) fn create_executor_from_plan(
                     node.predicate.clone(),
                     node.output_columns.clone(),
                     left_table_name,
+                    node.join_type,
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -703,12 +1253,22 @@ pub(crate) fn create_executor_from_plan(
                 };
 
                 // Build left and right executors recursively
-                let left_executor =
-                    create_executor_from_plan(*node.left, database, tx_id, snapshot.clone())
-                        .await?;
-                let right_executor =
-                    create_executor_from_plan(*node.right, database, tx_id, snapshot.clone())
-                        .await?;
+                let left_executor = create_executor_from_plan(
+                    *node.left,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
+                let right_executor = create_executor_from_plan(
+                    *node.right,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
 
                 Ok(Box::new(SemiJoinExecutorV2::new(JoinRelatedConfig {
                     left: left_executor,
@@ -721,6 +1281,7 @@ pub(crate) fn create_executor_from_plan(
                     right_plan,
                     database: Some(Arc::new(database.clone())),
                     snapshot,
+                    routed_tables: Arc::new(routed.clone()),
                 })) as Box<dyn Executor + Send>)
             }
 
@@ -738,12 +1299,22 @@ pub(crate) fn create_executor_from_plan(
                     None
                 };
                 // Build left and right executors recursively
-                let left_executor =
-                    create_executor_from_plan(*node.left, database, tx_id, snapshot.clone())
-                        .await?;
-                let right_executor =
-                    create_executor_from_plan(*node.right, database, tx_id, snapshot.clone())
-                        .await?;
+                let left_executor = create_executor_from_plan(
+                    *node.left,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
+                let right_executor = create_executor_from_plan(
+                    *node.right,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
 
                 Ok(Box::new(AntiJoinExecutor::new(JoinRelatedConfig {
                     left: left_executor,
@@ -756,14 +1327,20 @@ pub(crate) fn create_executor_from_plan(
                     right_plan,
                     database: Some(Arc::new(database.clone())),
                     snapshot,
+                    routed_tables: Arc::new(routed.clone()),
                 })) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::SubqueryEval(node) => {
                 let (outer_column_indices, _) = extract_column_indices(&node.input)?;
-                let input_executor =
-                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
-                        .await?;
+                let input_executor = create_executor_from_plan(
+                    *node.input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
                 Ok(Box::new(SubqueryEvalExecutor::new(
                     input_executor,
                     *node.subquery,
@@ -773,14 +1350,20 @@ pub(crate) fn create_executor_from_plan(
                     outer_column_indices,
                     Arc::new(database.clone()),
                     snapshot,
+                    Arc::new(routed.clone()),
                 )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::DerivedScan(node) => {
                 // Materialize subquery results into memory
-                let mut subquery_executor =
-                    create_executor_from_plan(*node.subquery, database, tx_id, snapshot.clone())
-                        .await?;
+                let mut subquery_executor = create_executor_from_plan(
+                    *node.subquery,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
                 let mut rows = Vec::new();
                 loop {
                     match subquery_executor.next().await? {
@@ -795,16 +1378,67 @@ pub(crate) fn create_executor_from_plan(
             PhysicalPlan::Projection(node) => {
                 // MS11-T01 Iter001: 逐项求值走 owned `Expression::evaluate`
                 // 路径（新值表达式的 evaluate_ref 对 String 结果报错，禁用）
-                let input =
-                    create_executor_from_plan(*node.input, database, tx_id, snapshot.clone())
-                        .await?;
+                let input = create_executor_from_plan(
+                    *node.input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
                 let items = node.items.into_iter().map(|item| item.expr).collect();
                 Ok(Box::new(ProjectionExecutor::new(input, items)) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Distinct(node) => {
+                // MS25 T2: materialize the (already output-shaped) input row
+                // stream, then hand the rows to the de-duplicating executor
+                // (same construction-time materialization shape as DerivedScan).
+                let input = create_executor_from_plan(
+                    *node.input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
+                Ok(Box::new(DistinctExecutor::new(input)) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::SetOperation(node) => {
+                // MS25 T3: both branches are full SELECT plans — build each
+                // executor and let the set-operation executor materialize them.
+                let left = create_executor_from_plan(
+                    *node.left,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
+                let right = create_executor_from_plan(
+                    *node.right,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
+                Ok(
+                    Box::new(SetOperationExecutor::new(left, right, node.op, node.all))
+                        as Box<dyn Executor + Send>,
+                )
             }
 
             PhysicalPlan::SingleRow => {
                 // MS13 T9: no-FORM 虚拟单行输入（恰产出一行空行）
                 Ok(Box::new(SingleRowExecutor::new()) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::Explain(node) => {
+                // MS25 T6: EXPLAIN 是只读观测面——渲染被观测计划，**不构造
+                // 内层执行器**（派生表急切物化与任何执行器副作用都不触发）。
+                Ok(Box::new(ExplainExecutor::new(&node.input)) as Box<dyn Executor + Send>)
             }
         }
     })
@@ -979,13 +1613,18 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
 }
 
 /// Extract all table names from a statement (including JOIN tables)
-fn extract_all_table_names(stmt: &Statement) -> Vec<String> {
+fn extract_all_table_names(stmt: &Statement) -> Vec<TableRef> {
     match stmt {
         Statement::Query(query) => extract_all_query_table_names(query),
-        Statement::Insert { table_name, .. } => {
-            vec![crate::parser::ast::object_name_to_table_name(table_name)]
-        }
+        // MS25 T6: `EXPLAIN <SELECT>` 的被观测语句贡献其表名（`EXPLAIN` 走
+        // plan_stage 的非 DDL 分支，目录注册为其内层语句服务）。
+        Statement::Explain { statement, .. } => extract_all_table_names(statement),
+        Statement::Insert { table_name, .. } => vec![TableRef::new(table_name)],
         Statement::Update { table, .. } => extract_all_from_table_with_joins_item(table),
+        // MS20 T4: CTAS 的物化源是完整 SELECT（含 CTEs / JOIN / 子查询），
+        // 目录注册为该 SELECT 服务；写目标名不参与提取（目标由 DDL 标记与
+        // 写库面检查负责，MS20 T3 既有语义）。
+        Statement::CreateTable { query: Some(q), .. } => extract_all_query_table_names(q),
         Statement::Delete { from, .. } => {
             let tables = match from {
                 sqlparser::ast::FromTable::WithFromKeyword(t) => t.clone(),
@@ -1001,48 +1640,99 @@ fn extract_all_table_names(stmt: &Statement) -> Vec<String> {
 }
 
 /// Extract all table names from a query (including JOIN tables, derived subqueries, and WHERE/SELECT subqueries)
-fn extract_all_query_table_names(query: &Query) -> Vec<String> {
+///
+/// MS25 T5: `WITH`-defined names are statement-scoped and shadow same-named base
+/// tables, so they never reach the catalog (the planner's CTE registry resolves
+/// them). Definition bodies contribute their own tables, each filtered by the
+/// names visible at that point — a name defined *later* still resolves to the
+/// base table inside an earlier definition.
+fn extract_all_query_table_names(query: &Query) -> Vec<TableRef> {
+    let Some(with) = &query.with else {
+        return extract_query_body_table_names(query);
+    };
+    let mut tables = Vec::new();
+    let mut visible: Vec<String> = Vec::new();
+    for cte in &with.cte_tables {
+        let mut definition_tables = extract_all_query_table_names(&cte.query);
+        definition_tables.retain(|t| !visible.contains(&t.flat));
+        tables.extend(definition_tables);
+        visible.push(cte.alias.name.value.to_lowercase());
+    }
+    let mut body_tables = extract_query_body_table_names(query);
+    body_tables.retain(|t| !visible.contains(&t.flat));
+    tables.extend(body_tables);
+    tables
+}
+
+/// Table names of a query body (dispatching over its set expression).
+fn extract_query_body_table_names(query: &Query) -> Vec<TableRef> {
     match query.body.as_ref() {
-        SetExpr::Select(select) => {
-            let from_tables: Vec<String> = select
-                .from
-                .iter()
-                .flat_map(extract_all_from_table_with_joins_item)
-                .collect();
-
-            // Extract tables from WHERE clause subqueries
-            let where_tables = select
-                .selection
-                .as_ref()
-                .map(extract_subquery_tables_from_expr)
-                .unwrap_or_default();
-
-            // Extract tables from SELECT projection subqueries
-            let projection_tables: Vec<String> = select
-                .projection
-                .iter()
-                .flat_map(|item| match item {
-                    sqlparser::ast::SelectItem::UnnamedExpr(expr)
-                    | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
-                        extract_subquery_tables_from_expr(expr)
-                    }
-                    _ => Vec::new(),
-                })
-                .collect();
-
-            // Combine FROM, WHERE, and projection tables
-            from_tables
-                .into_iter()
-                .chain(where_tables)
-                .chain(projection_tables)
-                .collect()
+        SetExpr::Select(select) => extract_select_table_names(select),
+        // MS25 T3: compound bodies contribute both branches' tables (each
+        // branch is a full SELECT, so the Select arm handles it as usual).
+        SetExpr::SetOperation { left, right, .. } => {
+            let mut tables = extract_all_table_names_from_set_expr(left);
+            tables.extend(extract_all_table_names_from_set_expr(right));
+            tables
         }
+        SetExpr::Query(inner) => extract_all_query_table_names(inner),
         _ => Vec::new(),
     }
 }
 
+/// MS25 T3: 分支表名提取——复合分支本身可能是嵌套复合。
+fn extract_all_table_names_from_set_expr(expr: &SetExpr) -> Vec<TableRef> {
+    match expr {
+        SetExpr::Select(select) => extract_select_table_names(select),
+        SetExpr::SetOperation { left, right, .. } => {
+            let mut tables = extract_all_table_names_from_set_expr(left);
+            tables.extend(extract_all_table_names_from_set_expr(right));
+            tables
+        }
+        SetExpr::Query(inner) => extract_all_query_table_names(inner),
+        _ => Vec::new(),
+    }
+}
+
+/// Table names of a single SELECT: FROM/JOIN plus WHERE and projection
+/// subqueries.
+fn extract_select_table_names(select: &sqlparser::ast::Select) -> Vec<TableRef> {
+    let from_tables: Vec<TableRef> = select
+        .from
+        .iter()
+        .flat_map(extract_all_from_table_with_joins_item)
+        .collect();
+
+    // Extract tables from WHERE clause subqueries
+    let where_tables = select
+        .selection
+        .as_ref()
+        .map(extract_subquery_tables_from_expr)
+        .unwrap_or_default();
+
+    // Extract tables from SELECT projection subqueries
+    let projection_tables: Vec<TableRef> = select
+        .projection
+        .iter()
+        .flat_map(|item| match item {
+            sqlparser::ast::SelectItem::UnnamedExpr(expr)
+            | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
+                extract_subquery_tables_from_expr(expr)
+            }
+            _ => Vec::new(),
+        })
+        .collect();
+
+    // Combine FROM, WHERE, and projection tables
+    from_tables
+        .into_iter()
+        .chain(where_tables)
+        .chain(projection_tables)
+        .collect()
+}
+
 /// Extract table names from subqueries inside an expression
-fn extract_subquery_tables_from_expr(expr: &Expr) -> Vec<String> {
+fn extract_subquery_tables_from_expr(expr: &Expr) -> Vec<TableRef> {
     match expr {
         Expr::InSubquery { subquery, .. } | Expr::Exists { subquery, .. } => {
             extract_all_query_table_names(subquery)
@@ -1069,13 +1759,13 @@ fn extract_subquery_tables_from_expr(expr: &Expr) -> Vec<String> {
 }
 
 /// Extract all table names from a TableWithJoins (including JOIN tables and derived subqueries)
-fn extract_all_from_table_with_joins_item(twj: &TableWithJoins) -> Vec<String> {
+fn extract_all_from_table_with_joins_item(twj: &TableWithJoins) -> Vec<TableRef> {
     let mut tables = Vec::new();
 
     // Main table
     match &twj.relation {
         TableFactor::Table { name, .. } => {
-            tables.push(crate::parser::ast::object_name_to_table_name(name));
+            tables.push(TableRef::new(name));
         }
         TableFactor::Derived { subquery, .. } => {
             // Recursively extract table names from the derived subquery
@@ -1088,7 +1778,7 @@ fn extract_all_from_table_with_joins_item(twj: &TableWithJoins) -> Vec<String> {
     for join in &twj.joins {
         match &join.relation {
             TableFactor::Table { name, .. } => {
-                tables.push(crate::parser::ast::object_name_to_table_name(name));
+                tables.push(TableRef::new(name));
             }
             TableFactor::Derived { subquery, .. } => {
                 tables.extend(extract_all_query_table_names(subquery));
@@ -1100,48 +1790,128 @@ fn extract_all_from_table_with_joins_item(twj: &TableWithJoins) -> Vec<String> {
     tables
 }
 
+/// MS20 T2：把一条表 schema 灌进 `PlanBuilder`——列/键类型/DEFAULT/唯一列
+/// 四条加性通道，`register_table` 主库路径与附加库路由分支共用（MS16 D2 /
+/// MS24 D1+D4 的既有行为逐字节不变）。
+fn register_table_schema(
+    builder: &mut PlanBuilder,
+    key: &str,
+    table_meta: &crate::storage::data::TableMeta,
+) {
+    let columns: Vec<String> = table_meta
+        .columns
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    builder.register_table(key, columns, &table_meta.pk_column);
+    // MS16 Iteration 000 (I046, design D2): 传递键列声明类型，键位
+    // 等值路由按类型分流。键列不在列清单（pk_column 为空）不注册
+    // ——类型未知 = 既有路由。
+    if let Some((_, pk_type)) = table_meta
+        .columns
+        .iter()
+        .find(|(name, _)| name == &table_meta.pk_column)
+    {
+        builder.set_pk_column_type(key, pk_type.clone());
+    }
+    // MS24 Iteration 000 (D1): 传递 per-column 声明 DEFAULT，
+    // 子集 INSERT / DEFAULT 关键字填充在计划期消费。
+    builder.set_table_defaults(key, table_meta.defaults.clone());
+    // MS24 Iteration 001 (D4): 传递承载唯一索引的列位（升序），
+    // ON CONFLICT 冲突目标只仲裁 INT 声明 PK 或这些列。
+    let unique_columns: Vec<usize> = table_meta
+        .unique_indexes
+        .iter()
+        .map(|(col_pos, _)| *col_pos)
+        .collect();
+    builder.set_table_unique_columns(key, unique_columns);
+}
+
+/// MS20 T3：DDL 写目标（CREATE TABLE / DROP TABLE）的附加库引用标记。这两个
+/// 语句走 `plan_stage` 的 DDL 分支，不经 `register_table`，判定只依赖「首段
+/// 命中注册别名」——不查 catalog，因此 `CREATE TABLE o.newt`（表尚不存在）
+/// 同样被点名拒绝。
+fn mark_attached_ddl_targets(builder: &mut PlanBuilder, stmt: &Statement, route: &AttachRoute) {
+    let names: Vec<&sqlparser::ast::ObjectName> = match stmt {
+        Statement::CreateTable { name, .. } => vec![name],
+        Statement::Drop { names, .. } => names.iter().collect(),
+        _ => Vec::new(),
+    };
+    for name in names {
+        let parts = crate::parser::ast::object_name_parts(name);
+        if parts.len() >= 2 && route.is_registered(&parts[0]) {
+            builder.mark_attached_table(&parts.join("."));
+        }
+    }
+}
+
 async fn register_table(
     database: &Database,
     builder: &mut PlanBuilder,
     stmt: &Statement,
-) -> std::result::Result<(), String> {
+    route: Option<&AttachRoute>,
+    routed: &mut RoutedTables,
+) -> std::result::Result<(), PlanFailure> {
     let table_names = extract_all_table_names(stmt);
     if table_names.is_empty() {
         return Ok(());
     }
 
-    for table_name in table_names {
-        match database.table_manager.get_table(&table_name).await {
-            Ok(table_meta) => {
-                let columns: Vec<String> = table_meta
-                    .columns
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect();
-                builder.register_table(&table_meta.name, columns, &table_meta.pk_column);
-                // MS16 Iteration 000 (I046, design D2): 传递键列声明类型，键位
-                // 等值路由按类型分流。键列不在列清单（pk_column 为空）不注册
-                // ——类型未知 = 既有路由。
-                if let Some((_, pk_type)) = table_meta
-                    .columns
-                    .iter()
-                    .find(|(name, _)| name == &table_meta.pk_column)
-                {
-                    builder.set_pk_column_type(&table_meta.name, pk_type.clone());
+    for table_ref in table_names {
+        // MS20 T2：路由判定只在 `ObjectName` 分段尚存处进行。三段及以上且首段
+        // 命中别名 → 点名拒绝（无 schema 层级概念）。
+        let attached = match (route, table_ref.parts.len()) {
+            (Some(route), len) if len >= 2 && route.is_registered(&table_ref.parts[0]) => {
+                if len >= 3 {
+                    return Err(PlanFailure::from(PlanError::UnsupportedStatement(
+                        "QUALIFIED NAME DEEPER THAN alias.table (no schema hierarchy)".into(),
+                    )));
                 }
-                // MS24 Iteration 000 (D1): 传递 per-column 声明 DEFAULT，
-                // 子集 INSERT / DEFAULT 关键字填充在计划期消费。
-                builder.set_table_defaults(&table_meta.name, table_meta.defaults.clone());
-                // MS24 Iteration 001 (D4): 传递承载唯一索引的列位（升序），
-                // ON CONFLICT 冲突目标只仲裁 INT 声明 PK 或这些列。
-                let unique_columns: Vec<usize> = table_meta
-                    .unique_indexes
-                    .iter()
-                    .map(|(col_pos, _)| *col_pos)
-                    .collect();
-                builder.set_table_unique_columns(&table_meta.name, unique_columns);
+                route.db_for_alias(&table_ref.parts[0])
             }
-            Err(e) => return Err(format!("Table '{}' not found: {}", table_name, e)),
+            _ => None,
+        };
+
+        if let Some(attached_db) = attached {
+            // 附加库表不存在 → 按「该限定名在附加库中不存在」点名，SQLSTATE 与
+            // 主库 `TableNotFound` 同类（42P01）；不静默回落主库同名表。
+            let table_meta = attached_db
+                .table_manager
+                .get_table(&table_ref.parts[1])
+                .await
+                .map_err(|_| {
+                    let message = format!(
+                        "Table '{}' not found in attached database '{}'",
+                        table_ref.flat, table_ref.parts[0]
+                    );
+                    PlanFailure {
+                        message,
+                        sqlstate: PlanError::TableNotFound(table_ref.flat.clone()).sqlstate(),
+                    }
+                })?;
+            register_table_schema(builder, &table_ref.flat, &table_meta);
+            // MS20 T3：写消费点据此点名拒绝（附加库只读）。
+            builder.mark_attached_table(&table_ref.flat);
+            routed.insert(
+                table_ref.flat.clone(),
+                RoutedTable {
+                    db: attached_db.clone(),
+                    local_name: table_ref.parts[1].clone(),
+                },
+            );
+            continue;
+        }
+
+        match database.table_manager.get_table(&table_ref.flat).await {
+            Ok(table_meta) => {
+                register_table_schema(builder, &table_meta.name, &table_meta);
+            }
+            // 表缺失文案保持不变，SQLSTATE 取 `PlanError` 映射表的同名分类。
+            Err(e) => {
+                let message = format!("Table '{}' not found: {}", table_ref.flat, e);
+                let sqlstate = PlanError::TableNotFound(table_ref.flat).sqlstate();
+                return Err(PlanFailure { message, sqlstate });
+            }
         }
     }
 
@@ -1237,7 +2007,7 @@ mod tests {
             .await
             .expect_err("plan should fail for unknown table");
         assert!(
-            err.contains("not found"),
+            err.to_string().contains("not found"),
             "expected 'not found' in error, got: {}",
             err
         );
@@ -1266,6 +2036,83 @@ mod tests {
             db.plan_cache_len(),
             1,
             "DML plan must not enlarge the plan cache"
+        );
+    }
+
+    /// MS20 T2: 含附加库引用的语句不进 plan cache——cache key 只含 SQL 文本，
+    /// 不含 attach 身份；同文本语句在「有/无该别名」的会话间会互相污染。
+    #[tokio::test]
+    async fn plan_stage_with_attached_reference_skips_plan_cache() {
+        let (db, _dir) =
+            open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
+        let attached_dir = tempdir().unwrap();
+        let attached = Database::open(&attached_dir.path().join("attached.db"))
+            .await
+            .unwrap();
+        let resp = attached
+            .execute_sql("CREATE TABLE u (id INT PRIMARY KEY)")
+            .await;
+        assert!(
+            !matches!(resp, Response::Error { .. }),
+            "setup failed: {resp:?}"
+        );
+
+        let route = AttachRoute::new(HashMap::from([(
+            "o".to_string(),
+            std::sync::Arc::new(attached),
+        )]));
+        let select_sql = "SELECT * FROM o.u";
+        let stmts = parse_stage(select_sql).await.unwrap();
+        let stmt = stmts.first().unwrap();
+
+        // 命中附加库：路由表非空 -> 跳过 cache 写
+        let mut routed = RoutedTables::new();
+        let plan = plan_stage_routed(&db, select_sql, stmt, false, Some(&route), &mut routed)
+            .await
+            .unwrap();
+        assert_eq!(
+            routed.len(),
+            1,
+            "the statement must route to the attached db"
+        );
+        assert_eq!(
+            db.plan_cache_len(),
+            0,
+            "attached-ref plan must not be cached"
+        );
+
+        // 同一 SQL 文本在无注册表会话：按既有路径写 cache
+        db.plan_cache.clear();
+        let mut no_route = RoutedTables::new();
+        let _plan = plan_stage_routed(&db, select_sql, stmt, false, None, &mut no_route).await;
+        assert_eq!(
+            db.plan_cache_len(),
+            0,
+            "unrouted statement fails at catalog lookup before caching"
+        );
+        let planned_table = match &plan {
+            PhysicalPlan::Scan(node) => node.table_name.clone(),
+            PhysicalPlan::DataScan(node) => node.table_name.clone(),
+            other => panic!("unexpected plan shape: {other:?}"),
+        };
+        assert_eq!(
+            planned_table, "o.u",
+            "the routed table must be planned under its qualified flat name"
+        );
+
+        // 对照组：不含附加库引用的 SELECT 照常进 cache
+        let plain_sql = "SELECT * FROM t";
+        let stmts = parse_stage(plain_sql).await.unwrap();
+        let stmt = stmts.first().unwrap();
+        let mut plain = RoutedTables::new();
+        plan_stage_routed(&db, plain_sql, stmt, false, Some(&route), &mut plain)
+            .await
+            .unwrap();
+        assert!(plain.is_empty(), "main-db table must not route");
+        assert_eq!(
+            db.plan_cache_len(),
+            1,
+            "plain SELECT must still be cached in an attach session"
         );
     }
 
@@ -1335,7 +2182,7 @@ mod tests {
         let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY)").await;
         let resp = db.execute_sql("SELECT 1; SELECT 2").await;
         match resp {
-            Response::Error { message } => {
+            Response::Error { message, .. } => {
                 assert!(
                     message.contains("single statement"),
                     "error must state the single-statement policy: {}",
@@ -1361,7 +2208,7 @@ mod tests {
             .execute_in_tx("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)", &tx)
             .await;
         match resp {
-            Response::Error { message } => {
+            Response::Error { message, .. } => {
                 assert!(
                     message.contains("single statement"),
                     "error must state the single-statement policy: {}",

@@ -176,7 +176,7 @@ async fn keyless_row_update_recovery_after_crash() {
     // search(5) → None → KeyNotFound（I037 修复语义——键位无键行对键位
     // 等值不可达，R1 新场景直接见证）
     match db.execute_sql("UPDATE t SET v = 42 WHERE a = 5").await {
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             assert!(
                 message.contains("Key not found"),
                 "对无键版本的键位等值 UPDATE 应 KeyNotFound，实际 {message}"

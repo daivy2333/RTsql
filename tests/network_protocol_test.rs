@@ -30,7 +30,7 @@ fn test_response_deserialize_error() {
     let json = r#"{"Error":{"message":"table not found"}}"#;
     let resp: Response = serde_json::from_str(json).unwrap();
     match resp {
-        Response::Error { message } => assert_eq!(message, "table not found"),
+        Response::Error { message, .. } => assert_eq!(message, "table not found"),
         _ => panic!("Expected Error response"),
     }
 }

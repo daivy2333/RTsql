@@ -16,12 +16,14 @@ mod expression;
 mod query;
 mod subquery;
 
-use crate::executor::PhysicalPlan;
-use crate::executor::Value;
+use crate::executor::{ExplainNode, PhysicalPlan, Value};
+use crate::parser::ast::unsupported_statement_name;
 use crate::parser::error::PlanError;
 use crate::storage::page_format::ColumnType;
+use sqlparser::ast::Expr;
 use sqlparser::ast::ObjectType;
 use sqlparser::ast::Statement;
+use sqlparser::ast::Value as SqlValue;
 use std::collections::HashMap;
 
 /// Transaction statement kinds recognized on the SQL surface (MS11-T02).
@@ -93,6 +95,50 @@ pub(crate) fn classify_transaction_statement(
     }
 }
 
+/// MS20 T1: `ATTACH '<path>' AS <alias>` 的分类结果（会话注册面消费）。
+///
+/// 别名按标识符归一化规则小写处理（`table-name-resolution` 同型）；路径只接受
+/// 单引号字符串字面量——`ATTACH` 的路径是打开期参数，表达式形态无法在计划期
+/// 解析成文件位置（点名拒绝，不静默回落）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachInfo {
+    /// 数据库路径（已按 `resolve_db_path` 语义待解析的原始参数）
+    pub(crate) path: String,
+    /// 会话内别名（小写归一）
+    pub(crate) alias: String,
+}
+
+/// Classify a parsed statement as an ATTACH statement (MS20 T1, design D2).
+///
+/// `Ok(None)` — not an ATTACH statement; `Ok(Some(info))` — a clean
+/// `ATTACH [DATABASE] '<literal>' AS <alias>`; `Err` — a path form that is
+/// explicitly rejected (anything other than a single-quoted string literal),
+/// carrying the named message. Shared by `build_plan` (lib non-session
+/// rejection, R3) and the CLI session dispatcher (R1/R2).
+pub(crate) fn classify_attach_statement(stmt: &Statement) -> Result<Option<AttachInfo>, PlanError> {
+    match stmt {
+        Statement::AttachDatabase {
+            schema_name,
+            database_file_name,
+            ..
+        } => {
+            let path = match database_file_name {
+                Expr::Value(SqlValue::SingleQuotedString(path)) => path.clone(),
+                _ => {
+                    return Err(PlanError::AttachStatement(
+                        "ATTACH database path must be a string literal".to_string(),
+                    ))
+                }
+            };
+            Ok(Some(AttachInfo {
+                path,
+                alias: schema_name.value.to_lowercase(),
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// PlanBuilder - Convert AST to PhysicalPlan
 ///
 /// Stores table metadata (columns, primary keys) for validation and plan generation.
@@ -131,6 +177,30 @@ pub struct PlanBuilder {
     /// 索引（前序表偏移累计 + 表内位置）。仅在 NLJ 分支编译 ON 期间置位
     ///（save/restore 严格配对），None 时既有路径行为逐字节不变。
     pub(crate) join_column_layout: Option<Vec<(String, Vec<String>)>>,
+    /// MS20 T3：附加库引用的限定扁平名集合（`"o.u"`）——由 pipeline 的路由
+    /// 分支注入。五写消费点据此点名拒绝（附加库一期只读）。加性通道，与
+    /// `set_pk_column_type` 同型；无注册会话时为空，主库写面行为逐字节不变。
+    pub(crate) attached_tables: std::collections::HashSet<String>,
+    /// MS25 T5（design D5）：语句级 CTE 注册表——`WITH` 定义按声明序累积，
+    /// 引用点克隆定义计划为既有 `DerivedScanNode`（无新执行器 / 节点）。
+    /// `PlanBuilder` 语句级生命周期天然隔离，定义间的前向引用即「后定义可见
+    /// 先定义」的注册序。
+    pub(crate) cte_plans: Vec<CteDef>,
+    /// MS25 T5：正在构建的 CTE 名称栈（定义计划构建期间置位）——命中即
+    /// 自引用 / 成环，点名拒绝。push/pop 严格配对。
+    pub(crate) pending_cte_names: Vec<String>,
+}
+
+/// MS25 T5：一个已注册的 CTE 定义（`WITH <名> [(列别名)] AS (<查询>)`）。
+#[derive(Debug, Clone)]
+pub(crate) struct CteDef {
+    /// CTE 名（小写归一，与 `register_table` 键纪律一致）
+    pub(crate) name: String,
+    /// 输出列名（列别名列表优先，否则为定义计划的输出列）
+    pub(crate) columns: Vec<String>,
+    /// 定义计划（引用时克隆，来源为顶层上下文构建——定义内 ORDER BY / LIMIT /
+    /// 集合操作 / 表达式项 / DISTINCT 经既有装配全量复用）
+    pub(crate) plan: PhysicalPlan,
 }
 
 impl PlanBuilder {
@@ -145,6 +215,9 @@ impl PlanBuilder {
             inner_table_names: None,
             building_subquery: false,
             join_column_layout: None,
+            attached_tables: std::collections::HashSet::new(),
+            cte_plans: Vec::new(),
+            pending_cte_names: Vec::new(),
         }
     }
 
@@ -178,6 +251,23 @@ impl PlanBuilder {
             .insert(name.to_lowercase(), columns);
     }
 
+    /// MS20 T3：标记一个限定名为附加库引用（pipeline 路由分支调用）。
+    pub fn mark_attached_table(&mut self, name: &str) {
+        self.attached_tables.insert(name.to_lowercase());
+    }
+
+    /// MS20 T3：写目标若为附加库引用则点名拒绝（附加库一期只读）。错误经
+    /// MS19 `UnsupportedStatement` 通道携带能力名，SQLSTATE 分类与既有
+    /// 能力面拒绝一致（0A000）。
+    pub(crate) fn reject_attached_write(&self, table_name: &str) -> Result<(), PlanError> {
+        if self.attached_tables.contains(&table_name.to_lowercase()) {
+            return Err(PlanError::UnsupportedStatement(
+                "WRITE TO ATTACHED DATABASE (attached databases are read-only)".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Build PhysicalPlan from Statement
     pub fn build_plan(&mut self, stmt: &Statement) -> Result<PhysicalPlan, PlanError> {
         // MS11-T02: transaction statements have no executor semantics on any
@@ -187,6 +277,16 @@ impl PlanBuilder {
         if classify_transaction_statement(stmt)?.is_some() {
             return Err(PlanError::TransactionStatement(
                 "transaction statements (BEGIN/COMMIT/ROLLBACK) are only supported in an rtsql CLI session".to_string(),
+            ));
+        }
+        // MS20 T1: ATTACH is a CLI-session registration statement — the lib
+        // execution paths have no attach registry, so reject it here (before
+        // planning, hence before the plan cache) exactly like transaction
+        // statements above. The CLI session dispatcher classifies it first and
+        // consumes it without ever reaching this arm.
+        if classify_attach_statement(stmt)?.is_some() {
+            return Err(PlanError::AttachStatement(
+                "ATTACH is only supported in an rtsql CLI session".to_string(),
             ));
         }
         match stmt {
@@ -212,8 +312,18 @@ impl PlanBuilder {
                 name,
                 columns,
                 constraints,
+                query,
+                like,
+                clone,
                 ..
-            } => self.build_create_table(name, columns, constraints),
+            } => self.build_create_table(
+                name,
+                columns,
+                constraints,
+                query.as_deref(),
+                like.as_ref(),
+                clone.as_ref(),
+            ),
             Statement::Drop {
                 object_type,
                 if_exists,
@@ -223,10 +333,47 @@ impl PlanBuilder {
                 if *object_type == ObjectType::Table {
                     self.build_drop_table(names, if_exists)
                 } else {
-                    Err(PlanError::UnsupportedStatement)
+                    Err(PlanError::UnsupportedStatement(format!(
+                        "DROP {}",
+                        object_type
+                    )))
                 }
             }
-            _ => Err(PlanError::UnsupportedStatement),
+            Statement::Explain {
+                analyze,
+                verbose,
+                format,
+                statement,
+                ..
+            } => {
+                // MS25 T6: `EXPLAIN <SELECT>` 计划期构造被观测计划并包
+                // `Explain` 包装节点（执行期零副作用）。修饰面与被观测语句族
+                // 逐项点名拒绝（`describe_alias` 的 `DESC` / `DESCRIBE` 与
+                // EXPLAIN 同语义，不拒绝）。
+                if *analyze {
+                    return Err(PlanError::UnsupportedStatement("EXPLAIN ANALYZE".into()));
+                }
+                if *verbose {
+                    return Err(PlanError::UnsupportedStatement("EXPLAIN VERBOSE".into()));
+                }
+                if format.is_some() {
+                    return Err(PlanError::UnsupportedStatement("EXPLAIN FORMAT".into()));
+                }
+                match statement.as_ref() {
+                    Statement::Query(query) => {
+                        let inner = self.build_query(query)?;
+                        Ok(PhysicalPlan::Explain(ExplainNode {
+                            input: Box::new(inner),
+                        }))
+                    }
+                    _ => Err(PlanError::UnsupportedStatement(
+                        "EXPLAIN of non-SELECT statements".into(),
+                    )),
+                }
+            }
+            _ => Err(PlanError::UnsupportedStatement(unsupported_statement_name(
+                stmt,
+            ))),
         }
     }
 
@@ -278,6 +425,109 @@ mod tests {
 
         assert!(builder.validate_table("users").is_ok());
         assert!(builder.validate_table("nonexistent").is_err());
+    }
+}
+
+#[cfg(test)]
+mod attach_statement_tests {
+    use super::*;
+    use crate::parser::parse_sql;
+
+    /// MS20 T1：ATTACH 分类器与 `build_plan` 前置拒绝（`sql-attach-session`
+    /// R1/R3 的库内面）。CLI 会话臂在 `src/cli/mod.rs` 消费本分类器。
+    fn classify(sql: &str) -> Result<Option<AttachInfo>, PlanError> {
+        let statements = parse_sql(sql).expect("parse must succeed");
+        assert_eq!(statements.len(), 1);
+        classify_attach_statement(&statements[0])
+    }
+
+    #[test]
+    fn clean_attach_statements_extract_path_and_alias() {
+        for (sql, path, alias) in [
+            ("ATTACH 'other.db' AS o", "other.db", "o"),
+            ("ATTACH DATABASE 'other.db' AS o", "other.db", "o"),
+            ("ATTACH '/abs/other.db' AS o", "/abs/other.db", "o"),
+        ] {
+            match classify(sql).unwrap() {
+                Some(info) => {
+                    assert_eq!(info.path, path, "{sql}");
+                    assert_eq!(info.alias, alias, "{sql}");
+                }
+                None => panic!("{sql}: expected Some(AttachInfo)"),
+            }
+        }
+    }
+
+    /// 别名按标识符归一化规则小写处理（`table-name-resolution` 同型）。
+    #[test]
+    fn attach_alias_is_lowercased() {
+        match classify("ATTACH 'other.db' AS OtherDB").unwrap() {
+            Some(info) => assert_eq!(info.alias, "otherdb"),
+            None => panic!("expected Some(AttachInfo)"),
+        }
+    }
+
+    /// 路径仅接受单引号字符串字面量；其他表达式形态点名拒绝。
+    #[test]
+    fn non_literal_path_rejected_with_named_message() {
+        for (sql, message) in [
+            (
+                "ATTACH other AS o",
+                "ATTACH database path must be a string literal",
+            ),
+            (
+                "ATTACH 'a' || 'b' AS o",
+                "ATTACH database path must be a string literal",
+            ),
+        ] {
+            match classify(sql) {
+                Err(PlanError::AttachStatement(msg)) => assert_eq!(msg, message, "{sql}"),
+                other => panic!("{sql}: expected AttachStatement, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn non_attach_statements_classify_to_none() {
+        for sql in [
+            "SELECT 1",
+            "INSERT INTO t VALUES (1)",
+            "BEGIN",
+            "CREATE TABLE t (id INT)",
+            "DROP TABLE t",
+        ] {
+            assert_eq!(classify(sql).unwrap(), None, "{sql}");
+        }
+    }
+
+    /// R3：lib 非会话路径在 `build_plan` 前置拒绝，先于 plan cache。
+    #[test]
+    fn build_plan_rejects_attach_with_session_message() {
+        for sql in ["ATTACH 'other.db' AS o", "ATTACH DATABASE 'other.db' AS o"] {
+            let statements = parse_sql(sql).unwrap();
+            let mut builder = PlanBuilder::new();
+            match builder.build_plan(&statements[0]) {
+                Err(PlanError::AttachStatement(msg)) => assert_eq!(
+                    msg, "ATTACH is only supported in an rtsql CLI session",
+                    "{sql}"
+                ),
+                other => panic!("{sql}: expected AttachStatement, got {:?}", other),
+            }
+        }
+    }
+
+    /// 非字面量路径在任何执行面上都非法：分类器先于 session-only 拒绝，
+    /// `build_plan` 原样透出该点名消息（不谎报为「仅会话可用」）。
+    #[test]
+    fn build_plan_reports_path_form_rejection_for_non_literal_path() {
+        let statements = parse_sql("ATTACH other AS o").unwrap();
+        let mut builder = PlanBuilder::new();
+        match builder.build_plan(&statements[0]) {
+            Err(PlanError::AttachStatement(msg)) => {
+                assert_eq!(msg, "ATTACH database path must be a string literal")
+            }
+            other => panic!("expected AttachStatement, got {:?}", other),
+        }
     }
 }
 

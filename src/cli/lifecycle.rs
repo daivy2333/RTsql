@@ -11,6 +11,7 @@ use crate::network::protocol::Response;
 use crate::pipeline::{execute_stage, parse_stage, plan_stage};
 use crate::storage::catalog::{CatalogColumnRow, CatalogRow};
 use crate::storage::page_format::ColumnType;
+use std::path::Path;
 
 /// `new <name|path>`：已存在拒绝 → 建父目录 → open 建库 + close checkpoint → 静默。
 pub(super) async fn new_db(target: &str, key: Option<&str>) -> ExitStatus {
@@ -96,6 +97,99 @@ pub(super) async fn list(format: Option<FormatArg>) -> ExitStatus {
     match emit_stdout(&text) {
         Ok(()) => ExitStatus::Success,
         Err(e) => ExitStatus::General(e),
+    }
+}
+
+/// `delete <db>`：文件级删除主文件与 `.wal` / `.checkpoint` 伴生文件族。
+///
+/// 不开库、不校验库内容（头部无效或零字节同样可删）、不触及密钥通道
+/// （加密库的删除与明文库无差别）。锁探测与删除在同一个 `try_lock` 持有
+/// 窗口内完成，消除检查-删除竞态：持有引擎同款 advisory 独占锁期间不可能
+/// 存在其他 RTsql 打开者。`dry_run` 是纯预览——不探测锁、不打开文件，
+/// 因此对打开中的库 dry-run 成功而实删失败是预期差异。
+pub(super) fn delete_db(db: &str, dry_run: bool) -> ExitStatus {
+    let db_path = match resolve_existing_db(db) {
+        Ok(path) => path,
+        Err(status) => return status,
+    };
+    if dry_run {
+        return delete_file_family(&db_path, true);
+    }
+    // 锁对象即主库文件本身（与 FileStorage::open_with_key 同原语、同语义）
+    let lock = match std::fs::File::open(&db_path) {
+        Ok(file) => file,
+        Err(e) => {
+            return ExitStatus::General(format!("failed to open {}: {}", db_path.display(), e))
+        }
+    };
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return ExitStatus::Locked(format!("database is locked: {}", db_path.display()))
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return ExitStatus::General(format!("failed to lock {}: {}", db_path.display(), e))
+        }
+    }
+    let status = delete_file_family(&db_path, false);
+    drop(lock);
+    status
+}
+
+/// 逐文件报告并删除文件族（`dry_run` 时只报告）：伴生 `.wal` / `.checkpoint`
+/// 优先、主文件最后——中途崩溃的最坏残留态是「主文件在而伴生已清」，主文件
+/// 按最后 checkpoint 状态干净可开、可重试；反序会在新库重建后残留可被恢复
+/// 重放的旧 WAL。缺失文件报 `absent` 不算错误；首个非 NotFound 错误在报告后
+/// 整体 General。
+fn delete_file_family(db_path: &Path, dry_run: bool) -> ExitStatus {
+    let mut lines: Vec<String> = Vec::new();
+    let mut failure: Option<String> = None;
+
+    for path in [
+        db_path.with_extension("wal"),
+        db_path.with_extension("checkpoint"),
+        db_path.to_path_buf(),
+    ] {
+        let shown = path.display().to_string();
+        let size = match std::fs::metadata(&path) {
+            Ok(meta) => Some(meta.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                let message = format!("failed to stat {shown}: {e}");
+                lines.push(message.clone());
+                failure.get_or_insert(message);
+                continue;
+            }
+        };
+        if dry_run {
+            lines.push(match size {
+                Some(n) => format!("would delete {shown} ({n} bytes)"),
+                None => format!("absent {shown}"),
+            });
+            continue;
+        }
+        match size {
+            None => lines.push(format!("absent {shown}")),
+            Some(n) => match std::fs::remove_file(&path) {
+                Ok(()) => lines.push(format!("deleted {shown} ({n} bytes)")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    lines.push(format!("absent {shown}"))
+                }
+                Err(e) => {
+                    let message = format!("failed to delete {shown}: {e}");
+                    lines.push(message.clone());
+                    failure.get_or_insert(message);
+                }
+            },
+        }
+    }
+
+    if let Err(e) = emit_stdout(&lines.join("\n")) {
+        return ExitStatus::General(e);
+    }
+    match failure {
+        Some(message) => ExitStatus::General(message),
+        None => ExitStatus::Success,
     }
 }
 
@@ -248,7 +342,7 @@ async fn select_all_rows(
     };
     match execute_stage(db, plan, false).await {
         Response::QueryResult { rows } => Ok(rows),
-        Response::Error { message } => Err(ExitStatus::General(format!(
+        Response::Error { message, .. } => Err(ExitStatus::General(format!(
             "failed to dump table {}: {}",
             table, message
         ))),
@@ -347,14 +441,14 @@ pub(super) async fn restore(db: &str, file: &str, key: Option<&str>) -> ExitStat
                             return super::sql_failure_status(
                                 index + 1,
                                 total,
-                                &e,
+                                &e.to_string(),
                                 &statement_text,
                                 false,
                             )
                         }
                     };
                     match execute_stage(db, plan, false).await {
-                        Response::Error { message } => {
+                        Response::Error { message, .. } => {
                             return super::sql_failure_status(
                                 index + 1,
                                 total,
@@ -507,7 +601,7 @@ pub(super) async fn import_csv(
                     );
                     match db.execute_sql(&insert).await {
                         Response::AffectedRows { count } => imported += count,
-                        Response::Error { message } => {
+                        Response::Error { message, .. } => {
                             return ExitStatus::Sql(format!(
                                 "import row {} of {} failed: {}",
                                 row_no, total, message
@@ -677,7 +771,9 @@ async fn fetch_table_rows(
         .map_err(|e| format!("failed to fetch rows from {table}: {e}"))?;
     match execute_stage(db, plan, false).await {
         Response::QueryResult { rows } => Ok((col_pairs, rows)),
-        Response::Error { message } => Err(format!("failed to fetch rows from {table}: {message}")),
+        Response::Error { message, .. } => {
+            Err(format!("failed to fetch rows from {table}: {message}"))
+        }
         other => Err(format!(
             "failed to fetch rows from {table}: unexpected response {:?}",
             other

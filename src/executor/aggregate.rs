@@ -1,13 +1,15 @@
 //! Aggregate function types and state accumulators (M15: GROUP BY / aggregation)
 //!
-//! Supports SQL standard aggregate functions: COUNT(*), COUNT(col), SUM, AVG, MIN, MAX.
+//! Supports SQL standard aggregate functions: COUNT(*), COUNT(col), SUM, AVG, MIN, MAX,
+//! plus the MS25 D7 extensions: COUNT/SUM/AVG(DISTINCT col) (real de-duplicating
+//! accumulators) and GROUP_CONCAT(col [, sep]).
 
 use crate::executor::executor_trait::Executor;
 use crate::executor::result::ExecResult;
 use crate::executor::{ExpressionRef, Value};
 use crate::storage;
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Aggregate function descriptor (from SQL parse)
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +26,18 @@ pub enum AggregateFunc {
     Min(String),
     /// MAX(col) — maximum non-NULL value
     Max(String),
+    /// COUNT(DISTINCT col) — MS25 D7: counts distinct non-NULL values
+    CountDistinct(String),
+    /// SUM(DISTINCT col) — MS25 D7: sums distinct non-NULL values
+    SumDistinct(String),
+    /// AVG(DISTINCT col) — MS25 D7: averages distinct non-NULL values
+    AvgDistinct(String),
+    /// GROUP_CONCAT(col [, sep]) — MS25 D7: joins non-NULL values in input row
+    /// order; `separator` is the literal separator (defaults to `,`).
+    GroupConcat {
+        col: String,
+        separator: Option<String>,
+    },
 }
 
 /// Running accumulator state for an aggregate function
@@ -41,6 +55,24 @@ pub enum AggregateState {
     Min(Option<Value>),
     /// MAX accumulator: current maximum
     Max(Option<Value>),
+    /// COUNT(DISTINCT col) accumulator: distinct non-NULL values seen
+    CountDistinct(HashSet<Value>),
+    /// SUM(DISTINCT col) accumulator: distinct values + running sum
+    SumDistinct {
+        seen: HashSet<Value>,
+        sum: Option<Value>,
+    },
+    /// AVG(DISTINCT col) accumulator: distinct values + running sum and count
+    AvgDistinct {
+        seen: HashSet<Value>,
+        sum: Option<Value>,
+        count: i64,
+    },
+    /// GROUP_CONCAT accumulator: joined parts in input row order
+    GroupConcat {
+        parts: Vec<String>,
+        separator: String,
+    },
 }
 
 impl AggregateFunc {
@@ -53,6 +85,26 @@ impl AggregateFunc {
             AggregateFunc::Avg(col) => format!("avg_{}", col),
             AggregateFunc::Min(col) => format!("min_{}", col),
             AggregateFunc::Max(col) => format!("max_{}", col),
+            AggregateFunc::CountDistinct(col) => format!("count_distinct_{}", col),
+            AggregateFunc::SumDistinct(col) => format!("sum_distinct_{}", col),
+            AggregateFunc::AvgDistinct(col) => format!("avg_distinct_{}", col),
+            AggregateFunc::GroupConcat { col, .. } => format!("group_concat_{}", col),
+        }
+    }
+
+    /// The column this aggregate reads, or `None` for COUNT(*).
+    pub(crate) fn column(&self) -> Option<&str> {
+        match self {
+            AggregateFunc::CountStar => None,
+            AggregateFunc::Count(col)
+            | AggregateFunc::Sum(col)
+            | AggregateFunc::Avg(col)
+            | AggregateFunc::Min(col)
+            | AggregateFunc::Max(col)
+            | AggregateFunc::CountDistinct(col)
+            | AggregateFunc::SumDistinct(col)
+            | AggregateFunc::AvgDistinct(col)
+            | AggregateFunc::GroupConcat { col, .. } => Some(col),
         }
     }
 }
@@ -73,6 +125,20 @@ impl AggregateState {
             },
             AggregateFunc::Min(_) => AggregateState::Min(None),
             AggregateFunc::Max(_) => AggregateState::Max(None),
+            AggregateFunc::CountDistinct(_) => AggregateState::CountDistinct(HashSet::new()),
+            AggregateFunc::SumDistinct(_) => AggregateState::SumDistinct {
+                seen: HashSet::new(),
+                sum: None,
+            },
+            AggregateFunc::AvgDistinct(_) => AggregateState::AvgDistinct {
+                seen: HashSet::new(),
+                sum: None,
+                count: 0,
+            },
+            AggregateFunc::GroupConcat { separator, .. } => AggregateState::GroupConcat {
+                parts: Vec::new(),
+                separator: separator.clone().unwrap_or_else(|| ",".to_string()),
+            },
         }
     }
 
@@ -137,15 +203,45 @@ impl AggregateState {
                     });
                 }
             }
+            // MS25 D7: DISTINCT accumulators skip NULL and fold duplicates via
+            // `Value` Eq/Hash (NULL would never enter the set anyway).
+            AggregateState::CountDistinct(seen) => {
+                if !value.is_null() {
+                    seen.insert(value.clone());
+                }
+            }
+            AggregateState::SumDistinct { seen, sum } => {
+                if !value.is_null() && seen.insert(value.clone()) {
+                    *sum = Some(match sum.take() {
+                        Some(prev) => prev.add(value),
+                        None => value.clone(),
+                    });
+                }
+            }
+            AggregateState::AvgDistinct { seen, sum, count } => {
+                if !value.is_null() && seen.insert(value.clone()) {
+                    *sum = Some(match sum.take() {
+                        Some(prev) => prev.add(value),
+                        None => value.clone(),
+                    });
+                    *count += 1;
+                }
+            }
+            AggregateState::GroupConcat { parts, .. } => {
+                if !value.is_null() {
+                    parts.push(concat_text(value));
+                }
+            }
         }
     }
 
     /// Returns the final aggregate result.
     ///
     /// Empty set semantics:
-    /// - CountStar -> 0, Count -> 0
-    /// - Sum -> Null, Avg -> Null
+    /// - CountStar -> 0, Count -> 0, CountDistinct -> 0
+    /// - Sum -> Null, Avg -> Null, SumDistinct -> Null, AvgDistinct -> Null
     /// - Min -> Null, Max -> Null
+    /// - GroupConcat -> Null (SQLite alignment: no non-NULL part)
     pub fn finalize(&self) -> Value {
         match self {
             AggregateState::CountStar(count) => Value::Int(*count),
@@ -170,7 +266,41 @@ impl AggregateState {
                 Some(v) => v.clone(),
                 None => Value::Null,
             },
+            AggregateState::CountDistinct(seen) => Value::Int(seen.len() as i64),
+            AggregateState::SumDistinct { sum, .. } => match sum {
+                Some(v) => v.clone(),
+                None => Value::Null,
+            },
+            AggregateState::AvgDistinct { sum, count, .. } => match sum {
+                Some(v) if *count > 0 => {
+                    let sum_float = v.as_float().unwrap_or(0.0);
+                    Value::Float(sum_float / *count as f64)
+                }
+                _ => Value::Null,
+            },
+            AggregateState::GroupConcat { parts, separator } => {
+                if parts.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(parts.join(separator))
+                }
+            }
         }
+    }
+}
+
+/// MS25 D7: render a value as its GROUP_CONCAT text part. Date/Timestamp use
+/// the same DA5 string form as the CLI renderer; other scalars use their
+/// `Display`/`to_string` form.
+fn concat_text(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Date(d) => crate::executor::datetime::format_date(*d),
+        Value::Timestamp(t) => crate::executor::datetime::format_timestamp(*t),
+        Value::Null => String::new(),
     }
 }
 
@@ -183,6 +313,11 @@ pub struct AggregateExecutor {
     /// 位置键 = SELECT 项编译表达式。
     group_key_exprs: Vec<ExpressionRef>,
     aggregates: Vec<AggregateFunc>,
+    /// MS25 T8 (D9): per-aggregate parameter index into the input row, parallel
+    /// to `aggregates`. `Some` = plan-time layout-resolved index (JOIN base);
+    /// `None` = no parameter (`COUNT(*)`) or single-table base, which keeps the
+    /// existing by-name lookup semantics byte-identically.
+    aggregate_arg_indices: Vec<Option<usize>>,
     /// Output column names for projection optimization (future use)
     #[allow(dead_code)]
     output_columns: Vec<String>,
@@ -205,6 +340,7 @@ impl AggregateExecutor {
         group_by: Vec<String>,
         group_key_exprs: Vec<ExpressionRef>,
         aggregates: Vec<AggregateFunc>,
+        aggregate_arg_indices: Vec<Option<usize>>,
         output_columns: Vec<String>,
         column_indices: HashMap<String, usize>,
     ) -> Self {
@@ -213,6 +349,7 @@ impl AggregateExecutor {
             group_by,
             group_key_exprs,
             aggregates,
+            aggregate_arg_indices,
             output_columns,
             column_indices,
             groups: HashMap::new(),
@@ -239,7 +376,12 @@ impl AggregateExecutor {
                     if is_no_group_by {
                         let states = self.single_group.as_mut().unwrap();
                         for (i, func) in self.aggregates.iter().enumerate() {
-                            let value = Self::extract_value(&row, func, &self.column_indices);
+                            let value = Self::extract_value(
+                                &row,
+                                func,
+                                self.aggregate_arg_indices.get(i).copied().flatten(),
+                                &self.column_indices,
+                            );
                             states[i].update(&value);
                         }
                     } else {
@@ -248,7 +390,12 @@ impl AggregateExecutor {
                             self.aggregates.iter().map(AggregateState::new).collect()
                         });
                         for (i, func) in self.aggregates.iter().enumerate() {
-                            let value = Self::extract_value(&row, func, &self.column_indices);
+                            let value = Self::extract_value(
+                                &row,
+                                func,
+                                self.aggregate_arg_indices.get(i).copied().flatten(),
+                                &self.column_indices,
+                            );
                             states[i].update(&value);
                         }
                     }
@@ -263,19 +410,25 @@ impl AggregateExecutor {
     }
 
     /// Extract value from row for aggregate function
+    ///
+    /// MS25 T8 (D9): `arg_index` is the plan-time layout-resolved parameter
+    /// index (JOIN base) and is used when present; otherwise the existing
+    /// by-name lookup runs unchanged.
     fn extract_value(
         row: &[Value],
         func: &AggregateFunc,
+        arg_index: Option<usize>,
         column_indices: &HashMap<String, usize>,
     ) -> Value {
         match func {
             AggregateFunc::CountStar => Value::Int(1),
-            AggregateFunc::Count(col)
-            | AggregateFunc::Sum(col)
-            | AggregateFunc::Avg(col)
-            | AggregateFunc::Min(col)
-            | AggregateFunc::Max(col) => match column_indices.get(&col.to_lowercase()) {
-                Some(&idx) => row.get(idx).cloned().unwrap_or(Value::Null),
+            // MS25 D7: every column-reading variant shares the name lookup.
+            _ => match arg_index.or_else(|| {
+                column_indices
+                    .get(&func.column().unwrap_or("").to_lowercase())
+                    .copied()
+            }) {
+                Some(idx) => row.get(idx).cloned().unwrap_or(Value::Null),
                 None => Value::Null,
             },
         }

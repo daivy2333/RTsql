@@ -35,7 +35,7 @@ async fn create_users(db: &Database) {
 
 async fn insert_one(db: &Database, id: i64, name: &str) {
     let sql = format!("INSERT INTO users VALUES ({}, '{}')", id, name);
-    if let Response::Error { message } = db.execute_sql(&sql).await {
+    if let Response::Error { message, .. } = db.execute_sql(&sql).await {
         panic!("INSERT failed: {}", message);
     }
 }

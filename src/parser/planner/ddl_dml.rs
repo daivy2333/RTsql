@@ -7,9 +7,9 @@
 
 use super::PlanBuilder;
 use crate::executor::{
-    ColumnConstraint, ColumnDef, ColumnType, ConflictAction, ConflictArbiter, CreateTableNode,
-    DeleteNode, DropTableNode, InsertNode, JoinCondition, PhysicalPlan, UpdateNode,
-    UpsertAssignment, UpsertNode, UpsertValueExpr, Value,
+    ColumnConstraint, ColumnDef, ColumnType, ConflictAction, ConflictArbiter,
+    CreateTableAsSelectNode, CreateTableNode, DeleteNode, DropTableNode, InsertNode, JoinCondition,
+    PhysicalPlan, UpdateNode, UpsertAssignment, UpsertNode, UpsertValueExpr, Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -137,7 +137,9 @@ impl PlanBuilder {
                 right_column: right_ref,
             }])
         } else {
-            Err(PlanError::UnsupportedExpression)
+            Err(PlanError::UnsupportedExpression(
+                "JOIN ON CONSTRAINT".into(),
+            ))
         }
     }
 
@@ -159,6 +161,9 @@ impl PlanBuilder {
         // Extract table name
         let table_name_str = extract_name_from_object(table_name);
         self.validate_table(&table_name_str)?;
+        // MS20 T3: 附加库一期只读——目标为附加库引用即点名拒绝（不落到
+        // 主库同名表，也不进入执行器层）。
+        self.reject_attached_write(&table_name_str)?;
 
         // Extract column names
         let columns: Vec<String> = columns.iter().map(|c| c.value.to_lowercase()).collect();
@@ -587,7 +592,7 @@ impl PlanBuilder {
                     })
                     .collect::<Result<Vec<_>, _>>()
             }
-            _ => Err(PlanError::UnsupportedStatement),
+            _ => Err(PlanError::UnsupportedStatement("INSERT ... SELECT".into())),
         }
     }
 
@@ -776,14 +781,52 @@ impl PlanBuilder {
     }
 
     /// Build PhysicalPlan for CREATE TABLE statement
+    ///
+    /// MS20 T4：`query` 成分消费为 `CreateTableAsSelect` 计划；`LIKE` / `CLONE`
+    /// 与「列清单 + query」混合形态计划期点名拒绝（不再静默建空表或静默忽略
+    /// 成分）。
     pub(crate) fn build_create_table(
-        &self,
+        &mut self,
         name: &sqlparser::ast::ObjectName,
         columns: &[sqlparser::ast::ColumnDef],
         constraints: &[sqlparser::ast::TableConstraint],
+        query: Option<&sqlparser::ast::Query>,
+        like: Option<&sqlparser::ast::ObjectName>,
+        clone: Option<&sqlparser::ast::ObjectName>,
     ) -> Result<PhysicalPlan, PlanError> {
         // Extract table name
         let table_name = object_name_to_table_name(name);
+        // MS20 T3: 附加库一期只读（`CREATE TABLE o.newt` 同样拒绝，CTAS 目标
+        // 沿用同一条写库面检查）。
+        self.reject_attached_write(&table_name)?;
+
+        // MS20 T4: 表形态诚实面。`LIKE other` / `CLONE other` 在解析层可表达，
+        // 但引擎无对应能力——点名拒绝而不是静默建空表。
+        if like.is_some() {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE TABLE ... LIKE".into(),
+            ));
+        }
+        if clone.is_some() {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE TABLE ... CLONE".into(),
+            ));
+        }
+
+        if let Some(query) = query {
+            // 混合形态：列清单与 query 并存，语义（以谁为准）未定 —— 点名拒绝。
+            if !columns.is_empty() {
+                return Err(PlanError::UnsupportedStatement(
+                    "CREATE TABLE ... AS WITH COLUMN DEFINITIONS".into(),
+                ));
+            }
+            if !constraints.is_empty() {
+                return Err(PlanError::UnsupportedStatement(
+                    "CREATE TABLE ... AS WITH TABLE CONSTRAINTS".into(),
+                ));
+            }
+            return self.build_create_table_as_select(table_name, query);
+        }
 
         // Check for empty columns
         if columns.is_empty() {
@@ -890,6 +933,38 @@ impl PlanBuilder {
         }))
     }
 
+    /// MS20 T4：CTAS 计划构造。
+    ///
+    /// 物化表列名取 SELECT 输出表头（既有 `get_plan_output_columns` 投影面），
+    /// 序同输出形状。输出列为空（`SELECT` 无表头可达形态）点名拒绝——物化
+    /// 零列表无首列主键语义。源计划构造在同一次 `PlanBuilder` 内完成，沿用既有
+    /// 子查询/CTE 抑制与列提取校验面。
+    fn build_create_table_as_select(
+        &mut self,
+        table_name: String,
+        query: &sqlparser::ast::Query,
+    ) -> Result<PhysicalPlan, PlanError> {
+        let select = self.build_query(query)?;
+        let columns = self.get_plan_output_columns(&select);
+        if columns.is_empty() {
+            return Err(PlanError::EmptyColumnDefinition);
+        }
+        // 输出列名重复 → 建表前点名拒绝（物化表列名必须唯一，否则 catalog 列行
+        // 语义与列引用消歧都失去依据）。
+        for (index, name) in columns.iter().enumerate() {
+            if columns[..index].contains(name) {
+                return Err(PlanError::UnsupportedStatement(format!(
+                    "DUPLICATE OUTPUT COLUMN '{name}'"
+                )));
+            }
+        }
+        Ok(PhysicalPlan::CreateTableAsSelect(CreateTableAsSelectNode {
+            table_name,
+            select: Box::new(select),
+            columns,
+        }))
+    }
+
     /// Build PhysicalPlan for DROP TABLE statement
     pub(crate) fn build_drop_table(
         &self,
@@ -902,6 +977,8 @@ impl PlanBuilder {
         }
 
         let table_name = object_name_to_table_name(&names[0]);
+        // MS20 T3: 附加库一期只读。
+        self.reject_attached_write(&table_name)?;
 
         Ok(PhysicalPlan::DropTable(DropTableNode {
             table_name,
@@ -921,6 +998,8 @@ impl PlanBuilder {
         // Extract table name
         let table_name = extract_table_name(std::slice::from_ref(table))?;
         self.validate_table(&table_name)?;
+        // MS20 T3: 附加库一期只读。
+        self.reject_attached_write(&table_name)?;
 
         // Extract primary key from WHERE clause
         let where_expr = selection
@@ -934,14 +1013,18 @@ impl PlanBuilder {
 
         // Only support single column update
         if assignments.len() != 1 {
-            return Err(PlanError::UnsupportedStatement);
+            return Err(PlanError::UnsupportedStatement(
+                "MULTI-COLUMN UPDATE".into(),
+            ));
         }
 
         let assignment = &assignments[0];
 
         // Extract column name
         if assignment.id.len() != 1 {
-            return Err(PlanError::UnsupportedStatement);
+            return Err(PlanError::UnsupportedStatement(
+                "COMPOUND ASSIGNMENT TARGET".into(),
+            ));
         }
         let column = assignment.id[0].value.to_lowercase();
 
@@ -1005,6 +1088,8 @@ impl PlanBuilder {
         };
         let table_name = extract_table_name(table_with_joins)?;
         self.validate_table(&table_name)?;
+        // MS20 T3: 附加库一期只读。
+        self.reject_attached_write(&table_name)?;
 
         // Extract primary key from WHERE clause
         let where_expr = selection

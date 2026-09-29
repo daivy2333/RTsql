@@ -18,7 +18,7 @@ const KEY: &str = "pw";
 fn assert_affected(resp: Response, what: &str, expected: u64) {
     match resp {
         Response::AffectedRows { count } => assert_eq!(count, expected, "{what}"),
-        Response::Error { message } => panic!("{what} failed: {message}"),
+        Response::Error { message, .. } => panic!("{what} failed: {message}"),
         other => panic!("{what}: unexpected response {other:?}"),
     }
 }
@@ -26,7 +26,7 @@ fn assert_affected(resp: Response, what: &str, expected: u64) {
 fn rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
     match resp {
         Response::QueryResult { rows } => rows,
-        Response::Error { message } => panic!("{what} failed: {message}"),
+        Response::Error { message, .. } => panic!("{what} failed: {message}"),
         other => panic!("{what}: unexpected response {other:?}"),
     }
 }
@@ -160,7 +160,7 @@ async fn tampered_ciphertext_page_detected_on_read() {
         .await
         .unwrap();
     match db.execute_sql("SELECT * FROM t").await {
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             assert!(message.contains("invalid key"), "got: {message}");
             assert!(
                 message.contains("wrong key or corrupted page"),

@@ -35,7 +35,7 @@ fn expect_ok(resp: &Response, what: &str) {
 
 fn expect_error_contains(resp: Response, needle: &str, what: &str) -> String {
     match resp {
-        Response::Error { message } => {
+        Response::Error { message, .. } => {
             assert!(
                 message.contains(needle),
                 "{what}: expected message containing {needle:?}, got {message:?}"
@@ -617,4 +617,65 @@ fn multi_statement_open_tx_rolled_back_at_exit() {
 
     let rows = select_rows(dir.path(), "SELECT id FROM t", "reopen select");
     assert!(rows.is_empty(), "uncommitted write must not persist");
+}
+
+// ---------------------------------------------------------------------------
+// MS19 Iteration 001 (R5 / MODIFIED S9, S10): 活跃会话事务中遇边界子句的
+// 组合路径锁定——拒绝语义与收尾回滚规则组合产生，先前语句不得部分生效。
+// ---------------------------------------------------------------------------
+
+/// MODIFIED S9: `BEGIN; INSERT ...; SAVEPOINT sp1` — SAVEPOINT 以 exit 3 点名
+/// 拒绝，错误信息注明先前语句未提交并已随事务回滚，重开无残留。
+#[test]
+fn active_session_savepoint_rejected_and_rolled_back() {
+    let dir = cli_fixture();
+    run_cli_ok(dir.path(), "CREATE TABLE t (id INT)", "create t");
+
+    let out = run_cli(
+        dir.path(),
+        &["app", "BEGIN; INSERT INTO t VALUES (1); SAVEPOINT sp1"],
+    );
+    assert_eq!(out.code, Some(3), "stderr: {:?}", out.stderr);
+    assert!(
+        out.stderr.contains("SAVEPOINT is not supported"),
+        "组合路径必须点名 SAVEPOINT: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("not committed"),
+        "组合路径必须注明先前语句未提交: {:?}",
+        out.stderr
+    );
+
+    let rows = select_rows(dir.path(), "SELECT id FROM t", "reopen select");
+    assert!(rows.is_empty(), "no partial effects may survive");
+}
+
+/// MODIFIED S10: `BEGIN; INSERT ...; SET TRANSACTION ...` — 同构拒绝语义。
+#[test]
+fn active_session_set_transaction_rejected_and_rolled_back() {
+    let dir = cli_fixture();
+    run_cli_ok(dir.path(), "CREATE TABLE t (id INT)", "create t");
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "BEGIN; INSERT INTO t VALUES (1); SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+        ],
+    );
+    assert_eq!(out.code, Some(3), "stderr: {:?}", out.stderr);
+    assert!(
+        out.stderr.contains("SET TRANSACTION is not supported"),
+        "组合路径必须点名 SET TRANSACTION: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("not committed"),
+        "组合路径必须注明先前语句未提交: {:?}",
+        out.stderr
+    );
+
+    let rows = select_rows(dir.path(), "SELECT id FROM t", "reopen select");
+    assert!(rows.is_empty(), "no partial effects may survive");
 }

@@ -232,6 +232,20 @@ impl BufferPool {
         Ok(())
     }
 
+    /// MS18-T01: read-only probe — is any cached page dirty (not yet flushed
+    /// to storage)?
+    ///
+    /// Same DashMap iteration discipline as `flush_all` Phase 1 (per-shard
+    /// read lock, no global lock), but it neither clears nor sets the dirty
+    /// bit and returns as soon as one dirty frame is seen. Used by the
+    /// checkpoint zero-work guard, where "no WAL appends and no dirty pages"
+    /// means there is nothing to flush, write or truncate.
+    pub fn has_dirty_pages(&self) -> bool {
+        self.pages
+            .iter()
+            .any(|entry| entry.value().lock().unwrap().dirty)
+    }
+
     /// Read only the version header from a data page (M10, M20 closure form)
     ///
     /// Zero-copy: only the 8-byte `VersionHeader` is materialized, the

@@ -27,7 +27,7 @@ fn rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
         Response::AffectedRows { count } => {
             panic!("expected QueryResult, got AffectedRows({count})")
         }
-        Response::Error { message } => panic!("expected QueryResult, got Error: {message}"),
+        Response::Error { message, .. } => panic!("expected QueryResult, got Error: {message}"),
         Response::Pong => panic!("expected QueryResult, got Pong"),
     }
 }

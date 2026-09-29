@@ -17,7 +17,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 
 async fn expect_error(db: &Database, sql: &str, needle: &str) {
     match db.execute_sql(sql).await {
-        Response::Error { message } => assert!(
+        Response::Error { message, .. } => assert!(
             message.contains(needle),
             "expected error containing {needle:?}, got: {message}"
         ),

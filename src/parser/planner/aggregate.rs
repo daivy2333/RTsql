@@ -50,42 +50,71 @@ impl PlanBuilder {
                 // Aggregate function reference in HAVING
                 // Build the result column name and find its index in output_columns
                 let name = f.name.to_string().to_uppercase();
-                let result_col_name = match name.as_str() {
-                    "COUNT" => {
-                        if f.args.is_empty() {
-                            "count_star".to_string()
-                        } else {
-                            match &f.args[0] {
-                                sqlparser::ast::FunctionArg::Unnamed(
-                                    sqlparser::ast::FunctionArgExpr::Wildcard,
-                                ) => "count_star".to_string(),
-                                sqlparser::ast::FunctionArg::Unnamed(
-                                    sqlparser::ast::FunctionArgExpr::Expr(inner),
-                                ) => {
-                                    let col = expr_to_column_name(inner)?;
-                                    format!("count_{}", col.to_lowercase())
+                // MS25 D7: 新聚合形态的输出名先行解析（DISTINCT 感知 + GROUP_CONCAT）。
+                // 非 DISTINCT 的既有五聚合走下方原 match，命名逐字节不变。
+                let ms25_name = match name.as_str() {
+                    "COUNT" | "SUM" | "AVG" if has_distinct_quantifier(f) => {
+                        let col = match f.args.first() {
+                            Some(sqlparser::ast::FunctionArg::Unnamed(
+                                sqlparser::ast::FunctionArgExpr::Expr(inner),
+                            )) => expr_to_column_name(inner)?,
+                            _ => {
+                                return Err(PlanError::InvalidAggregateArgument(
+                                    "COUNT/SUM/AVG(DISTINCT ...) requires a column".to_string(),
+                                ))
+                            }
+                        };
+                        Some(format!(
+                            "{}_distinct_{}",
+                            name.to_lowercase(),
+                            col.to_lowercase()
+                        ))
+                    }
+                    "GROUP_CONCAT" => {
+                        let (col, _) = extract_group_concat_args(&f.args)?;
+                        Some(format!("group_concat_{}", col.to_lowercase()))
+                    }
+                    _ => None,
+                };
+                let result_col_name = match ms25_name {
+                    Some(name) => name,
+                    None => match name.as_str() {
+                        "COUNT" => {
+                            if f.args.is_empty() {
+                                "count_star".to_string()
+                            } else {
+                                match &f.args[0] {
+                                    sqlparser::ast::FunctionArg::Unnamed(
+                                        sqlparser::ast::FunctionArgExpr::Wildcard,
+                                    ) => "count_star".to_string(),
+                                    sqlparser::ast::FunctionArg::Unnamed(
+                                        sqlparser::ast::FunctionArgExpr::Expr(inner),
+                                    ) => {
+                                        let col = expr_to_column_name(inner)?;
+                                        format!("count_{}", col.to_lowercase())
+                                    }
+                                    _ => "count_star".to_string(),
                                 }
-                                _ => "count_star".to_string(),
                             }
                         }
-                    }
-                    "SUM" => {
-                        let col = extract_single_column_arg(&f.args, "SUM")?;
-                        format!("sum_{}", col.to_lowercase())
-                    }
-                    "AVG" => {
-                        let col = extract_single_column_arg(&f.args, "AVG")?;
-                        format!("avg_{}", col.to_lowercase())
-                    }
-                    "MIN" => {
-                        let col = extract_single_column_arg(&f.args, "MIN")?;
-                        format!("min_{}", col.to_lowercase())
-                    }
-                    "MAX" => {
-                        let col = extract_single_column_arg(&f.args, "MAX")?;
-                        format!("max_{}", col.to_lowercase())
-                    }
-                    _ => return Err(PlanError::UnsupportedExpression),
+                        "SUM" => {
+                            let col = extract_single_column_arg(&f.args, "SUM")?;
+                            format!("sum_{}", col.to_lowercase())
+                        }
+                        "AVG" => {
+                            let col = extract_single_column_arg(&f.args, "AVG")?;
+                            format!("avg_{}", col.to_lowercase())
+                        }
+                        "MIN" => {
+                            let col = extract_single_column_arg(&f.args, "MIN")?;
+                            format!("min_{}", col.to_lowercase())
+                        }
+                        "MAX" => {
+                            let col = extract_single_column_arg(&f.args, "MAX")?;
+                            format!("max_{}", col.to_lowercase())
+                        }
+                        _ => return Err(PlanError::UnsupportedExpression(name)),
+                    },
                 };
                 let column_index = output_columns
                     .iter()
@@ -122,7 +151,7 @@ impl PlanBuilder {
                     Err(PlanError::UnsupportedValue)
                 }
             }
-            _ => Err(PlanError::UnsupportedExpression),
+            _ => Err(PlanError::UnsupportedExpression("EXPRESSION".into())),
         }
     }
 
@@ -156,9 +185,9 @@ impl PlanBuilder {
                         }))
                     }
                     _ => {
-                        let comp_op = self
-                            .convert_comparison_op(op)
-                            .ok_or(PlanError::UnsupportedExpression)?;
+                        let comp_op = self.convert_comparison_op(op).ok_or_else(|| {
+                            PlanError::UnsupportedExpression(format!("COMPARISON OPERATOR {op}"))
+                        })?;
                         let left_expr = self.build_having_expression(left, output_columns)?;
                         let right_expr = self.build_having_expression(right, output_columns)?;
                         Ok(Arc::new(ComparisonPredicate {
@@ -170,7 +199,7 @@ impl PlanBuilder {
                 }
             }
             Expr::Nested(expr) => self.build_having(expr, output_columns),
-            _ => Err(PlanError::UnsupportedExpression),
+            _ => Err(PlanError::UnsupportedExpression("HAVING PREDICATE".into())),
         }
     }
 }
@@ -179,8 +208,55 @@ impl PlanBuilder {
 pub(crate) fn is_aggregate_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Function(f) if {
         let name = f.name.to_string().to_uppercase();
-        matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
+        matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "GROUP_CONCAT")
     })
+}
+
+/// MS25 D7: 是否带 `DISTINCT` 量化词（sqlparser 0.44 `Function::distinct` 为 bool）。
+fn has_distinct_quantifier(f: &sqlparser::ast::Function) -> bool {
+    f.distinct
+}
+
+/// MS25 D7: `GROUP_CONCAT(<col> [, '<sep>'])` 的参数解析。第一参数为列引用；
+/// 第二参数必须是字面量字符串（分隔符不做表达式求值）。参数数量越界或
+/// 分隔符非字面量 → `InvalidAggregateArgument` 点名。
+fn extract_group_concat_args(
+    args: &[sqlparser::ast::FunctionArg],
+) -> Result<(String, Option<String>), PlanError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(PlanError::InvalidAggregateArgument(
+            "GROUP_CONCAT requires a column and an optional literal separator".to_string(),
+        ));
+    }
+    let col = match &args[0] {
+        sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
+            expr_to_column_name(expr)?
+        }
+        _ => {
+            return Err(PlanError::InvalidAggregateArgument(
+                "GROUP_CONCAT argument must be a column".to_string(),
+            ))
+        }
+    };
+    let separator = match args.get(1) {
+        None => None,
+        Some(sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+            sqlparser::ast::Expr::Value(value),
+        ))) => Some(match value_from_sqlparser(value)? {
+            Value::String(sep) => sep,
+            _ => {
+                return Err(PlanError::InvalidAggregateArgument(
+                    "GROUP_CONCAT separator must be a string literal".to_string(),
+                ))
+            }
+        }),
+        Some(_) => {
+            return Err(PlanError::InvalidAggregateArgument(
+                "GROUP_CONCAT separator must be a string literal".to_string(),
+            ))
+        }
+    };
+    Ok((col, separator))
 }
 
 /// Extract AggregateFunc from an Expr, returns None if not an aggregate
@@ -188,6 +264,11 @@ pub(crate) fn extract_aggregate_func(expr: &Expr) -> Result<Option<AggregateFunc
     match expr {
         Expr::Function(f) => {
             let name = f.name.to_string().to_uppercase();
+            // MS25 D7: `GROUP_CONCAT(DISTINCT …)` 不在支持面（重复值不做去重
+            // 折叠），落入既有的「未知名聚合」点名拒绝通道。
+            if name == "GROUP_CONCAT" && has_distinct_quantifier(f) {
+                return Ok(None);
+            }
             match name.as_str() {
                 "COUNT" => {
                     if f.args.is_empty() {
@@ -195,15 +276,34 @@ pub(crate) fn extract_aggregate_func(expr: &Expr) -> Result<Option<AggregateFunc
                             "COUNT requires argument or *".to_string(),
                         ));
                     }
+                    // MS25 D7: `COUNT(DISTINCT col)` 真实去重计数；`*` 与多参数
+                    // 形态在 DISTINCT 下点名拒绝（去重对象必须是单个列）。
+                    let distinct = has_distinct_quantifier(f);
+                    if distinct && f.args.len() > 1 {
+                        return Err(PlanError::InvalidAggregateArgument(
+                            "COUNT(DISTINCT ...) requires exactly one column".to_string(),
+                        ));
+                    }
                     match &f.args[0] {
                         sqlparser::ast::FunctionArg::Unnamed(
                             sqlparser::ast::FunctionArgExpr::Wildcard,
-                        ) => Ok(Some(AggregateFunc::CountStar)),
+                        ) => {
+                            if distinct {
+                                return Err(PlanError::InvalidAggregateArgument(
+                                    "COUNT(DISTINCT ...) requires a column, not *".to_string(),
+                                ));
+                            }
+                            Ok(Some(AggregateFunc::CountStar))
+                        }
                         sqlparser::ast::FunctionArg::Unnamed(
                             sqlparser::ast::FunctionArgExpr::Expr(inner),
                         ) => {
                             let col = expr_to_column_name(inner)?;
-                            Ok(Some(AggregateFunc::Count(col)))
+                            Ok(Some(if distinct {
+                                AggregateFunc::CountDistinct(col)
+                            } else {
+                                AggregateFunc::Count(col)
+                            }))
                         }
                         _ => Err(PlanError::InvalidAggregateArgument(
                             "COUNT argument must be * or column".to_string(),
@@ -212,12 +312,22 @@ pub(crate) fn extract_aggregate_func(expr: &Expr) -> Result<Option<AggregateFunc
                 }
                 "SUM" => {
                     let col = extract_single_column_arg(&f.args, "SUM")?;
-                    Ok(Some(AggregateFunc::Sum(col)))
+                    Ok(Some(if has_distinct_quantifier(f) {
+                        AggregateFunc::SumDistinct(col)
+                    } else {
+                        AggregateFunc::Sum(col)
+                    }))
                 }
                 "AVG" => {
                     let col = extract_single_column_arg(&f.args, "AVG")?;
-                    Ok(Some(AggregateFunc::Avg(col)))
+                    Ok(Some(if has_distinct_quantifier(f) {
+                        AggregateFunc::AvgDistinct(col)
+                    } else {
+                        AggregateFunc::Avg(col)
+                    }))
                 }
+                // MS25 D7: `MIN/MAX(DISTINCT x)` 等价普通形态（SQLite 对齐），
+                // DISTINCT 量化词被丢弃。
                 "MIN" => {
                     let col = extract_single_column_arg(&f.args, "MIN")?;
                     Ok(Some(AggregateFunc::Min(col)))
@@ -225,6 +335,10 @@ pub(crate) fn extract_aggregate_func(expr: &Expr) -> Result<Option<AggregateFunc
                 "MAX" => {
                     let col = extract_single_column_arg(&f.args, "MAX")?;
                     Ok(Some(AggregateFunc::Max(col)))
+                }
+                "GROUP_CONCAT" => {
+                    let (col, separator) = extract_group_concat_args(&f.args)?;
+                    Ok(Some(AggregateFunc::GroupConcat { col, separator }))
                 }
                 _ => Ok(None),
             }

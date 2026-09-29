@@ -50,13 +50,14 @@ impl DeleteExecutor {
         if self.table_meta.unique_indexes.is_empty() {
             return Ok(Vec::new());
         }
-        let tuple = match read_tuple_from_data_page(&self.buffer_pool, rid, |_, bytes| Ok(bytes.to_vec()))
-            .await
-        {
-            Ok(bytes) => bytes,
-            Err(StorageError::SlotNotFound(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e),
-        };
+        let tuple =
+            match read_tuple_from_data_page(&self.buffer_pool, rid, |_, bytes| Ok(bytes.to_vec()))
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(StorageError::SlotNotFound(_)) => return Ok(Vec::new()),
+                Err(e) => return Err(e),
+            };
         let schema: Vec<ColumnType> = self
             .table_meta
             .columns

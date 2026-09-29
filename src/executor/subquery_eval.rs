@@ -31,6 +31,10 @@ pub struct SubqueryEvalExecutor {
     /// MS09 Iter000 (D4): statement-start Read Committed snapshot re-applied
     /// on every (re-)evaluation of the subquery (`None` under RepeatableRead).
     snapshot: Option<Snapshot>,
+    /// MS20 T2: cross-db route table re-applied on every (re-)evaluation, so a
+    /// subquery reading an attached table resolves to that database. Empty
+    /// outside an ATTACH session (lib path / single-database CLI call).
+    pub(crate) routed_tables: Arc<crate::pipeline::RoutedTables>,
     cached_result: Option<Value>,
     /// MS09 Iter002 (D6): statement-level correlated-result cache keyed by the
     /// correlated parameter value sequence. Stores the successful row set (0 or
@@ -51,6 +55,7 @@ impl SubqueryEvalExecutor {
         outer_column_indices: HashMap<String, usize>,
         database: Arc<Database>,
         snapshot: Option<Snapshot>,
+        routed_tables: Arc<crate::pipeline::RoutedTables>,
     ) -> Self {
         Self {
             input,
@@ -61,6 +66,7 @@ impl SubqueryEvalExecutor {
             outer_column_indices,
             database,
             snapshot,
+            routed_tables,
             cached_result: None,
             correlated_cache: HashMap::new(),
         }
@@ -75,6 +81,7 @@ impl SubqueryEvalExecutor {
             &self.database,
             None,
             self.snapshot.clone(),
+            &self.routed_tables,
         )
         .await?;
 
@@ -145,6 +152,7 @@ impl Executor for SubqueryEvalExecutor {
                                 &self.database,
                                 None,
                                 self.snapshot.clone(),
+                                &self.routed_tables,
                             )
                             .await?;
                             let mut result_value: Option<Value> = None;

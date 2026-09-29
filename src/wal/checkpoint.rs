@@ -120,6 +120,25 @@ impl CheckpointManager {
     /// - 截断后位点置 0：此后恢复对已缩短文件全量重放；
     /// - 截断中崩溃留下部分/旧尾部字节 → 解析错误 → 恢复显式失败（不静默丢）。
     ///
+    /// MS18-T01: zero-work skip. When nothing is pending — no WAL record
+    /// appended since the last checkpoint (`get_write_count() == 0`) and no
+    /// dirty buffer-pool page — the whole checkpoint is a no-op: no page
+    /// flush, no site write, no WAL rewrite/truncate, return `Ok(0)`. The
+    /// disk is already in the checkpoint-clean state this method would
+    /// produce, so "close persists everything" is unchanged: pending work
+    /// (DML records, DDL dirty pages, crash-recovery replayed pages) always
+    /// takes the full nine-step path byte for byte.
+    ///
+    /// The WAL side reads the in-memory append counter rather than the file
+    /// length on purpose: step 6 below appends a Checkpoint marker record
+    /// and step 7 keeps it, so a checkpointed WAL is never empty and a
+    /// length probe is permanently false. DDL writes no WAL record at all,
+    /// which is why the dirty-page probe is a required second condition —
+    /// without it a schema-only session would skip and lose its DDL.
+    ///
+    /// Returns the captured LSN of a full checkpoint, or `0` for a zero-work
+    /// skip (no LSN captured, no site written).
+    ///
     /// MS17-T02 Iter002（design D8 健全性关键）：`tx_watermark` 闭包在本
     /// 方法内、步骤 1 LSN 捕获**之后**调用——位点前缀内（offset < lsn）落盘
     /// Begin 的事务，其 id 分配先于 Begin 写入、Begin 写入先于 LSN 捕获，
@@ -129,6 +148,13 @@ impl CheckpointManager {
     /// 捕获的参数传入（LSN 之前读取会漏观测「读取与 LSN 捕获之间分配且
     /// Begin 落前缀」的 id）。
     pub async fn checkpoint(&self, tx_watermark: impl Fn() -> u64) -> Result<u64, WalError> {
+        // 0. MS18-T01 零工作跳过：WAL 无追加且池无脏页时整体无操作。
+        //    磁盘已处于本方法将产生的 checkpoint-clean 态，九步全为无谓 I/O
+        //    （位点 fsync + WAL 重写截断）。任一条件非空 → 全量路径逐字节不变。
+        if self.wal_writer.get_write_count() == 0 && !self.buffer_pool.has_dirty_pages() {
+            return Ok(0);
+        }
+
         // 1. 获取当前 WAL LSN（文件字节偏移）
         let lsn = self.wal_writer.get_current_lsn().await?;
 
@@ -178,7 +204,7 @@ impl CheckpointManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{BufferPool, FileStorage};
+    use crate::storage::{BufferPool, FileStorage, Page, PageId};
     use tempfile::tempdir;
 
     fn manager_for(db_path: &std::path::Path) -> CheckpointManager {
@@ -186,6 +212,67 @@ mod tests {
         let storage = FileStorage::open(db_path).unwrap();
         let buffer_pool = Arc::new(BufferPool::new(10, Arc::new(storage)).unwrap());
         CheckpointManager::new(db_path, wal_writer, buffer_pool)
+    }
+
+    /// ms07-rest-tx-checkpoint-pushdown「Checkpoint 零工作跳过」：WAL 无追加
+    /// 且池无脏页时早退——返回 0 且不产生位点文件。
+    #[tokio::test]
+    async fn zero_work_checkpoint_returns_zero_without_site() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("zero.db");
+        let manager = manager_for(&db_path);
+
+        assert_eq!(manager.wal_writer.get_write_count(), 0);
+        assert!(!manager.buffer_pool.has_dirty_pages());
+
+        assert_eq!(manager.checkpoint(|| 0).await.unwrap(), 0);
+        assert!(
+            !manager.checkpoint_path.exists(),
+            "零工作跳过不得创建位点文件"
+        );
+
+        // 谓词一侧非空（WAL 有追加）→ 全量路径，位点落盘。
+        manager
+            .wal_writer
+            .write_record(WalRecord::Checkpoint {
+                lsn: 0,
+                timestamp: 0,
+            })
+            .await
+            .unwrap();
+        assert!(manager.checkpoint(|| 0).await.unwrap() > 0);
+        assert!(manager.checkpoint_path.exists());
+    }
+
+    /// ms07-rest-tx-checkpoint-pushdown：谓词的池侧条件——页被置脏时不得跳过
+    /// （DDL 不写 WAL，纯 schema 会话依赖刷脏页持久化）。
+    #[tokio::test]
+    async fn dirty_pool_checkpoint_keeps_full_path() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("dirty.db");
+        let manager = manager_for(&db_path);
+
+        assert_eq!(manager.wal_writer.get_write_count(), 0);
+        manager
+            .buffer_pool
+            .storage()
+            .write_page(PageId(0), &Page::new(PageId(0)))
+            .await
+            .unwrap();
+        let guard = manager.buffer_pool.get_page(PageId(0)).await.unwrap();
+        guard.mark_dirty();
+        drop(guard);
+
+        assert!(manager.buffer_pool.has_dirty_pages(), "置脏后探测必须为真");
+        assert!(!manager.checkpoint_path.exists());
+
+        manager.checkpoint(|| 0).await.unwrap();
+
+        // 全量路径的可见后果：位点落盘 + 脏页被刷（探测转为假）。
+        // 返回值在此夹具下同为 0——新库 WAL 长度为零，全量路径捕获的 LSN
+        // 也是 0，故以文件与脏位判定，不以返回值判定。
+        assert!(manager.checkpoint_path.exists());
+        assert!(!manager.buffer_pool.has_dirty_pages());
     }
 
     /// transaction-isolation-levels S2（MS17-T02 Iter002）：24B 位点往返——

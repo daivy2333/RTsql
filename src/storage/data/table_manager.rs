@@ -234,9 +234,7 @@ impl TableManager {
                     .iter()
                     .enumerate()
                     .filter(|(idx, c)| {
-                        c.unique
-                            && matches!(c.column_type, ColumnType::Int)
-                            && *idx != pk_index
+                        c.unique && matches!(c.column_type, ColumnType::Int) && *idx != pk_index
                     })
                     .map(|(idx, _)| idx)
                     .collect();
@@ -251,10 +249,7 @@ impl TableManager {
                 let mut rebuilt = Vec::with_capacity(qualifying.len());
                 for (ordinal, col_idx) in qualifying.into_iter().enumerate() {
                     let root = PageId(row.unique_roots[ordinal] as u64);
-                    let uindex = Arc::new(IndexManager::from_root(
-                        self.buffer_pool.clone(),
-                        root,
-                    )?);
+                    let uindex = Arc::new(IndexManager::from_root(self.buffer_pool.clone(), root)?);
                     rebuilt.push((col_idx, uindex));
                 }
                 rebuilt
@@ -356,12 +351,7 @@ impl TableManager {
         let index_manager = Arc::new(
             tokio::task::spawn_blocking(move || IndexManager::new(bp))
                 .await??
-                .with_catalog_context(
-                    catalog,
-                    CatalogRootSlot::PrimaryKey {
-                        table: table_name,
-                    },
-                ),
+                .with_catalog_context(catalog, CatalogRootSlot::PrimaryKey { table: table_name }),
         );
         let index_root_page_id = index_manager.root_page_id().0 as u32;
 
@@ -535,10 +525,7 @@ impl TableManager {
         name: &str,
         new_index: Arc<IndexManager>,
         new_uniques: Vec<(usize, Arc<IndexManager>)>,
-    ) -> Result<(
-        Arc<IndexManager>,
-        Vec<(usize, Arc<IndexManager>)>,
-    )> {
+    ) -> Result<(Arc<IndexManager>, Vec<(usize, Arc<IndexManager>)>)> {
         let mut tables = self.tables.write().await;
         let old = tables
             .get(name)
@@ -715,7 +702,13 @@ mod tests {
             "t",
             vec![
                 ("id".to_string(), ColumnType::Int, false, false, None),
-                ("name".to_string(), ColumnType::String(255), true, true, None),
+                (
+                    "name".to_string(),
+                    ColumnType::String(255),
+                    true,
+                    true,
+                    None,
+                ),
             ],
             "id",
         )
@@ -750,13 +743,21 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
         let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+        let tm = TableManager::new(pool.clone(), storage.clone())
+            .await
+            .unwrap();
 
         tm.create_table_with_constraints(
             "t",
             vec![
                 ("id".to_string(), ColumnType::Int, false, false, None),
-                ("name".to_string(), ColumnType::String(255), true, false, None),
+                (
+                    "name".to_string(),
+                    ColumnType::String(255),
+                    true,
+                    false,
+                    None,
+                ),
             ],
             "id",
         )
@@ -765,13 +766,21 @@ mod tests {
 
         // 创建面：TableMeta 按列序直接携带标志
         let meta = tm.get_table("t").await.unwrap();
-        assert_eq!(meta.not_null, vec![false, true], "create path must carry flags");
+        assert_eq!(
+            meta.not_null,
+            vec![false, true],
+            "create path must carry flags"
+        );
 
         // 恢复面：新 TableManager 经 open_or_init 自 catalog 读回
         let tm2 = TableManager::new(pool, storage).await.unwrap();
         tm2.open_or_init().await.unwrap();
         let meta2 = tm2.get_table("t").await.unwrap();
-        assert_eq!(meta2.not_null, vec![false, true], "reopen path must read back flags");
+        assert_eq!(
+            meta2.not_null,
+            vec![false, true],
+            "reopen path must read back flags"
+        );
     }
 
     // ===========================================================================
@@ -791,7 +800,13 @@ mod tests {
             vec![
                 ("id".to_string(), ColumnType::Int, false, false, None),
                 ("code".to_string(), ColumnType::Int, false, true, None),
-                ("name".to_string(), ColumnType::String(255), false, false, None),
+                (
+                    "name".to_string(),
+                    ColumnType::String(255),
+                    false,
+                    false,
+                    None,
+                ),
             ],
             "id",
         )
@@ -803,7 +818,10 @@ mod tests {
             meta.unique_indexes.len(),
             1,
             "exactly one UNIQUE index for column 'code': {:?}",
-            meta.unique_indexes.iter().map(|(i, _)| i).collect::<Vec<_>>()
+            meta.unique_indexes
+                .iter()
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             meta.unique_indexes[0].0, 1,
@@ -834,7 +852,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
         let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+        let tm = TableManager::new(pool.clone(), storage.clone())
+            .await
+            .unwrap();
 
         tm.create_table_with_constraints(
             "t",
@@ -872,13 +892,21 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
         let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+        let tm = TableManager::new(pool.clone(), storage.clone())
+            .await
+            .unwrap();
 
         tm.create_table_with_constraints(
             "t",
             vec![
                 ("id".to_string(), ColumnType::Int, false, false, None),
-                ("name".to_string(), ColumnType::String(255), false, true, None),
+                (
+                    "name".to_string(),
+                    ColumnType::String(255),
+                    false,
+                    true,
+                    None,
+                ),
             ],
             "id",
         )
@@ -909,7 +937,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
         let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+        let tm = TableManager::new(pool.clone(), storage.clone())
+            .await
+            .unwrap();
 
         // 手工插入旧版形态的 catalog 行：INT unique 标志列、无尾随唯一根段
         let head = pool.storage().allocate_page().await.unwrap();
@@ -951,7 +981,10 @@ mod tests {
         assert!(
             meta.unique_indexes.is_empty(),
             "legacy row (empty roots) must open without unique indexes, got {:?}",
-            meta.unique_indexes.iter().map(|(i, _)| i).collect::<Vec<_>>()
+            meta.unique_indexes
+                .iter()
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -967,14 +1000,28 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
         let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-        let tm = TableManager::new(pool.clone(), storage.clone()).await.unwrap();
+        let tm = TableManager::new(pool.clone(), storage.clone())
+            .await
+            .unwrap();
 
         tm.create_table_with_constraints(
             "t",
             vec![
                 ("id".to_string(), ColumnType::Int, false, false, None),
-                ("score".to_string(), ColumnType::Int, false, false, Some(Value::Int(90))),
-                ("note".to_string(), ColumnType::String(255), false, false, Some(Value::Null)),
+                (
+                    "score".to_string(),
+                    ColumnType::Int,
+                    false,
+                    false,
+                    Some(Value::Int(90)),
+                ),
+                (
+                    "note".to_string(),
+                    ColumnType::String(255),
+                    false,
+                    false,
+                    Some(Value::Null),
+                ),
             ],
             "id",
         )

@@ -19,6 +19,7 @@ impl SqlHandler {
                     Request::Ping => Response::Pong,
                     _ => Response::Error {
                         message: "Unknown request".to_string(),
+                        sqlstate: None,
                     },
                 };
             }

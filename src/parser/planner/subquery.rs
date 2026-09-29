@@ -377,7 +377,7 @@ impl PlanBuilder {
                     column,
                 })
             }
-            _ => Err(PlanError::UnsupportedExpression),
+            _ => Err(PlanError::UnsupportedExpression("COLUMN REFERENCE".into())),
         }
     }
 
