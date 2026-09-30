@@ -1,11 +1,11 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-30（MS26 嵌入式运行形态收尾归档——change `2026-09-30-ms26-embedded-runtime` 四 Iteration 全 accepted 并归档 carrier：T1/T2 只读打开模式（`open_readonly[_with_key]` 共享锁多读单写 + WAL 未决拒绝 + 零写入会话 + 13 写变体 25006 + CLI `--readonly` + ATTACH 只读传递）+ T3/T4 `:memory:` 库形态（`MemoryStorage` + `open_in_memory()` + CLI 特判与拒绝面、零文件退出即弃）+ T8 派生基座外层投影收口（FROM 子查询/CTE/视图三通道外层清单裁剪行+表头、未知列 42703；用户指令 Issue 候选本 change 解决）+ T9/T10/T7 收尾批（组合拒绝自动化用例 / clippy 清零 / 孤儿移除 / 文档三处）+ T5/T6 WAL 字节水位（提交边界 `maybe_auto_checkpoint` 单点、16 MiB 默认 + env/lib 双通道、0 禁用、活跃事务顺延、失败传播且 CTAS 表存活、死记录数阈值接口删除）；增量规格 +3 域（`readonly-open-mode` / `in-memory-database` / `wal-auto-checkpoint`）+ `database-file-lock` R1 按模式收窄 + `error-reporting` R2 增 25006 + `join-output-shape-resolution` +R5，语料 56 → 59 域；1590 tests）
+> 最后更新：2026-09-30（**v0.2.0 版本定义与本地部署升级**——change `2026-09-30-version-0-2-bump-and-deploy` accepted 并归档 carrier：`Cargo.toml` version 0.1.0 → **0.2.0**（单一版本源——`rtsql --version`/`cargo pkgid`/dist 归档命名三下游自动跟随）+ `Cargo.lock` 再生 + `rtsql-docs/SKILL.md` frontmatter 0.2.0 + 双 README 核验零编辑（基准节 0.1.0 历史标注经裁定保留）+ 本机 `~/.local/bin` 经 install.sh 原地重装升级 0.2.0（0.1 库免迁移可查可写实证、cmp 逐字节幂等重跑）；增量规格 `install-script` +R3「升级重装」（原地升级保数据 / 版本三处同源 / 重跑幂等），语料域数不变；1590 tests 不变（版本字段无行为面，抽样 140 例 + 全目标编译复核）。此前同日：MS26 嵌入式运行形态收尾归档——只读并发 / `:memory:` / WAL 字节水位 / 派生基座投影收口，+3 域语料 56 → 59）
 > 同步状态：current
 
 ## 项目身份
 
-RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 无栈协程为调度核心，实现轻量、便捷、高效的现代数据库系统。
+RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 无栈协程为调度核心，实现轻量、便捷、高效的现代数据库系统。
 
 ## 技术栈
 
@@ -86,16 +86,16 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: a78bae1（本批主提交：MS26 实施与收尾统一入库）
+- **提交基线**: （本批主提交：v0.2.0 版本定义与部署升级——hash 由后续 docs 提交回填；上一主批次 a78bae1 = MS26）
 - **ahead of origin**: 4
 - **工作区**: 干净（MS26 收尾提交后无未提交项）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 1590 tests pass, 0 failures（2026-09-30 Iteration 002 Act Response 全量 M19 分批（100 集成目标 ×10 批 + lib）新鲜执行，Plan Review 采信 + 用户裁定「测试可信」；MS26 净增 3 测试文件 39 例——readonly_session 14 / memory_db 15 / wal_auto_checkpoint 11（−2 死接口消费用例随删除）+ 派生投影扩展 12 例）
-- **OpenSpec**: 59 specs（MS26 增量合并 +3 域——新增 `readonly-open-mode` / `in-memory-database` / `wal-auto-checkpoint`，`database-file-lock` R1 按模式收窄、`error-reporting` R2 增 25006、`join-output-shape-resolution` +R5 派生基座投影；decisions/knowledge 为 2026-09-24 退役空壳，仍计入 validate）；**活跃 change**：无（最新归档 `archive/2026-09-30-ms26-embedded-runtime/`，四 Iteration 全 accepted；下一里程碑 MS27）注：新版 openspec CLI `validate --all --strict` 将 MS06–MS10 时代 spec 的占位 Purpose 标记为失败——既有状态，非本轮引入
+- **OpenSpec**: 59 specs（MS26 增量合并 +3 域——新增 `readonly-open-mode` / `in-memory-database` / `wal-auto-checkpoint`，`database-file-lock` R1 按模式收窄、`error-reporting` R2 增 25006、`join-output-shape-resolution` +R5 派生基座投影；decisions/knowledge 为 2026-09-24 退役空壳，仍计入 validate）；**活跃 change**：无（最新归档 `archive/2026-09-30-version-0-2-bump-and-deploy/`，accepted；install-script +R3 升级重装已合并；上一归档 `archive/2026-09-30-ms26-embedded-runtime/`；下一里程碑 MS27）注：新版 openspec CLI `validate --all --strict` 将 MS06–MS10 时代 spec 的占位 Purpose 标记为失败——既有状态，非本轮引入
 
 ## 同步状态
 
-- `current` — 文档与代码一致；MS26 嵌入式运行形态收尾入库（change 四 Iteration 全 accepted 并归档、+3 域增量规格合并使语料达 59 域、tasks MS26 标注完成、SNAPSHOT 刷新）；1590 tests（2026-09-30 Iteration 002 Act Response 全量分批，Plan Review 采信）；无活跃 change，工作区随收尾提交入库
+- `current` — 文档与代码一致；**v0.2.0 版本定义落地**（`Cargo.toml`/`--version`/`cargo pkgid` 三处同源 0.2.0、SKILL frontmatter 同步、本机部署经 install.sh 原地升级 0.2.0、0.1 库免迁移实证、install-script +R3 合并并归档）；1590 tests 不变（版本字段无行为面；抽样 140 例 + 全目标编译复核，Plan Review 采信）；无活跃 change，工作区随收尾提交入库
 
 ## 权威文档
 
