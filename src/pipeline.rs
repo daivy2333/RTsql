@@ -1,14 +1,16 @@
 use crate::database::Database;
 use crate::executor::{
-    AggregateExecutor, AggregateNode, AntiJoinExecutor, CreateTableAsSelectNode,
-    CreateTableExecutor, DataScanExecutor, DeleteExecutor, DerivedScanExecutor, DistinctExecutor,
-    DropTableExecutor, ExecResult, Executor, ExplainExecutor, FilterExecutor, HavingExecutor,
+    AggregateExecutor, AggregateNode, AlterTableExecutor, AntiJoinExecutor, CreateIndexExecutor,
+    CreateTableAsSelectNode, CreateTableExecutor, CreateViewExecutor, DataScanExecutor,
+    DeleteExecutor, DerivedScanExecutor, DistinctExecutor, DropIndexExecutor, DropTableExecutor,
+    DropViewExecutor, ExecResult, Executor, ExplainExecutor, FilterExecutor, HavingExecutor,
     IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig, JoinExecutor,
     JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, PhysicalPlan, ProjectionExecutor,
     ScanExecutor, SemiJoinExecutorV2, SetOperationExecutor, SingleRowExecutor, SortExecutor,
-    SubqueryEvalExecutor, UpdateExecutor, UpsertExecutor, Value,
+    SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor, UpsertExecutor, Value,
 };
 use crate::network::protocol::Response;
+use crate::parser::planner::ViewDef;
 use crate::parser::{parse_sql, PlanBuilder, PlanError};
 use crate::profiling::{
     init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope,
@@ -16,8 +18,8 @@ use crate::profiling::{
 use crate::storage::page_format::ColumnType as StorageColumnType;
 use crate::storage::{Result, StorageError};
 use crate::transaction::Snapshot;
-use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, TableWithJoins};
-use std::collections::HashMap;
+use sqlparser::ast::{Expr, ObjectType, Query, SetExpr, Statement, TableFactor, TableWithJoins};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -199,12 +201,36 @@ pub async fn plan_stage_routed(
             }
             plan_builder.build_plan(stmt).map_err(PlanFailure::from)
         }
-        Statement::CreateTable { .. } | Statement::Drop { .. } => {
+        Statement::CreateTable { .. }
+        | Statement::Drop {
+            object_type: ObjectType::Table,
+            ..
+        } => {
             let mut plan_builder = PlanBuilder::new();
             // MS20 T3: DDL 走此分支（不经 `register_table`），写目标的附加库
             // 引用判定在此独立完成——只需「首段命中别名」，不查 catalog。
+            // MS21 Iter002：CREATE INDEX / DROP INDEX 不落此分支（前者需要
+            // register_table 的表 schema 通道，后者无表名可标记）——附加库
+            // 目标各自在其计划臂点名拒绝。
             if let Some(route) = route {
                 mark_attached_ddl_targets(&mut plan_builder, stmt, route);
+            }
+            plan_builder.build_plan(stmt).map_err(PlanFailure::from)
+        }
+        // MS21 Iter005 (T5-b/D12)：CREATE VIEW 专用臂——视图通道注入（重名
+        // 检查与 T5-c 展开钩子消费）+ 定义表名视图感知注册（附加库引用点名
+        // 拒绝、既有视图引用合法）。DDL 不进 plan cache。
+        Statement::CreateView { .. } => {
+            let table_lookup_start = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let mut plan_builder = PlanBuilder::new();
+            plan_builder.set_views(current_view_defs(database).await);
+            register_view_definition_tables(database, &mut plan_builder, stmt, route).await?;
+            if let Some(start) = table_lookup_start {
+                record_time("table_metadata_lookup", start.elapsed());
             }
             plan_builder.build_plan(stmt).map_err(PlanFailure::from)
         }
@@ -215,6 +241,32 @@ pub async fn plan_stage_routed(
                 None
             };
             let mut plan_builder = PlanBuilder::new();
+            // MS21 Iter005 (T5-c/D12)：语句级视图通道注入——FROM/JOIN 展开钩子
+            // 与 register_table 视图豁免的共同消费面（`Database.views` 快照；
+            // 无视图库为空表 → 全路径逐字节不变）。
+            plan_builder.set_views(current_view_defs(database).await);
+            // MS21 Iter002 (T2-c/T2-f/D14)：CREATE INDEX / DROP INDEX 的计划期
+            // 名单——全库二级索引名一次性注入（重名 / 不存在检查）。
+            if matches!(stmt, Statement::CreateIndex { .. } | Statement::Drop { .. }) {
+                let names: HashSet<String> = database
+                    .table_manager
+                    .all_secondary_index_names()
+                    .await
+                    .into_iter()
+                    .collect();
+                plan_builder.set_existing_index_names(names);
+            }
+            // MS21 Iter003 (T3-b/D9)：ALTER TABLE 目标表的行存在性注入
+            // （NOT NULL 无 DEFAULT × 非空的计划期判定输入）。
+            if let Statement::AlterTable { name, .. } = stmt {
+                let table_name = crate::parser::ast::object_name_to_table_name(name);
+                let has_rows = database
+                    .table_manager
+                    .table_has_live_rows(&table_name)
+                    .await
+                    .unwrap_or(false);
+                plan_builder.set_table_has_live_rows(&table_name, has_rows);
+            }
             register_table(database, &mut plan_builder, stmt, route, routed).await?;
             if let Some(start) = table_lookup_start {
                 record_time("table_metadata_lookup", start.elapsed());
@@ -265,6 +317,66 @@ pub async fn execute_stage_routed(
             };
             let response = execute_executor(executor).await;
             // 时序保持：DDL 执行后清缓存（与原 execute_inner 行为等价——成功后与失败后都清）。
+            database.plan_cache.clear();
+            response
+        }
+        // MS21 Iter002 (T2-c/T2-f)：CREATE/DROP INDEX 直包对应执行器（DDL 臂
+        // 同型；执行后清缓存——引用该索引的 SELECT 计划若曾被缓存，全清封死
+        // 复活窗口）。
+        PhysicalPlan::CreateIndex(_) | PhysicalPlan::DropIndex(_) => {
+            let executor: Box<dyn Executor + Send> = match &plan {
+                PhysicalPlan::CreateIndex(_) => Box::new(CreateIndexExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                PhysicalPlan::DropIndex(_) => Box::new(DropIndexExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                _ => unreachable!("DDL match already filtered"),
+            };
+            let response = execute_executor(executor).await;
+            database.plan_cache.clear();
+            response
+        }
+        // MS21 Iter003 (T3-b/c)：ALTER TABLE 直包执行器（DDL 臂同型；执行后
+        // 清缓存——引用该表的 SELECT 计划若曾被缓存，全清封死复活窗口）。
+        PhysicalPlan::AlterTable(_) => {
+            let executor: Box<dyn Executor + Send> = Box::new(AlterTableExecutor::new(
+                plan.clone(),
+                Arc::new(database.clone()),
+            ));
+            let response = execute_executor(executor).await;
+            database.plan_cache.clear();
+            response
+        }
+        // MS21 Iter004 (T4-a)：TRUNCATE 直包执行器（DDL 臂同型；执行后清缓存
+        // ——引用该表的 SELECT 计划若曾被缓存，全清封死复活窗口）。
+        PhysicalPlan::Truncate(_) => {
+            let executor: Box<dyn Executor + Send> = Box::new(TruncateExecutor::new(
+                plan.clone(),
+                Arc::new(database.clone()),
+            ));
+            let response = execute_executor(executor).await;
+            database.plan_cache.clear();
+            response
+        }
+        // MS21 Iter005 (T5-b/T5-d)：CREATE/DROP VIEW 直包执行器（DDL 臂同型
+        //；执行后清缓存——引用视图的 SELECT 计划内嵌展开子树，全清封死定义
+        // 变更后旧计划复活窗口，spec R3）。
+        PhysicalPlan::CreateView(_) | PhysicalPlan::DropView(_) => {
+            let executor: Box<dyn Executor + Send> = match &plan {
+                PhysicalPlan::CreateView(_) => Box::new(CreateViewExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                PhysicalPlan::DropView(_) => Box::new(DropViewExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                _ => unreachable!("DDL match already filtered"),
+            };
+            let response = execute_executor(executor).await;
             database.plan_cache.clear();
             response
         }
@@ -727,13 +839,26 @@ pub async fn execute_stage_in_tx_routed(
     routed: &RoutedTables,
 ) -> Response {
     match &plan {
-        PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
+        PhysicalPlan::CreateTable(_)
+        | PhysicalPlan::DropTable(_)
+        // MS21 Iter005 (T5-b/T5-d/D13)：CREATE/DROP VIEW 沿 CREATE TABLE
+        // 现状——catalog-only，立即生效、不随回滚撤销。
+        | PhysicalPlan::CreateView(_)
+        | PhysicalPlan::DropView(_) => {
             let executor: Box<dyn Executor + Send> = match &plan {
                 PhysicalPlan::CreateTable(_) => Box::new(CreateTableExecutor::new(
                     plan.clone(),
                     Arc::new(database.clone()),
                 )),
                 PhysicalPlan::DropTable(_) => Box::new(DropTableExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                PhysicalPlan::CreateView(_) => Box::new(CreateViewExecutor::new(
+                    plan.clone(),
+                    Arc::new(database.clone()),
+                )),
+                PhysicalPlan::DropView(_) => Box::new(DropViewExecutor::new(
                     plan.clone(),
                     Arc::new(database.clone()),
                 )),
@@ -753,6 +878,28 @@ pub async fn execute_stage_in_tx_routed(
                 sqlstate: Some("0A000".to_string()),
             }
         }
+        // MS21 Iter002 (D13/T2-c)：显式事务内 CREATE/DROP INDEX 点名拒绝
+        // （0A000，CTAS 先例同型——回填与登记一致性依赖无并发未提交写窗口）。
+        PhysicalPlan::CreateIndex(_) => Response::Error {
+            message: "CREATE INDEX is not supported inside a transaction".to_string(),
+            sqlstate: Some("0A000".to_string()),
+        },
+        PhysicalPlan::DropIndex(_) => Response::Error {
+            message: "DROP INDEX is not supported inside a transaction".to_string(),
+            sqlstate: Some("0A000".to_string()),
+        },
+        // MS21 Iter003 (T3-b/D13)：显式事务内 ALTER 执行期点名拒绝（0A000，
+        // D13——ADD/DROP 的重写一致性依赖无并发未提交写窗口）。
+        PhysicalPlan::AlterTable(_) => Response::Error {
+            message: "ALTER TABLE is not supported inside a transaction".to_string(),
+            sqlstate: Some("0A000".to_string()),
+        },
+        // MS21 Iter004 (T4-a/D13)：显式事务内 TRUNCATE 执行期点名拒绝（0A000，
+        // 物理页释放不可回滚；拒绝先于执行器产生任何副作用）。
+        PhysicalPlan::Truncate(_) => Response::Error {
+            message: "TRUNCATE TABLE is not supported inside a transaction".to_string(),
+            sqlstate: Some("0A000".to_string()),
+        },
         _ => {
             // MS09 Iter000 (D4): in-transaction statements take their
             // statement-start snapshot with the transaction's own id as the
@@ -1022,15 +1169,29 @@ pub(crate) fn create_executor_from_plan<'a>(
             PhysicalPlan::IndexScanAll(node) => {
                 let db = routed_db(routed, database, &node.table_name).0;
                 let table_meta = load_table_meta(routed, database, &node.table_name).await?;
-                Ok(Box::new(
-                    IndexScanAllExecutor::new(
-                        table_meta,
-                        db.buffer_pool.clone(),
-                        node.key.as_bytes().to_vec(),
-                        snapshot,
-                    )
-                    .with_projection(node.projection),
-                ) as Box<dyn Executor + Send>)
+                // MS21 Iter002 (T2-g/D6)：二级索引路由命中时按登记名取该树；
+                // None（既有路径）保持 PK 树搜索，构造逐字节不变。
+                let mut executor = IndexScanAllExecutor::new(
+                    table_meta.clone(),
+                    db.buffer_pool.clone(),
+                    node.key.as_bytes().to_vec(),
+                    snapshot,
+                );
+                if let Some(index_name) = &node.index_name {
+                    let index = table_meta
+                        .secondary_indexes
+                        .iter()
+                        .find(|s| &s.name == index_name)
+                        .map(|s| s.index.clone())
+                        .ok_or_else(|| {
+                            StorageError::Internal(format!(
+                                "plan routes to unregistered secondary index '{}'",
+                                index_name
+                            ))
+                        })?;
+                    executor = executor.with_index_manager(index);
+                }
+                Ok(Box::new(executor.with_projection(node.projection)) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Insert(node) => {
@@ -1088,6 +1249,18 @@ pub(crate) fn create_executor_from_plan<'a>(
             }
 
             PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
+                panic!("DDL should be handled separately in execute()")
+            }
+
+            // MS21 Iter002 (T2-c/T2-f)：索引 DDL 由 execute_stage 的 DDL 直包
+            // 臂执行，无单一执行器构造臂。MS21 Iter003：ALTER TABLE 同型。
+            // MS21 Iter004：TRUNCATE 同型。MS21 Iter005：CREATE/DROP VIEW 同型。
+            PhysicalPlan::CreateIndex(_)
+            | PhysicalPlan::DropIndex(_)
+            | PhysicalPlan::AlterTable(_)
+            | PhysicalPlan::Truncate(_)
+            | PhysicalPlan::CreateView(_)
+            | PhysicalPlan::DropView(_) => {
                 panic!("DDL should be handled separately in execute()")
             }
 
@@ -1635,6 +1808,19 @@ fn extract_all_table_names(stmt: &Statement) -> Vec<TableRef> {
                 .flat_map(extract_all_from_table_with_joins_item)
                 .collect()
         }
+        // MS21 Iter002 (T2-c)：CREATE INDEX 的目标表经 register_table 注册
+        // （builder 需要其 schema 通道做列存在性 / INT 声明检查）。
+        Statement::CreateIndex { table_name, .. } => vec![TableRef::new(table_name)],
+        // MS21 Iter003 (T3-b)：ALTER TABLE 的目标表经 register_table 注册
+        // （缺失表 42P01；builder 需要其 schema 通道做列校验）。
+        Statement::AlterTable { name, .. } => vec![TableRef::new(name)],
+        // MS21 Iter004 (T4-a)：TRUNCATE 的目标表经 register_table 注册
+        // （缺失表/系统保留名 42P01、附加库引用标记只读拒绝）。
+        Statement::Truncate { table_name, .. } => vec![TableRef::new(table_name)],
+        // MS21 Iter005 (T5-b/D12)：CREATE VIEW 的定义查询贡献其表名（CTAS
+        // 物化源语义同型——CTE 名已按可见性过滤）。引用合法性由视图感知
+        // 注册消费（附加库引用拒绝、既有视图引用合法、基表注入 schema）。
+        Statement::CreateView { query, .. } => extract_all_query_table_names(query),
         _ => Vec::new(),
     }
 }
@@ -1825,6 +2011,26 @@ fn register_table_schema(
         .map(|(col_pos, _)| *col_pos)
         .collect();
     builder.set_table_unique_columns(key, unique_columns);
+    // MS21 Iter002 (T2-c/D14)：传递逐列声明类型，CREATE INDEX 的 INT-only
+    // 门在计划期消费。
+    builder.set_table_column_types(
+        key,
+        table_meta
+            .columns
+            .iter()
+            .map(|(_, ct)| ct.clone())
+            .collect(),
+    );
+    // MS21 Iter002 (T2-g/D6)：传递登记的二级索引（索引名, 列名），非 PK
+    // 等值路由在计划期消费。
+    builder.set_table_secondary_indexes(
+        key,
+        table_meta
+            .secondary_indexes
+            .iter()
+            .map(|s| (s.name.clone(), table_meta.columns[s.column_index].0.clone()))
+            .collect(),
+    );
 }
 
 /// MS20 T3：DDL 写目标（CREATE TABLE / DROP TABLE）的附加库引用标记。这两个
@@ -1843,6 +2049,102 @@ fn mark_attached_ddl_targets(builder: &mut PlanBuilder, stmt: &Statement, route:
             builder.mark_attached_table(&parts.join("."));
         }
     }
+}
+
+/// MS21 Iter005 (T5-b/D12)：`Database.views` → builder 视图通道快照
+/// （`ViewMeta` → planner 层 `ViewDef` 的纯映射）。
+async fn current_view_defs(database: &Database) -> std::collections::HashMap<String, ViewDef> {
+    let views = database.views.read().await;
+    views
+        .iter()
+        .map(|(name, meta)| {
+            (
+                name.clone(),
+                ViewDef {
+                    sql: meta.sql.clone(),
+                    columns: meta.columns.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// MS21 Iter005 (T5-b/D12)：CREATE VIEW 定义表名的视图感知注册——
+/// 附加库引用计划期点名拒绝（可持久对象不得携带会话限定名，spec R1）；
+/// 既有视图引用合法（递归注册其定义的基表面）；基表引用注入
+/// register_table 通道（缺失 42P01 自然上抛，为定义验证的列解析服务）。
+async fn register_view_definition_tables(
+    database: &Database,
+    builder: &mut PlanBuilder,
+    stmt: &Statement,
+    route: Option<&AttachRoute>,
+) -> std::result::Result<(), PlanFailure> {
+    for table_ref in extract_all_table_names(stmt) {
+        if let Some(route) = route {
+            if table_ref.parts.len() >= 2 && route.is_registered(&table_ref.parts[0]) {
+                return Err(PlanFailure {
+                    message: format!(
+                        "CREATE VIEW definition references attached database table '{}' (persistable objects cannot reference session-scoped attached databases)",
+                        table_ref.flat
+                    ),
+                    sqlstate: PlanError::UnsupportedStatement(String::new()).sqlstate(),
+                });
+            }
+        }
+        if builder.views.contains_key(&table_ref.flat) {
+            register_view_base_tables_recursive(database, builder, &table_ref.flat).await?;
+            continue;
+        }
+        match database.table_manager.get_table(&table_ref.flat).await {
+            Ok(table_meta) => register_table_schema(builder, &table_meta.name, &table_meta),
+            Err(e) => {
+                let message = format!("Table '{}' not found: {}", table_ref.flat, e);
+                let sqlstate = PlanError::TableNotFound(table_ref.flat).sqlstate();
+                return Err(PlanFailure { message, sqlstate });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// MS21 Iter005 (T5-c/D12)：递归注册一个视图定义所引用的基表面（嵌套视图
+/// 深入其定义）。展开钩子在 build_query 期消费这些 schema 通道做列解析；
+/// 循环引用结构性不可能（创建期「引用尚不存在的视图即拒」→ 引用图按
+/// 创建序成 DAG），无需环检测。
+async fn register_view_base_tables_recursive(
+    database: &Database,
+    builder: &mut PlanBuilder,
+    view_name: &str,
+) -> std::result::Result<(), PlanFailure> {
+    let Some(def) = builder.views.get(view_name) else {
+        return Ok(());
+    };
+    let sql = def.sql.clone();
+    let statements = parse_sql(&sql).map_err(PlanFailure::from)?;
+    let refs = match statements.first() {
+        Some(Statement::Query(q)) => extract_all_query_table_names(q),
+        _ => Vec::new(),
+    };
+    for table_ref in refs {
+        if builder.views.contains_key(&table_ref.flat) {
+            Box::pin(register_view_base_tables_recursive(
+                database,
+                builder,
+                &table_ref.flat,
+            ))
+            .await?;
+            continue;
+        }
+        match database.table_manager.get_table(&table_ref.flat).await {
+            Ok(table_meta) => register_table_schema(builder, &table_meta.name, &table_meta),
+            Err(e) => {
+                let message = format!("Table '{}' not found: {}", table_ref.flat, e);
+                let sqlstate = PlanError::TableNotFound(table_ref.flat).sqlstate();
+                return Err(PlanFailure { message, sqlstate });
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn register_table(
@@ -1905,6 +2207,13 @@ async fn register_table(
         match database.table_manager.get_table(&table_ref.flat).await {
             Ok(table_meta) => {
                 register_table_schema(builder, &table_meta.name, &table_meta);
+            }
+            // MS21 Iter005 (T5-c/D12)：视图名豁免——statement 级引用合法化
+            // 并递归注册其定义的基表面（42P01 判定推迟到 FROM/JOIN 展开钩子
+            // 与定义基表注册；视图是主库对象，两段限定名路由先于此分支处理
+            // ——豁免只对 flat 名）。
+            Err(_) if builder.views.contains_key(&table_ref.flat) => {
+                register_view_base_tables_recursive(database, builder, &table_ref.flat).await?;
             }
             // 表缺失文案保持不变，SQLSTATE 取 `PlanError` 映射表的同名分类。
             Err(e) => {

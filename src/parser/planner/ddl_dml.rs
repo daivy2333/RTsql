@@ -7,9 +7,10 @@
 
 use super::PlanBuilder;
 use crate::executor::{
-    ColumnConstraint, ColumnDef, ColumnType, ConflictAction, ConflictArbiter,
-    CreateTableAsSelectNode, CreateTableNode, DeleteNode, DropTableNode, InsertNode, JoinCondition,
-    PhysicalPlan, UpdateNode, UpsertAssignment, UpsertNode, UpsertValueExpr, Value,
+    AlterTableNode, AlterTableOp, ColumnConstraint, ColumnDef, ColumnType, ConflictAction,
+    ConflictArbiter, CreateIndexNode, CreateTableAsSelectNode, CreateTableNode, CreateViewNode,
+    DeleteNode, DropIndexNode, DropTableNode, DropViewNode, InsertNode, JoinCondition,
+    PhysicalPlan, TruncateNode, UpdateNode, UpsertAssignment, UpsertNode, UpsertValueExpr, Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -17,6 +18,12 @@ use crate::parser::value::value_from_sqlparser;
 use sqlparser::ast::{
     Assignment, BinaryOperator, ConflictTarget, Expr, OnConflictAction, OnInsert,
 };
+
+/// MS21 Iter005 (T5-b/D12)：视图定义 SQL 文本长度上限（字节）。catalog 行须
+/// 单 slot 可容（页面 4KB 减去行头/既有尾段预留），超限在计划期前置点名
+/// 拒绝（不达 `add_slot` 的执行期 PageFull）。具体边界值为非实质实现细节，
+/// 契约是「超长 → 计划期拒绝零副作用」。
+const MAX_VIEW_SQL_BYTES: usize = 3000;
 
 /// MS09-T02: structural column-reference probe for the ON classifier (design
 /// D5a) — a bare `Identifier` or 2-part `CompoundIdentifier` only.
@@ -160,6 +167,10 @@ impl PlanBuilder {
     ) -> Result<PhysicalPlan, PlanError> {
         // Extract table name
         let table_name_str = extract_name_from_object(table_name);
+        // MS21 Iter005 (T5-c/D12)：视图只读——DML 目标为视图名计划期点名
+        // 拒绝（先于 validate_table：视图名不在基表注册表，后者只会给出
+        // 误导性的 42P01）。
+        self.reject_view_write(&table_name_str)?;
         self.validate_table(&table_name_str)?;
         // MS20 T3: 附加库一期只读——目标为附加库引用即点名拒绝（不落到
         // 主库同名表，也不进入执行器层）。
@@ -800,6 +811,14 @@ impl PlanBuilder {
         // 沿用同一条写库面检查）。
         self.reject_attached_write(&table_name)?;
 
+        // MS21 Iter005 (T5-c/D12)：名称唯一性跨基表与视图——对既有视图名
+        // 建表计划期点名拒绝（执行期的基表重名检查不覆盖 kind=View 行）。
+        if self.views.contains_key(&table_name) {
+            return Err(PlanError::InvalidQuery(format!(
+                "view '{table_name}' already exists"
+            )));
+        }
+
         // MS20 T4: 表形态诚实面。`LIKE other` / `CLONE other` 在解析层可表达，
         // 但引擎无对应能力——点名拒绝而不是静默建空表。
         if like.is_some() {
@@ -966,6 +985,187 @@ impl PlanBuilder {
     }
 
     /// Build PhysicalPlan for DROP TABLE statement
+    /// MS21 Iter003 (T3-b/c/D9/D10/D13)：`ALTER TABLE` 计划臂——单操作白名单
+    /// （AddColumn / DropColumn），其余操作形态与多操作点名拒绝（D14 复用既有
+    /// 变体）。目标表存在性经 builder 注册表（pipeline `register_table` 通道
+    /// 先行——缺失即 42P01）；附加库目标点名拒绝；ADD 的约束声明 / NOT NULL
+    /// × 非空 × 无 DEFAULT 计划期校验，列重复名拒绝。
+    pub(crate) fn build_alter_table(
+        &self,
+        stmt: &sqlparser::ast::Statement,
+    ) -> Result<PhysicalPlan, PlanError> {
+        let sqlparser::ast::Statement::AlterTable {
+            name,
+            if_exists,
+            only,
+            operations,
+            ..
+        } = stmt
+        else {
+            return Err(PlanError::UnsupportedStatement("ALTER TABLE".into()));
+        };
+        // IF EXISTS / ONLY 修饰诚实化拒绝（假设 10 同型）
+        if *if_exists {
+            return Err(PlanError::UnsupportedStatement(
+                "ALTER TABLE IF EXISTS".into(),
+            ));
+        }
+        if *only {
+            return Err(PlanError::UnsupportedStatement("ALTER TABLE ONLY".into()));
+        }
+        // 多操作点名拒绝（首版单操作）
+        if operations.len() != 1 {
+            return Err(PlanError::UnsupportedStatement(format!(
+                "MULTI-OPERATION ALTER TABLE ({}, first version supports single-operation statements)",
+                operations.len()
+            )));
+        }
+
+        let table_name = object_name_to_table_name(name);
+        // MS20 T3: 附加库一期只读。
+        self.reject_attached_write(&table_name)?;
+
+        // 表存在性（pipeline 通道下缺失在 register_table 即被点名拒绝，
+        // 此处为直呼构造的防御臂）
+        let column_list = self
+            .tables
+            .get(&table_name)
+            .ok_or_else(|| PlanError::TableNotFound(table_name.clone()))?;
+
+        let op = match &operations[0] {
+            sqlparser::ast::AlterTableOperation::AddColumn {
+                if_not_exists,
+                column_def,
+                ..
+            } => {
+                if *if_not_exists {
+                    return Err(PlanError::UnsupportedStatement(
+                        "ALTER TABLE ADD COLUMN IF NOT EXISTS".into(),
+                    ));
+                }
+                let column_name = column_def.name.value.to_lowercase();
+                if column_list.contains(&column_name) {
+                    return Err(PlanError::InvalidQuery(format!(
+                        "column '{}' already exists in table '{}'",
+                        column_name, table_name
+                    )));
+                }
+                // 约束声明矩阵：UNIQUE/CHECK/FK/方言项点名拒绝（MS23 复用）；
+                // PRIMARY KEY（is_primary Unique）单独点名
+                for option in &column_def.options {
+                    match &option.option {
+                        sqlparser::ast::ColumnOption::Unique {
+                            is_primary: true, ..
+                        } => {
+                            return Err(PlanError::UnsupportedConstraint(
+                                "PRIMARY KEY in ADD COLUMN",
+                            ));
+                        }
+                        sqlparser::ast::ColumnOption::Unique {
+                            is_primary: false, ..
+                        } => {
+                            return Err(PlanError::UnsupportedConstraint("UNIQUE in ADD COLUMN"));
+                        }
+                        sqlparser::ast::ColumnOption::Check(_) => {
+                            return Err(PlanError::UnsupportedConstraint("CHECK in ADD COLUMN"));
+                        }
+                        sqlparser::ast::ColumnOption::ForeignKey { .. } => {
+                            return Err(PlanError::UnsupportedConstraint(
+                                "FOREIGN KEY in ADD COLUMN",
+                            ));
+                        }
+                        sqlparser::ast::ColumnOption::DialectSpecific(_) => {
+                            return Err(PlanError::UnsupportedConstraint(
+                                "dialect-specific options in ADD COLUMN",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                let column_type = self.convert_data_type(&column_def.data_type)?;
+                // NOT NULL / DEFAULT 提取（多项 NOT NULL/DEFAULT 视首项）
+                let mut not_null = false;
+                let mut default_value: Option<Value> = None;
+                for option in &column_def.options {
+                    match &option.option {
+                        sqlparser::ast::ColumnOption::NotNull => not_null = true,
+                        sqlparser::ast::ColumnOption::Default(expr) => {
+                            if default_value.is_none() {
+                                default_value = Some(self.extract_default_value(expr)?);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // NOT NULL 无 DEFAULT 且表非空 → 计划期点名拒绝（存量行无法
+                // 满足）；表非空判定为 plan_stage 注入的通道输入
+                if not_null && default_value.is_none() {
+                    let has_rows = self
+                        .table_has_live_rows
+                        .get(&table_name)
+                        .copied()
+                        .unwrap_or(false);
+                    if has_rows {
+                        return Err(PlanError::InvalidQuery(format!(
+                            "NOT NULL column '{}' without DEFAULT cannot be added to non-empty table '{}' (existing rows cannot satisfy the constraint)",
+                            column_name, table_name
+                        )));
+                    }
+                }
+                AlterTableOp::AddColumn {
+                    column_name,
+                    column_type,
+                    not_null,
+                    default_value,
+                }
+            }
+            sqlparser::ast::AlterTableOperation::DropColumn {
+                column_name,
+                if_exists,
+                cascade,
+                ..
+            } => {
+                if *if_exists {
+                    return Err(PlanError::UnsupportedStatement(
+                        "ALTER TABLE DROP COLUMN IF EXISTS".into(),
+                    ));
+                }
+                if *cascade {
+                    return Err(PlanError::UnsupportedStatement(
+                        "ALTER TABLE DROP COLUMN CASCADE".into(),
+                    ));
+                }
+                let column_name = column_name.value.to_lowercase();
+                let col_index = column_list
+                    .iter()
+                    .position(|c| *c == column_name)
+                    .ok_or_else(|| PlanError::ColumnNotFound(column_name.clone()))?;
+                // 守卫矩阵：最后一列 / PK / 唯一声明 / 二级索引引用
+                if column_list.len() == 1 {
+                    return Err(PlanError::InvalidQuery(
+                        "cannot drop the last column of a table (tables must keep at least one column)"
+                            .into(),
+                    ));
+                }
+                // PK 列：经 builder 注册的 PK 类型通道在 T3-c 消费；此处仅列
+                // 存在性校验，守卫臂由 build 层的独立通道判定（见 T3-c）。
+                let _ = col_index;
+                AlterTableOp::DropColumn { column_name }
+            }
+            other => {
+                return Err(PlanError::UnsupportedStatement(format!(
+                    "ALTER TABLE {} (first version supports ADD COLUMN / DROP COLUMN only)",
+                    alter_operation_name(other)
+                )));
+            }
+        };
+
+        Ok(PhysicalPlan::AlterTable(AlterTableNode {
+            table_name,
+            operation: op,
+        }))
+    }
+
     pub(crate) fn build_drop_table(
         &self,
         names: &[sqlparser::ast::ObjectName],
@@ -986,6 +1186,407 @@ impl PlanBuilder {
         }))
     }
 
+    /// MS21 Iter004 (T4-a)：`TRUNCATE TABLE` 计划臂——物理清空保留定义
+    /// （design D11）。白名单：单表目标、无 Hive `PARTITION` 清单；修饰面
+    /// 与目标边界全部点名拒绝（D14：复用既有变体，不新增 `PlanError`）。
+    /// 表存在性经 builder 注册表（plan_stage 的 register_table 通道先行——
+    /// 缺失表/系统保留名/附加库引用即被点名拒绝，此处为直呼构造的防御臂）。
+    pub(crate) fn build_truncate(
+        &self,
+        stmt: &sqlparser::ast::Statement,
+    ) -> Result<PhysicalPlan, PlanError> {
+        let sqlparser::ast::Statement::Truncate {
+            table_name,
+            partitions,
+            ..
+        } = stmt
+        else {
+            return Err(PlanError::UnsupportedStatement("TRUNCATE".into()));
+        };
+        // Hive 分区清单点名拒绝（本库无分区概念）
+        if partitions.is_some() {
+            return Err(PlanError::UnsupportedStatement(
+                "TRUNCATE PARTITION (partition lists are not supported)".into(),
+            ));
+        }
+        let table_name = object_name_to_table_name(table_name);
+        // MS20 T3: 附加库一期只读。
+        self.reject_attached_write(&table_name)?;
+
+        // 表存在性（pipeline 通道下缺失在 register_table 即被点名拒绝，
+        // 此处为直呼构造的防御臂）
+        self.tables
+            .get(&table_name)
+            .ok_or_else(|| PlanError::TableNotFound(table_name.clone()))?;
+
+        Ok(PhysicalPlan::Truncate(TruncateNode { table_name }))
+    }
+
+    /// MS21 Iter005 (T5-b/D12)：`CREATE VIEW` 计划臂——非物化只读视图。
+    ///
+    /// 持久化三要素在计划期定形：视图名（小写归一、非限定）、定义 SQL 文本
+    /// （`Query::to_string()` 规范化序列化——展开期经 `parse_sql` 重解析）、
+    /// 列名清单（显式清单覆盖，缺省取定义输出表头）。创建期对定义
+    /// `build_query` 验证（CTAS 先例）——引用必须是已存在的基表或已存在
+    /// 视图（缺失 42P01 / 42703 自然上抛），「引用尚不存在的视图」在创建期
+    /// 即拒 → 循环引用结构性不可能，运行期无需环检测。修饰面 / 限定名 /
+    /// 列选项 / 重名 / 超长定义全部计划期点名拒绝（D14：复用既有变体）。
+    pub(crate) fn build_create_view(
+        &mut self,
+        stmt: &sqlparser::ast::Statement,
+    ) -> Result<PhysicalPlan, PlanError> {
+        let sqlparser::ast::Statement::CreateView {
+            or_replace,
+            materialized,
+            name,
+            columns,
+            query,
+            options,
+            cluster_by,
+            with_no_schema_binding,
+            if_not_exists,
+            temporary,
+        } = stmt
+        else {
+            return Err(PlanError::UnsupportedStatement("CREATE VIEW".into()));
+        };
+
+        // 修饰面拒绝矩阵（能力点名，MS19 错误面先例；不静默忽略成分）
+        if *or_replace {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE OR REPLACE VIEW".into(),
+            ));
+        }
+        if *materialized {
+            return Err(PlanError::UnsupportedStatement("MATERIALIZED VIEW".into()));
+        }
+        if *if_not_exists {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE VIEW IF NOT EXISTS".into(),
+            ));
+        }
+        if *temporary {
+            return Err(PlanError::UnsupportedStatement("TEMPORARY VIEW".into()));
+        }
+        if !cluster_by.is_empty() {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE VIEW CLUSTER BY".into(),
+            ));
+        }
+        if *with_no_schema_binding {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE VIEW WITH NO SCHEMA BINDING".into(),
+            ));
+        }
+        if !matches!(options, sqlparser::ast::CreateTableOptions::None) {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE VIEW WITH/OPTIONS (storage options)".into(),
+            ));
+        }
+
+        // 视图名：单段、非限定（无 schema 层级）；系统保留名拒绝（与
+        // CREATE TABLE 同面——视图名与表名共享名称空间纪律）
+        let parts = object_name_parts(name);
+        if parts.len() != 1 {
+            return Err(PlanError::UnsupportedStatement(
+                "QUALIFIED VIEW NAME (no schema hierarchy)".into(),
+            ));
+        }
+        let view_name = parts[0].to_lowercase();
+        if view_name == crate::storage::TABLES_SYSTEM_NAME
+            || view_name == crate::storage::COLUMNS_SYSTEM_NAME
+        {
+            return Err(PlanError::InvalidQuery(format!(
+                "'{view_name}' is a reserved system table name"
+            )));
+        }
+
+        // 重名：跨基表与视图（名称唯一性不变量；点名拒绝零副作用）
+        if self.tables.contains_key(&view_name) {
+            return Err(PlanError::InvalidQuery(format!(
+                "table '{view_name}' already exists"
+            )));
+        }
+        if self.views.contains_key(&view_name) {
+            return Err(PlanError::InvalidQuery(format!(
+                "view '{view_name}' already exists"
+            )));
+        }
+
+        // 列名清单形态：仅裸标识符（列级选项点名拒绝）
+        for col in columns {
+            if col.options.is_some() {
+                return Err(PlanError::UnsupportedStatement(
+                    "VIEW COLUMN OPTIONS".into(),
+                ));
+            }
+        }
+
+        // 创建期定义验证（CTAS 先例）：引用缺失 42P01 / 列缺失 42703 自然
+        // 上抛；对尚不存在视图的引用也在此 42P01（T5-c 展开钩子未命中的
+        // 名字走基表 miss 通道）。
+        let definition_plan = self.build_query(query)?;
+        let output_columns = self.get_plan_output_columns(&definition_plan);
+        if output_columns.is_empty() {
+            return Err(PlanError::InvalidQuery(
+                "view definition outputs no columns".into(),
+            ));
+        }
+        // 输出列名重复 → 建视图前点名拒绝（CTAS 同型——catalog 列行语义与
+        // 列引用消歧都失去依据）
+        for (index, col) in output_columns.iter().enumerate() {
+            if output_columns[..index].contains(col) {
+                return Err(PlanError::UnsupportedStatement(format!(
+                    "DUPLICATE OUTPUT COLUMN '{col}'"
+                )));
+            }
+        }
+
+        // 列名清单 = 显式清单（长度须匹配定义输出宽度、无重复名）或定义
+        // 输出表头
+        let final_columns: Vec<String> = if columns.is_empty() {
+            output_columns
+        } else {
+            if columns.len() != output_columns.len() {
+                return Err(PlanError::InvalidQuery(format!(
+                    "view column list has {} names but the definition outputs {} columns",
+                    columns.len(),
+                    output_columns.len()
+                )));
+            }
+            let names: Vec<String> = columns
+                .iter()
+                .map(|c| c.name.value.to_lowercase())
+                .collect();
+            for (index, col) in names.iter().enumerate() {
+                if names[..index].contains(col) {
+                    return Err(PlanError::InvalidQuery(format!(
+                        "duplicate column name '{col}' in view column list"
+                    )));
+                }
+            }
+            names
+        };
+
+        // 定义 SQL 文本 = `Query::to_string()` 规范化序列化；超长前置点名
+        // 拒绝（catalog 行单 slot 容量上限，不达执行期 PageFull）
+        let sql_text = query.to_string();
+        if sql_text.len() > MAX_VIEW_SQL_BYTES {
+            return Err(PlanError::InvalidQuery(format!(
+                "view definition SQL text too long ({} > {} bytes)",
+                sql_text.len(),
+                MAX_VIEW_SQL_BYTES
+            )));
+        }
+
+        Ok(PhysicalPlan::CreateView(CreateViewNode {
+            view_name,
+            sql: sql_text,
+            columns: final_columns,
+        }))
+    }
+
+    /// MS21 Iter005 (T5-d/D12)：`DROP VIEW` 计划臂——单名、非限定、
+    /// `IF EXISTS` 点名拒绝（Forbidden）；视图不存在点名拒绝（plan_stage
+    /// 视图通道注入的名单判定，直呼构造同面；D14：视图不存在 →
+    /// `TableNotFound` 42P01）。基表名不是视图操作目标——按视图不存在点名。
+    pub(crate) fn build_drop_view(
+        &self,
+        names: &[sqlparser::ast::ObjectName],
+        if_exists: &bool,
+    ) -> Result<PhysicalPlan, PlanError> {
+        if *if_exists {
+            return Err(PlanError::UnsupportedStatement(
+                "DROP VIEW IF EXISTS".into(),
+            ));
+        }
+        if names.len() != 1 {
+            return Err(PlanError::UnsupportedStatement(format!(
+                "MULTI-OBJECT DROP VIEW ({}, first version supports single-object statements)",
+                names.len()
+            )));
+        }
+        let parts = object_name_parts(&names[0]);
+        if parts.len() != 1 {
+            return Err(PlanError::UnsupportedStatement(
+                "QUALIFIED VIEW NAME (no schema hierarchy)".into(),
+            ));
+        }
+        let view_name = parts[0].to_lowercase();
+        if !self.views.contains_key(&view_name) {
+            return Err(PlanError::TableNotFound(view_name));
+        }
+        Ok(PhysicalPlan::DropView(DropViewNode { view_name }))
+    }
+
+    /// MS21 Iter002 (T2-c)：`CREATE INDEX` 计划臂——白名单（单列、非唯一、
+    /// 声明 INT 列、显式索引名）+ 全形态修饰点名拒绝（D14：复用既有变体，
+    /// 不新增 `PlanError`）。表存在性经 builder 注册表（plan_stage 的
+    /// register_table 通道先行——缺失即 `TableNotFound` 42P01，此处为直呼
+    /// 构造的防御臂）；列存在性 / INT 声明 / 库级重名计划期点名拒绝零副作用。
+    /// 对 PK 列建索引允许（冗余但行为等价，不做专门检测）。
+    pub(crate) fn build_create_index(
+        &self,
+        stmt: &sqlparser::ast::Statement,
+    ) -> Result<PhysicalPlan, PlanError> {
+        let sqlparser::ast::Statement::CreateIndex {
+            name,
+            table_name,
+            using,
+            columns,
+            unique,
+            concurrently,
+            if_not_exists,
+            include,
+            nulls_distinct,
+            predicate,
+        } = stmt
+        else {
+            return Err(PlanError::UnsupportedStatement("CREATE INDEX".into()));
+        };
+
+        // 修饰面拒绝矩阵（能力点名，MS19 错误面先例；不静默忽略成分）
+        if *unique {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE UNIQUE INDEX".into(),
+            ));
+        }
+        if *concurrently {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE INDEX CONCURRENTLY".into(),
+            ));
+        }
+        if *if_not_exists {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE INDEX IF NOT EXISTS".into(),
+            ));
+        }
+        if using.is_some() {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE INDEX USING (access method)".into(),
+            ));
+        }
+        if !include.is_empty() {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE INDEX INCLUDE".into(),
+            ));
+        }
+        if nulls_distinct.is_some() {
+            return Err(PlanError::UnsupportedStatement(
+                "CREATE INDEX NULLS DISTINCT".into(),
+            ));
+        }
+        if predicate.is_some() {
+            return Err(PlanError::UnsupportedStatement(
+                "PARTIAL INDEX (WHERE clause)".into(),
+            ));
+        }
+        if columns.len() != 1 {
+            return Err(PlanError::UnsupportedStatement("MULTI-COLUMN INDEX".into()));
+        }
+
+        // 显式索引名（sqlparser 的 `CREATE INDEX ON t(c)` 自动命名形态不
+        // 支持——MissingField 点名）；限定名（schema.idx）拒绝（无 schema 层级）
+        let Some(name) = name else {
+            return Err(PlanError::MissingField("index name".into()));
+        };
+        let parts = object_name_parts(name);
+        if parts.len() != 1 {
+            return Err(PlanError::UnsupportedStatement(
+                "QUALIFIED INDEX NAME (no schema hierarchy)".into(),
+            ));
+        }
+        let index_name = parts[0].to_lowercase();
+
+        let table_name = object_name_to_table_name(table_name);
+        // MS20 T3: 附加库一期只读。
+        self.reject_attached_write(&table_name)?;
+
+        // 表存在性（直呼构造的防御臂；pipeline 通道下缺失在 register_table
+        // 即被点名拒绝，不达此处）
+        if !self.tables.contains_key(&table_name) {
+            return Err(PlanError::TableNotFound(table_name));
+        }
+
+        // 单列表达式形态：仅裸列名（表达式索引点名拒绝）
+        let column_expr = &columns[0].expr;
+        let Expr::Identifier(ident) = column_expr else {
+            return Err(PlanError::UnsupportedStatement("EXPRESSION INDEX".into()));
+        };
+        let column_name = ident.value.to_lowercase();
+        let column_list = &self.tables[&table_name];
+        let Some(column_index) = column_list
+            .iter()
+            .position(|c| c.to_lowercase() == column_name)
+        else {
+            return Err(PlanError::ColumnNotFound(column_name));
+        };
+
+        // 声明类型门：首版仅 INT 列（写入类型门保证 INT 列无非 Int 值）
+        let declared_int = self
+            .table_column_types
+            .get(&table_name)
+            .and_then(|types| types.get(column_index))
+            .is_some_and(|ct| matches!(ct, crate::storage::page_format::ColumnType::Int));
+        if !declared_int {
+            return Err(PlanError::UnsupportedStatement(format!(
+                "INDEX ON NON-INT COLUMN '{}' (first version supports INT columns only)",
+                column_name
+            )));
+        }
+
+        // 库级重名（plan_stage 注入的全库名单；点名拒绝零副作用）
+        if self.existing_index_names.contains(&index_name) {
+            return Err(PlanError::InvalidQuery(format!(
+                "index '{}' already exists",
+                index_name
+            )));
+        }
+
+        Ok(PhysicalPlan::CreateIndex(CreateIndexNode {
+            index_name,
+            table_name,
+            column_index,
+            column_name,
+        }))
+    }
+
+    /// MS21 Iter002 (T2-f)：`DROP INDEX` 计划臂——单名、非限定、`IF EXISTS`
+    /// 点名拒绝（假设 10 诚实化）；索引不存在按计划期名单点名拒绝。
+    pub(crate) fn build_drop_index(
+        &self,
+        names: &[sqlparser::ast::ObjectName],
+        if_exists: &bool,
+    ) -> Result<PhysicalPlan, PlanError> {
+        if names.is_empty() {
+            return Err(PlanError::MissingField("index name".into()));
+        }
+        if names.len() > 1 {
+            return Err(PlanError::UnsupportedStatement(
+                "MULTIPLE INDEX NAMES".into(),
+            ));
+        }
+        let parts = object_name_parts(&names[0]);
+        if parts.len() != 1 {
+            return Err(PlanError::UnsupportedStatement(
+                "QUALIFIED INDEX NAME (no schema hierarchy)".into(),
+            ));
+        }
+        if *if_exists {
+            return Err(PlanError::UnsupportedStatement(
+                "DROP INDEX IF EXISTS".into(),
+            ));
+        }
+        let index_name = parts[0].to_lowercase();
+        if !self.existing_index_names.contains(&index_name) {
+            return Err(PlanError::InvalidQuery(format!(
+                "index '{}' does not exist",
+                index_name
+            )));
+        }
+        Ok(PhysicalPlan::DropIndex(DropIndexNode { index_name }))
+    }
+
     /// Build PhysicalPlan for UPDATE statement
     ///
     /// Only supports single column update with primary key WHERE clause
@@ -997,6 +1598,8 @@ impl PlanBuilder {
     ) -> Result<PhysicalPlan, PlanError> {
         // Extract table name
         let table_name = extract_table_name(std::slice::from_ref(table))?;
+        // MS21 Iter005 (T5-c/D12)：视图只读（先于 validate_table，同 INSERT）。
+        self.reject_view_write(&table_name)?;
         self.validate_table(&table_name)?;
         // MS20 T3: 附加库一期只读。
         self.reject_attached_write(&table_name)?;
@@ -1087,6 +1690,8 @@ impl PlanBuilder {
             sqlparser::ast::FromTable::WithoutKeyword(tables) => tables,
         };
         let table_name = extract_table_name(table_with_joins)?;
+        // MS21 Iter005 (T5-c/D12)：视图只读（先于 validate_table，同 INSERT）。
+        self.reject_view_write(&table_name)?;
         self.validate_table(&table_name)?;
         // MS20 T3: 附加库一期只读。
         self.reject_attached_write(&table_name)?;
@@ -1102,6 +1707,37 @@ impl PlanBuilder {
             })?;
 
         Ok(PhysicalPlan::Delete(DeleteNode { table_name, key }))
+    }
+}
+
+/// MS21 Iter003 (T3-b)：拒绝面文案的 ALTER 操作能力名（D14 点名形态）。
+fn alter_operation_name(op: &sqlparser::ast::AlterTableOperation) -> String {
+    match op {
+        sqlparser::ast::AlterTableOperation::AddConstraint(_) => "ADD CONSTRAINT".into(),
+        sqlparser::ast::AlterTableOperation::AddColumn { .. } => "ADD COLUMN".into(),
+        sqlparser::ast::AlterTableOperation::DisableRowLevelSecurity => {
+            "DISABLE ROW LEVEL SECURITY".into()
+        }
+        sqlparser::ast::AlterTableOperation::DisableRule { .. } => "DISABLE RULE".into(),
+        sqlparser::ast::AlterTableOperation::DisableTrigger { .. } => "DISABLE TRIGGER".into(),
+        sqlparser::ast::AlterTableOperation::DropConstraint { .. } => "DROP CONSTRAINT".into(),
+        sqlparser::ast::AlterTableOperation::DropColumn { .. } => "DROP COLUMN".into(),
+        sqlparser::ast::AlterTableOperation::DropPrimaryKey => "DROP PRIMARY KEY".into(),
+        sqlparser::ast::AlterTableOperation::EnableAlwaysRule { .. } => "ENABLE ALWAYS RULE".into(),
+        sqlparser::ast::AlterTableOperation::EnableAlwaysTrigger { .. } => {
+            "ENABLE ALWAYS TRIGGER".into()
+        }
+        sqlparser::ast::AlterTableOperation::EnableReplicaRule { .. } => {
+            "ENABLE REPLICA RULE".into()
+        }
+        sqlparser::ast::AlterTableOperation::EnableReplicaTrigger { .. } => {
+            "ENABLE REPLICA TRIGGER".into()
+        }
+        sqlparser::ast::AlterTableOperation::EnableRowLevelSecurity => {
+            "ENABLE ROW LEVEL SECURITY".into()
+        }
+        sqlparser::ast::AlterTableOperation::RenameTable { .. } => "RENAME".into(),
+        _ => format!("{}", op),
     }
 }
 

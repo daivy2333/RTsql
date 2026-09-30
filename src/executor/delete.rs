@@ -2,7 +2,7 @@
 
 use crate::executor::{ExecResult, Executor};
 use crate::storage::btree::IndexManager;
-use crate::storage::page_format::{deserialize_tuple, ColumnType};
+use crate::storage::page_format::{deserialize_row, ColumnType};
 use crate::storage::{
     read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, PageId, Result, RowId,
     StorageError, TableMeta,
@@ -46,16 +46,27 @@ impl DeleteExecutor {
     /// Best-effort like the PK path: an unreadable slot (SlotNotFound
     /// tolerance, test fixtures) yields no keys and the unique deletions are
     /// skipped. NULL values never have entries (no key).
-    async fn unique_keys_of_row(&self, rid: RowId) -> Result<Vec<(Arc<IndexManager>, Vec<u8>)>> {
-        if self.table_meta.unique_indexes.is_empty() {
-            return Ok(Vec::new());
+    ///
+    /// MS21 Iter002 (T2-d/D7): 同一次 tuple 反序列化兼提各二级列键（与唯一
+    /// 键同一派生趟；条目清理由调用方以 `delete_exact` 执行——重复键并存下
+    /// `delete(key)` 歧义原语禁用）。
+    async fn unique_keys_of_row(
+        &self,
+        rid: RowId,
+    ) -> Result<(
+        Vec<(Arc<IndexManager>, Vec<u8>)>,
+        Vec<(Arc<IndexManager>, Vec<u8>)>,
+    )> {
+        if self.table_meta.unique_indexes.is_empty() && self.table_meta.secondary_indexes.is_empty()
+        {
+            return Ok((Vec::new(), Vec::new()));
         }
         let tuple =
             match read_tuple_from_data_page(&self.buffer_pool, rid, |_, bytes| Ok(bytes.to_vec()))
                 .await
             {
                 Ok(bytes) => bytes,
-                Err(StorageError::SlotNotFound(_)) => return Ok(Vec::new()),
+                Err(StorageError::SlotNotFound(_)) => return Ok((Vec::new(), Vec::new())),
                 Err(e) => return Err(e),
             };
         let schema: Vec<ColumnType> = self
@@ -64,14 +75,22 @@ impl DeleteExecutor {
             .iter()
             .map(|(_, ct)| ct.clone())
             .collect();
-        let values = deserialize_tuple(&tuple, &schema)?;
+        // MS21 Iter003 (T3-a/D9): width-aware read-back + DEFAULT overlay
+        // ——窄行的键派生（含尾列二级索引的 DEFAULT 键）与扫描读回同源。
+        let values = deserialize_row(&tuple, &schema, &self.table_meta.defaults)?;
         let mut keys = Vec::new();
         for (col_idx, uindex) in &self.table_meta.unique_indexes {
             if let Some(key) = values[*col_idx].to_key() {
                 keys.push((uindex.clone(), key.as_bytes().to_vec()));
             }
         }
-        Ok(keys)
+        let mut secondary_keys = Vec::new();
+        for sindex in &self.table_meta.secondary_indexes {
+            if let Some(key) = values[sindex.column_index].to_key() {
+                secondary_keys.push((sindex.index.clone(), key.as_bytes().to_vec()));
+            }
+        }
+        Ok((keys, secondary_keys))
     }
 }
 
@@ -87,12 +106,20 @@ impl Executor for DeleteExecutor {
         // Search for row_id before deleting
         let row_id = self.table_meta.index_manager.search(&self.key).await?;
 
+        // 未命中键零副作用早退（MS21 Iter001 D16）：search 未命中时返回
+        // affected 0，不触碰墓碑/唯一/PK 条目/WAL。此前无条件
+        // `index_manager.delete` 会以「首个 ≥」插入位误删邻近条目；键大于
+        // 全部键时上抛 KeyNotFound 误报。命中路径逐字节不变。
+        if row_id.is_none() {
+            return Ok(Some(ExecResult::AffectedRows(0)));
+        }
+
         // MS23 Iteration 001 (2.7/D7): 唯一列键值提取——写墓碑前从 rid 处
         // slot 数据反序列化行元组（SlotNotFound 容忍路径无元组可读，与 PK
-        // 同型跳过唯一删除）。
-        let unique_keys = match row_id.as_ref() {
+        // 同型跳过唯一删除）。MS21 Iter002 (T2-d/D7)：同趟兼提二级列键。
+        let (unique_keys, secondary_keys) = match row_id.as_ref() {
             Some(rid) => self.unique_keys_of_row(*rid).await?,
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
 
         // MS09 Iter000 (D1, I033): express the delete as an independent
@@ -138,6 +165,14 @@ impl Executor for DeleteExecutor {
         // 不移除则残留条目使后续同值插入假阳性 DuplicateKey。
         for (uindex, key) in &unique_keys {
             uindex.delete(key).await?;
+        }
+
+        // MS21 Iter002 (T2-d/D7)：逐二级索引以 `delete_exact` 清理被删行的
+        // 条目（按 tuple 派生键精确定位；重复键并存下其余条目不受扰）。
+        for (sindex, key) in &secondary_keys {
+            if let Some(rid) = row_id {
+                sindex.delete_exact(key, rid).await?;
+            }
         }
 
         // M10: record the version object for commit/abort bookkeeping — the

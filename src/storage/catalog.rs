@@ -52,6 +52,36 @@ const COL_TAG_DATE: u8 = 0x05;
 /// Tag byte for `ColumnType::Timestamp` in the catalog serialized form (MS13).
 const COL_TAG_TIMESTAMP: u8 = 0x06;
 
+/// One secondary-index registration in a `__tables` row's trailing
+/// section (MS21 Iteration 002, design D4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogSecondaryIndex {
+    /// Index name (library-level unique).
+    pub name: String,
+    /// Indexed column ordinal within the table's column list.
+    pub column_index: u32,
+    /// B-Tree root page of this index tree.
+    pub root: u32,
+}
+
+/// Kind tag byte for a base-table row in the `__tables` trailing kind
+/// section (MS21 Iteration 005, design D12).
+const ROW_KIND_TABLE: u8 = 0x01;
+/// Kind tag byte for a view-definition row (MS21 Iteration 005, D12).
+const ROW_KIND_VIEW: u8 = 0x02;
+
+/// MS21 Iteration 005 (T5-a/D12): what a `__tables` row defines. Legacy
+/// rows (written before the trailing kind section existed) deserialize as
+/// [`CatalogKind::Table`] — base-table semantics are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogKind {
+    /// A base table (data pages, index trees, rows).
+    Table,
+    /// A persisted read-only view definition (no data pages, no index
+    /// trees — the row carries the definition SQL text tail instead).
+    View,
+}
+
 /// One row in the `__tables` SlottedPage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogRow {
@@ -67,6 +97,17 @@ pub struct CatalogRow {
     /// to the row tail; a legacy row without the trailing section
     /// deserializes as empty (compat read — no unique indexes).
     pub unique_roots: Vec<u32>,
+    /// MS21 Iteration 002 (D4): registered secondary (user CREATE INDEX)
+    /// indexes, in creation order. Appended after the unique-roots section;
+    /// a row without that trailing section deserializes as empty (compat
+    /// read — no secondary indexes).
+    pub secondary_indexes: Vec<CatalogSecondaryIndex>,
+    /// MS21 Iteration 005 (T5-a/D12): row kind, carried in the trailing
+    /// kind section. A legacy row (no kind byte) reads as `Table`.
+    pub kind: CatalogKind,
+    /// MS21 Iteration 005 (T5-a/D12): view definition SQL text (kind=View
+    /// rows only, `u16 len | text` tail). `None` for base tables.
+    pub view_sql: Option<String>,
 }
 
 /// One row in the `__columns` SlottedPage.
@@ -240,6 +281,80 @@ impl Catalog {
             .collect())
     }
 
+    /// MS21 Iter003 (T3-b/D9): append one column row to `__columns` for the
+    /// ALTER TABLE ADD COLUMN write. The row carries its own table name and
+    /// trailing `column_index` (chain append preserves the chain-order
+    /// invariant: a tail-added column is the last in the chain).
+    pub async fn insert_column_row(&self, row: &CatalogColumnRow) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let payload = serialize_catalog_column_row(row);
+        let columns_root = *self.columns_root.lock().await;
+        append_to_chain(&self.buffer_pool, &self.storage, columns_root, &payload).await?;
+        *self.columns_root.lock().await = chain_head(&self.buffer_pool, columns_root).await?;
+        Ok(())
+    }
+
+    /// MS21 Iter005 (T5-a/D12): insert a view-definition row (a `__tables`
+    /// row with kind=View carrying the SQL text tail) plus its column-name
+    /// rows. The row follows the view-row field conventions: zero page
+    /// pointers and empty PK (views are non-materialized — no data pages,
+    /// no index trees); `column_count` = declared column count.
+    pub async fn insert_view_row(
+        &self,
+        name: &str,
+        sql: &str,
+        columns: &[CatalogColumnRow],
+    ) -> Result<()> {
+        let meta = CatalogRow {
+            table_name: name.to_string(),
+            data_page_head: 0,
+            index_root_page_id: 0,
+            pk_index: 0,
+            pk_column: String::new(),
+            column_count: columns.len() as u32,
+            data_page_tail: 0,
+            unique_roots: Vec::new(),
+            secondary_indexes: Vec::new(),
+            kind: CatalogKind::View,
+            view_sql: Some(sql.to_string()),
+        };
+        self.insert_table(&meta, columns).await
+    }
+
+    /// MS21 Iter005 (T5-a/D12): scan all view-definition rows.
+    pub async fn scan_views(&self) -> Result<Vec<CatalogRow>> {
+        Ok(self
+            .scan_tables()
+            .await?
+            .into_iter()
+            .filter(|r| r.kind == CatalogKind::View)
+            .collect())
+    }
+
+    /// MS21 Iter003 (T3-b/D9): rewrite the `column_count` field of an
+    /// existing `__tables` row (ADD +1 / DROP -1). Same
+    /// deserialize→mutate→serialize shape as `update_table_tail`.
+    ///
+    /// No-op if the table does not exist.
+    pub async fn update_table_column_count(&self, name: &str, new_count: u32) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.column_count = new_count;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await
+    }
+
     /// Update the `data_page_tail` field of an existing row in `__tables`.
     ///
     /// No-op if the table does not exist.
@@ -326,6 +441,99 @@ impl Catalog {
                     )));
                 }
                 row.unique_roots[ordinal] = new_root;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await
+    }
+
+    /// MS21 Iteration 002 (D4): update the Nth secondary index root of an
+    /// existing row in `__tables` (`ordinal` = position in the row's
+    /// `secondary_indexes` section, the same order the roots are serialized
+    /// in). Same deserialize→mutate→serialize shape as
+    /// [`Self::update_unique_index_root`].
+    ///
+    /// No-op if the table does not exist.
+    pub async fn update_secondary_index_root(
+        &self,
+        name: &str,
+        ordinal: usize,
+        new_root: u32,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                if ordinal >= row.secondary_indexes.len() {
+                    return Err(StorageError::Internal(format!(
+                        "update_secondary_index_root: ordinal {} out of range for table '{}' ({})",
+                        ordinal,
+                        name,
+                        row.secondary_indexes.len()
+                    )));
+                }
+                row.secondary_indexes[ordinal].root = new_root;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await
+    }
+
+    /// MS21 Iteration 002 (D4/D5): append one secondary-index registration to
+    /// an existing row in `__tables` (the CREATE INDEX catalog write, performed
+    /// only after the tree was built and backfilled — CTAS
+    /// 「建表→物化→登记」 ordering precedent).
+    ///
+    /// No-op if the table does not exist.
+    pub async fn append_secondary_index(
+        &self,
+        name: &str,
+        entry: &CatalogSecondaryIndex,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.secondary_indexes.push(entry.clone());
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await
+    }
+
+    /// MS21 Iteration 002 (D4): remove the named secondary-index registration
+    /// from an existing row in `__tables` (DROP INDEX). The remaining entries
+    /// keep their relative order; positions after the removed one shift down
+    /// by one (callers re-attach `CatalogRootSlot::Secondary` ordinals).
+    ///
+    /// No-op if the table or index does not exist.
+    pub async fn remove_secondary_index(&self, name: &str, index_name: &str) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.secondary_indexes.retain(|e| e.name != index_name);
                 Ok(Some(serialize_catalog_row(&row)))
             },
         )
@@ -612,9 +820,22 @@ where
 ///         u32 pk_index | u16 pk_col_len | pk_col_bytes |
 ///         u32 column_count | u32 tail
 ///         [ MS23 Iter001 appended: u32 unique_count | unique_count × u32 root ]
+///         [ MS21 Iter002 appended: u32 sec_count |
+///           sec_count × (u16 name_len | name | u32 col_index | u32 root) ]
+///         [ MS21 Iter005 appended: u8 kind; kind=View carries
+///           u16 sql_len | sql_bytes ]
 pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
     let name_bytes = row.table_name.as_bytes();
     let pk_bytes = row.pk_column.as_bytes();
+    let sec_bytes: usize = row
+        .secondary_indexes
+        .iter()
+        .map(|e| 2 + e.name.len() + 4 + 4)
+        .sum();
+    let view_bytes = match (&row.kind, &row.view_sql) {
+        (CatalogKind::View, Some(sql)) => 2 + sql.len(),
+        _ => 0,
+    };
     let total = 2
         + name_bytes.len()
         + 4
@@ -625,7 +846,11 @@ pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
         + 4
         + 4
         + 4
-        + 4 * row.unique_roots.len();
+        + 4 * row.unique_roots.len()
+        + 4
+        + sec_bytes
+        + 1
+        + view_bytes;
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
     buf.extend_from_slice(name_bytes);
@@ -639,6 +864,23 @@ pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
     buf.extend_from_slice(&(row.unique_roots.len() as u32).to_le_bytes());
     for root in &row.unique_roots {
         buf.extend_from_slice(&root.to_le_bytes());
+    }
+    buf.extend_from_slice(&(row.secondary_indexes.len() as u32).to_le_bytes());
+    for entry in &row.secondary_indexes {
+        let idx_bytes = entry.name.as_bytes();
+        buf.extend_from_slice(&(idx_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(idx_bytes);
+        buf.extend_from_slice(&entry.column_index.to_le_bytes());
+        buf.extend_from_slice(&entry.root.to_le_bytes());
+    }
+    buf.push(match row.kind {
+        CatalogKind::Table => ROW_KIND_TABLE,
+        CatalogKind::View => ROW_KIND_VIEW,
+    });
+    if row.kind == CatalogKind::View {
+        let sql_bytes = row.view_sql.as_deref().unwrap_or("").as_bytes();
+        buf.extend_from_slice(&(sql_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(sql_bytes);
     }
     debug_assert_eq!(buf.len(), total);
     buf
@@ -704,6 +946,7 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
     // 24B checkpoint-site three-branch compat read (MS17-T02).
     let mut unique_roots = Vec::new();
     let rest = &data[p + 4..];
+    let mut unique_consumed = 0usize;
     if rest.len() >= 4 {
         let count = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
         if rest.len() >= 4 + count * 4 {
@@ -716,8 +959,91 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
                     rest[off + 3],
                 ]));
             }
+            unique_consumed = 4 + count * 4;
         }
     }
+    // MS21 Iter002 (D4) compat read: the secondary-index section
+    // (`u32 sec_count | N × (u16 name_len | name | u32 col_index | u32 root)`)
+    // follows the unique-roots section. A row written before MS21 (or an
+    // incomplete trailing section) deserializes as empty — behavior = no
+    // secondary indexes.
+    let mut secondary_indexes = Vec::new();
+    let sec_rest = &rest[unique_consumed..];
+    let mut sec_consumed = 0usize;
+    if sec_rest.len() >= 4 {
+        let sec_count =
+            u32::from_le_bytes([sec_rest[0], sec_rest[1], sec_rest[2], sec_rest[3]]) as usize;
+        let mut off = 4usize;
+        let mut ok = true;
+        for _ in 0..sec_count {
+            if sec_rest.len() < off + 2 {
+                ok = false;
+                break;
+            }
+            let idx_len = u16::from_le_bytes([sec_rest[off], sec_rest[off + 1]]) as usize;
+            off += 2;
+            if sec_rest.len() < off + idx_len + 8 {
+                ok = false;
+                break;
+            }
+            let idx_name = match std::str::from_utf8(&sec_rest[off..off + idx_len]) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            };
+            off += idx_len;
+            let col_index = u32::from_le_bytes([
+                sec_rest[off],
+                sec_rest[off + 1],
+                sec_rest[off + 2],
+                sec_rest[off + 3],
+            ]);
+            off += 4;
+            let root = u32::from_le_bytes([
+                sec_rest[off],
+                sec_rest[off + 1],
+                sec_rest[off + 2],
+                sec_rest[off + 3],
+            ]);
+            off += 4;
+            secondary_indexes.push(CatalogSecondaryIndex {
+                name: idx_name,
+                column_index: col_index,
+                root,
+            });
+        }
+        if !ok {
+            secondary_indexes.clear();
+        } else {
+            sec_consumed = off;
+        }
+    }
+    // MS21 Iter005 (T5-a/D12) compat read: the trailing kind section is a
+    // single `u8 kind` byte; a kind=View row carries `u16 len | text`. A
+    // legacy row (or an incomplete/invalid trailing section) reads as
+    // `Table` with no SQL text — same tolerate-incomplete-trailing-section
+    // pattern as the secondary-index section above.
+    let kind_rest = &sec_rest[sec_consumed..];
+    let (kind, view_sql) = match kind_rest.first() {
+        Some(&ROW_KIND_VIEW) => {
+            if kind_rest.len() >= 3 {
+                let sql_len = u16::from_le_bytes([kind_rest[1], kind_rest[2]]) as usize;
+                if kind_rest.len() >= 3 + sql_len {
+                    match std::str::from_utf8(&kind_rest[3..3 + sql_len]) {
+                        Ok(s) => (CatalogKind::View, Some(s.to_string())),
+                        Err(_) => (CatalogKind::Table, None),
+                    }
+                } else {
+                    (CatalogKind::Table, None)
+                }
+            } else {
+                (CatalogKind::Table, None)
+            }
+        }
+        _ => (CatalogKind::Table, None),
+    };
     Ok(CatalogRow {
         table_name,
         data_page_head,
@@ -727,6 +1053,9 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
         column_count,
         data_page_tail,
         unique_roots,
+        secondary_indexes,
+        kind,
+        view_sql,
     })
 }
 
@@ -1003,6 +1332,142 @@ pub(crate) fn matches_catalog_column_row_table_name(data: &[u8], name: &str) -> 
 // Tests
 // ---------------------------------------------------------------------------
 
+impl Catalog {
+    /// MS21 Iter003 (T3-c/D10): rewrite the `__columns` chain for a DROP
+    /// COLUMN — delete the removed column's row and shift every later
+    /// column's `column_index` down by one, rewriting each affected row
+    /// **in place on its page** (same-page append + delete,
+    /// `update_field_in_chain` strategy; the payload is fixed-width in
+    /// `column_index`, so the replacement is byte-equal in length). This
+    /// preserves the chain-order invariant (`scan_columns` returns rows in
+    /// chain order; `open_or_init` additionally sorts by `column_index`).
+    ///
+    /// Single chain walk for the whole shift. No-op if the table has no
+    /// qualifying column rows.
+    pub async fn rewrite_column_rows_drop(&self, table: &str, removed_index: u32) -> Result<()> {
+        let _guard = self.lock.lock().await;
+
+        // Pass 1: delete the removed column's row (delete_from_chain shape).
+        delete_from_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(COLUMNS_PAGE_ID),
+            |data| {
+                matches_column_row_of_table(data, table)
+                    && matches_column_row_index(data, removed_index)
+            },
+        )
+        .await?;
+
+        // Pass 2: one walk — every row of the table with
+        // `column_index > removed_index` is rewritten with its ordinal
+        // decremented, in ascending ordinal order within the page (later
+        // ordinals first would collide; within one page we rewrite rows
+        // sorted ascending so each rewritten row is unique against the
+        // pre-pass state).
+        let mut current = Some(PageId(COLUMNS_PAGE_ID));
+        let mut visited = std::collections::HashSet::new();
+        while let Some(page_id) = current {
+            if !visited.insert(page_id.0) {
+                break;
+            }
+            // Locate all qualifying rows on this page (ascending ordinal).
+            let found: Vec<(u16, Vec<u8>)> = self
+                .buffer_pool
+                .with_page_data(page_id, |data| -> Result<Vec<(u16, Vec<u8>)>> {
+                    let slotted = SlottedPageRef::new(data);
+                    let mut out = Vec::new();
+                    for i in 0..slotted.slot_count() {
+                        let Some(slot) = slotted.get_slot(i) else {
+                            continue;
+                        };
+                        let bytes = slotted.get_slot_data(&slot);
+                        if !matches_column_row_of_table(bytes, table) {
+                            continue;
+                        }
+                        let idx = column_row_index(bytes);
+                        if idx <= removed_index {
+                            continue;
+                        }
+                        let mut new_bytes = bytes.to_vec();
+                        let name_len = u16::from_le_bytes([new_bytes[0], new_bytes[1]]) as usize;
+                        let after = 2 + name_len;
+                        new_bytes[after..after + 4].copy_from_slice(&(idx - 1).to_le_bytes());
+                        out.push((slot.logical_id, new_bytes));
+                    }
+                    out.sort_by_key(|(lid, bytes)| (column_row_index(bytes), *lid));
+                    Ok(out)
+                })
+                .await?;
+
+            if !found.is_empty() {
+                let guard = self.buffer_pool.get_page(page_id).await?;
+                let add_error: Option<String> = guard.modify_page(|page| {
+                    let mut slotted = SlottedPage::new(page);
+                    for (_lid, new_bytes) in &found {
+                        if let Err(e) = slotted.add_slot(new_bytes) {
+                            return Some(format!("add_slot failed: {e}"));
+                        }
+                    }
+                    for (lid, _) in &found {
+                        let _ = slotted.delete_slot_by_logical_id(*lid);
+                    }
+                    None
+                });
+                if let Some(e) = add_error {
+                    let _ = self.storage;
+                    return Err(StorageError::Internal(format!(
+                        "rewrite_column_rows_drop: {e}"
+                    )));
+                }
+            }
+
+            let next = self
+                .buffer_pool
+                .with_page_data(page_id, |data| -> Result<u32> {
+                    let slotted = SlottedPageRef::new(data);
+                    Ok(slotted.header().next_page_id)
+                })
+                .await?;
+            current = if next == 0 {
+                None
+            } else {
+                Some(PageId(next as u64))
+            };
+        }
+        Ok(())
+    }
+}
+
+/// MS21 Iter003 (T3-c): whether the bytes encode a `__columns` row of the
+/// given table (first field is the table name — same prefix layout as
+/// `__tables` rows).
+fn matches_column_row_of_table(data: &[u8], table: &str) -> bool {
+    matches_catalog_row_name(data, table)
+}
+
+/// MS21 Iter003 (T3-c): the `column_index` (u32 LE after the table-name
+/// field) of a `__columns` row.
+fn column_row_index(data: &[u8]) -> u32 {
+    let name_len = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let after = 2 + name_len;
+    if data.len() < after + 4 {
+        return u32::MAX; // malformed: never matches a shift target
+    }
+    u32::from_le_bytes([
+        data[after],
+        data[after + 1],
+        data[after + 2],
+        data[after + 3],
+    ])
+}
+
+/// MS21 Iter003 (T3-c): whether the bytes encode a `__columns` row with the
+/// given `column_index`.
+fn matches_column_row_index(data: &[u8], column_index: u32) -> bool {
+    column_row_index(data) == column_index
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,6 +1484,9 @@ mod tests {
             column_count: 2,
             data_page_tail: 7,
             unique_roots: Vec::new(),
+            secondary_indexes: Vec::new(),
+            kind: CatalogKind::Table,
+            view_sql: None,
         }
     }
 
@@ -1210,6 +1678,115 @@ mod tests {
         );
     }
 
+    // ===========================================================================
+    // MS21 Iter005 (T5-a/D12): catalog kind 段与视图行
+    // ===========================================================================
+
+    /// 视图行编解码往返：kind=View + SQL 文本尾段随行序列化并读回。
+    #[test]
+    fn catalog_view_row_roundtrip() {
+        let mut row = sample_row();
+        row.kind = CatalogKind::View;
+        row.view_sql = Some("SELECT id, v FROM users WHERE v > 100".to_string());
+        let bytes = serialize_catalog_row(&row);
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(row, back);
+    }
+
+    /// 旧格式兼容：无 kind 尾段的行（旧版写入）读为 Table / 无 SQL 文本
+    /// （Table 行的 kind 字节是唯一尾随段，截去即旧版布局逐字节）。
+    #[test]
+    fn legacy_row_without_kind_section_reads_as_table() {
+        let row = sample_row();
+        let mut bytes = serialize_catalog_row(&row);
+        bytes.pop();
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(back.kind, CatalogKind::Table);
+        assert_eq!(back.view_sql, None);
+    }
+
+    /// kind=View 但 SQL 文本段截断：容忍读为 Table（与既有「不完整尾随段
+    /// 读为空」兼容模式同型——secondary_indexes `ok=false → clear`）。
+    #[test]
+    fn view_row_with_truncated_sql_section_tolerates_as_table() {
+        let mut row = sample_row();
+        row.kind = CatalogKind::View;
+        row.view_sql = Some("SELECT 1".to_string());
+        let mut bytes = serialize_catalog_row(&row);
+        bytes.truncate(bytes.len() - 1);
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(back.kind, CatalogKind::Table);
+        assert_eq!(back.view_sql, None);
+    }
+
+    /// 视图行 + 列行经 catalog 持久往返：`insert_view_row` → scan_views/
+    /// scan_tables/scan_columns 读回，与基表行共存互不串扰；`delete_table`
+    /// 复用既有删除机制删除视图行与列行。
+    #[tokio::test]
+    async fn view_row_persist_roundtrip_and_delete() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+            .await
+            .unwrap();
+
+        let sql = "SELECT id, v FROM users WHERE v > 100";
+        let cols = vec![
+            CatalogColumnRow {
+                table_name: "big".to_string(),
+                column_index: 0,
+                column_name: "id".to_string(),
+                column_type: ColumnType::Int,
+                not_null: false,
+                unique: false,
+                default_value: None,
+            },
+            CatalogColumnRow {
+                table_name: "big".to_string(),
+                column_index: 1,
+                column_name: "v".to_string(),
+                column_type: ColumnType::Int,
+                not_null: false,
+                unique: false,
+                default_value: None,
+            },
+        ];
+        cat.insert_view_row("big", sql, &cols).await.unwrap();
+        cat.insert_table(&sample_row(), &[]).await.unwrap();
+
+        let views = cat.scan_views().await.unwrap();
+        assert_eq!(views.len(), 1, "scan_views must return only view rows");
+        assert_eq!(views[0].table_name, "big");
+        assert_eq!(views[0].kind, CatalogKind::View);
+        assert_eq!(views[0].view_sql.as_deref(), Some(sql));
+        assert_eq!(views[0].column_count, 2);
+        // 视图行字段约定：零页指针、空 PK（无数据页/索引树）
+        assert_eq!(views[0].data_page_head, 0);
+        assert_eq!(views[0].data_page_tail, 0);
+        assert_eq!(views[0].index_root_page_id, 0);
+        assert_eq!(views[0].pk_column, "");
+
+        let all = cat.scan_tables().await.unwrap();
+        assert_eq!(all.len(), 2);
+        let base: Vec<_> = all
+            .iter()
+            .filter(|r| r.kind == CatalogKind::Table)
+            .collect();
+        assert_eq!(base.len(), 1);
+        assert_eq!(base[0].table_name, "users");
+        assert_eq!(base[0].view_sql, None);
+
+        let scanned_cols = cat.scan_columns("big").await.unwrap();
+        assert_eq!(scanned_cols, cols);
+
+        cat.delete_table("big").await.unwrap();
+        assert!(cat.scan_views().await.unwrap().is_empty());
+        assert!(cat.scan_columns("big").await.unwrap().is_empty());
+        assert_eq!(cat.scan_tables().await.unwrap().len(), 1);
+    }
+
     /// `update_table_root` 的 deserialize→mutate→serialize 往返必须保住
     /// 尾随追加字段（写回根不丢唯一根）。
     #[tokio::test]
@@ -1256,6 +1833,123 @@ mod tests {
         assert_eq!(scanned[0].unique_roots, vec![7, 99]);
         assert_eq!(scanned[0].index_root_page_id, 9, "PK root untouched");
         assert_eq!(scanned[0].data_page_tail, 7, "other fields untouched");
+    }
+
+    // ===========================================================================
+    // MS21 Iteration 002 (T2-a/D4): catalog 表行二级索引登记尾段
+    // ===========================================================================
+
+    /// 新格式往返：二级索引登记段（名称/列位/根页）随行序列化并读回，唯一根
+    /// 段不受影响。
+    #[test]
+    fn catalog_row_with_secondary_indexes_roundtrip() {
+        let mut row = sample_row();
+        row.unique_roots = vec![41];
+        row.secondary_indexes = vec![
+            CatalogSecondaryIndex {
+                name: "idx_age".to_string(),
+                column_index: 1,
+                root: 51,
+            },
+            CatalogSecondaryIndex {
+                name: "idx_city".to_string(),
+                column_index: 2,
+                root: 52,
+            },
+        ];
+        let bytes = serialize_catalog_row(&row);
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(row, back);
+        assert_eq!(back.secondary_indexes.len(), 2);
+        assert_eq!(back.secondary_indexes[0].name, "idx_age");
+        assert_eq!(back.secondary_indexes[1].root, 52);
+    }
+
+    /// 旧格式兼容：MS23 时代行（唯一根段之后无二级段）读为空二级登记。
+    #[test]
+    fn ms23_era_row_without_secondary_section_reads_empty() {
+        // MS23 固定布局：基础字段 + 唯一根段（count=1），其后结束。
+        let name = b"users";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(b"id");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&41u32.to_le_bytes());
+
+        let row = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(row.unique_roots, vec![41]);
+        assert!(
+            row.secondary_indexes.is_empty(),
+            "row without secondary section must read empty, got {:?}",
+            row.secondary_indexes
+        );
+    }
+
+    /// `append_secondary_index` / `remove_secondary_index` /
+    /// `update_secondary_index_root` 的链上读写往返：其余字段（含唯一根）不丢。
+    #[tokio::test]
+    async fn secondary_index_registration_lifecycle_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+
+        let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+            .await
+            .unwrap();
+        let mut row = sample_row();
+        row.unique_roots = vec![7];
+        cat.insert_table(&row, &[]).await.unwrap();
+
+        cat.append_secondary_index(
+            "users",
+            &CatalogSecondaryIndex {
+                name: "idx_age".to_string(),
+                column_index: 1,
+                root: 51,
+            },
+        )
+        .await
+        .unwrap();
+        cat.append_secondary_index(
+            "users",
+            &CatalogSecondaryIndex {
+                name: "idx_city".to_string(),
+                column_index: 2,
+                root: 52,
+            },
+        )
+        .await
+        .unwrap();
+
+        let scanned = cat.scan_tables().await.unwrap();
+        assert_eq!(scanned[0].unique_roots, vec![7], "unique roots preserved");
+        assert_eq!(scanned[0].secondary_indexes.len(), 2);
+
+        // ordinal 定位根写回只改目标位
+        cat.update_secondary_index_root("users", 1, 99)
+            .await
+            .unwrap();
+        let scanned = cat.scan_tables().await.unwrap();
+        assert_eq!(scanned[0].secondary_indexes[0].root, 51);
+        assert_eq!(scanned[0].secondary_indexes[1].root, 99);
+
+        // 删除首个登记：余者保持相对次序
+        cat.remove_secondary_index("users", "idx_age")
+            .await
+            .unwrap();
+        let scanned = cat.scan_tables().await.unwrap();
+        assert_eq!(scanned[0].secondary_indexes.len(), 1);
+        assert_eq!(scanned[0].secondary_indexes[0].name, "idx_city");
+        assert_eq!(scanned[0].secondary_indexes[0].root, 99);
+        assert_eq!(scanned[0].unique_roots, vec![7]);
     }
 
     #[tokio::test]

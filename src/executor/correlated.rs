@@ -83,6 +83,12 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
         | PhysicalPlan::Update(_)
         | PhysicalPlan::Delete(_)
         | PhysicalPlan::CreateTable(_)
+        | PhysicalPlan::CreateIndex(_)
+        | PhysicalPlan::DropIndex(_)
+        | PhysicalPlan::AlterTable(_)
+        | PhysicalPlan::Truncate(_)
+        | PhysicalPlan::CreateView(_)
+        | PhysicalPlan::DropView(_)
         | PhysicalPlan::DropTable(_) => {}
         PhysicalPlan::CreateTableAsSelect(node) => {
             // MS20 T4: CTAS 包着一条完整 SELECT，递归其下计划（谓词/表达式

@@ -13,7 +13,7 @@ use crate::executor::aggregate::AggregateFunc;
 use crate::executor::plan::{
     ConflictAction, JoinCondition, NestedLoopJoinType, OrderByColumn, PhysicalPlan, SetOpKind,
 };
-use crate::executor::UpsertValueExpr;
+use crate::executor::{AlterTableOp, UpsertValueExpr};
 use crate::storage::page_format::Key;
 
 /// 渲染整棵计划树：首行恒为 `EXPLAIN` 根标识，其后每行对应一个计划节点。
@@ -71,6 +71,12 @@ fn render_node(plan: &PhysicalPlan, depth: usize, out: &mut Vec<String>) {
         | PhysicalPlan::Update(_)
         | PhysicalPlan::Delete(_)
         | PhysicalPlan::CreateTable(_)
+        | PhysicalPlan::CreateIndex(_)
+        | PhysicalPlan::DropIndex(_)
+        | PhysicalPlan::AlterTable(_)
+        | PhysicalPlan::Truncate(_)
+        | PhysicalPlan::CreateView(_)
+        | PhysicalPlan::DropView(_)
         | PhysicalPlan::DropTable(_)
         | PhysicalPlan::SingleRow => {}
     }
@@ -110,12 +116,19 @@ fn describe(plan: &PhysicalPlan) -> String {
         ),
         // IndexScanAll 相反：`columns` 是基表列清单，真实输出形状由 `projection`
         // 决定（与 `get_plan_output_columns` 的 IndexScanAll 臂同款裁剪）。
-        PhysicalPlan::IndexScanAll(node) => format!(
-            "IndexScanAll {} (key={}, columns={})",
-            node.table_name,
-            key_hex(&node.key),
-            columns(&node.columns, &node.projection)
-        ),
+        // MS21 Iter002 (T2-g)：二级索引路由命中时点名索引（EXPLAIN 可观察）；
+        // None（既有路径）保持渲染逐字节不变。
+        PhysicalPlan::IndexScanAll(node) => {
+            let mut params = vec![format!("key={}", key_hex(&node.key))];
+            if let Some(index_name) = &node.index_name {
+                params.push(format!("index={}", index_name));
+            }
+            params.push(format!(
+                "columns={}",
+                columns(&node.columns, &node.projection)
+            ));
+            format!("IndexScanAll {} ({})", node.table_name, params.join(", "))
+        }
         PhysicalPlan::Filter(node) => format!(
             "Filter {} (predicate={:?})",
             node.table_name, node.predicate
@@ -168,10 +181,44 @@ fn describe(plan: &PhysicalPlan) -> String {
             node.table_name,
             node.columns.join(", ")
         ),
+        PhysicalPlan::CreateIndex(node) => format!(
+            "CreateIndex {} (on {}({}))",
+            node.index_name, node.table_name, node.column_name
+        ),
+        PhysicalPlan::DropIndex(node) => {
+            format!("DropIndex {}", node.index_name)
+        }
+        PhysicalPlan::CreateView(node) => format!(
+            "CreateView {} (columns=[{}])",
+            node.view_name,
+            node.columns.join(", ")
+        ),
+        PhysicalPlan::DropView(node) => {
+            format!("DropView {}", node.view_name)
+        }
+        PhysicalPlan::AlterTable(node) => match &node.operation {
+            AlterTableOp::AddColumn {
+                column_name,
+                column_type,
+                ..
+            } => format!(
+                "AlterTable {} (ADD COLUMN {} {:?})",
+                node.table_name, column_name, column_type
+            ),
+            AlterTableOp::DropColumn { column_name } => {
+                format!(
+                    "AlterTable {} (DROP COLUMN {})",
+                    node.table_name, column_name
+                )
+            }
+        },
         PhysicalPlan::DropTable(node) => format!(
             "DropTable {} (if_exists={})",
             node.table_name, node.if_exists
         ),
+        PhysicalPlan::Truncate(node) => {
+            format!("Truncate {}", node.table_name)
+        }
         PhysicalPlan::Sort(node) => {
             let keys: Vec<String> = node
                 .order_by

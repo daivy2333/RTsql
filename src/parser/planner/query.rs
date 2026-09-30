@@ -9,9 +9,9 @@ use super::ddl_dml::is_pure_equi_join_on;
 use super::expression::expr_to_column_name;
 use super::{CteDef, PlanBuilder};
 use crate::executor::{
-    ColumnExpression, DataScanNode, DistinctNode, ExpressionRef, FilterNode, IndexScanNode,
-    OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode, ScanNode, SetOpKind,
-    SetOperationNode, SortNode,
+    ColumnExpression, DataScanNode, DistinctNode, ExpressionRef, FilterNode, IndexScanAllNode,
+    IndexScanNode, OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
+    ScanNode, SetOpKind, SetOperationNode, SortNode,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -142,7 +142,14 @@ impl PlanBuilder {
             | PhysicalPlan::Upsert(_)
             | PhysicalPlan::Update(_)
             | PhysicalPlan::Delete(_) => Vec::new(),
-            PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => Vec::new(),
+            PhysicalPlan::CreateTable(_)
+            | PhysicalPlan::CreateIndex(_)
+            | PhysicalPlan::DropIndex(_)
+            | PhysicalPlan::AlterTable(_)
+            | PhysicalPlan::Truncate(_)
+            | PhysicalPlan::CreateView(_)
+            | PhysicalPlan::DropView(_)
+            | PhysicalPlan::DropTable(_) => Vec::new(),
         }
     }
 
@@ -329,19 +336,25 @@ impl PlanBuilder {
                 // MS25 T5: CTE 查找钩子置于 `validate_table` 之前（CTE 名遮蔽
                 // 同名基表）；未命中时既有基表路径逐字节不变（含既有忽略
                 // 表别名的行为）。
+                // MS21 Iter005 (T5-c)：视图查找钩子置于 CTE 未命中之后、基表
+                // `validate_table` 之前（CTE > 视图 > 基表优先级不变量）；
+                // 视图未命中时既有基表路径逐字节不变。
                 match self.resolve_cte_reference(&table_name, alias.as_ref())? {
                     Some((plan, effective)) => (plan, effective),
-                    None => {
-                        self.validate_table(&table_name)?;
-                        let base_columns =
-                            self.tables.get(&table_name).cloned().unwrap_or_default();
-                        let plan = PhysicalPlan::Scan(ScanNode {
-                            table_name: table_name.clone(),
-                            columns: base_columns,
-                            projection: Vec::new(),
-                        });
-                        (plan, table_name)
-                    }
+                    None => match self.resolve_view_reference(&table_name, alias.as_ref())? {
+                        Some((plan, effective)) => (plan, effective),
+                        None => {
+                            self.validate_table(&table_name)?;
+                            let base_columns =
+                                self.tables.get(&table_name).cloned().unwrap_or_default();
+                            let plan = PhysicalPlan::Scan(ScanNode {
+                                table_name: table_name.clone(),
+                                columns: base_columns,
+                                projection: Vec::new(),
+                            });
+                            (plan, table_name)
+                        }
+                    },
                 }
             }
             TableFactor::Derived {
@@ -409,6 +422,8 @@ impl PlanBuilder {
             // 解析右表
             let right_table = extract_join_table_name(&join.relation)?;
             // MS25 T5: JOIN 右臂同款 CTE 钩子（置于 `validate_table` 之前）。
+            // MS21 Iter005 (T5-c)：JOIN 右臂同款视图钩子（CTE 未命中后、
+            // 基表前）。
             let (right_table, right_columns, right_plan) = match self
                 .resolve_cte_reference(&right_table, table_factor_alias(&join.relation))?
             {
@@ -416,16 +431,24 @@ impl PlanBuilder {
                     let columns = self.tables.get(&effective).cloned().unwrap_or_default();
                     (effective, columns, plan)
                 }
-                None => {
-                    self.validate_table(&right_table)?;
-                    let columns = self.tables.get(&right_table).cloned().unwrap_or_default();
-                    let plan = PhysicalPlan::Scan(ScanNode {
-                        table_name: right_table.clone(),
-                        columns: columns.clone(),
-                        projection: Vec::new(),
-                    });
-                    (right_table, columns, plan)
-                }
+                None => match self
+                    .resolve_view_reference(&right_table, table_factor_alias(&join.relation))?
+                {
+                    Some((plan, effective)) => {
+                        let columns = self.tables.get(&effective).cloned().unwrap_or_default();
+                        (effective, columns, plan)
+                    }
+                    None => {
+                        self.validate_table(&right_table)?;
+                        let columns = self.tables.get(&right_table).cloned().unwrap_or_default();
+                        let plan = PhysicalPlan::Scan(ScanNode {
+                            table_name: right_table.clone(),
+                            columns: columns.clone(),
+                            projection: Vec::new(),
+                        });
+                        (right_table, columns, plan)
+                    }
+                },
             };
 
             // 解析 ON 条件
@@ -899,6 +922,52 @@ impl PlanBuilder {
         Ok(Some((
             PhysicalPlan::DerivedScan(crate::executor::DerivedScanNode {
                 subquery: Box::new(plan),
+                alias: effective.clone(),
+                columns,
+            }),
+            effective,
+        )))
+    }
+
+    /// MS21 Iter005 (T5-c/D12)：视图引用展开——命中 builder 视图通道时把
+    /// 定义文本重解析并以派生表同型上下文（`building_subquery` save/restore，
+    /// 内联 `FROM (<定义>) AS <视图名>` 逐字节等价的唯一裁判）`build_query`
+    /// 递归展开（定义内 ORDER BY/LIMIT/聚合/JOIN/嵌套视图全可达），包
+    /// `DerivedScanNode`（alias=引用别名或视图名、columns=持久化列名清单
+    /// ——显式清单已覆盖）。未命中返回 None（基表路径逐字节不变）。CTE
+    /// 查找先于此（同名 CTE 遮蔽视图，优先级不变量）；引用别名列清单与
+    /// 派生表同型忽略（零特殊化）。
+    fn resolve_view_reference(
+        &mut self,
+        name: &str,
+        alias: Option<&sqlparser::ast::TableAlias>,
+    ) -> Result<Option<(PhysicalPlan, String)>, PlanError> {
+        let normalized = name.to_lowercase();
+        let Some(def) = self.views.get(&normalized) else {
+            return Ok(None);
+        };
+        let sql = def.sql.clone();
+        let columns = def.columns.clone();
+        // 定义文本重解析（`Query::to_string()` → parse 往返稳定）；防御臂：
+        // 持久化文本非查询（结构性不可达）
+        let statements = crate::parser::ast::parse_sql(&sql)?;
+        let sqlparser::ast::Statement::Query(inner_query) = &statements[0] else {
+            return Err(PlanError::InvalidQuery(format!(
+                "view '{normalized}' definition did not re-parse as a query"
+            )));
+        };
+        let saved_subquery_ctx = self.building_subquery;
+        self.building_subquery = true;
+        let inner_result = self.build_query(inner_query);
+        self.building_subquery = saved_subquery_ctx;
+        let inner_plan = inner_result?;
+        let effective = alias
+            .map(|a| a.name.value.to_lowercase())
+            .unwrap_or(normalized);
+        self.register_table(&effective, columns.clone(), "");
+        Ok(Some((
+            PhysicalPlan::DerivedScan(crate::executor::DerivedScanNode {
+                subquery: Box::new(inner_plan),
                 alias: effective.clone(),
                 columns,
             }),
@@ -1498,6 +1567,26 @@ impl PlanBuilder {
                         projection: proj_or_empty.clone(),
                     })
                 }
+            } else if let Some((index_name, key)) =
+                self.extract_secondary_index_equality(&table_name, where_expr)?
+            {
+                // MS21 Iter002 (T2-g/D6)：二级索引等值路由——PK 判定链未命中
+                // 后、非 PK 臂前插入。单条件 `<登记列> = <Int 字面量>` 命中
+                // 登记索引即 `IndexScanAll`（执行器消费该登记树）；其余形态
+                // （AND/OR 嵌入、非 Int/NULL 字面量）一律既有路径。计划形状
+                // 与 PK 键位路由同型：`columns`/`projection` 装配镜像上方
+                // IndexScan 臂。
+                PhysicalPlan::IndexScanAll(IndexScanAllNode {
+                    table_name: table_name.clone(),
+                    key,
+                    columns: if !sort_due && projection_indices.is_some() {
+                        projection_columns.clone()
+                    } else {
+                        base_schema.clone().unwrap_or_default()
+                    },
+                    projection: proj_or_empty.clone(),
+                    index_name: Some(index_name),
+                })
             } else {
                 // Non-PK WHERE — M19 routing + MS07-T06 pushdown:
                 // - PK equality in a non-simple form (e.g. AND-combined):
@@ -2378,6 +2467,46 @@ impl PlanBuilder {
             return Ok(None);
         }
         self.extract_pk_from_where(table_name, expr)
+    }
+
+    /// MS21 Iter002 (T2-g/D6)：二级索引等值路由键提取——WHERE 为单条件
+    /// `<列> = <Int 字面量>`（或字面量在前）且该列命中登记的二级索引时，
+    /// 返回 `(索引名, 键)`；其余形态一律 `None` 走既有路径（AND/OR 嵌入
+    /// 不路由；非 Int / NULL 字面量经 `to_key` None 自然回落；转换失败与
+    /// PK 提取同型传播）。
+    fn extract_secondary_index_equality(
+        &self,
+        table_name: &str,
+        expr: &Expr,
+    ) -> Result<Option<(String, crate::storage::page_format::Key)>, PlanError> {
+        let Some(indexes) = self.table_secondary_indexes.get(table_name) else {
+            return Ok(None);
+        };
+        let Expr::BinaryOp {
+            left,
+            op: sqlparser::ast::BinaryOperator::Eq,
+            right,
+        } = expr
+        else {
+            return Ok(None);
+        };
+        // column = literal / literal = column（裸列名；限定名不路由——与
+        // PK 简单等值同口径）
+        let (column, literal) = match (left.as_ref(), right.as_ref()) {
+            (Expr::Identifier(c), Expr::Value(v)) => (c, v),
+            (Expr::Value(v), Expr::Identifier(c)) => (c, v),
+            _ => return Ok(None),
+        };
+        let column_name = column.value.to_lowercase();
+        let Some((index_name, _)) = indexes.iter().find(|(_, col)| *col == column_name) else {
+            return Ok(None);
+        };
+        // 仅 Int 字面量可路由（非 Int / NULL → to_key None → 既有路径）
+        let value = value_from_sqlparser(literal)?;
+        match value.to_key() {
+            Some(key) => Ok(Some((index_name.clone(), key))),
+            None => Ok(None),
+        }
     }
 
     /// Extract primary key from WHERE clause

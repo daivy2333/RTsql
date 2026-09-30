@@ -44,6 +44,19 @@ pub enum PhysicalPlan {
     CreateTable(CreateTableNode),
     /// CTAS：`CREATE TABLE <name> AS <SELECT>`（MS20 T4）
     CreateTableAsSelect(CreateTableAsSelectNode),
+    /// 创建二级索引（MS21 Iter002 T2-c）：建空树 → 存量行回填 → catalog 登记
+    CreateIndex(CreateIndexNode),
+    /// 表结构演进（MS21 Iter003 T3-b/c）：尾部加列 / 删列重写
+    AlterTable(AlterTableNode),
+    /// 删除二级索引（MS21 Iter002 T2-f）：登记移除 + 树页释放
+    DropIndex(DropIndexNode),
+    /// TRUNCATE TABLE（MS21 Iter004 T4-a）：物理清空保留定义
+    Truncate(TruncateNode),
+    /// 创建视图（MS21 Iter005 T5-b）：持久化定义 + 内存注册表登记；
+    /// 非物化——无数据页/索引树
+    CreateView(CreateViewNode),
+    /// 删除视图（MS21 Iter005 T5-d）：catalog 视图行/列行删除 + 注册表移除
+    DropView(DropViewNode),
     /// 删除表
     DropTable(DropTableNode),
     /// 排序节点（ORDER BY）
@@ -144,6 +157,10 @@ pub struct IndexScanAllNode {
     pub columns: Vec<String>,
     /// MS10-T01 Iter001: 输出投影（空 = 恒等，产出全 schema 行）
     pub projection: Vec<usize>,
+    /// MS21 Iter002 (T2-g/D6)：命中的二级索引名。`None` = PK/唯一树上的既有
+    /// 全扫语义（构造路径逐字节不变）；`Some` 时执行器消费该登记树
+    /// （pipeline 按 `TableMeta.secondary_indexes` 名称解析）。
+    pub index_name: Option<String>,
 }
 
 /// 过滤节点（WHERE 子句求值）
@@ -351,6 +368,79 @@ pub struct DropTableNode {
     pub table_name: String,
     /// 是否使用 IF EXISTS
     pub if_exists: bool,
+}
+
+/// 创建二级索引节点（MS21 Iter002 T2-c）
+#[derive(Debug, Clone)]
+pub struct CreateIndexNode {
+    /// 索引名（小写归一，库级唯一）
+    pub index_name: String,
+    /// 目标表名
+    pub table_name: String,
+    /// 索引列（表列序内位置）
+    pub column_index: usize,
+    /// 索引列名（EXPLAIN 参数直出）
+    pub column_name: String,
+}
+
+/// ALTER TABLE 操作（MS21 Iter003 T3-b/c）——计划期白名单后的两种形态
+#[derive(Debug, Clone)]
+pub enum AlterTableOp {
+    /// `ADD COLUMN <col> <type> [NOT NULL] [DEFAULT <literal>]`（尾部加列）；
+    /// 类型为 planner 层 ColumnType（CREATE TABLE 先例——storage 转换在
+    /// 执行器侧，String → String(255)）
+    AddColumn {
+        column_name: String,
+        column_type: ColumnType,
+        not_null: bool,
+        default_value: Option<Value>,
+    },
+    /// `DROP COLUMN <col>`（单隐式事务逐行重写）
+    DropColumn { column_name: String },
+}
+
+/// ALTER TABLE 节点（MS21 Iter003 T3-b/c）
+#[derive(Debug, Clone)]
+pub struct AlterTableNode {
+    /// 目标表名（小写归一）
+    pub table_name: String,
+    /// 已校验的单操作
+    pub operation: AlterTableOp,
+}
+
+/// 删除二级索引节点（MS21 Iter002 T2-f）
+#[derive(Debug, Clone)]
+pub struct DropIndexNode {
+    /// 索引名（小写归一）
+    pub index_name: String,
+}
+
+/// TRUNCATE TABLE 节点（MS21 Iter004 T4-a）：物理清空保留定义——数据页经
+/// free-list 释放、head 原地重置、PK/唯一/二级三类索引重建为空树，表与
+/// 索引定义完整保留（design D11 checkpoint-first 序，物理语义无行级痕迹）。
+#[derive(Debug, Clone)]
+pub struct TruncateNode {
+    /// 目标表名（小写归一；缺失/附加库/系统保留名已在计划期拒绝）
+    pub table_name: String,
+}
+
+/// 创建视图节点（MS21 Iter005 T5-b/D12）
+#[derive(Debug, Clone)]
+pub struct CreateViewNode {
+    /// 视图名（小写归一；库级唯一——跨基表与视图）
+    pub view_name: String,
+    /// 定义 SQL 文本（`Query::to_string()` 规范化形态；展开期 `parse_sql`
+    /// 重解析）
+    pub sql: String,
+    /// 视图列名清单（显式清单或定义输出表头，计划期定形）
+    pub columns: Vec<String>,
+}
+
+/// 删除视图节点（MS21 Iter005 T5-d/D12）
+#[derive(Debug, Clone)]
+pub struct DropViewNode {
+    /// 视图名（小写归一；存在性已在计划期拒绝）
+    pub view_name: String,
 }
 
 /// 排序节点（ORDER BY）

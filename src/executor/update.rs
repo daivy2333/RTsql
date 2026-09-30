@@ -2,7 +2,7 @@
 
 use crate::executor::{ExecResult, Executor, Value};
 use crate::storage::page_format::{
-    compute_tuple_size, deserialize_tuple, serialize_tuple, ColumnType,
+    compute_tuple_size, deserialize_row, serialize_tuple, ColumnType,
 };
 use crate::storage::{
     read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, PageId, Result, StorageError,
@@ -173,7 +173,10 @@ impl Executor for UpdateExecutor {
                 Ok((vh, bytes.to_vec()))
             })
             .await?;
-        let mut values = deserialize_tuple(&old_tuple_bytes, &self.schema)?;
+        // MS21 Iter003 (T3-a/D9): width-aware read-back + DEFAULT overlay —
+        // ADD COLUMN 前的窄行读回全宽后自愈（写新版本恒全宽）。
+        let mut values =
+            deserialize_row(&old_tuple_bytes, &self.schema, &self.table_meta.defaults)?;
 
         // MS23 Iteration 001 (2.6/D7): 唯一列旧值快照——Step 3 改值前捕获，
         // 供碰撞预检与四分支维护使用（无唯一列的表零开销，不快照）。
@@ -182,6 +185,15 @@ impl Executor for UpdateExecutor {
             .unique_indexes
             .iter()
             .map(|(col_idx, _)| values[*col_idx].clone())
+            .collect();
+
+        // MS21 Iter002 (T2-d/D7)：二级列旧值快照——同区同型（无二级索引的
+        // 表零开销，不快照）。
+        let secondary_old_values: Vec<Value> = self
+            .table_meta
+            .secondary_indexes
+            .iter()
+            .map(|s| values[s.column_index].clone())
             .collect();
 
         // Step 3: Find column index and modify the target column
@@ -348,6 +360,35 @@ impl Executor for UpdateExecutor {
                 }
                 if let Some(k) = new_key {
                     uindex.insert(k.as_bytes(), new_row_id).await?;
+                }
+            }
+        }
+
+        // MS21 Iter002 (T2-d/D7)：二级索引条目维护——UPDATE 为该行写入新
+        // 版本（新 rid），条目必须从 (旧键, 旧 rid) 迁移到 (新键, 新 rid)。
+        // 写入一律 `delete_exact` + `insert`（D3：二级索引重复键并存，
+        // `update`/`delete` 歧义原语禁用）。三支形态：
+        // 1. 值不变：条目按同键换指新 rid；
+        // 2. 置 NULL：删旧条目（NULL 不入索引）；
+        // 3. 改值：删旧键旧条目、插新键新条目（NULL 旧值无条目自然跳过；
+        //    INT 声明列经写入类型门新值必为 Int/NULL，to_key 防御形态同唯一列）。
+        for (pos, sindex) in self.table_meta.secondary_indexes.iter().enumerate() {
+            let col = sindex.column_index;
+            let old_v = &secondary_old_values[pos];
+            let new_v = &values[col];
+            let old_key = old_v.to_key();
+            let new_key = new_v.to_key();
+            if old_v == new_v {
+                if let Some(k) = new_key {
+                    sindex.index.delete_exact(k.as_bytes(), old_row_id).await?;
+                    sindex.index.insert(k.as_bytes(), new_row_id).await?;
+                }
+            } else {
+                if let Some(k) = old_key {
+                    sindex.index.delete_exact(k.as_bytes(), old_row_id).await?;
+                }
+                if let Some(k) = new_key {
+                    sindex.index.insert(k.as_bytes(), new_row_id).await?;
                 }
             }
         }

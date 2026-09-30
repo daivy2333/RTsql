@@ -1597,9 +1597,11 @@ fn unsupported_statement_names_capability() {
 }
 
 /// R2-S1 补充：非 Table 的 DROP 走语句类别臂，报错含 `DROP <对象>`。
+/// （MS21 Iter005 校准：DROP VIEW 随 `sql-views` R2 转正为支持语句，
+/// 校准主体改为仍不支持的 DROP ROLE——意图不变：点名对象类型。）
 #[test]
 fn unsupported_statement_names_drop_object_type() {
-    let sql = "DROP VIEW v";
+    let sql = "DROP ROLE someone";
     let stmts = parse_sql(sql).unwrap();
     let mut builder = setup_builder();
     let result = builder.build_plan(&stmts[0]);
@@ -1608,7 +1610,7 @@ fn unsupported_statement_names_drop_object_type() {
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.starts_with("Unsupported statement type: DROP VIEW"),
+                msg.starts_with("Unsupported statement type: DROP ROLE"),
                 "非 Table 的 DROP 必须点名对象类型，实际: {msg}"
             );
         }

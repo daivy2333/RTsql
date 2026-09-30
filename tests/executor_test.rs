@@ -754,6 +754,7 @@ async fn test_create_table_executor_success() -> Result<()> {
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
         isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
+        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     });
 
     let plan = PhysicalPlan::CreateTable(rtsql::executor::CreateTableNode {
@@ -802,6 +803,7 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
         isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
+        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     });
 
     // Create table first time (using storage::ColumnType)
@@ -861,6 +863,7 @@ async fn test_drop_table_executor_success() -> Result<()> {
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
         isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
+        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     });
 
     // Create table first
@@ -915,6 +918,7 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
         isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
+        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     });
 
     // Try to drop a non-existent table without IF EXISTS
@@ -960,6 +964,7 @@ async fn test_drop_table_if_exists_success() -> Result<()> {
         wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
         plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
         isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
+        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     });
 
     // Drop a non-existent table with IF EXISTS - should succeed without error

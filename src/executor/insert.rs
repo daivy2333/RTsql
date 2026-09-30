@@ -294,6 +294,15 @@ impl Executor for InsertExecutor {
                 }
             }
 
+            // MS21 Iter002 (T2-d/D7)：二级索引条目——镜像唯一条目顺序（数据
+            // 落位后写入）。NULL 跳过（不入索引，同 PK/唯一语义）；INT 声明
+            // 列的值经写入类型门必为 Int/NULL，`to_key` 防御形态同唯一列。
+            for sindex in &self.table_meta.secondary_indexes {
+                if let Some(key) = row_values[sindex.column_index].to_key() {
+                    sindex.index.insert(key.as_bytes(), row_id).await?;
+                }
+            }
+
             count += 1;
         }
 

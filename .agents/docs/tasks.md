@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-09-29（MS20 一期 ATTACH 式跨库交互收尾归档——change `2026-09-29-ms20-attach-cross-db` 三 Iteration 全 accepted：ATTACH 会话注册面（独占锁/路径解析复用/拒绝矩阵/DETACH 豁免 I076）、两段限定名路由与只读跨库查询（SELECT 全形态跨库组合 + 三段列引用 + 附加库只读边界计划期拒绝 + plan cache 旁路）、CTAS 主库物化（列名取输出表头 + 类型推导矩阵 + 建表→flush_all→插入崩溃一致性序 + 零副作用同名可重试 + LIKE/CLONE/混合形态诚实化拒绝 + 事务内点名拒绝）；增量规格 +3 域合并（sql-attach-session / cross-db-namespace-query / create-table-as-select），语料 49 → 52 域；全量 1458 tests）
+> 最后更新：2026-09-30（MS21 DDL 演进与二级索引收尾归档——change `2026-09-29-ms21-ddl-evolution` 六 Iteration 全 accepted：T1 索引条目一致性收口（rekey 回滚语义化回退 + NULL-rekey 还原 + UPSERT SlotNotFound 对齐）+ T2 二级索引端到端（catalog 登记段/`delete_exact`/回填/写路径挂钩/恢复重建/`IndexScanAll` 路由）+ T3 ALTER TABLE ADD/DROP COLUMN（宽度感知解码 + DEFAULT 覆盖层 + 内隐式事务重写删列）+ 用户扩围 T4 TRUNCATE、T5 CREATE/DROP VIEW、T6 删除原语精确化、T7 NULL-rekey 补口；增量规格 +4 域（sql-secondary-indexes / alter-table-column-evolution / truncate-table / sql-views）+ update-index-maintenance 扩展，语料 52 → 56 域；全量 1541 tests）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,9 +12,9 @@
 
 ## 路线图结构
 
-28 个 Milestone：16 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 6 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，作独立 planned 任务行留存〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕）。★初版达成★。
+28 个 Milestone：17 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 5 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，作独立 planned 任务行留存〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21 于 2026-09-30 完成）。★初版达成★。
 
-统一执行序（2026-09-24 用户裁定初版后工作完全重排——编号与执行序无关，沿用「批准执行序与编号无关」既定先例；编号只表规划先后，执行以本序为准）：**MS23 数据完整性约束执行面（正确性红线最优先）→ MS24 SQL 写面补全 → MS19 CLI 管理面小收口 → MS18 one-shot 路径性能收口 → MS25 SQL 读面补全 → MS20 ATTACH 式跨库交互 → MS21 DDL 演进与二级索引 → MS26 嵌入式运行形态 → MS27 存储演进批 → MS22 实测驱动性能批（量化定稿后转 ready）**。MS25 于 2026-09-28 完成，下一个建议序为 **MS20 ATTACH 式跨库交互**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据：正确性红线先于新功能（MS15/MS16 纪律）；同代码面相邻减少返工（MS23→MS24 唯一索引与约束语义、MS18→MS26 checkpoint 策略面、MS23→MS21 索引基建、MS26→MS27 存储后端覆盖）；小项批紧随正确性带；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）等留 improvements 域未排期。
+统一执行序（2026-09-24 用户裁定初版后工作完全重排——编号与执行序无关，沿用「批准执行序与编号无关」既定先例；编号只表规划先后，执行以本序为准）：**MS23 数据完整性约束执行面（正确性红线最优先）→ MS24 SQL 写面补全 → MS19 CLI 管理面小收口 → MS18 one-shot 路径性能收口 → MS25 SQL 读面补全 → MS20 ATTACH 式跨库交互 → MS21 DDL 演进与二级索引 → MS26 嵌入式运行形态 → MS27 存储演进批 → MS22 实测驱动性能批（量化定稿后转 ready）**。MS20 一期于 2026-09-29 完成〔T02 二期除外〕，MS21 于 2026-09-30 完成，下一个建议序为 **MS26 嵌入式运行形态**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据：正确性红线先于新功能（MS15/MS16 纪律）；同代码面相邻减少返工（MS23→MS24 唯一索引与约束语义、MS18→MS26 checkpoint 策略面、MS23→MS21 索引基建、MS26→MS27 存储后端覆盖）；小项批紧随正确性带；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）等留 improvements 域未排期。
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
 ## Milestone Roadmap
 
@@ -82,9 +82,9 @@
 - **Split signals**: 二期跨文件 DML 语义或锁交互超预期时拆出独立 MS，一期独立收口
 - **Related changes**: `openspec/changes/archive/2026-09-29-ms20-attach-cross-db/`（一期 T01，2026-09-29 收尾归档；T02 尚未创建）
 
-### MS21：DDL 演进——ALTER TABLE 与二级索引 — planned
+### MS21：DDL 演进——ALTER TABLE 与二级索引 — completed
 
-- **Status**: planned
+- **Status**: completed（2026-09-30——change `2026-09-29-ms21-ddl-evolution` 六 Iteration 全 accepted 收尾并归档。T1 索引条目维护一致性收口：rekey UPDATE 回滚按 rekey 语义回退（`read_prev_index_keys` 派生键区分 rekey/非 rekey）+ SET 唯一列为 NULL 的旧唯一键还原 + UPSERT `SlotNotFound` 容忍臂与 DELETE 对齐。T2 CREATE/DROP INDEX 二级索引端到端：catalog 登记段（secondary 尾段 + `update_secondary_index_root` + `CatalogRootSlot::Secondary`）+ `IndexManager::delete_exact` 精确原语 + 建索引存量回填 + 写路径六处挂钩（四执行器 + abort A/B 趟）+ 恢复重建扩展 + 非 PK 等值 `IndexScanAll` 路由 + DROP INDEX 页释放回落。T3 ALTER TABLE ADD/DROP COLUMN：宽度感知反序列化（`deserialize_tuple_width`）+ DEFAULT 覆盖层 + 尾部加列 + 内隐式事务逐行重写删列 + 守卫矩阵（索引引用/最后一列/多操作/事务内）。用户 2026-09-29 扩围：T4 TRUNCATE TABLE（checkpoint-first + 数据页释放 + 三类索引空重建 + 无墓碑不复活 + 事务内拒绝）；T5 CREATE/DROP VIEW（catalog kind=View 行持久 + 创建期验证封死循环 + CTE 通道展开与内联逐字节一致 + DML 只读拒绝 + plan cache 全清）。二次扩围（Iter000 Issue 候选）：T6 删除原语精确化（`LeafNode::delete` 精确键验证 + DELETE 未命中零副作用）；T7 回滚 NULL-rekey 还原补口。增量规格合并 4 新域（`sql-secondary-indexes` / `alter-table-column-evolution` / `truncate-table` / `sql-views`）+ `update-index-maintenance` 扩展至 5 Requirement，语料 52 → 56 域；全量 1541 tests / 0 failures / 2 ignored）
 - **Dependencies**: None（catalog 持久化通道由 MS07-T01 满足）
 - **Outcome**: `ALTER TABLE ADD/DROP COLUMN` 与 `CREATE INDEX`/`DROP INDEX` 可用（I068）——列结构演进不再依赖 dump→改 DDL→restore 重建，非 PK 查询列可建二级索引；既有索引条目维护在删除与回滚路径上的一致性收口（回滚后键位点查与实际存活版本一致）；`CREATE VIEW`/`TRUNCATE` 届时一并裁定是否并入范围（EXPLAIN 已转正为 MS25-T05 顺带项，2026-09-24 统一重排）
 - **Rationale**: SQL DDL 面最大功能缺口（R18 主题 2/3）；触及 catalog/序列化/重建路径的独立故障域，工作量中-大需独立阶段，与功能小项和性能批互不阻塞。T03 与本阶段同主题相邻（同为索引条目维护面、共享 `src/storage/btree/` 索引管理与执行器诊断边界），按聚合规则并入而非独立成阶段
@@ -102,7 +102,7 @@
 - **Verification boundary**: ALTER/INDEX 独立测试（含崩溃恢复两态一致）+ T03 的回滚/删除两态矩阵（rekey UPDATE 回滚点查、失败语句无残留、恢复两态）+ 全量零回归
 - **Diagnostic boundary**: `src/storage/catalog.rs` + `src/parser/planner/ddl_dml.rs` + `src/storage/btree/` 索引管理与执行器 + `src/executor/{delete,upsert}.rs` 条目清理臂 + `src/transaction/manager.rs::abort_cleanup_versions`
 - **Split signals**: DROP COLUMN 触发全行重写格式变更过大时先收 ADD COLUMN + INDEX，DROP 另行评估；T03 若牵动 `abort_cleanup_versions` A 趟整体重做（超出「A 趟保持现状」语义）时拆为独立 change
-- **Related changes**: None（T01/T02 尚未创建；T03 来源 change 已归档 `openspec/changes/archive/2026-09-25-ms24-write-surface-completion/`）
+- **Related changes**: `openspec/changes/archive/2026-09-29-ms21-ddl-evolution/`（2026-09-30 收尾归档；T03 来源 change 已归档 `openspec/changes/archive/2026-09-25-ms24-write-surface-completion/`）
 
 ### MS22：实测驱动性能优化（第一批） — planned（范围量化定稿后转 ready）
 
@@ -266,7 +266,7 @@ MS25 SQL 读面 · MS20 ATTACH 跨库（独立，序自由）
 全部殿后 ──→ MS22 实测驱动性能批（量化定稿后转 ready）
 ```
 
-建议执行序：**MS23 → MS24 → MS19 → MS18 → MS25 ✓ → MS20 → MS21 → MS26 → MS27 → MS22**（截至 2026-09-29 前五项已完成，MS20 一期已完成〔T02 二期与 MS21 起按序待排期，下一项 MS21〕）
+建议执行序：**MS23 → MS24 → MS19 → MS18 → MS25 ✓ → MS20 → MS21 → MS26 → MS27 → MS22**（截至 2026-09-30 前七项已完成〔MS20 一期完成、T02 二期除外；MS21 完成〕，下一项 MS26）
 
 无环；所有依赖均已满足。初版后工作（MS18-MS27）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
 
@@ -283,6 +283,8 @@ MS25 SQL 读面 · MS20 ATTACH 跨库（独立，序自由）
 - （无）
 
 ## 最近完成
+
+- **MS21 DDL 演进与二级索引（CREATE/DROP INDEX + ALTER TABLE + TRUNCATE + VIEW + 索引一致性收口）**（2026-09-30）：change `2026-09-29-ms21-ddl-evolution` 六 Iteration 全 accepted——T1 索引条目维护一致性收口（rekey UPDATE 回滚按 rekey 语义回退、SET 唯一列为 NULL 的旧键还原、UPSERT `SlotNotFound` 容忍臂与 DELETE 对齐）；T2 二级索引端到端（catalog secondary 尾段 + `CatalogRootSlot::Secondary` + `IndexManager::delete_exact` + 建索引回填 + 写路径六处挂钩 + 恢复重建扩展 + 非 PK 等值 `IndexScanAll` 路由 + DROP INDEX 页释放回落）；T3 ALTER TABLE ADD/DROP COLUMN（`deserialize_tuple_width` 宽度感知 + DEFAULT 覆盖层 + 尾部加列 + 内隐式事务逐行重写删列 + 索引引用/最后一列守卫）；用户扩围 T4 TRUNCATE TABLE（checkpoint-first 序 + 数据页释放 + 三类索引空重建 + 无墓碑崩溃不复活 + 事务内拒绝 + 空表幂等）、T5 CREATE/DROP VIEW（catalog kind=View 行持久 + 视图注册表 + 创建期验证封死循环 + CTE 通道展开与内联逐字节一致 + 显式列清单 + DML 只读拒绝 + 非基表 DDL 目标拒绝 + plan cache 全清 + 附加库引用创建期拒绝）；二次扩围 T6 删除原语精确化（`LeafNode::delete` 精确键验证，DELETE 未命中零副作用不误删邻近条目/不误报 KeyNotFound）、T7 回滚 NULL-rekey 还原补口（SET 唯一列为 NULL 回滚后旧值占用恢复）；增量规格 +4 域（`sql-secondary-indexes` / `alter-table-column-evolution` / `truncate-table` / `sql-views`）+ `update-index-maintenance` 扩展至 5 Requirement，语料 52 → 56 域；全量 1541 tests / 0 failures / 2 ignored（净增 4 测试文件 47 例 + catalog lib 单测）。
 
 - **MS20 一期 ATTACH 式跨库交互（ATTACH 注册 + 跨库只读查询 + CTAS 主库物化）**（2026-09-29）：change `2026-09-29-ms20-attach-cross-db` 三 Iteration 全 accepted——T1 ATTACH 会话注册面（`resolve_db_path` 语义复用、独占锁 `try_lock` 冲突 exit 4、自附加 flock 同 inode 拒绝、重复别名/路径缺失零副作用拒绝、lib session-only 点名拒绝、DETACH 豁免登记 I076）；T2 两段限定名路由（`alias.table` 全表名消费点先查注册表、未命中扁平名回落零回归、三段列引用路由命中可用、`AttachRoute`/`RoutedTables` 计划期判定执行期取库、附加库缺表 42P01 点名、含附加库引用语句不进 plan cache）；T3 附加库只读边界（五写消费点计划期点名拒绝、DDL 不查 catalog 即标记）；T4 CTAS 主库物化（列名取 SELECT 输出表头、类型推导矩阵——全 NULL→String(255) 含零行退化/Int∪Float→Float/同型保留/其余混合 `CtasColumnTypeConflict` 建表前点名拒绝、输出列名重复计划期拒绝、目标已存在守卫前置物化、建表→`flush_all()`→隐式事务插入崩溃一致性序、失败 abort+尽力 drop 零副作用同名可重试、隐式主键 DuplicateKey、`CREATE TABLE o.m AS SELECT` 计划期拒绝、LIKE/CLONE/列清单+query/表约束+query 诚实化拒绝、显式事务内 execute 期点名拒绝 0A000、执行后 plan cache 全清）；Review 补跑 Act 未覆盖的全量串行 Gate（1458 passed / 0 failed / 2 ignored）；增量规格 +3 域合并（`sql-attach-session`/`cross-db-namespace-query`/`create-table-as-select`，含事务内收口语义与零行源退化两处校准），语料 49 → 52 域。
 - **MS25 SQL 读面补全（外连接/DISTINCT/集合操作/CTE/ORDER BY 别名排序）**（2026-09-28）：change `2026-09-26-ms25-sql-read-surface` 五 Iteration 全 accepted——T1–T7（OUTER JOIN 三态经 NLJ 统一承载 LEFT/FULL + RIGHT 计划期左右交换、WHERE×JOIN 解禁含 INNER、SELECT DISTINCT 三分支链位、UNION[ALL]/INTERSECT/EXCEPT 左结合展开与非递归 CTE、COUNT/SUM/AVG DISTINCT 真实去重与 group_concat、EXPLAIN 计划树文本不执行内层、ORDER BY 输出别名真实排序含 decorate-sort-undecorate）与 T8–T13（JOIN 基座聚合参数/分组键完整形状解析 + 同名裸名歧义 `AmbiguousColumn` 点名 + 未知列 `ColumnNotFound`、聚合直出行/表头形状一致性收口、DerivedScan 基座普通列别名应用、信号处理器注册先于 open 锁获取、聚合参数两基座计划期解析——未知列与别名引用由静默 0/NULL 转 `ColumnNotFound` 点名、`SELECT t.*` 拒绝文案点名 QUALIFIED WILDCARD）；收口三处静默错误结果/静默不出错缺陷（DISTINCT 静默不去重、CTE 静默丢弃、COUNT DISTINCT 静默忽略）；增量规格合并 +32 added / 5 modified / 1 removed，语料 40 → 49 域；全量 1408 tests / 0 failures / 2 ignored。

@@ -20,7 +20,7 @@
 
 use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, PredicateRef, Value};
-use crate::storage::page_format::{deserialize_value_refs, ColumnType, RowId, SlottedPageRef};
+use crate::storage::page_format::{deserialize_row, ColumnType, RowId, SlottedPageRef};
 use crate::storage::PageId;
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
 use crate::transaction::{Snapshot, TransactionManager, VersionHeader};
@@ -53,6 +53,10 @@ enum PageAction {
 pub struct DataScanExecutor {
     buffer_pool: Arc<BufferPool>,
     schema: Vec<ColumnType>,
+    /// MS21 Iter003 (T3-a/D9): declared DEFAULT literals (index-aligned with
+    /// `schema`) — the width-aware read-back overlays them on narrow legacy
+    /// rows (written before a trailing ADD COLUMN).
+    defaults: Vec<Option<Value>>,
     snapshot: Option<Snapshot>,
     /// MS07-T06: row-level predicate pushed down from the planner. Evaluated
     /// against the same full-schema-order row that a wrapping `FilterExecutor`
@@ -125,6 +129,7 @@ impl DataScanExecutor {
         Self {
             buffer_pool,
             schema,
+            defaults: table_meta.defaults.clone(),
             snapshot,
             predicate,
             scan_cap,
@@ -395,7 +400,11 @@ impl Executor for DataScanExecutor {
             // Snapshot schema and slot index into locals for the closure.
             // The closure is `FnOnce` (synchronous) so we can move `slot_index`
             // in, mutate it, then write it back to `self` after the await.
+            // MS21 Iter003 (T3-a/D9): defaults snapshot alongside — the
+            // width-aware read-back overlays declared DEFAULTs on narrow
+            // legacy rows.
             let schema = self.schema.clone();
+            let defaults = self.defaults.clone();
             let mut slot_index = self.current_slot_index;
             // MS08-T02: the closure captures the current page's successor for
             // the post-await prefetch trigger (header read is in-memory only).
@@ -487,8 +496,8 @@ impl Executor for DataScanExecutor {
                     }
 
                     // Visible (or no snapshot) — deserialize and yield.
-                    let vrs = deserialize_value_refs(tuple_bytes, &schema)?;
-                    let values: Vec<Value> = vrs.iter().map(|vr| vr.to_value()).collect();
+                    // MS21 Iter003 (T3-a/D9): width-aware + DEFAULT overlay.
+                    let values = deserialize_row(tuple_bytes, &schema, &defaults)?;
                     Ok(PageAction::YieldValue(values))
                 })
                 .await?;
