@@ -83,9 +83,9 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 0fe6971（MS20 一期收尾 docs 小提交；MS21 全部实施与本轮收尾产物未提交，待入库）
-- **ahead of origin**: 2
-- **工作区**: 未提交（MS21 实施——约 30 个源码/测试修改 + 6 个新执行器 + 4 个新测试文件 + 4 个新语料域 + 归档 carrier `openspec/changes/archive/2026-09-29-ms21-ddl-evolution/`——与本轮收尾刷新一并待入库）
+- **提交基线**: 2f83dd9（本批主提交：MS21 实施与收尾统一入库）
+- **ahead of origin**: 3
+- **工作区**: 干净（MS21 收尾提交后无未提交项）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 1541 tests pass, 0 failures, 2 ignored（2026-09-30 Iter005 Act Response 全量串行新鲜 `cargo test -- --test-threads=1`，Plan Review 采信 + 用户裁定「测试可信」；MS21 净增 4 测试文件 60 例——secondary_index 22 / alter_table 16 / truncate 7 / view 15 + catalog lib 单测 4）
 - **OpenSpec**: 56 specs（MS21 增量合并 +4 域——新增 `sql-secondary-indexes` / `alter-table-column-evolution` / `truncate-table` / `sql-views`，`update-index-maintenance` 扩展至 5 Requirement；decisions/knowledge 为 2026-09-24 退役空壳，仍计入 validate）；**活跃 change**：无（最新归档 `archive/2026-09-29-ms21-ddl-evolution/`，六 Iteration 全 accepted；下一里程碑 MS26）注：新版 openspec CLI `validate --all --strict` 将 MS06–MS10 时代 spec 的占位 Purpose 标记为失败——既有状态，非本轮引入
