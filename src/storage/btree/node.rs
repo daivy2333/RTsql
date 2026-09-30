@@ -226,6 +226,14 @@ impl<'a> LeafNode<'a> {
             return Err(StorageError::KeyNotFound);
         }
 
+        // 精确键删除（MS21 Iter001 D16）：`find_key_position` 返回「首个 ≥」
+        // 插入位，不验证命中位键相等会把缺失键的删除落在下一个更大的邻近
+        // 条目上。与 `update` 同型先验证再删。
+        match self.get_key(position) {
+            Some(existing_key) if existing_key == *key => {}
+            _ => return Err(StorageError::KeyNotFound),
+        }
+
         self.slotted
             .delete_slot(position)
             .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;

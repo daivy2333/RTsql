@@ -13,7 +13,7 @@ use crate::executor::{
 };
 use crate::storage::data::TableManager;
 use crate::storage::page_format::{
-    compute_tuple_size, deserialize_tuple, serialize_tuple, ColumnType,
+    compute_tuple_size, deserialize_row, serialize_tuple, ColumnType,
 };
 use crate::storage::{
     read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, PageId, Result, RowId,
@@ -317,6 +317,13 @@ impl UpsertExecutor {
             }
         }
 
+        // MS21 Iter002 (T2-d/D7)：二级索引条目——镜像唯一条目（NULL 跳过）。
+        for sindex in &self.table_meta.secondary_indexes {
+            if let Some(key) = row_values[sindex.column_index].to_key() {
+                sindex.index.insert(key.as_bytes(), row_id).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -337,7 +344,10 @@ impl UpsertExecutor {
                 Ok((vh, bytes.to_vec()))
             })
             .await?;
-        let mut values = deserialize_tuple(&old_tuple_bytes, &self.schema)?;
+        // MS21 Iter003 (T3-a/D9): width-aware read-back + DEFAULT overlay（窄行
+        // 读回全宽；写新版本恒全宽，行自愈）。
+        let mut values =
+            deserialize_row(&old_tuple_bytes, &self.schema, &self.table_meta.defaults)?;
 
         // 旧行快照：`Old` 右值与唯一列旧值均取自赋值前状态（SQLite 同型——
         // 全部右值对原行求值）。
@@ -347,6 +357,13 @@ impl UpsertExecutor {
             .unique_indexes
             .iter()
             .map(|(col_idx, _)| values[*col_idx].clone())
+            .collect();
+        // MS21 Iter002 (T2-d/D7)：二级列旧值快照（同区同型）。
+        let secondary_old_values: Vec<Value> = self
+            .table_meta
+            .secondary_indexes
+            .iter()
+            .map(|s| values[s.column_index].clone())
             .collect();
 
         let mut touched_columns: Vec<usize> = Vec::with_capacity(assignments.len());
@@ -540,6 +557,36 @@ impl UpsertExecutor {
             }
         }
 
+        // MS21 Iter002 (T2-d/D7)：二级索引条目维护——镜像 `update.rs` 三支
+        // 形态（同值换指 / 置 NULL 仅删 / 改值删旧插新），写入一律
+        // `delete_exact` + `insert`（D3 禁用歧义原语）。
+        for (pos, sindex) in self.table_meta.secondary_indexes.iter().enumerate() {
+            let col = sindex.column_index;
+            let old_v = &secondary_old_values[pos];
+            let new_v = &values[col];
+            let old_key = old_v.to_key();
+            let new_key = new_v.to_key();
+            if old_v == new_v {
+                if let Some(k) = new_key {
+                    sindex
+                        .index
+                        .delete_exact(k.as_bytes(), conflict_rid)
+                        .await?;
+                    sindex.index.insert(k.as_bytes(), new_row_id).await?;
+                }
+            } else {
+                if let Some(k) = old_key {
+                    sindex
+                        .index
+                        .delete_exact(k.as_bytes(), conflict_rid)
+                        .await?;
+                }
+                if let Some(k) = new_key {
+                    sindex.index.insert(k.as_bytes(), new_row_id).await?;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -547,24 +594,38 @@ impl UpsertExecutor {
     /// 唯一列键值提取 → 墓碑版本（`mark_deleted` + `with_next_version(rid)`）→
     /// visibility → PK 条目删除 → 唯一条目删除 → record_version（墓碑槽位）
     /// → WAL Delete。
-    async fn delete_conflict_row(&self, rid: RowId) -> Result<()> {
-        let (old_values, unique_keys) =
+    ///
+    /// MS21 Iter000 (design D2)：`hit_pk_key` 为仲裁命中的 PK 搜索键——slot
+    /// 不可读容忍臂下 PK 条目删除按该键执行（`DeleteExecutor` 同形态，不留
+    /// 悬空条目），且悬空 rid 不入 `record_version`（不可读 slot 入
+    /// `tx_versions` 会让事务终结路径对它读 slot 报错）。
+    async fn delete_conflict_row(&self, rid: RowId, hit_pk_key: Option<Vec<u8>>) -> Result<()> {
+        let (old_values, unique_keys, secondary_keys) =
             match read_tuple_from_data_page(&self.buffer_pool, rid, |_, bytes| Ok(bytes.to_vec()))
                 .await
             {
                 Ok(tuple) => {
-                    let values = deserialize_tuple(&tuple, &self.schema)?;
+                    // MS21 Iter003 (T3-a/D9): width-aware + DEFAULT overlay。
+                    let values = deserialize_row(&tuple, &self.schema, &self.table_meta.defaults)?;
                     let mut keys = Vec::new();
                     for (col_idx, uindex) in &self.table_meta.unique_indexes {
                         if let Some(key) = values[*col_idx].to_key() {
                             keys.push((uindex.clone(), key.as_bytes().to_vec()));
                         }
                     }
-                    (Some(values), keys)
+                    // MS21 Iter002 (T2-d/D7)：同趟兼提二级列键（调用方以
+                    // `delete_exact` 清理）。
+                    let mut secondary = Vec::new();
+                    for sindex in &self.table_meta.secondary_indexes {
+                        if let Some(key) = values[sindex.column_index].to_key() {
+                            secondary.push((sindex.index.clone(), key.as_bytes().to_vec()));
+                        }
+                    }
+                    (Some(values), keys, secondary)
                 }
                 // 与 `DeleteExecutor` 的 SlotNotFound 容忍同型：无元组可读则跳过
                 // 唯一条目删除，仍移除索引条目。
-                Err(StorageError::SlotNotFound(_)) => (None, Vec::new()),
+                Err(StorageError::SlotNotFound(_)) => (None, Vec::new(), Vec::new()),
                 Err(e) => return Err(e),
             };
 
@@ -591,19 +652,37 @@ impl UpsertExecutor {
             if let Some(key) = values[self.pk_index].to_key() {
                 self.table_meta.index_manager.delete(key.as_bytes()).await?;
             }
+        } else if let Some(key) = &hit_pk_key {
+            // MS21 Iter000 (design D2)：容忍臂对齐 `DeleteExecutor`——slot
+            // 不可读无元组可派生键，仍按仲裁命中的搜索键清理 PK 条目。删除
+            // 前按在位守卫确认该键在索引中确实指向本冲突行：`delete` 对缺
+            // 失键会误删首个 ≥ 的邻近条目（歧义删除原语），且经唯一索引命
+            // 中的冲突行其 PK 键与仲裁键无关。
+            if self.table_meta.index_manager.search(key.as_slice()).await? == Some(rid) {
+                self.table_meta.index_manager.delete(key.as_slice()).await?;
+            }
         }
 
         for (uindex, key) in &unique_keys {
             uindex.delete(key).await?;
         }
 
-        self.tx_manager
-            .record_version(
-                self.tx_id,
-                &self.table_meta.name,
-                tombstone_rid.unwrap_or(rid),
-            )
-            .await;
+        // MS21 Iter002 (T2-d/D7)：逐二级索引 `delete_exact` 清理冲突行条目
+        // （tuple 派生键精确定位；容忍臂无元组可派生，与唯一键同型跳过）。
+        for (sindex, key) in &secondary_keys {
+            sindex.delete_exact(key, rid).await?;
+        }
+
+        // MS21 Iter000 (design D2)：容忍臂（墓碑写入被 SlotNotFound 跳过且
+        // 无元组可读）不记录悬空 rid——不可读 slot 入 `tx_versions` 会让
+        // `commit_mark_versions` / abort 对它读 slot 报错，事务无法终结。
+        // WAL Delete 记录仍携带原 rid（形态不变）。
+        let recorded = tombstone_rid.or_else(|| old_values.is_some().then_some(rid));
+        if let Some(recorded) = recorded {
+            self.tx_manager
+                .record_version(self.tx_id, &self.table_meta.name, recorded)
+                .await;
+        }
 
         if let Some(wal) = &self.wal_buffer {
             wal.append(WalRecord::Delete {
@@ -650,8 +729,13 @@ impl Executor for UpsertExecutor {
                                 deleted.push(rid);
                             }
                         }
+                        // MS21 Iter000 (design D2)：仲裁命中的 PK 键穿入冲突
+                        // 删除——slot 不可读容忍臂据此按键清理条目。
+                        let hit_pk_key = prepared[self.pk_index]
+                            .to_key()
+                            .map(|k| k.as_bytes().to_vec());
                         for rid in deleted {
-                            self.delete_conflict_row(rid).await?;
+                            self.delete_conflict_row(rid, hit_pk_key.clone()).await?;
                         }
                     }
                 }

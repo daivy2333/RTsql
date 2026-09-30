@@ -21,8 +21,8 @@ pub use btree::{
 };
 pub use buffer_pool::BufferPool;
 pub use catalog::{
-    Catalog, CatalogColumnRow, CatalogRow, COLUMNS_PAGE_ID, COLUMNS_SYSTEM_NAME, TABLES_PAGE_ID,
-    TABLES_SYSTEM_NAME,
+    Catalog, CatalogColumnRow, CatalogKind, CatalogRow, COLUMNS_PAGE_ID, COLUMNS_SYSTEM_NAME,
+    TABLES_PAGE_ID, TABLES_SYSTEM_NAME,
 };
 pub use data::{TableManager, TableMeta};
 pub use data_page::{

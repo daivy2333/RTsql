@@ -164,6 +164,23 @@ pub struct PlanBuilder {
     /// conflict-target resolution — a target column is arbitrable only if it
     /// is an INT declared PK or listed here.
     pub(crate) table_unique_columns: HashMap<String, Vec<usize>>,
+    /// MS21 Iter002 (T2-g/D6): Table name -> registered secondary indexes
+    /// (`(index name, column name)`, creation order — the catalog section
+    /// order). Additive channel consumed by the non-PK equality routing arm.
+    pub(crate) table_secondary_indexes: HashMap<String, Vec<(String, String)>>,
+    /// MS21 Iter002 (T2-c/D14): Table name -> per-column declared types
+    /// (index-aligned with the registered column list). Additive channel
+    /// consumed by the CREATE INDEX INT-only check.
+    pub(crate) table_column_types: HashMap<String, Vec<ColumnType>>,
+    /// MS21 Iter002 (T2-c/T2-f/D14): every registered secondary index name in
+    /// the library (lowercase). Injected per-statement at the pipeline's plan
+    /// stage for CREATE INDEX (duplicate-name check) and DROP INDEX
+    /// (existence check) — plan-time rejection, zero side effects.
+    pub(crate) existing_index_names: std::collections::HashSet<String>,
+    /// MS21 Iter003 (T3-b/D9): table name -> live-row flag, injected
+    /// per-statement at the pipeline's plan stage for ALTER TABLE ... ADD
+    /// COLUMN — the input to the `NOT NULL`-without-DEFAULT rejection.
+    pub(crate) table_has_live_rows: HashMap<String, bool>,
     /// Set of inner table names when building a subquery (for detecting outer references).
     /// None when building a top-level query.
     pub(crate) inner_table_names: Option<Vec<String>>,
@@ -189,6 +206,21 @@ pub struct PlanBuilder {
     /// MS25 T5：正在构建的 CTE 名称栈（定义计划构建期间置位）——命中即
     /// 自引用 / 成环，点名拒绝。push/pop 严格配对。
     pub(crate) pending_cte_names: Vec<String>,
+    /// MS21 Iter005 (T5-b/D12)：语句级视图注册表——持久化视图的名称、定义
+    /// SQL 与列名清单，由 pipeline 的 plan 阶段按语句注入（`Database.views`
+    /// 的快照）。CREATE VIEW 重名检查、定义内既有视图引用合法性（T5-b）与
+    /// FROM/JOIN 展开钩子（T5-c）共同消费。加性通道：无注入（空表）时主库
+    /// 面行为逐字节不变。
+    pub(crate) views: HashMap<String, ViewDef>,
+}
+
+/// MS21 Iter005 (T5-b/D12)：一个已注册的持久化视图定义。列名清单 = 显式
+/// 列清单（`CREATE VIEW v (a, b) AS ...`）或定义输出表头（创建期已定形，
+/// 持久化于 `__columns` 行——列名-only 行）。
+#[derive(Debug, Clone)]
+pub(crate) struct ViewDef {
+    pub(crate) sql: String,
+    pub(crate) columns: Vec<String>,
 }
 
 /// MS25 T5：一个已注册的 CTE 定义（`WITH <名> [(列别名)] AS (<查询>)`）。
@@ -212,12 +244,17 @@ impl PlanBuilder {
             primary_key_types: HashMap::new(),
             table_defaults: HashMap::new(),
             table_unique_columns: HashMap::new(),
+            table_secondary_indexes: HashMap::new(),
+            table_column_types: HashMap::new(),
+            existing_index_names: std::collections::HashSet::new(),
+            table_has_live_rows: HashMap::new(),
             inner_table_names: None,
             building_subquery: false,
             join_column_layout: None,
             attached_tables: std::collections::HashSet::new(),
             cte_plans: Vec::new(),
             pending_cte_names: Vec::new(),
+            views: HashMap::new(),
         }
     }
 
@@ -251,6 +288,40 @@ impl PlanBuilder {
             .insert(name.to_lowercase(), columns);
     }
 
+    /// MS21 Iter002 (T2-g/D6): Register a table's secondary indexes
+    /// (`(index name, column name)` pairs, creation order — additive channel,
+    /// key lowercase like `register_table`).
+    pub fn set_table_secondary_indexes(&mut self, name: &str, indexes: Vec<(String, String)>) {
+        self.table_secondary_indexes
+            .insert(name.to_lowercase(), indexes);
+    }
+
+    /// MS21 Iter002 (T2-c/D14): Register the table's per-column declared
+    /// types (index-aligned with the registered column list — additive
+    /// channel, key lowercase like `register_table`).
+    pub fn set_table_column_types(&mut self, name: &str, types: Vec<ColumnType>) {
+        self.table_column_types.insert(name.to_lowercase(), types);
+    }
+
+    /// MS21 Iter002 (T2-c/T2-f/D14): Inject the library-wide secondary index
+    /// name set (plan_stage does the async gather before `build_plan`).
+    pub fn set_existing_index_names(&mut self, names: std::collections::HashSet<String>) {
+        self.existing_index_names = names;
+    }
+
+    /// MS21 Iter003 (T3-b/D9): inject the target table's live-row flag
+    /// (plan_stage does the async scan before `build_plan`).
+    pub fn set_table_has_live_rows(&mut self, name: &str, has_rows: bool) {
+        self.table_has_live_rows
+            .insert(name.to_lowercase(), has_rows);
+    }
+
+    /// MS21 Iter005 (T5-b/D12)：注入语句级视图注册表（`Database.views` 的
+    /// 快照；plan 阶段做 async 读取后一次性置换）。键为小写归一视图名。
+    pub(crate) fn set_views(&mut self, views: HashMap<String, ViewDef>) {
+        self.views = views;
+    }
+
     /// MS20 T3：标记一个限定名为附加库引用（pipeline 路由分支调用）。
     pub fn mark_attached_table(&mut self, name: &str) {
         self.attached_tables.insert(name.to_lowercase());
@@ -263,6 +334,18 @@ impl PlanBuilder {
         if self.attached_tables.contains(&table_name.to_lowercase()) {
             return Err(PlanError::UnsupportedStatement(
                 "WRITE TO ATTACHED DATABASE (attached databases are read-only)".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// MS21 Iter005 (T5-c/D12)：写目标若为视图名则计划期点名拒绝（视图
+    /// 只读、非物化——无行可写）。D14：`UnsupportedStatement` 能力名通道
+    /// （0A000），与 `reject_attached_write` 同位形。
+    pub(crate) fn reject_view_write(&self, table_name: &str) -> Result<(), PlanError> {
+        if self.views.contains_key(&table_name.to_lowercase()) {
+            return Err(PlanError::UnsupportedStatement(
+                "WRITE TO VIEW (views are read-only)".into(),
             ));
         }
         Ok(())
@@ -332,12 +415,40 @@ impl PlanBuilder {
             } => {
                 if *object_type == ObjectType::Table {
                     self.build_drop_table(names, if_exists)
+                } else if *object_type == ObjectType::Index {
+                    // MS21 Iter002 (T2-f)：DROP INDEX 分派（此前落非 Table
+                    // 泛化拒绝臂）。
+                    self.build_drop_index(names, if_exists)
+                } else if *object_type == ObjectType::View {
+                    // MS21 Iter005 (T5-d)：DROP VIEW 分派（此前落非 Table
+                    // 泛化拒绝臂）。
+                    self.build_drop_view(names, if_exists)
                 } else {
                     Err(PlanError::UnsupportedStatement(format!(
                         "DROP {}",
                         object_type
                     )))
                 }
+            }
+            Statement::CreateIndex { .. } => {
+                // MS21 Iter002 (T2-c)：CREATE INDEX 分派（此前落 catch-all
+                // UnsupportedStatement）。
+                self.build_create_index(stmt)
+            }
+            Statement::AlterTable { .. } => {
+                // MS21 Iter003 (T3-b)：ALTER TABLE 分派（此前落 catch-all
+                // UnsupportedStatement）。
+                self.build_alter_table(stmt)
+            }
+            Statement::Truncate { .. } => {
+                // MS21 Iter004 (T4-a)：TRUNCATE 分派（此前落 catch-all
+                // UnsupportedStatement）。
+                self.build_truncate(stmt)
+            }
+            Statement::CreateView { .. } => {
+                // MS21 Iter005 (T5-b)：CREATE VIEW 分派（此前落 catch-all
+                // UnsupportedStatement）。
+                self.build_create_view(stmt)
             }
             Statement::Explain {
                 analyze,

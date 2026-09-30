@@ -508,3 +508,112 @@ async fn recovery_matches_runtime_after_rekey() {
 
     db2.wal_buffer.shutdown().await;
 }
+
+// ===========================================================================
+// MS21 Iter001（change 2026-09-29-ms21-ddl-evolution / design D16）：DELETE
+// 未命中键零副作用——修复前 `LeafNode::delete` 按「首个 ≥」插入位删除且
+// 不验证命中位键相等，search 未命中时 DeleteExecutor 仍无条件按目标键删
+// 索引：缺失键误删邻近条目（点查漏行、同值 INSERT 失去 DuplicateKey）且
+// 恒报 affected 1；键大于全部键时上抛 KeyNotFound 误报。
+// ===========================================================================
+
+/// T6-①：3 行表 DELETE 未命中中间键（id = 0）——affected 0、三行点查均
+/// 可达、同值 INSERT 仍被 DuplicateKey 拒绝（零副作用）。
+///
+/// RED（修复前实测）：affected 1、id = 1 点查空集、INSERT (1, …) 成功。
+#[tokio::test]
+async fn delete_missing_middle_key_leaves_no_side_effects() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+        .await;
+    for (id, v) in [(1, 10), (2, 20), (3, 30)] {
+        match db
+            .execute_sql(&format!("INSERT INTO t VALUES ({id}, {v})"))
+            .await
+        {
+            Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
+            other => panic!("INSERT ({id}) 应成功，实际 {:?}", other),
+        }
+    }
+
+    // 修复前：affected 1 且 key 1 条目被误删（RED）
+    match db.execute_sql("DELETE FROM t WHERE id = 0").await {
+        Response::AffectedRows { count: 0 } => { /* 期望未命中零副作用 */ }
+        other => panic!("DELETE 未命中键必须 affected 0，实际 {:?}", other),
+    }
+
+    for (id, v) in [(1, 10), (2, 20), (3, 30)] {
+        match db
+            .execute_sql(&format!("SELECT * FROM t WHERE id = {id}"))
+            .await
+        {
+            Response::QueryResult { rows } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![serde_json::json!(id), serde_json::json!(v)]],
+                    "未命中 DELETE 不得扰动行 (id = {id})"
+                );
+            }
+            other => panic!("Expected QueryResult, got {:?}", other),
+        }
+    }
+
+    // 修复前：key 1 条目被误删 → INSERT (1, …) 成功（RED）
+    match db.execute_sql("INSERT INTO t VALUES (1, 99)").await {
+        Response::Error { message, .. } => {
+            assert!(
+                message.to_lowercase().contains("duplicate"),
+                "同值 INSERT 必须仍被 DuplicateKey 拒绝，实际: {message}"
+            );
+        }
+        other => panic!(
+            "未命中 DELETE 后同值 INSERT 必须仍 DuplicateKey，实际 {:?}",
+            other
+        ),
+    }
+    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(rows[0][0], serde_json::json!(3), "表必须恰含三行");
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+
+    db.wal_buffer.shutdown().await;
+}
+
+/// T6-②：DELETE 键大于全部键（id = 999）——affected 0 且不报错。
+///
+/// RED（修复前实测）：`KeyNotFound` 误报。
+#[tokio::test]
+async fn delete_key_beyond_all_keys_reports_zero_without_error() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+        .await;
+    match db.execute_sql("INSERT INTO t VALUES (1, 10)").await {
+        Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
+        other => panic!("INSERT 应成功，实际 {:?}", other),
+    }
+
+    // 修复前：KeyNotFound 错误（RED）
+    match db.execute_sql("DELETE FROM t WHERE id = 999").await {
+        Response::AffectedRows { count: 0 } => { /* 期望 affected 0 不报错 */ }
+        other => panic!("DELETE 大于全部键必须 affected 0 不报错，实际 {:?}", other),
+    }
+
+    match db.execute_sql("SELECT * FROM t WHERE id = 1").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!(1), serde_json::json!(10)]],
+                "未命中 DELETE 不得扰动既有行"
+            );
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+
+    db.wal_buffer.shutdown().await;
+}

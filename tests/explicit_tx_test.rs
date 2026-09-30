@@ -675,3 +675,361 @@ async fn rollback_index_restore_survives_clean_reopen() {
     );
     db2.wal_buffer.shutdown().await;
 }
+
+// ===========================================================================
+// MS21 Iter000（change 2026-09-29-ms21-ddl-evolution）：rekey UPDATE 回滚后
+// 索引条目一致——修复前 A 趟以反查键（rekey 后为新键）执行 `update`，把新
+// 键条目指向 prev 版本而旧键条目缺失，产生旧键点查漏行、新键残留误拒、
+// 唯一列 UNIQUE 静默失效三类可观察错误结果。
+// ===========================================================================
+
+/// 场景 1：PK rekey 回滚后旧键点查可达（修复前旧键条目缺失、点查漏行）。
+#[tokio::test]
+async fn rollback_of_pk_rekey_restores_old_key_lookup() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        "seed insert",
+    );
+
+    let tx = db.begin().await.unwrap();
+    expect_affected(
+        db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
+            .await,
+        "in-tx rekey update",
+    );
+    db.rollback(tx).await.unwrap();
+
+    assert_eq!(
+        expect_rows(
+            db.execute_sql("SELECT * FROM t WHERE id = 5").await,
+            "old key point lookup after rekey rollback"
+        ),
+        vec![vec![serde_json::json!(5), serde_json::json!(100)]],
+        "rekey 回滚后旧键 5 点查必须可达"
+    );
+}
+
+/// 场景 2：PK rekey 回滚后新键无残留——点查空集，新键 INSERT 不被误拒。
+#[tokio::test]
+async fn rollback_of_pk_rekey_leaves_no_new_key_residue() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        "seed insert",
+    );
+
+    let tx = db.begin().await.unwrap();
+    expect_affected(
+        db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
+            .await,
+        "in-tx rekey update",
+    );
+    db.rollback(tx).await.unwrap();
+
+    let rows = expect_rows(
+        db.execute_sql("SELECT * FROM t WHERE id = 7").await,
+        "new key point lookup after rekey rollback",
+    );
+    assert!(
+        rows.is_empty(),
+        "rekey 回滚后新键 7 点查必须为空集，got: {:?}",
+        rows
+    );
+    let resp = db.execute_sql("INSERT INTO t VALUES (7, 200)").await;
+    assert!(
+        !matches!(resp, Response::Error { .. }),
+        "回滚后新键 7 的 INSERT 不得被残留条目误拒，got: {:?}",
+        resp
+    );
+}
+
+/// 场景 3：唯一列 rekey 回滚后条目与存活版本一致——原值 5 仍占用（同值
+/// 重插被 UNIQUE 拒绝）、新值 9 释放（重插可达）。唯一列无索引路由，占用
+/// 与释放经 INSERT 的唯一预检观察。
+#[tokio::test]
+async fn rollback_of_unique_rekey_keeps_entries_consistent() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t VALUES (1, 5)").await,
+        "seed insert",
+    );
+
+    let tx = db.begin().await.unwrap();
+    expect_affected(
+        db.execute_in_tx("UPDATE t SET code = 9 WHERE id = 1", &tx)
+            .await,
+        "in-tx unique rekey update",
+    );
+    db.rollback(tx).await.unwrap();
+
+    let rows = expect_rows(
+        db.execute_sql("SELECT * FROM t WHERE code = 5").await,
+        "unique old value scan after rollback",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![serde_json::json!(1), serde_json::json!(5)]],
+        "回滚后原行 (1, 5) 必须经扫描可达"
+    );
+
+    let resp = db.execute_sql("INSERT INTO t VALUES (2, 5)").await;
+    assert!(
+        matches!(resp, Response::Error { .. }),
+        "回滚后原唯一值 5 必须仍被占用（UNIQUE 不得静默失效），got: {:?}",
+        resp
+    );
+
+    let resp = db.execute_sql("INSERT INTO t VALUES (2, 9)").await;
+    assert!(
+        !matches!(resp, Response::Error { .. }),
+        "回滚后新唯一值 9 必须被释放（不得被残留条目误拒），got: {:?}",
+        resp
+    );
+}
+
+/// 场景 4：rekey UPDATE 回滚后干净重开与崩溃恢复两态一致——运行期断言与
+/// 重开断言同型（恢复面以数据页重建索引，天然收敛；运行期行为必须一致）。
+#[tokio::test]
+async fn rollback_of_pk_rekey_consistent_across_crash_reopen() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("explicit_tx.db");
+
+    {
+        let db = Database::open(&path).await.unwrap();
+        expect_ok(
+            &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+            "create t",
+        );
+        // DDL 无 WAL 记录：catalog 经 buffer_pool 落盘（夹具先例），否则
+        // 重开 redo 必 table not found。
+        db.buffer_pool.flush_all().await.unwrap();
+        expect_ok(
+            &db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+            "seed insert",
+        );
+
+        let tx = db.begin().await.unwrap();
+        expect_affected(
+            db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
+                .await,
+            "in-tx rekey update",
+        );
+        db.rollback(tx).await.unwrap();
+
+        // 运行期两态比较面（修复前：旧键空集 + 新键返回 (5, 100)，RED）
+        assert_eq!(
+            expect_rows(
+                db.execute_sql("SELECT * FROM t WHERE id = 5").await,
+                "runtime old key lookup"
+            ),
+            vec![vec![serde_json::json!(5), serde_json::json!(100)]],
+            "运行期旧键 5 点查必须可达"
+        );
+        let rows = expect_rows(
+            db.execute_sql("SELECT * FROM t WHERE id = 7").await,
+            "runtime new key lookup",
+        );
+        assert!(
+            rows.is_empty(),
+            "运行期新键 7 点查必须为空集，got: {:?}",
+            rows
+        );
+
+        db.wal_buffer.shutdown().await;
+        drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
+    }
+
+    let db2 = Database::open(&path).await.unwrap();
+    assert_eq!(
+        expect_rows(
+            db2.execute_sql("SELECT * FROM t WHERE id = 5").await,
+            "recovered old key lookup"
+        ),
+        vec![vec![serde_json::json!(5), serde_json::json!(100)]],
+        "恢复后旧键 5 点查必须可达"
+    );
+    let rows = expect_rows(
+        db2.execute_sql("SELECT * FROM t WHERE id = 7").await,
+        "recovered new key lookup",
+    );
+    assert!(
+        rows.is_empty(),
+        "恢复后新键 7 点查必须为空集，got: {:?}",
+        rows
+    );
+    let resp = db2.execute_sql("INSERT INTO t VALUES (7, 200)").await;
+    assert!(
+        !matches!(resp, Response::Error { .. }),
+        "恢复后新键 7 的 INSERT 必须可用，got: {:?}",
+        resp
+    );
+    db2.wal_buffer.shutdown().await;
+}
+
+/// 附加形态：SET 唯一列从 NULL 改值的回滚——prev 该列为 NULL（派生键
+/// None），修复前把新值键条目 update 指向 prev，新值 9 残留占用；修复后
+/// 仅删除不回插，9 释放。
+#[tokio::test]
+async fn rollback_of_unique_set_from_null_releases_new_value() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        "seed insert (code NULL)",
+    );
+
+    let tx = db.begin().await.unwrap();
+    expect_affected(
+        db.execute_in_tx("UPDATE t SET code = 9 WHERE id = 1", &tx)
+            .await,
+        "in-tx set unique from null",
+    );
+    db.rollback(tx).await.unwrap();
+
+    let rows = expect_rows(
+        db.execute_sql("SELECT * FROM t WHERE code = 9").await,
+        "scan for new value after rollback",
+    );
+    assert!(
+        rows.is_empty(),
+        "回滚后新值 9 不得经扫描可达，got: {:?}",
+        rows
+    );
+    let resp = db.execute_sql("INSERT INTO t VALUES (2, 9)").await;
+    assert!(
+        !matches!(resp, Response::Error { .. }),
+        "回滚后新唯一值 9 必须被释放（不得被残留条目误拒），got: {:?}",
+        resp
+    );
+}
+
+// ===========================================================================
+// MS21 Iter001（change 2026-09-29-ms21-ddl-evolution / design D17）：SET 唯一
+// 列为 NULL 的回滚还原——修复前 A 趟唯一臂以唯一反查为门，值→NULL 的
+// UPDATE 已在写入期删除旧条目且 NULL 不入索引，反查 None 整臂跳过：旧唯
+// 一键条目缺失，同值重插不再被 UNIQUE 拒绝（静默失效）。
+// ===========================================================================
+
+/// T7-①：值→NULL 回滚后旧值占用还原——同值 INSERT 被 DuplicateKey 拒绝、
+/// 原行经唯一列扫描可达。
+///
+/// RED（修复前实测）：INSERT (2, 5) 成功（UNIQUE 静默失效）。
+#[tokio::test]
+async fn rollback_of_unique_set_to_null_restores_old_value_occupation() {
+    let (db, _dir) = open_db().await;
+    expect_ok(
+        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+        "create t",
+    );
+    expect_ok(
+        &db.execute_sql("INSERT INTO t VALUES (1, 5)").await,
+        "seed insert",
+    );
+
+    let tx = db.begin().await.unwrap();
+    expect_affected(
+        db.execute_in_tx("UPDATE t SET code = NULL WHERE id = 1", &tx)
+            .await,
+        "in-tx set unique to null",
+    );
+    db.rollback(tx).await.unwrap();
+
+    // 修复前：旧值 5 条目缺失 → INSERT 成功（RED）
+    let resp = db.execute_sql("INSERT INTO t VALUES (2, 5)").await;
+    assert!(
+        matches!(resp, Response::Error { .. }),
+        "回滚后旧唯一值 5 必须仍被占用（UNIQUE 不得静默失效），got: {:?}",
+        resp
+    );
+
+    assert_eq!(
+        expect_rows(
+            db.execute_sql("SELECT * FROM t WHERE code = 5").await,
+            "old value scan after rollback"
+        ),
+        vec![vec![serde_json::json!(1), serde_json::json!(5)]],
+        "回滚后原行 (1, 5) 必须经唯一列扫描可达"
+    );
+}
+
+/// T7-②：值→NULL 回滚还原跨崩溃重开两态一致（`:437` 模式——运行期断言
+/// 与重开断言同型，恢复面以数据页重建索引）。
+#[tokio::test]
+async fn rollback_of_unique_set_to_null_consistent_across_crash_reopen() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("explicit_tx.db");
+
+    {
+        let db = Database::open(&path).await.unwrap();
+        expect_ok(
+            &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+            "create t",
+        );
+        // DDL 无 WAL 记录：catalog 经 buffer_pool 落盘（夹具先例），否则
+        // 重开 redo 必 table not found。
+        db.buffer_pool.flush_all().await.unwrap();
+        expect_ok(
+            &db.execute_sql("INSERT INTO t VALUES (1, 5)").await,
+            "seed insert",
+        );
+
+        let tx = db.begin().await.unwrap();
+        expect_affected(
+            db.execute_in_tx("UPDATE t SET code = NULL WHERE id = 1", &tx)
+                .await,
+            "in-tx set unique to null",
+        );
+        db.rollback(tx).await.unwrap();
+
+        // 运行期两态比较面（修复前：INSERT 成功，RED）
+        let resp = db.execute_sql("INSERT INTO t VALUES (2, 5)").await;
+        assert!(
+            matches!(resp, Response::Error { .. }),
+            "运行期旧唯一值 5 必须仍被占用，got: {:?}",
+            resp
+        );
+
+        db.wal_buffer.shutdown().await;
+        drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
+    }
+
+    let db2 = Database::open(&path).await.unwrap();
+    let resp = db2.execute_sql("INSERT INTO t VALUES (2, 5)").await;
+    assert!(
+        matches!(resp, Response::Error { .. }),
+        "恢复后旧唯一值 5 必须仍被占用（两态一致），got: {:?}",
+        resp
+    );
+    assert_eq!(
+        expect_rows(
+            db2.execute_sql("SELECT * FROM t WHERE code = 5").await,
+            "old value scan after crash reopen"
+        ),
+        vec![vec![serde_json::json!(1), serde_json::json!(5)]],
+        "恢复后原行 (1, 5) 必须经唯一列扫描可达"
+    );
+    db2.wal_buffer.shutdown().await;
+}

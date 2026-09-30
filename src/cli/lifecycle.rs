@@ -9,7 +9,7 @@ use super::{emit_stdout, kind, sigint_future, sigterm_future, ExitStatus, Format
 use crate::database::Database;
 use crate::network::protocol::Response;
 use crate::pipeline::{execute_stage, parse_stage, plan_stage};
-use crate::storage::catalog::{CatalogColumnRow, CatalogRow};
+use crate::storage::catalog::{CatalogColumnRow, CatalogKind, CatalogRow};
 use crate::storage::page_format::ColumnType;
 use std::path::Path;
 
@@ -213,7 +213,8 @@ pub(super) async fn schema(db: &str, key: Option<&str>) -> ExitStatus {
                     Ok(tables) => tables,
                     Err(e) => return ExitStatus::General(format!("failed to scan catalog: {}", e)),
                 };
-                for table in tables {
+                // MS21 Iter005 (T5-a/D12)：视图行不进 schema 输出（D15）。
+                for table in tables.into_iter().filter(|t| t.kind == CatalogKind::Table) {
                     let mut columns = match catalog.scan_columns(&table.table_name).await {
                         Ok(columns) => columns,
                         Err(e) => {
@@ -255,7 +256,9 @@ pub(super) async fn dump(db: &str, key: Option<&str>) -> ExitStatus {
                     Ok(tables) => tables,
                     Err(e) => return ExitStatus::General(format!("failed to scan catalog: {}", e)),
                 };
-                for table in tables {
+                // MS21 Iter005 (T5-a/D12)：视图行不进 dump（D15：dump 文本
+                // 仍为 CREATE TABLE + INSERT，视图不跨 dump 存续）。
+                for table in tables.into_iter().filter(|t| t.kind == CatalogKind::Table) {
                     let mut columns = match catalog.scan_columns(&table.table_name).await {
                         Ok(columns) => columns,
                         Err(e) => {
@@ -414,7 +417,9 @@ pub(super) async fn restore(db: &str, file: &str, key: Option<&str>) -> ExitStat
                 // 空库前置（D8）：先空库检查后读文件（避免对拒绝目标白读大文件）
                 let catalog = db.table_manager.catalog();
                 match catalog.scan_tables().await {
-                    Ok(tables) if !tables.is_empty() => {
+                    // MS21 Iter005 (T5-a/D12)：视图行不构成非空拒绝（D15：
+                    // restore 通道不消费视图）。
+                    Ok(tables) if tables.iter().any(|t| t.kind == CatalogKind::Table) => {
                         return ExitStatus::General(format!(
                             "{} is not empty; restore requires an empty database",
                             db_path_in_work.display()
@@ -1189,6 +1194,9 @@ mod tests {
             column_count: 2,
             data_page_tail: 2,
             unique_roots: Vec::new(),
+            secondary_indexes: Vec::new(),
+            kind: crate::storage::CatalogKind::Table,
+            view_sql: None,
         }
     }
 

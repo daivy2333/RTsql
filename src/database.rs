@@ -5,12 +5,27 @@
 
 use crate::network::protocol::Response;
 use crate::plan_cache::PlanCache;
-use crate::storage::{BufferPool, ColumnType, FileStorage, Result, TableManager, TableMeta};
+use crate::storage::{
+    BufferPool, CatalogKind, ColumnType, FileStorage, Result, TableManager, TableMeta,
+};
 use crate::transaction::{IsolationLevel, Snapshot, Transaction, TransactionManager};
 use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalWriter};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// MS21 Iter005 (T5-a/D12): in-memory view registry entry — the persisted
+/// definition SQL plus the persisted column-name list (the explicit column
+/// list, or the definition's output header when none was given). Loaded
+/// from the catalog at open time; kept in sync by the CREATE/DROP VIEW
+/// executors. Views are non-materialized: a `ViewMeta` is the whole
+/// in-memory footprint (no data pages, no index trees).
+#[derive(Debug, Clone)]
+pub struct ViewMeta {
+    pub sql: String,
+    pub columns: Vec<String>,
+}
 
 /// Database is the central coordinator that owns all major RTsql subsystems.
 #[derive(Clone)]
@@ -25,6 +40,8 @@ pub struct Database {
     /// MS09 Iter000 (D4): isolation level fixed at open time. The default
     /// `RepeatableRead` keeps every existing behavior byte for byte.
     pub isolation: IsolationLevel,
+    /// MS21 Iter005 (T5-a/D12): persisted view definitions by name.
+    pub views: Arc<RwLock<HashMap<String, ViewMeta>>>,
 }
 
 impl Database {
@@ -62,6 +79,30 @@ impl Database {
         // cache from the catalog for an existing file.
         let table_manager = TableManager::new(buffer_pool.clone(), storage).await?;
         table_manager.open_or_init().await?;
+
+        // MS21 Iter005 (T5-a/D12): load the persisted view registry —
+        // kind=View catalog rows plus their column-name rows (schema order
+        // = persisted `column_index` order, same hardening as
+        // `open_or_init`; `open_or_init` itself skips view rows).
+        let mut views = HashMap::new();
+        for row in table_manager.catalog().scan_tables().await? {
+            if row.kind != CatalogKind::View {
+                continue;
+            }
+            let mut cols = table_manager
+                .catalog()
+                .scan_columns(&row.table_name)
+                .await?;
+            cols.sort_by_key(|c| c.column_index);
+            views.insert(
+                row.table_name.clone(),
+                ViewMeta {
+                    sql: row.view_sql.unwrap_or_default(),
+                    columns: cols.into_iter().map(|c| c.column_name).collect(),
+                },
+            );
+        }
+        let views = Arc::new(RwLock::new(views));
         let transaction_manager = Arc::new(TransactionManager::new());
 
         // 2. Initialize WAL
@@ -131,6 +172,7 @@ impl Database {
             plan_cache,
             checkpoint_manager,
             isolation,
+            views,
         })
     }
 

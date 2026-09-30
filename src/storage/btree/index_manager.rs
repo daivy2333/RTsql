@@ -27,6 +27,11 @@ pub enum CatalogRootSlot {
     /// columns in ascending column order — the same order the roots are
     /// serialized in the catalog row.
     Unique { table: String, ordinal: usize },
+    /// MS21 Iteration 002 (D4): the Nth secondary (user CREATE INDEX) root
+    /// (`__tables.secondary_indexes[ordinal]`). `ordinal` is the position in
+    /// the table's registration list — creation order, the same order the
+    /// section is serialized in the catalog row.
+    Secondary { table: String, ordinal: usize },
 }
 
 /// IndexManager: Async API wrapper for BTree
@@ -111,7 +116,8 @@ impl IndexManager {
     /// catalog context. Errors propagate strictly — a failed catalog write
     /// must not silently desynchronize the recoverable root. MS23 Iteration
     /// 001 (D5): dispatch by slot — PK root to `index_root_page_id`, UNIQUE
-    /// root to `unique_roots[ordinal]`.
+    /// root to `unique_roots[ordinal]`. MS21 Iteration 002 (D4): secondary
+    /// root to `secondary_indexes[ordinal]`.
     async fn sync_root_to_catalog(&self, new_root: PageId) -> Result<()> {
         let ctx = self.catalog_ctx.lock().unwrap().clone();
         if let Some((catalog, slot)) = ctx {
@@ -122,6 +128,11 @@ impl IndexManager {
                 CatalogRootSlot::Unique { table, ordinal } => {
                     catalog
                         .update_unique_index_root(&table, ordinal, new_root.0 as u32)
+                        .await?;
+                }
+                CatalogRootSlot::Secondary { table, ordinal } => {
+                    catalog
+                        .update_secondary_index_root(&table, ordinal, new_root.0 as u32)
                         .await?;
                 }
             }
@@ -289,6 +300,38 @@ impl IndexManager {
             self.sync_root_to_catalog(new_root_id).await?;
         }
 
+        Ok(())
+    }
+
+    /// MS21 Iteration 002 (D3/T2-b): exact single-entry delete — removes only
+    /// the `(key, row_id)` entry, leaving sibling same-key entries and their
+    /// reverse mappings untouched. Secondary indexes allow duplicate keys
+    /// (multiple rows sharing one value), so the ambiguous primitives
+    /// `delete(key)` (first-≥ position) / `update(key, rid)` (first match)
+    /// must never be used against them — this is their only cleanup channel.
+    ///
+    /// `BTree::delete_exact` never rebalances and never changes the root
+    /// (returns `Ok(None)` by contract), so no root or catalog sync is needed.
+    /// The reverse mapping entry is removed only when it still maps the rid
+    /// to this exact key. Key present but rid mismatched → `KeyNotFound`
+    /// (same error surface as the leaf-level exact delete).
+    pub async fn delete_exact(&self, key: &[u8], row_id: RowId) -> Result<()> {
+        let root_page_id = self.root_page_id.load(Ordering::Acquire);
+        let sync_loader = self.sync_loader.clone();
+        let key_vec = key.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let mut btree = BTree::from_root(PageId(root_page_id), sync_loader);
+            btree.delete_exact(&key_vec, row_id)
+        })
+        .await??;
+
+        // Reverse mapping: clear the rid's entry only when it still names
+        // this key (an entry re-pointed by a later writer must survive).
+        let mut map = self.row_to_key.write().await;
+        if map.get(&row_id).map(|k| k.as_slice()) == Some(key) {
+            map.remove(&row_id);
+        }
         Ok(())
     }
 
@@ -557,5 +600,47 @@ mod tests {
         for p in &pages {
             assert!(seen.insert(p.0), "duplicate page id in result: {:?}", p);
         }
+    }
+
+    // ===========================================================================
+    // MS21 Iteration 002 (T2-b/D3): delete_exact 精确删除原语
+    // ===========================================================================
+
+    /// 同 key 双 rid 并存时 `delete_exact` 只删指定条目：兄弟条目、反向映射
+    /// 与其余 key 不受扰；键存在但 rid 不匹配 → KeyNotFound。
+    #[tokio::test]
+    async fn delete_exact_removes_only_named_entry_among_duplicates() {
+        let (_dir, im) = make_manager().await;
+        let rid_a = RowId::new(3, 1);
+        let rid_b = RowId::new(4, 2);
+        let rid_c = RowId::new(5, 3);
+
+        // 同 key 两个条目 + 邻近另一 key 条目
+        im.insert(b"dup", rid_a).await.unwrap();
+        im.insert(b"dup", rid_b).await.unwrap();
+        im.insert(b"other", rid_c).await.unwrap();
+
+        // 键在树中但 rid 不匹配 → KeyNotFound（两 rid 均不误删）
+        assert!(im.delete_exact(b"dup", RowId::new(9, 9)).await.is_err());
+        assert_eq!(im.search_all(b"dup").await.unwrap().len(), 2);
+
+        // 精确删除 rid_a：rid_b 条目与反向映射保留
+        im.delete_exact(b"dup", rid_a).await.unwrap();
+        assert_eq!(im.search_all(b"dup").await.unwrap(), vec![rid_b]);
+        assert_eq!(
+            im.find_key_by_row_id(rid_b).await.as_deref(),
+            Some(b"dup".as_slice()),
+            "sibling reverse mapping must survive"
+        );
+        assert_eq!(im.find_key_by_row_id(rid_a).await, None);
+
+        // 精确删除最后一个条目后键清空；邻近 key 不受扰
+        im.delete_exact(b"dup", rid_b).await.unwrap();
+        assert!(im.search_all(b"dup").await.unwrap().is_empty());
+        assert_eq!(im.search_all(b"other").await.unwrap(), vec![rid_c]);
+
+        // 缺失键 KeyNotFound（leaf 层精确语义，不误删「首个 ≥」邻近条目）
+        assert!(im.delete_exact(b"zzz", rid_c).await.is_err());
+        assert_eq!(im.search_all(b"other").await.unwrap(), vec![rid_c]);
     }
 }

@@ -3,7 +3,7 @@
 use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor};
 use crate::profiling::{is_profiling_enabled, record_time};
-use crate::storage::page_format::{deserialize_value_refs, ColumnType};
+use crate::storage::page_format::{deserialize_row, ColumnType};
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
 use crate::transaction::Snapshot;
 use std::sync::Arc;
@@ -76,12 +76,13 @@ impl Executor for IndexScanExecutor {
         match row_id {
             Some(id) => {
                 if let Some(ref snapshot) = self.snapshot {
-                    // M36: closure-based zero-copy (deserialize_value_refs + to_value)
+                    // M36 closure path; MS21 Iter003 (T3-a/D9): width-aware
+                    // read-back + DEFAULT overlay so ADD COLUMN narrow rows
+                    // materialize at full schema width.
                     let values_opt = self
                         .buffer_pool
                         .find_visible_version(id, snapshot, |bytes| {
-                            deserialize_value_refs(bytes, &self.schema)
-                                .map(|vrs| vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>())
+                            deserialize_row(bytes, &self.schema, &self.table_meta.defaults)
                         })
                         .await?;
 
@@ -93,10 +94,10 @@ impl Executor for IndexScanExecutor {
                         None => Ok(None), // all versions invisible
                     }
                 } else {
-                    // M36: closure-based zero-copy
+                    // M36 closure path; MS21 Iter003 (T3-a/D9): width-aware
+                    // read-back + DEFAULT overlay.
                     let values = read_tuple_from_data_page(&self.buffer_pool, id, |_vh, bytes| {
-                        deserialize_value_refs(bytes, &self.schema)
-                            .map(|vrs| vrs.iter().map(|vr| vr.to_value()).collect::<Vec<_>>())
+                        deserialize_row(bytes, &self.schema, &self.table_meta.defaults)
                     })
                     .await?;
                     Ok(Some(ExecResult::Row(apply_projection(

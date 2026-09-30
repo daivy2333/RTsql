@@ -3,13 +3,13 @@
 //! 负责启动时重放 WAL，恢复未完成事务
 
 use super::{WalError, WalReader, WalRecord};
-use crate::storage::data::TableMeta;
+use crate::storage::data::{SecondaryIndexMeta, TableMeta};
 use crate::storage::page_format::{
-    deserialize_tuple, ColumnType, RowId, SlottedPage, SlottedPageRef,
+    deserialize_row, ColumnType, RowId, SlottedPage, SlottedPageRef,
 };
 use crate::storage::{
-    update_version_header_in_data_page, write_tuple_to_data_page, BufferPool, IndexManager, PageId,
-    TableManager,
+    update_version_header_in_data_page, write_tuple_to_data_page, BufferPool, CatalogKind,
+    IndexManager, PageId, TableManager,
 };
 use crate::transaction::VersionHeader;
 use std::collections::{HashMap, HashSet};
@@ -88,14 +88,29 @@ fn insert_row_id_sorted(candidates: &mut Vec<RowId>, rid: RowId) {
 /// slot 键：可键控 slot 携带 PK 键；无键 slot 携带 tuple 原始字节（T8-R2
 /// keyless 桶的桶键）。
 type PreScanPage = crate::storage::Result<(u32, Vec<(PrescanSlotKey, RowId)>)>;
-/// 页扫描闭包产出（rebuild_pk_indexes）：(rid, header, PK key, 唯一列键)。
-/// 唯一列键向量与该表 qualifying UNIQUE 列序号表逐位对齐（MS23 Iter001）。
+/// 页扫描闭包产出（rebuild_pk_indexes）：(rid, header, PK key, 唯一列键,
+/// 二级列键)。唯一列键向量与该表 qualifying UNIQUE 列序号表逐位对齐
+/// （MS23 Iter001）；二级列键向量与 catalog 登记段逐位对齐（MS21 Iter002）。
 type RebuildScanPage = crate::storage::Result<(
     u32,
-    Vec<(RowId, VersionHeader, Option<Vec<u8>>, Vec<Option<Vec<u8>>>)>,
+    Vec<(
+        RowId,
+        VersionHeader,
+        Option<Vec<u8>>,
+        Vec<Option<Vec<u8>>>,
+        Vec<Option<Vec<u8>>>,
+    )>,
 )>;
-/// 重建扫描 slot 表：rid → (header, PK 键, 唯一列键)。
-type RebuildSlots = HashMap<RowId, (VersionHeader, Option<Vec<u8>>, Vec<Option<Vec<u8>>>)>;
+/// 重建扫描 slot 表：rid → (header, PK 键, 唯一列键, 二级列键)。
+type RebuildSlots = HashMap<
+    RowId,
+    (
+        VersionHeader,
+        Option<Vec<u8>>,
+        Vec<Option<Vec<u8>>>,
+        Vec<Option<Vec<u8>>>,
+    ),
+>;
 
 /// 预扫描 slot 键（T8-R2）：`Keyed` = PK 键字节；`Keyless` = tuple 原始字节。
 enum PrescanSlotKey {
@@ -211,7 +226,9 @@ fn extract_pk_key(table_meta: &Arc<TableMeta>, tuple_data: &[u8]) -> Option<Vec<
         .iter()
         .map(|(_, ct)| ct.clone())
         .collect();
-    let values = deserialize_tuple(tuple_data, &schema).ok()?;
+    // MS21 Iter003 (T3-a/D9): width-aware + DEFAULT overlay——与运行期
+    // 读回同源（PK 列恒在存活前缀，overlay 对 PK 派生无行为差异）。
+    let values = deserialize_row(tuple_data, &schema, &table_meta.defaults).ok()?;
     let pk_value = values.get(table_meta.pk_index)?;
     pk_value.to_key().map(|k| k.as_bytes().to_vec())
 }
@@ -222,17 +239,29 @@ fn extract_pk_key(table_meta: &Arc<TableMeta>, tuple_data: &[u8]) -> Option<Vec<
 ///
 /// MS24 Iter001 replan (2.9/D9)：`pub(crate)` 供事务层回滚通道复用为墓碑
 /// 行的索引键派生单一来源（键派生规则零变化，仅可见性）。
+///
+/// MS21 Iter002 (T2-d/T2-e, D8)：签名扩展兼提二级列键（`secondary_cols`，
+/// 一次反序列化多提键——rebuild 扫描与事务回滚还原共用单一派生源）。
+///
+/// 提取结果：`(PK 键, 唯一列键向量, 二级列键向量)`——后两者与传入列序号表
+/// 逐位对齐，不可键控位为 `None`。
+pub(crate) type ExtractedIndexKeys = (Option<Vec<u8>>, Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>);
+
 pub(crate) fn extract_index_keys(
     table_meta: &Arc<TableMeta>,
     unique_cols: &[usize],
+    secondary_cols: &[usize],
     tuple_data: &[u8],
-) -> (Option<Vec<u8>>, Vec<Option<Vec<u8>>>) {
+) -> ExtractedIndexKeys {
     let schema: Vec<_> = table_meta
         .columns
         .iter()
         .map(|(_, ct)| ct.clone())
         .collect();
-    match deserialize_tuple(tuple_data, &schema) {
+    // MS21 Iter003 (T3-a/D9): width-aware + DEFAULT overlay——ADD COLUMN
+    // 后对尾列建索引时，窄行按声明 DEFAULT 派生键（与运行期扫描/回填
+    // 同源，恢复两态一致）。反序列化失败仍整组 None（容忍语义不变）。
+    match deserialize_row(tuple_data, &schema, &table_meta.defaults) {
         Ok(values) => {
             let pk = values
                 .get(table_meta.pk_index)
@@ -247,9 +276,22 @@ pub(crate) fn extract_index_keys(
                         .map(|k| k.as_bytes().to_vec())
                 })
                 .collect();
-            (pk, uniques)
+            let secondaries = secondary_cols
+                .iter()
+                .map(|i| {
+                    values
+                        .get(*i)
+                        .and_then(|v| v.to_key())
+                        .map(|k| k.as_bytes().to_vec())
+                })
+                .collect();
+            (pk, uniques, secondaries)
         }
-        Err(_) => (None, vec![None; unique_cols.len()]),
+        Err(_) => (
+            None,
+            vec![None; unique_cols.len()],
+            vec![None; secondary_cols.len()],
+        ),
     }
 }
 
@@ -270,6 +312,11 @@ async fn build_pk_version_maps(
         })?;
 
     for row in tables {
+        // MS21 Iter005 (T5-a/D12): view-definition rows have no TableMeta
+        // and no data pages — nothing to pre-scan.
+        if row.kind == CatalogKind::View {
+            continue;
+        }
         let table_name = row.table_name.clone();
         let meta = table_manager.get_table(&table_name).await.map_err(|e| {
             WalError::RedoFailed(format!(
@@ -889,6 +936,11 @@ impl RecoveryManager {
         })?;
 
         for row in tables {
+            // MS21 Iter005 (T5-a/D12): view-definition rows carry no index
+            // trees — skip (no TableMeta exists for them).
+            if row.kind == CatalogKind::View {
+                continue;
+            }
             let table_name = row.table_name.clone();
             let meta = table_manager.get_table(&table_name).await.map_err(|e| {
                 WalError::RedoFailed(format!(
@@ -926,7 +978,7 @@ impl RecoveryManager {
                 .map(|i| meta.columns[*i].0.clone())
                 .collect();
 
-            // 1. 新索引实例（PK + 逐唯一列；先分配，后释放旧树）
+            // 1. 新索引实例（PK + 逐唯一列 + 逐登记二级索引；先分配，后释放旧树）
             let bp = buffer_pool.clone();
             let new_index = Arc::new(
                 tokio::task::spawn_blocking(move || IndexManager::new(bp))
@@ -957,8 +1009,38 @@ impl RecoveryManager {
                 );
                 new_unique_indexes.push((*col_idx, uindex));
             }
+            // MS21 Iter002 (T2-e/D8)：为 catalog 登记的每个二级索引新建空树
+            // （creation order，与登记段序列化序一致）。重建树不带 catalog
+            // 上下文（换入后由 attach_index_catalog_contexts 统一挂接）。
+            let secondary_cols: Vec<usize> = row
+                .secondary_indexes
+                .iter()
+                .map(|e| e.column_index as usize)
+                .collect();
+            let mut new_secondary_indexes: Vec<SecondaryIndexMeta> = Vec::new();
+            for entry in &row.secondary_indexes {
+                let bp = buffer_pool.clone();
+                let sindex = Arc::new(
+                    tokio::task::spawn_blocking(move || IndexManager::new(bp))
+                        .await
+                        .map_err(|e| {
+                            WalError::RedoFailed(format!("index rebuild join error: {}", e))
+                        })?
+                        .map_err(|e| {
+                            WalError::RedoFailed(format!(
+                                "index rebuild secondary init for '{}' failed: {}",
+                                table_name, e
+                            ))
+                        })?,
+                );
+                new_secondary_indexes.push(SecondaryIndexMeta {
+                    name: entry.name.clone(),
+                    column_index: entry.column_index as usize,
+                    index: sindex,
+                });
+            }
 
-            // 2. 扫描最终数据页（同一反序列化兼提 PK 键与唯一列键）
+            // 2. 扫描最终数据页（同一反序列化兼提 PK 键、唯一列键与二级列键）
             let mut slots: RebuildSlots = HashMap::new();
             let mut pointed: HashSet<RowId> = HashSet::new();
             let mut page_id = Some(meta.data_page_head);
@@ -980,9 +1062,10 @@ impl RecoveryManager {
                             else {
                                 continue;
                             };
-                            let (key, ukeys) = extract_index_keys(
+                            let (key, ukeys, skeys) = extract_index_keys(
                                 &meta,
                                 &unique_cols,
+                                &secondary_cols,
                                 &slot_data[VersionHeader::SIZE..],
                             );
                             if let Some(target) = vh.next_version() {
@@ -993,6 +1076,7 @@ impl RecoveryManager {
                                 vh,
                                 key,
                                 ukeys,
+                                skeys,
                             ));
                         }
                         Ok((slotted.header().next_page_id, page_slots))
@@ -1005,8 +1089,8 @@ impl RecoveryManager {
                         ))
                     })?;
 
-                for (rid, vh, key, ukeys) in page_slots {
-                    slots.insert(rid, (vh, key, ukeys));
+                for (rid, vh, key, ukeys, skeys) in page_slots {
+                    slots.insert(rid, (vh, key, ukeys, skeys));
                 }
                 page_id = if next_page == 0 {
                     None
@@ -1016,17 +1100,22 @@ impl RecoveryManager {
             }
 
             // 3. 链尾回溯：不被指向的 slot 为链尾，new→old 取首个存活版本
-            //    （PK 判重 + 逐唯一列判重，跨链重复显式点名表列）
+            //    （PK 判重 + 逐唯一列判重，跨链重复显式点名表列；MS21 Iter002
+            //    D8：二级索引非唯一——不做跨链判重，重复键多行全建条目）
             let mut entries: HashMap<Vec<u8>, RowId> = HashMap::new();
             let mut unique_entries: Vec<HashMap<Vec<u8>, RowId>> =
                 (0..unique_cols.len()).map(|_| HashMap::new()).collect();
+            let mut secondary_entries: Vec<Vec<(Vec<u8>, RowId)>> = (0..new_secondary_indexes
+                .len())
+                .map(|_| Vec::new())
+                .collect();
             for tail_rid in slots.keys().copied().collect::<Vec<_>>() {
                 if pointed.contains(&tail_rid) {
                     continue;
                 }
                 let mut rid = tail_rid;
                 loop {
-                    let (vh, key, ukeys) = &slots[&rid];
+                    let (vh, key, ukeys, skeys) = &slots[&rid];
                     if vh.is_deleted() {
                         if committed_tx_ids.contains(&vh.create_tx_id()) {
                             break; // 提交删除：整行不建条目
@@ -1056,6 +1145,11 @@ impl RecoveryManager {
                                 unique_entries[j].insert(ukey.clone(), rid);
                             }
                         }
+                        for (j, skey) in skeys.iter().enumerate() {
+                            if let Some(skey) = skey {
+                                secondary_entries[j].push((skey.clone(), rid));
+                            }
+                        }
                         break;
                     }
                     // 未提交版本 / 未提交删除：回溯旧版本
@@ -1066,7 +1160,8 @@ impl RecoveryManager {
                 }
             }
 
-            // 4. 写入新索引（PK + 唯一）→ 整表 swap → 持久化新根（PK + 逐唯一）
+            // 4. 写入新索引（PK + 唯一 + 二级）→ 整表 swap → 持久化新根
+            //    （PK + 逐唯一 + 逐二级）
             for (key, rid) in &entries {
                 new_index.insert(key, *rid).await.map_err(|e| {
                     WalError::RedoFailed(format!(
@@ -1085,12 +1180,31 @@ impl RecoveryManager {
                     })?;
                 }
             }
+            for (j, sindex_meta) in new_secondary_indexes.iter().enumerate() {
+                for (key, rid) in &secondary_entries[j] {
+                    sindex_meta.index.insert(key, *rid).await.map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "index rebuild secondary insert into '{}' failed: {}",
+                            table_name, e
+                        ))
+                    })?;
+                }
+            }
             let unique_roots: Vec<u32> = new_unique_indexes
                 .iter()
                 .map(|(_, u)| u.root_page_id().0 as u32)
                 .collect();
-            let (old_index, old_uniques) = table_manager
-                .replace_recovery_indexes(&table_name, new_index.clone(), new_unique_indexes)
+            let secondary_roots: Vec<u32> = new_secondary_indexes
+                .iter()
+                .map(|m| m.index.root_page_id().0 as u32)
+                .collect();
+            let (old_index, old_uniques, old_secondaries) = table_manager
+                .replace_recovery_indexes(
+                    &table_name,
+                    new_index.clone(),
+                    new_unique_indexes,
+                    new_secondary_indexes,
+                )
                 .await
                 .map_err(|e| {
                     WalError::RedoFailed(format!(
@@ -1120,8 +1234,21 @@ impl RecoveryManager {
                         ))
                     })?;
             }
+            for (ordinal, root) in secondary_roots.iter().enumerate() {
+                table_manager
+                    .catalog()
+                    .update_secondary_index_root(&table_name, ordinal, *root)
+                    .await
+                    .map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "index rebuild catalog secondary root update for '{}' failed: {}",
+                            table_name, e
+                        ))
+                    })?;
+            }
 
-            // 5. 旧树释放（PK + 旧唯一树；洞容忍；失败 warn + 泄漏，先例 drop_table）
+            // 5. 旧树释放（PK + 旧唯一树 + 旧二级树；洞容忍；失败 warn + 泄漏，
+            //    先例 drop_table）
             for page in old_index.collect_all_pages_tolerant().await {
                 if let Err(e) = buffer_pool.free_page(page).await {
                     eprintln!(
@@ -1135,6 +1262,16 @@ impl RecoveryManager {
                     if let Err(e) = buffer_pool.free_page(page).await {
                         eprintln!(
                             "[recovery] free old unique index page {:?} of '{}' failed: {}",
+                            page, table_name, e
+                        );
+                    }
+                }
+            }
+            for old_sindex in &old_secondaries {
+                for page in old_sindex.index.collect_all_pages_tolerant().await {
+                    if let Err(e) = buffer_pool.free_page(page).await {
+                        eprintln!(
+                            "[recovery] free old secondary index page {:?} of '{}' failed: {}",
                             page, table_name, e
                         );
                     }
@@ -1172,6 +1309,11 @@ impl RecoveryManager {
         })?;
 
         for row in tables {
+            // MS21 Iter005 (T5-a/D12): view-definition rows have no TableMeta
+            // and no data pages — nothing to mark.
+            if row.kind == CatalogKind::View {
+                continue;
+            }
             let meta = table_manager
                 .get_table(&row.table_name)
                 .await

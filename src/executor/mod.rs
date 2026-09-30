@@ -6,15 +6,20 @@ mod join_config;
 mod join_related_config;
 
 mod aggregate;
+mod alter_table;
 mod anti_join;
 mod correlated;
+mod create_index;
 mod create_table;
+mod create_view;
 mod data_scan;
 pub(crate) mod datetime;
 mod delete;
 mod derived_scan;
 mod distinct;
+mod drop_index;
 mod drop_table;
+mod drop_view;
 mod executor_trait;
 mod explain;
 mod filter;
@@ -37,6 +42,7 @@ mod set_operation;
 mod single_row;
 mod sort;
 mod subquery_eval;
+mod truncate;
 mod update;
 mod upsert;
 mod value;
@@ -46,14 +52,19 @@ pub use join_config::JoinConfig;
 pub use join_related_config::JoinRelatedConfig;
 
 pub use aggregate::{AggregateExecutor, AggregateFunc, AggregateState};
+pub use alter_table::AlterTableExecutor;
 pub use anti_join::AntiJoinExecutor;
 pub use correlated::inject_correlated_values;
+pub use create_index::CreateIndexExecutor;
 pub use create_table::CreateTableExecutor;
+pub use create_view::CreateViewExecutor;
 pub use data_scan::DataScanExecutor;
 pub use delete::DeleteExecutor;
 pub use derived_scan::DerivedScanExecutor;
 pub use distinct::DistinctExecutor;
+pub use drop_index::DropIndexExecutor;
 pub use drop_table::DropTableExecutor;
+pub use drop_view::DropViewExecutor;
 pub use executor_trait::Executor;
 pub use explain::ExplainExecutor;
 pub use filter::FilterExecutor;
@@ -66,13 +77,14 @@ pub use join::JoinExecutor;
 pub use limit::LimitExecutor;
 pub use nested_loop_join::NestedLoopJoinExecutor;
 pub use plan::{
-    AggregateNode, AntiJoinNode, ColumnConstraint, ColumnDef, ColumnRef, ConflictAction,
-    ConflictArbiter, CorrelatedParam, CreateTableAsSelectNode, CreateTableNode, DataScanNode,
-    DeleteNode, DerivedScanNode, DistinctNode, DropTableNode, ExplainNode, FilterNode, HavingNode,
-    IndexScanAllNode, IndexScanNode, InsertNode, JoinCondition, JoinNode, LimitNode,
-    NestedLoopJoinNode, NestedLoopJoinType, OrderByColumn, OutputColumn, PhysicalPlan,
+    AggregateNode, AlterTableNode, AlterTableOp, AntiJoinNode, ColumnConstraint, ColumnDef,
+    ColumnRef, ConflictAction, ConflictArbiter, CorrelatedParam, CreateIndexNode,
+    CreateTableAsSelectNode, CreateTableNode, CreateViewNode, DataScanNode, DeleteNode,
+    DerivedScanNode, DistinctNode, DropIndexNode, DropTableNode, DropViewNode, ExplainNode,
+    FilterNode, HavingNode, IndexScanAllNode, IndexScanNode, InsertNode, JoinCondition, JoinNode,
+    LimitNode, NestedLoopJoinNode, NestedLoopJoinType, OrderByColumn, OutputColumn, PhysicalPlan,
     ProjectionItem, ProjectionNode, ScanNode, SemiJoinNode, SetOpKind, SetOperationNode, SortNode,
-    SubqueryEvalNode, UpdateNode, UpsertAssignment, UpsertNode, UpsertValueExpr,
+    SubqueryEvalNode, TruncateNode, UpdateNode, UpsertAssignment, UpsertNode, UpsertValueExpr,
 };
 pub use predicate::{
     ArithOp, BinaryArithExpression, CaseExpression, CastExpression, CastType, CoalesceExpression,
@@ -88,6 +100,7 @@ pub use set_operation::SetOperationExecutor;
 pub use single_row::SingleRowExecutor;
 pub use sort::SortExecutor;
 pub use subquery_eval::SubqueryEvalExecutor;
+pub use truncate::TruncateExecutor;
 pub use update::UpdateExecutor;
 pub use upsert::UpsertExecutor;
 pub use value::{ColumnType, Value, ValueError};

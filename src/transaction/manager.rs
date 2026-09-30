@@ -317,27 +317,137 @@ impl TransactionManager {
 
             for row_id in indexed {
                 let header = buffer_pool.read_version_header(row_id).await?;
+                let prev_row_id = header.next_version();
+
+                // MS21 Iter000 (D1): 有前驱时从 prev 版本 tuple 派生真实
+                // PK/唯一键——rekey UPDATE 回滚时反查键是新键而 prev tuple
+                // 携带旧键，必须按派生键区分 rekey（删新键 + 按旧键回插）
+                // 与非 rekey（既有 update 快路径）。派生不可得时按既有形态
+                // 回退（见 `read_prev_index_keys`）。
+                let derived = match prev_row_id {
+                    Some(prev) => read_prev_index_keys(buffer_pool, table_meta, prev).await?,
+                    None => None,
+                };
+                let derived_pk: Option<Option<&[u8]>> =
+                    derived.as_ref().map(|(pk, _, _)| pk.as_deref());
+                let derived_uniques: Vec<Option<Option<&[u8]>>> = match &derived {
+                    Some((_, uniques, _)) => uniques.iter().map(|k| Some(k.as_deref())).collect(),
+                    None => vec![None; table_meta.unique_indexes.len()],
+                };
+                let derived_secondaries: Vec<Option<Option<&[u8]>>> = match &derived {
+                    Some((_, _, secondaries)) => {
+                        secondaries.iter().map(|k| Some(k.as_deref())).collect()
+                    }
+                    None => vec![None; table_meta.secondary_indexes.len()],
+                };
 
                 let key = table_meta.index_manager.find_key_by_row_id(row_id).await;
 
                 if let Some(key) = key {
-                    if let Some(prev_row_id) = header.next_version() {
-                        table_meta.index_manager.update(&key, prev_row_id).await?;
-                    } else {
-                        table_meta.index_manager.delete(&key).await?;
+                    match (derived_pk, prev_row_id) {
+                        (Some(Some(dk)), Some(prev)) if dk == key.as_slice() => {
+                            // 非 rekey 快路径：派生键与反查键逐字节相等——
+                            // 既有 update 回退，行为逐字节不变。
+                            table_meta.index_manager.update(&key, prev).await?;
+                        }
+                        (Some(Some(dk)), Some(prev)) => {
+                            // rekey：反查键是新键而 prev tuple 携带旧键——
+                            // 删新键条目后按旧键回插（delete 先于 insert：
+                            // `row_to_key` 反向映射经 delete 清理）。
+                            table_meta.index_manager.delete(&key).await?;
+                            table_meta.index_manager.insert(dk, prev).await?;
+                        }
+                        (Some(None), Some(_)) => {
+                            // prev 键位 NULL / 不可键控：仅删除不回插。
+                            table_meta.index_manager.delete(&key).await?;
+                        }
+                        (None, Some(prev)) => {
+                            // prev tuple 不可读（派生不可得）：既有形态回退。
+                            table_meta.index_manager.update(&key, prev).await?;
+                        }
+                        (_, None) => {
+                            table_meta.index_manager.delete(&key).await?;
+                        }
                     }
                 }
 
                 // MS23 Iteration 001 (2.7/D8): 唯一索引同型修复——不修复则
                 // 回滚的 INSERT 残留唯一条目，后续同值插入假阳性
-                // DuplicateKey。
-                for (_, uindex) in &table_meta.unique_indexes {
+                // DuplicateKey。MS21 Iter000 (D1): 与 PK 臂同型按派生键
+                // 区分 rekey 回退。
+                for ((_, uindex), derived_key) in table_meta
+                    .unique_indexes
+                    .iter()
+                    .zip(derived_uniques.into_iter())
+                {
                     if let Some(key) = uindex.find_key_by_row_id(row_id).await {
-                        if let Some(prev_row_id) = header.next_version() {
-                            uindex.update(&key, prev_row_id).await?;
-                        } else {
-                            uindex.delete(&key).await?;
+                        match (derived_key, prev_row_id) {
+                            (Some(Some(dk)), Some(prev)) if dk == key.as_slice() => {
+                                uindex.update(&key, prev).await?;
+                            }
+                            (Some(Some(dk)), Some(prev)) => {
+                                uindex.delete(&key).await?;
+                                uindex.insert(dk, prev).await?;
+                            }
+                            (Some(None), Some(_)) => {
+                                uindex.delete(&key).await?;
+                            }
+                            (None, Some(prev)) => {
+                                uindex.update(&key, prev).await?;
+                            }
+                            (_, None) => {
+                                uindex.delete(&key).await?;
+                            }
                         }
+                    } else if let Some(prev) = prev_row_id {
+                        // MS21 Iter001 (D17)：值→NULL rekey 的对称还原——
+                        // 写入期已删除旧唯一条目且 NULL 不入索引，反查 None
+                        // 落此处。prev 唯一键可派生且非 NULL 时纯插入还原旧
+                        // 值占用（无 delete-先于-insert 次序约束）；键位
+                        // NULL 或派生不可得时无条目可还原，跳过。
+                        if let Some(Some(dk)) = derived_key {
+                            uindex.insert(dk, prev).await?;
+                        }
+                    }
+                }
+
+                // MS21 Iter002 (T2-d/D7)：二级索引同型回退——分支形状与唯一
+                // 臂一致，但写入一律 `delete_exact` + `insert`（D3：二级索引
+                // 禁用歧义原语 `delete`/`update`；重复键并存时二者均不可定位
+                // 唯一条目）。三支形态：
+                // 1. 派生键 Some（含 ==反查键的非 rekey 与 ≠的 rekey）：按
+                //    派生键换指 prev（delete_exact 删反查键条目 + insert 派
+                //    生键指向 prev——delete 先于 insert 的反向映射次序约束
+                //    同样适用）；
+                // 2. prev 键位 NULL：仅删反查键条目；
+                // 3. 派生不可得：按反查键换指 prev（与唯一臂 `update` 回退
+                //    的终态等价——反查键条目确定在位）。
+                // 反查 None 的对称还原分支（值→NULL 形态，镜像 D17）：prev
+                // 键可派生且非 NULL 时纯插入还原。
+                for (sindex, derived_key) in table_meta
+                    .secondary_indexes
+                    .iter()
+                    .zip(derived_secondaries.into_iter())
+                {
+                    if let Some(key) = sindex.index.find_key_by_row_id(row_id).await {
+                        match (derived_key, prev_row_id) {
+                            (Some(Some(dk)), Some(prev)) => {
+                                sindex.index.delete_exact(&key, row_id).await?;
+                                sindex.index.insert(dk, prev).await?;
+                            }
+                            (Some(None), Some(_)) => {
+                                sindex.index.delete_exact(&key, row_id).await?;
+                            }
+                            (None, Some(prev)) => {
+                                sindex.index.delete_exact(&key, row_id).await?;
+                                sindex.index.insert(&key, prev).await?;
+                            }
+                            (_, None) => {
+                                sindex.index.delete_exact(&key, row_id).await?;
+                            }
+                        }
+                    } else if let (Some(prev), Some(Some(dk))) = (prev_row_id, derived_key) {
+                        sindex.index.insert(dk, prev).await?;
                     }
                 }
 
@@ -393,6 +503,12 @@ async fn restore_tombstone_index_entries(
         .iter()
         .map(|(col_idx, _)| *col_idx)
         .collect();
+    // MS21 Iter002 (T2-d/D7)：二级列键同一派生调用提取（单一派生源）。
+    let secondary_cols: Vec<usize> = table_meta
+        .secondary_indexes
+        .iter()
+        .map(|s| s.column_index)
+        .collect();
 
     let mut cursor = buffer_pool
         .read_version_header(tombstone_row_id)
@@ -424,8 +540,12 @@ async fn restore_tombstone_index_entries(
         }
 
         if let Some(tuple) = tuple {
-            let (pk_key, unique_keys) =
-                crate::wal::recovery::extract_index_keys(table_meta, &unique_cols, &tuple);
+            let (pk_key, unique_keys, secondary_keys) = crate::wal::recovery::extract_index_keys(
+                table_meta,
+                &unique_cols,
+                &secondary_cols,
+                &tuple,
+            );
             if let Some(pk_key) = pk_key {
                 table_meta.index_manager.insert(&pk_key, row_id).await?;
             }
@@ -434,11 +554,77 @@ async fn restore_tombstone_index_entries(
                     uindex.insert(&key, row_id).await?;
                 }
             }
+            // MS21 Iter002 (T2-d/D7)：二级条目同型回插（条目已在删除时以
+            // `delete_exact` 清理；NULL 值无条目自然跳过）。
+            for (sindex, key) in table_meta.secondary_indexes.iter().zip(secondary_keys) {
+                if let Some(key) = key {
+                    sindex.index.insert(&key, row_id).await?;
+                }
+            }
         }
         break;
     }
 
     Ok(())
+}
+
+/// MS21 Iter000 (design D1)：单次页读 prev 版本 tuple 并派生其真实 PK 键
+/// 与各唯一列键（B 趟 `restore_tombstone_index_entries` 同型单次页读 +
+/// `wal::recovery::extract_index_keys` 单一派生源，键派生规则零变化）。
+///
+/// MS21 Iter002 (T2-d/D7)：签名兼提各二级列键（与唯一键同一派生调用，
+/// 无第二派生源）。
+///
+/// `Ok(None)`（派生不可得，调用方按既有形态回退——`update` 反查键）：
+/// - slot 不可读（`SlotNotFound`，夹具/损坏态可达）；
+/// - tuple 按表 schema 不可反序列化——变更前 A 趟从不读 prev tuple，且
+///   直构夹具（`mvcc_abort_test` 等）的条目键为手写字节、与 tuple 内容
+///   无关，该角落行为必须与变更前逐字节一致。
+///
+/// 反序列化成功但键位 NULL / 不可键控 → `Ok(Some((None, …)))`：调用方仅
+/// 删除不回插（真实键位 NULL 形态）。其余错误传播（与既有错误面同型）。
+async fn read_prev_index_keys(
+    buffer_pool: &BufferPool,
+    table_meta: &Arc<TableMeta>,
+    prev_row_id: RowId,
+) -> Result<Option<(Option<Vec<u8>>, Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>)>> {
+    let unique_cols: Vec<usize> = table_meta
+        .unique_indexes
+        .iter()
+        .map(|(col_idx, _)| *col_idx)
+        .collect();
+    let secondary_cols: Vec<usize> = table_meta
+        .secondary_indexes
+        .iter()
+        .map(|s| s.column_index)
+        .collect();
+
+    let tuple =
+        match read_tuple_from_data_page(buffer_pool, prev_row_id, |_, bytes| Ok(bytes.to_vec()))
+            .await
+        {
+            Ok(tuple) => tuple,
+            Err(StorageError::SlotNotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+
+    let schema: Vec<crate::storage::page_format::ColumnType> = table_meta
+        .columns
+        .iter()
+        .map(|(_, ct)| ct.clone())
+        .collect();
+    // MS21 Iter003 (T3-a/D9)：宽度感知校验——窄行（ADD COLUMN 前写入）是
+    // 合法形态不再判失败；撕裂/错位行仍 None 回退。
+    if crate::storage::page_format::deserialize_tuple_width(&tuple, &schema).is_err() {
+        return Ok(None);
+    }
+
+    Ok(Some(crate::wal::recovery::extract_index_keys(
+        table_meta,
+        &unique_cols,
+        &secondary_cols,
+        &tuple,
+    )))
 }
 
 impl Default for TransactionManager {

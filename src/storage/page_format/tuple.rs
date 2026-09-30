@@ -144,7 +144,38 @@ pub fn serialize_tuple(values: &[Value], schema: &[ColumnType], buf: &mut [u8]) 
 ///
 /// Returns a `Vec<Value>` with one element per column, or a `StorageError`
 /// when the buffer is truncated or contains malformed data.
+///
+/// MS21 Iter003 (T3-a/D9): thin exact-width wrapper over
+/// [`deserialize_tuple_width`] — a row shorter than the schema is an error
+/// here (legacy semantics), while the width-aware entry pads the missing
+/// tail.
 pub fn deserialize_tuple(data: &[u8], schema: &[ColumnType]) -> Result<Vec<Value>> {
+    let (values, actual) = deserialize_tuple_width(data, schema)?;
+    if actual != schema.len() {
+        return Err(StorageError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "truncated tuple: expected tag byte",
+        )));
+    }
+    Ok(values)
+}
+
+/// MS21 Iter003 (T3-a/D9): width-aware row decode. Values are
+/// self-describing (tag byte per value), so a row may physically carry
+/// fewer or more values than the current schema width:
+///
+/// - **Narrow row** (written before a trailing `ALTER TABLE ADD COLUMN`):
+///   decodes its prefix, pads the missing tail with `Value::Null` and
+///   returns `actual` = the decoded value count. The caller applies the
+///   declared DEFAULTs via [`overlay_row_defaults`] (or uses the combined
+///   [`deserialize_row`]).
+/// - **Wide row** (written before a `DROP COLUMN`): trailing bytes beyond
+///   `schema.len()` decoded values are ignored.
+/// - Mid-value truncation and unknown tags still error — a torn row must
+///   not silently decode to a wrong-width result.
+///
+/// Returns `(values padded to schema width, actual decoded count)`.
+pub fn deserialize_tuple_width(data: &[u8], schema: &[ColumnType]) -> Result<(Vec<Value>, usize)> {
     fn eof(what: &str) -> StorageError {
         StorageError::Io(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -157,7 +188,11 @@ pub fn deserialize_tuple(data: &[u8], schema: &[ColumnType]) -> Result<Vec<Value
 
     for _col_type in schema {
         if pos >= data.len() {
-            return Err(eof("expected tag byte"));
+            // Narrow row: pad the missing tail with NULL; the DEFAULT
+            // overlay happens caller-side.
+            let actual = values.len();
+            values.resize(schema.len(), Value::Null);
+            return Ok((values, actual));
         }
         let tag = data[pos];
         pos += 1;
@@ -255,6 +290,30 @@ pub fn deserialize_tuple(data: &[u8], schema: &[ColumnType]) -> Result<Vec<Value
         }
     }
 
+    Ok((values, schema.len()))
+}
+
+/// MS21 Iter003 (T3-a/D9): apply the declared DEFAULT literals to a
+/// width-aware decoded row — every position at or beyond `actual` (the
+/// missing tail of a narrow legacy row) reads back its declared default,
+/// or NULL when the column declares none.
+pub fn overlay_row_defaults(values: &mut [Value], actual: usize, defaults: &[Option<Value>]) {
+    for (i, v) in values.iter_mut().enumerate().skip(actual) {
+        *v = defaults.get(i).cloned().flatten().unwrap_or(Value::Null);
+    }
+}
+
+/// MS21 Iter003 (T3-a/D9): width-aware row decode + DEFAULT overlay in one
+/// step — the single read-back entry for every row-data consumer (scans,
+/// DML read-backs, index backfill, recovery key extraction), so runtime
+/// reads and recovery stay same-sourced.
+pub fn deserialize_row(
+    data: &[u8],
+    schema: &[ColumnType],
+    defaults: &[Option<Value>],
+) -> Result<Vec<Value>> {
+    let (mut values, actual) = deserialize_tuple_width(data, schema)?;
+    overlay_row_defaults(&mut values, actual, defaults);
     Ok(values)
 }
 
@@ -442,6 +501,108 @@ mod tests {
         let schema = [ColumnType::Int];
         let result = deserialize_tuple(&[0x01], &schema);
         assert!(result.is_err(), "truncated buffer must return error");
+    }
+
+    // ===========================================================================
+    // MS21 Iteration 003 (T3-a/D9): 宽度感知反序列化与 DEFAULT 覆盖层
+    // ===========================================================================
+
+    /// 窄行（ADD COLUMN 前写入的旧行）：按 schema 解码前缀，缺失尾位补
+    /// NULL，`actual` = 实际解码值数；恰宽行为既有语义零变化。
+    #[test]
+    fn width_aware_narrow_row_pads_null_tail() {
+        fn ser(values: &[Value], schema: &[ColumnType]) -> Vec<u8> {
+            let size = compute_tuple_size(values, schema);
+            let mut buf = vec![0u8; size];
+            let n = serialize_tuple(values, schema, &mut buf).unwrap();
+            buf.truncate(n);
+            buf
+        }
+        let schema = [
+            ColumnType::Int,
+            ColumnType::String(10),
+            ColumnType::Int,
+            ColumnType::Bool,
+        ];
+        let narrow = ser(&[Value::Int(1), Value::String("a".into())], &schema[..2]);
+        let (values, actual) = deserialize_tuple_width(&narrow, &schema).unwrap();
+        assert_eq!(actual, 2, "two values physically present");
+        assert_eq!(
+            values,
+            vec![
+                Value::Int(1),
+                Value::String("a".into()),
+                Value::Null,
+                Value::Null
+            ]
+        );
+        // 既有入口对同一行仍显式报错（legacy 语义由薄包装保持）
+        assert!(deserialize_tuple(&narrow, &schema).is_err());
+    }
+
+    /// 宽行（DROP COLUMN 前写入的旧行）：超出 schema 宽度的尾部字节被忽略。
+    #[test]
+    fn width_aware_wide_row_truncates_tail() {
+        let wide_schema = [
+            ColumnType::Int,
+            ColumnType::String(10),
+            ColumnType::Bool,
+            ColumnType::Float,
+        ];
+        let values_in = vec![
+            Value::Int(1),
+            Value::String("a".into()),
+            Value::Bool(true),
+            Value::Float(2.5),
+        ];
+        let size = compute_tuple_size(&values_in, &wide_schema);
+        let mut buf = vec![0u8; size];
+        let n = serialize_tuple(&values_in, &wide_schema, &mut buf).unwrap();
+        let wide = &buf[..n];
+
+        let schema = [ColumnType::Int, ColumnType::String(10)];
+        let (values, actual) = deserialize_tuple_width(wide, &schema).unwrap();
+        assert_eq!(actual, 2);
+        assert_eq!(values, vec![Value::Int(1), Value::String("a".into())]);
+    }
+
+    /// 恰宽行：宽度感知变体与既有 `deserialize_tuple` 输出逐元素等价。
+    #[test]
+    fn width_aware_exact_row_equals_legacy() {
+        let schema = [ColumnType::Int, ColumnType::Bool, ColumnType::Bool];
+        let values_in = vec![Value::Int(7), Value::Null, Value::Bool(false)];
+        let size = compute_tuple_size(&values_in, &schema);
+        let mut buf = vec![0u8; size];
+        let n = serialize_tuple(&values_in, &schema, &mut buf).unwrap();
+        let row = &buf[..n];
+
+        let (values, actual) = deserialize_tuple_width(row, &schema).unwrap();
+        assert_eq!(actual, 3);
+        assert_eq!(values, deserialize_tuple(row, &schema).unwrap());
+    }
+
+    /// 覆盖层：`actual` 起的缺失位取声明 DEFAULT，无 DEFAULT 回落 NULL；
+    /// `actual` 之前解码值不受扰；`deserialize_row` 组合两步。
+    #[test]
+    fn overlay_defaults_fills_missing_tail() {
+        let schema = [ColumnType::Int, ColumnType::Int, ColumnType::Int];
+        let narrow_values = vec![Value::Int(1)];
+        let size = compute_tuple_size(&narrow_values, &schema[..1]);
+        let mut buf = vec![0u8; size];
+        let n = serialize_tuple(&narrow_values, &schema[..1], &mut buf).unwrap();
+        let narrow = &buf[..n];
+
+        let defaults = vec![None, Some(Value::Int(0)), None];
+        let values = deserialize_row(narrow, &schema, &defaults).unwrap();
+        assert_eq!(values, vec![Value::Int(1), Value::Int(0), Value::Null]);
+
+        // 显式 NULL 不在缺失位（恰宽行含 NULL）时覆盖层不介入
+        let full_values = vec![Value::Int(1), Value::Null, Value::Int(9)];
+        let size = compute_tuple_size(&full_values, &schema);
+        let mut buf = vec![0u8; size];
+        let n = serialize_tuple(&full_values, &schema, &mut buf).unwrap();
+        let values = deserialize_row(&buf[..n], &schema, &defaults).unwrap();
+        assert_eq!(values, vec![Value::Int(1), Value::Null, Value::Int(9)]);
     }
 
     #[test]

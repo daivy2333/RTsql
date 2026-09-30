@@ -1142,3 +1142,91 @@ async fn explicit_tx_replace_rollback_restores_row() {
 
     db.wal_buffer.shutdown().await;
 }
+
+// ===========================================================================
+// 2.6 — MS21 Iter000（change 2026-09-29-ms21-ddl-evolution）：REPLACE 冲突
+// 行删除在 slot 不可读容忍臂下仍按仲裁命中键清理 PK 条目（与 DeleteExecutor
+// 同形态对齐），SHALL NOT 静默保留悬空条目。
+// ===========================================================================
+
+/// 夹具：PK 索引条目指向已存在页上不存在的 slot（`SlotNotFound`，仅夹具/
+/// 损坏态可达）。REPLACE 经 PK 仲裁命中该悬空条目——修复前 PK 条目删除被
+/// 跳过，悬空条目残留使 `insert_row` 的 PK 预检误判重复、语句失败；修复后
+/// 按命中键清理条目，REPLACE 正常完成且 key 7 恰余新行条目。
+#[tokio::test]
+async fn replace_dangling_slot_entry_removed_by_hit_key() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    setup(&db).await;
+    expect_affected(&db, "INSERT INTO users (id, name) VALUES (1, 'a')", 1).await;
+
+    // 注入悬空条目：key 7 → 已存在数据页（种子行所在页）上不存在的 slot。
+    // 指向不存在页会产生 Io 错误（传播臂），命中不了 SlotNotFound 容忍臂。
+    let table = db.get_table("users").await.unwrap();
+    let seed_rid = table
+        .index_manager
+        .search(&1i64.to_be_bytes())
+        .await
+        .unwrap()
+        .expect("seed row must be indexed");
+    let dangling = rtsql::storage::RowId::new(seed_rid.page_id, 9999);
+    table
+        .index_manager
+        .insert(&7i64.to_be_bytes(), dangling)
+        .await
+        .unwrap();
+    assert_eq!(
+        table
+            .index_manager
+            .search(&7i64.to_be_bytes())
+            .await
+            .unwrap(),
+        Some(dangling),
+        "夹具前置：悬空条目必须在位"
+    );
+
+    // RED（修复前）：PK 条目删除被跳过 → insert_row PK 预检命中悬空条目
+    // DuplicateKey（或事务终结对不可读 slot 报错）→ 语句失败。
+    expect_affected(&db, "REPLACE INTO users (id, name) VALUES (7, 'r')", 1).await;
+
+    // GREEN：条目被清理——key 7 恰余新行条目，悬空 rid 无反向映射残留。
+    let new_rid = table
+        .index_manager
+        .search(&7i64.to_be_bytes())
+        .await
+        .unwrap()
+        .expect("replaced row must be indexed");
+    assert_ne!(new_rid, dangling, "key 7 条目必须指向新行而非悬空 rid");
+    assert_eq!(
+        table.index_manager.find_key_by_row_id(dangling).await,
+        None,
+        "悬空条目必须被清理（无反向映射残留）"
+    );
+    let key7 = 7i64.to_be_bytes();
+    let key7_entries: Vec<_> = table
+        .index_manager
+        .scan_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|(k, _)| k.as_slice() == key7.as_slice())
+        .collect();
+    assert_eq!(
+        key7_entries.len(),
+        1,
+        "key 7 必须恰余新行条目，got: {:?}",
+        key7_entries
+    );
+
+    // 语句行为正确：两行（种子行 + 替换行），新行经点查可达。
+    expect_count(&db, "users", 2).await;
+    expect_cell(
+        &db,
+        "SELECT name FROM users WHERE id = 7",
+        0,
+        serde_json::json!("r"),
+    )
+    .await;
+
+    db.wal_buffer.shutdown().await;
+}

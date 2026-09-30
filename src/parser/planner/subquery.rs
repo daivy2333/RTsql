@@ -441,6 +441,17 @@ impl PlanBuilder {
             PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_) => {
                 Err(PlanError::InSubqueryJoinUnsupported)
             }
+            // MS21 Iter005 (T5-c/D12)：视图/CTE 展开基座（DerivedScan）——
+            // 返回首列名（此前兜底误报多列；CTE 基座同形随之收口，D12）。
+            PhysicalPlan::DerivedScan(node) => {
+                if node.columns.is_empty() {
+                    return Err(PlanError::SubqueryReturnsMultipleColumns);
+                }
+                Ok(ColumnRef {
+                    table: Some(node.alias.clone()),
+                    column: node.columns[0].clone(),
+                })
+            }
             _ => Err(PlanError::SubqueryReturnsMultipleColumns),
         }
     }
