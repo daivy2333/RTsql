@@ -103,7 +103,7 @@ async fn upsert_without_conflict_inserts_like_plain_insert() {
     .await;
     expect_count(&db, "users", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// DO NOTHING：PK 冲突行跳过，不计入受影响行数。
@@ -130,7 +130,7 @@ async fn do_nothing_skips_pk_conflict_row() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// DO NOTHING：唯一索引冲突（非 PK 目标）同样跳过。
@@ -151,7 +151,7 @@ async fn do_nothing_skips_unique_conflict_row() {
     expect_count(&db, "users", 1).await;
     expect_where_count(&db, "SELECT COUNT(*) FROM users WHERE id = 2", 0).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// DO NOTHING 多行 VALUES：冲突行跳过、非冲突行正常插入，计数为非冲突行数。
@@ -193,7 +193,7 @@ async fn do_nothing_mixed_rows_inserts_only_non_conflicting() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 显式单列目标命中唯一索引列（spec R4：`(u)` 目标的冲突被仲裁跳过）。
@@ -213,7 +213,7 @@ async fn explicit_unique_target_skips_unique_conflict() {
     expect_count(&db, "users", 1).await;
     expect_where_count(&db, "SELECT COUNT(*) FROM users WHERE id = 2", 0).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 显式单列目标命中主键列（spec R4：`(id)` 目标的冲突被仲裁跳过）。
@@ -239,7 +239,7 @@ async fn explicit_pk_target_skips_pk_conflict() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 显式单列目标只仲裁该列：目标外的约束冲突不触发 DO NOTHING。
@@ -259,7 +259,7 @@ async fn explicit_target_only_arbitrates_that_column() {
     .await;
     expect_count(&db, "users", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 显式唯一列目标 + 主键冲突（DO NOTHING 臂）：仲裁不命中 → 无冲突插入路径
@@ -295,7 +295,7 @@ async fn explicit_unique_target_with_pk_conflict_rejected() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 显式唯一列目标 + 主键冲突（DO UPDATE 臂）：同型拒绝，行数与原行值不变。
@@ -321,7 +321,7 @@ async fn explicit_unique_target_with_pk_conflict_do_update_rejected() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 仲裁序：PK 先于唯一列（两列同时冲突时按 PK 命中处理，行为等价）。
@@ -340,7 +340,7 @@ async fn arbitration_prefers_pk_over_unique() {
     .await;
     expect_count(&db, "users", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -385,7 +385,7 @@ async fn do_update_literal_assignment_updates_in_place() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// `excluded.col` 赋值取本行待插值。
@@ -428,7 +428,7 @@ async fn do_update_excluded_column_uses_inserted_value() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 裸列名赋值取冲突行旧值。
@@ -462,7 +462,7 @@ async fn do_update_bare_column_uses_old_row_value() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 多行 DO UPDATE 逐行独立判定（spec R3「多行语句逐行独立」）。
@@ -498,7 +498,7 @@ async fn do_update_multi_row_evaluates_each_row() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 裸列名赋值作用于唯一列：取旧行值，不引入新唯一冲突（spec R3 DO UPDATE 场景）。
@@ -538,7 +538,7 @@ async fn do_update_bare_column_on_unique_column_keeps_old_value() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// `DEFAULT` 赋值取该列声明默认值。
@@ -564,7 +564,7 @@ async fn do_update_default_assignment_uses_declared_default() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 唯一列碰撞预检零副作用：新键命中即拒，两行数据与索引不变。
@@ -601,7 +601,7 @@ async fn do_update_collision_precheck_is_side_effect_free() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 键位 rekey 碰撞预检零副作用：新 PK 命中即拒。
@@ -629,7 +629,7 @@ async fn do_update_rekey_collision_is_side_effect_free() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 键位 rekey 成功：旧条目清理、新条目建立，PK 等值点查随之迁移。
@@ -660,7 +660,7 @@ async fn do_update_rekey_maintains_pk_entry() {
     // 旧键位 1 已释放
     expect_affected(&db, "INSERT INTO users VALUES (1, 'Ann', 400)", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// NOT NULL 赋值零副作用拒绝。
@@ -687,7 +687,7 @@ async fn do_update_not_null_violation_is_side_effect_free() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 赋值列类型门：跨类型值点名拒绝且原行保持。
@@ -712,7 +712,7 @@ async fn do_update_type_gate_rejects_cross_type_value() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -738,7 +738,7 @@ async fn replace_into_replaces_conflicting_row() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// REPLACE：唯一索引冲突行同样被替换。
@@ -768,7 +768,7 @@ async fn replace_into_replaces_unique_conflicting_row() {
     .await;
     expect_affected(&db, "INSERT INTO users VALUES (1, 'Ann', 300)", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// REPLACE：无冲突时为普通插入。
@@ -782,7 +782,7 @@ async fn replace_into_without_conflict_inserts() {
     expect_affected(&db, "REPLACE INTO users VALUES (2, 'Bob', 200)", 1).await;
     expect_count(&db, "users", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// REPLACE：同一行被 PK 与唯一索引同时命中（id == code）时只删除一次。
@@ -820,7 +820,7 @@ async fn replace_into_dedupes_row_hit_by_pk_and_unique() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// REPLACE：两条不同冲突行（PK 命中一行 + 唯一命中另一行）全部删除后重插。
@@ -847,7 +847,7 @@ async fn replace_into_removes_all_conflicting_rows() {
     // 两条被删行的唯一值 100 / 旧 PK 键位均已释放
     expect_affected(&db, "INSERT INTO users VALUES (3, 'Carl', 100)", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -911,7 +911,7 @@ async fn clean_reopen_keeps_upsert_state() {
         serde_json::json!("w"),
     )
     .await;
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 崩溃恢复（shutdown + drop 不 close → redo > 0 → 索引重建）后 DO UPDATE /
@@ -932,7 +932,7 @@ async fn crash_recovery_keeps_upsert_state() {
     )
     .await;
     expect_affected(&db, "REPLACE INTO users VALUES (2, 'Ann', 400)", 1).await;
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db); // 无 close()——不 checkpoint，WAL 保留，重开走 redo + 重建
 
     let db2 = Database::open(&path).await.unwrap();
@@ -979,7 +979,7 @@ async fn crash_recovery_keeps_upsert_state() {
         serde_json::json!(700),
     )
     .await;
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 显式事务内 upsert 失败 → 回滚后原值可重插（abort 清理通道含唯一条目）。
@@ -1040,7 +1040,7 @@ async fn explicit_tx_upsert_failure_rolls_back_and_allows_reinsert() {
     // 事务内未落地的值无残留
     expect_affected(&db, "INSERT INTO users VALUES (3, 'Cid', 300)", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 显式事务内 upsert 成功 → commit 后数据与索引一致。
@@ -1082,7 +1082,7 @@ async fn explicit_tx_upsert_commit_persists() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 显式事务内 REPLACE 回滚：被替换行按 abort 通道恢复（墓碑中和 + 索引还原）。
@@ -1140,7 +1140,7 @@ async fn explicit_tx_replace_rollback_restores_row() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -1228,5 +1228,5 @@ async fn replace_dangling_slot_entry_removed_by_hit_key() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

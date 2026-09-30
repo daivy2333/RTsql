@@ -90,7 +90,7 @@ async fn inequality_join_produces_semantic_result() {
         "不等式 JOIN 必须产出语义连接结果 {{(1,2),(1,3),(2,3)}}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S2：混合腿（非等值 + 非等值）多腿 AND 全部评估。
@@ -118,7 +118,7 @@ async fn mixed_legs_multi_and_evaluated() {
         "混合 ON 的全部腿必须逐组合评估，仅产出满足全部腿的组合"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S1：NULL 侧组合不进入结果（三值语义 Unknown 折叠为不匹配）。
@@ -146,7 +146,7 @@ async fn null_side_combination_excluded() {
         "谓词涉及 NULL 侧的组合必须被排除（仅 (1,2) 可达）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S3：任一侧空表 → 空集，不报错。
@@ -181,7 +181,7 @@ async fn empty_input_yields_empty_set() {
         "右侧空表必须产出空集"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4：非等值 ON 计划形状 = NestedLoopJoin（计划期启发式可观测）。
@@ -202,7 +202,7 @@ async fn non_equi_on_routes_to_nested_loop_join() {
         other => panic!("非等值 ON 应路由 NestedLoopJoin，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1/R4：纯等值 ON 保持既有 Hash Join 计划形状。
@@ -220,7 +220,7 @@ async fn equi_on_keeps_hash_join_shape() {
         other => panic!("纯等值 ON 应保持既有 Hash Join 形状，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R5：非等值 JOIN + ORDER BY 排序正确（Sort 消费 NLJ 输出形状）。
@@ -257,7 +257,7 @@ async fn order_by_over_non_equi_join() {
         "ORDER BY 必须对 NLJ 输出正确排序"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R5：关联子查询注入路径保持——`inject_correlated_values` NLJ 臂行为见证。
@@ -390,5 +390,5 @@ async fn where_over_non_equi_join_reachable() {
         "WHERE + 非等值 JOIN 必须按组合行布局编译并可达（谓词作用于组合行）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

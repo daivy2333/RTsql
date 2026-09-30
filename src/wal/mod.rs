@@ -16,4 +16,4 @@ pub use checkpoint::{CheckpointManager, CheckpointSite};
 pub use reader::WalReader;
 pub use record::{WalError, WalRecord, WalRecordType};
 pub use recovery::RecoveryManager;
-pub use writer::WalWriter;
+pub use writer::{WalWriter, DEFAULT_CHECKPOINT_BYTES};

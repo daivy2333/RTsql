@@ -90,7 +90,7 @@ impl Executor for AlterTableExecutor {
                         column_name,
                         tx_id,
                         self.database.transaction_manager.clone(),
-                        Some(self.database.wal_buffer.clone()),
+                        self.database.wal_buffer.clone(),
                     )
                     .await;
                 match result {

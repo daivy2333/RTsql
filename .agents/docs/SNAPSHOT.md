@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-09-30（MS21 DDL 演进与二级索引收尾归档——change `2026-09-29-ms21-ddl-evolution` 六 Iteration 全 accepted 并归档 carrier：T1 索引条目一致性收口（rekey 回滚语义化回退/NULL-rekey 还原/UPSERT SlotNotFound 对齐）+ T2 CREATE/DROP INDEX 二级索引端到端（catalog secondary 尾段 + `delete_exact` 精确原语 + 回填 + 写路径六处挂钩 + 恢复重建 + `IndexScanAll` 等值路由）+ T3 ALTER TABLE ADD/DROP COLUMN（宽度感知解码 + DEFAULT 覆盖层 + 内隐式事务重写删列）+ 用户扩围 T4 TRUNCATE（checkpoint-first 页释放 + 三类索引空重建）与 T5 CREATE/DROP VIEW（kind=View 持久 + CTE 通道展开 + 只读拒绝 + plan cache 全清）+ 二次扩围 T6 删除原语精确化与 T7 NULL-rekey 补口；增量规格 +4 域（sql-secondary-indexes / alter-table-column-evolution / truncate-table / sql-views）+ update-index-maintenance 扩展，语料 52 → 56 域；1541 tests）
+> 最后更新：2026-09-30（MS26 嵌入式运行形态收尾归档——change `2026-09-30-ms26-embedded-runtime` 四 Iteration 全 accepted 并归档 carrier：T1/T2 只读打开模式（`open_readonly[_with_key]` 共享锁多读单写 + WAL 未决拒绝 + 零写入会话 + 13 写变体 25006 + CLI `--readonly` + ATTACH 只读传递）+ T3/T4 `:memory:` 库形态（`MemoryStorage` + `open_in_memory()` + CLI 特判与拒绝面、零文件退出即弃）+ T8 派生基座外层投影收口（FROM 子查询/CTE/视图三通道外层清单裁剪行+表头、未知列 42703；用户指令 Issue 候选本 change 解决）+ T9/T10/T7 收尾批（组合拒绝自动化用例 / clippy 清零 / 孤儿移除 / 文档三处）+ T5/T6 WAL 字节水位（提交边界 `maybe_auto_checkpoint` 单点、16 MiB 默认 + env/lib 双通道、0 禁用、活跃事务顺延、失败传播且 CTAS 表存活、死记录数阈值接口删除）；增量规格 +3 域（`readonly-open-mode` / `in-memory-database` / `wal-auto-checkpoint`）+ `database-file-lock` R1 按模式收窄 + `error-reporting` R2 增 25006 + `join-output-shape-resolution` +R5，语料 56 → 59 域；1590 tests）
 > 同步状态：current
 
 ## 项目身份
@@ -32,6 +32,8 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - **高效**: 基于协程的异步 I/O、MVCC 无锁读、零拷贝页访问、DashMap 缓冲池；one-shot 只读会话零工作关闭整体跳过 checkpoint（无 WAL 追加且无脏页时，「close 即落盘」语义不变）
 - **读面代数完整**: OUTER JOIN 三态（LEFT/RIGHT/FULL，含非等值 ON 三值语义）、`SELECT DISTINCT`、`UNION [ALL]` / `INTERSECT` / `EXCEPT`（左结合、NULL 相等）、非递归 CTE（`WITH`，前向引用/列别名/遮蔽基表）、聚合扩展（`COUNT/SUM/AVG(DISTINCT …)` 真实去重、`group_concat`）、`ORDER BY <输出别名>` 按输出列真实排序
 - **跨库交互一期**: `ATTACH '<path>' AS <alias>` 会话注册（路径解析复用 `resolve_db_path`、独占 advisory 锁冲突 exit 4、自附加 flock 同 inode 拒绝、DETACH 豁免 I076）+ 两段限定名路由（`alias.table` 命中附加库、未命中扁平名回落零回归、三段列引用路由命中可用）+ SELECT 全形态跨库只读组合 + 附加库 DML/DDL 计划期只读拒绝；`CREATE TABLE AS SELECT` 主库物化（列名取输出表头、类型推导矩阵、建表→`flush_all()`→插入崩溃一致性序、失败零副作用、LIKE/CLONE/混合形态/事务内点名拒绝）
+- **嵌入式运行形态**: 只读打开模式——lib `Database::open_readonly[_with_key]` + CLI `--readonly`，advisory 共享锁多读单写（读读并发/读写互斥/冲突立即 `DatabaseLocked` exit 4）、WAL 未决 `WalPendingRecovery` 点名拒绝（exit 1）、会话零写入（无 WAL/checkpoint 通道的结构性 no-op）、13 写计划变体计划期 25006 拒绝（exit 3）、`--readonly`×生命周期子命令 exit 2、ATTACH 附加库随会话只读；`:memory:` 内存库——lib `open_in_memory()` + CLI 主命令特判，`MemoryStorage` 内存页后端零文件、close/checkpoint 结构性 no-op、进程退出即弃、`--key`/`--readonly`/六生命周期子命令 exit 2、ATTACH/CTAS 零特殊化；WAL 字节水位自动 checkpoint——提交边界 `maybe_auto_checkpoint` 单点（16 MiB 默认 + `RTSQL_WAL_CHECKPOINT_BYTES`/lib 设置器双通道、0 禁用、非法值打开前 exit 2、活跃事务顺延、失败点名 `checkpoint failed` 传播且已提交数据不受影响/CTAS 表存活）
+- **派生基座投影收口**: FROM 子查询/CTE/视图三通道（共用 `DerivedScan`）的外层纯列清单按清单裁剪行与表头、未知外层列计划期 `ColumnNotFound`（42703）、WHERE/ORDER BY 组合同型、CTAS 列名取裁剪后表头；`SELECT *`/聚合/别名项恒等面不回归
 - **DDL 演进与二级索引**: `CREATE INDEX`/`DROP INDEX` 单列 INT 非唯一二级索引（存量回填、干净重开与崩溃恢复两态一致、写路径与回滚还原条目一致、非 PK 等值谓词 `IndexScanAll` 路由且结果等价、删除页物理释放回落扫描、UNIQUE/组合/表达式/部分/IF NOT EXISTS/非 INT 列点名拒绝）；`ALTER TABLE ADD/DROP COLUMN`（尾部加列存量行按 DEFAULT/NULL 读回、NOT NULL 无 DEFAULT 非空表拒绝、约束声明拒绝；任意位置删列内隐式事务逐行重写全有或全无、索引引用/最后一列守卫、多操作与事务内拒绝）；`TRUNCATE TABLE`（checkpoint-first 数据页物理释放、表定义与三类索引定义保留索引重建为空、无墓碑崩溃不复活、事务内/多表/视图拒绝、空表幂等）；`CREATE`/`DROP VIEW` 只读视图（kind=View catalog 持久跨重启、CTE 通道展开与内联派生表逐字节一致、显式列清单、嵌套展开循环结构性封死、DML 只读拒绝、定义变更 plan cache 全清）；`DELETE` 未命中键零副作用（`LeafNode::delete` 精确键验证，不误删邻近条目不误报）
 - **计划可观测与名字解析严格**: `EXPLAIN <SELECT>` 输出计划树文本且不执行内层；JOIN 基座聚合参数与分组键在完整组合列布局上解析，同名裸名歧义 `AmbiguousColumn` 点名、未知列 `ColumnNotFound` 点名（消除静默末位胜出与零宽行）；聚合查询输出行与表头恒为 SELECT 清单形状；聚合参数在 JOIN 与单表面均计划期解析（未知列与别名引用点名，SHALL 引用输入基列）；派生表/CTE 基座 `col AS alias` 表头生效
 - **约束执行**: 建表声明的约束要么写路径强制要么计划期点名拒绝——NOT NULL 零副作用强制、INT 列 UNIQUE 经专属唯一索引强制（重启与崩溃恢复两态一致）、CHECK/FOREIGN KEY/组合与非 INT UNIQUE 诚实化拒绝
@@ -62,6 +64,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 集成测试: MS25 新增 10 个测试文件——`tests/outer_join_test.rs`、`tests/select_distinct_test.rs`、`tests/set_operations_test.rs`、`tests/aggregate_extension_test.rs`、`tests/cte_test.rs`、`tests/explain_test.rs`、`tests/order_by_alias_sort_test.rs`、`tests/join_output_resolution_test.rs`、`tests/aggregate_output_shape_test.rs`、`tests/derived_scan_alias_test.rs`（全量 1408 tests）
 - 集成测试: MS20 新增 3 个测试文件——`tests/attach_session_test.rs`（11）、`tests/cross_db_query_test.rs`（17）、`tests/ctas_test.rs`（17）（全量 1458 tests）
 - 集成测试: MS21 新增 4 个测试文件——`tests/secondary_index_test.rs`（22）、`tests/alter_table_test.rs`（16）、`tests/truncate_test.rs`（7）、`tests/view_test.rs`（15）（全量 1541 tests）
+- 集成测试: MS26 新增 3 个测试文件——`tests/readonly_session_test.rs`（14）、`tests/memory_db_test.rs`（15）、`tests/wal_auto_checkpoint_test.rs`（11）+ `tests/derived_scan_alias_test.rs` 扩展（+12 派生投影 R5 矩阵）（全量 1590 tests）
 - 单元测试: 文件内 `#[cfg(test)]`（含新增 `src/storage/catalog.rs` 10 单元测试）
 - 基准测试: `benches/` (8 套: micro / concurrent / scale / sqlite_compare / single / precise_compare / data_scan / visibility)
 - OpenSpec: `openspec/`
@@ -83,16 +86,16 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 2f83dd9（本批主提交：MS21 实施与收尾统一入库）
-- **ahead of origin**: 3
-- **工作区**: 干净（MS21 收尾提交后无未提交项）
+- **提交基线**: （本批主提交：MS26 实施与收尾统一入库——hash 由后续 docs 提交回填）
+- **ahead of origin**: 4
+- **工作区**: 干净（MS26 收尾提交后无未提交项）
 - **最新 tag**: 无（仓库当前无任何 tag）
-- **测试**: 1541 tests pass, 0 failures, 2 ignored（2026-09-30 Iter005 Act Response 全量串行新鲜 `cargo test -- --test-threads=1`，Plan Review 采信 + 用户裁定「测试可信」；MS21 净增 4 测试文件 60 例——secondary_index 22 / alter_table 16 / truncate 7 / view 15 + catalog lib 单测 4）
-- **OpenSpec**: 56 specs（MS21 增量合并 +4 域——新增 `sql-secondary-indexes` / `alter-table-column-evolution` / `truncate-table` / `sql-views`，`update-index-maintenance` 扩展至 5 Requirement；decisions/knowledge 为 2026-09-24 退役空壳，仍计入 validate）；**活跃 change**：无（最新归档 `archive/2026-09-29-ms21-ddl-evolution/`，六 Iteration 全 accepted；下一里程碑 MS26）注：新版 openspec CLI `validate --all --strict` 将 MS06–MS10 时代 spec 的占位 Purpose 标记为失败——既有状态，非本轮引入
+- **测试**: 1590 tests pass, 0 failures（2026-09-30 Iteration 002 Act Response 全量 M19 分批（100 集成目标 ×10 批 + lib）新鲜执行，Plan Review 采信 + 用户裁定「测试可信」；MS26 净增 3 测试文件 39 例——readonly_session 14 / memory_db 15 / wal_auto_checkpoint 11（−2 死接口消费用例随删除）+ 派生投影扩展 12 例）
+- **OpenSpec**: 59 specs（MS26 增量合并 +3 域——新增 `readonly-open-mode` / `in-memory-database` / `wal-auto-checkpoint`，`database-file-lock` R1 按模式收窄、`error-reporting` R2 增 25006、`join-output-shape-resolution` +R5 派生基座投影；decisions/knowledge 为 2026-09-24 退役空壳，仍计入 validate）；**活跃 change**：无（最新归档 `archive/2026-09-30-ms26-embedded-runtime/`，四 Iteration 全 accepted；下一里程碑 MS27）注：新版 openspec CLI `validate --all --strict` 将 MS06–MS10 时代 spec 的占位 Purpose 标记为失败——既有状态，非本轮引入
 
 ## 同步状态
 
-- `current` — 文档与代码一致；MS21 DDL 演进与二级索引收尾入库（change 六 Iteration 全 accepted 并归档、+4 域增量规格合并使语料达 56 域、tasks MS21 标注完成、SNAPSHOT 刷新）；1541 tests（2026-09-30 Iter005 Act Response 全量串行，Plan Review 采信）；无活跃 change，工作区随收尾提交入库
+- `current` — 文档与代码一致；MS26 嵌入式运行形态收尾入库（change 四 Iteration 全 accepted 并归档、+3 域增量规格合并使语料达 59 域、tasks MS26 标注完成、SNAPSHOT 刷新）；1590 tests（2026-09-30 Iteration 002 Act Response 全量分批，Plan Review 采信）；无活跃 change，工作区随收尾提交入库
 
 ## 权威文档
 
@@ -102,7 +105,7 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - 参考: `.agents/memory/references.md` (Rxx)
 - 改进: `.agents/memory/improvements.md` (Ixx)
 - 任务与路线: `.agents/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含 MS06–MS17、MS18、MS19、MS23/MS24、MS20 一期已完成 carriers 与清理 carriers，最新为 `archive/2026-09-29-ms21-ddl-evolution/`）
+- 变更: `openspec/changes/`（无活跃 change；归档目录含 MS06–MS17、MS18、MS19、MS23/MS24、MS20 一期、MS21 已完成 carriers 与清理 carriers，最新为 `archive/2026-09-30-ms26-embedded-runtime/`）
 - Legacy migration carrier: `.agents/legacy/2026-08-25-openspec-init-migration/`
 - 新增能力 spec:
   - `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）
@@ -156,3 +159,6 @@ RTsql — 异步协程驱动的高性能嵌入式关系型数据库。以 Tokio 
 - `openspec/specs/alter-table-column-evolution/spec.md`（MS21 落地，3 个 Requirement：R1 ADD COLUMN 尾部加列（宽度感知读回 + DEFAULT 覆盖 + dump/restore 保真）/ R2 DROP COLUMN 删列（内隐式事务逐行重写 + 索引引用/最后一列守卫）/ R3 语句形态与既有面边界（单操作/事务内拒绝/零回归））
 - `openspec/specs/truncate-table/spec.md`（MS21 落地，2 个 Requirement：R1 TRUNCATE 物理清空保留定义（checkpoint-first 页释放 + 三类索引空重建 + 无墓碑 + 事务内/多表拒绝 + 幂等）/ R2 DELETE·DROP TABLE 既有语义零回归）
 - `openspec/specs/sql-views/spec.md`（MS21 落地，3 个 Requirement：R1 CREATE VIEW 持久化只读视图（7 场景：创建查询/列清单/持久/嵌套/循环拒绝/定义错误与重名/修饰与附加库引用拒绝）/ R2 视图只读与 DML/DDL 拒绝 / R3 视图解析与计划一致性（plan cache 全清 + 组合面零特殊化））
+- `openspec/specs/readonly-open-mode/spec.md`（MS26 落地，6 个 Requirement：R1 只读打开入口与共享锁（含 `--readonly`×生命周期子命令组合拒绝场景）/ R2 WAL 未决拒绝 / R3 只读会话零写入 / R4 只读拒绝写操作（25006）/ R5 只读会话 ATTACH 附加库只读 / R6 既有打开语义零回归）
+- `openspec/specs/in-memory-database/spec.md`（MS26 落地，4 个 Requirement：R1 内存库打开与全形态会话 / R2 checkpoint 与 WAL 无操作 / R3 边界拒绝面 / R4 ATTACH 与跨库组合零特殊化）
+- `openspec/specs/wal-auto-checkpoint/spec.md`（MS26 落地，5 个 Requirement：R1 提交边界字节水位触发 / R2 水位配置（16 MiB 默认 + env/lib 双通道、0 禁用、非法打开期拒绝）/ R3 显式事务活跃时顺延 / R4 自动 checkpoint 失败传播（已提交数据不受影响）/ R5 既有 checkpoint 语义零回归与死接口删除）

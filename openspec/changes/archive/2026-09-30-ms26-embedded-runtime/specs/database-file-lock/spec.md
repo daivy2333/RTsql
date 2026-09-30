@@ -1,0 +1,31 @@
+# database-file-lock Delta — MS26 T1 锁语义按打开模式收窄
+
+## MODIFIED Requirements
+
+### Requirement: 打开即独占文件锁
+
+读写模式的 `FileStorage` 打开（`FileStorage::open`/`open_with_key` 及其上游 `Database::open`/`open_with_isolation`/`open_with_key`）SHALL 在打开主数据库文件时对其文件描述符获取 advisory 独占锁（`std::fs::File::try_lock`，非阻塞）。锁被其他持有者占用（`WouldBlock`）SHALL 返回 `StorageError::DatabaseLocked`（携带路径信息）；锁系统调用本身失败（`WouldBlock` 以外的 IO 错误，如文件系统不支持 flock）SHALL 按普通 IO 错误传播，不得降级为无锁运行。锁 SHALL 在打开 WAL 与执行崩溃恢复之前完成。只读模式的锁语义（共享锁、多读单写矩阵）由 `readonly-open-mode` 域承载，本 Requirement 的独占语义 SHALL NOT 适用于只读打开。
+
+#### Scenario: 单进程独占打开成功
+
+- **GIVEN** 一个未被其他持有者锁定的数据库文件
+- **WHEN** 读写模式 `Database::open` 打开该文件
+- **THEN** 打开成功，锁保持到 Database 生命周期结束，执行与查询行为与加锁前完全一致
+
+#### Scenario: 第二持有者打开被拒
+
+- **GIVEN** 某持有者已对 `x.db` 持有 flock（另一进程或测试进程）
+- **WHEN** 第二方以读写模式打开 `x.db`
+- **THEN** 打开失败并返回 `StorageError::DatabaseLocked`，主文件数据与 WAL 未被第二方触碰
+
+#### Scenario: 同进程第二实例被拒
+
+- **GIVEN** 同一进程内读写模式 `Database::open(path)` 已返回且未 drop
+- **WHEN** 再次以读写模式 `Database::open(path)`（同一文件）
+- **THEN** 第二次 open 返回 `StorageError::DatabaseLocked`（flock 按 open-file-description 互斥，不因同进程而豁免）
+
+#### Scenario: 锁系统调用失败严格报错
+
+- **GIVEN** 底层文件系统不支持 flock（`try_lock` 返回 `ENOLCK` 等非 `WouldBlock` 错误）
+- **WHEN** 读写模式 `Database::open`
+- **THEN** 按普通 IO 错误失败（CLI 退出码 1），不降级为无锁打开

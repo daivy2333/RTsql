@@ -196,6 +196,11 @@ impl CheckpointManager {
 
         // 9. 重置写入计数
         self.wal_writer.reset_write_count();
+        // 9b. 重置字节水位计数（MS26 T5，`wal-auto-checkpoint` R1）——与
+        //     9 同位：水位语义是「自上次 checkpoint 以来的累计追加字节」，
+        //     故归零点必须与物理回落同处。步骤 6 的 Checkpoint 标记字节随之
+        //     一并归零，不会跨 checkpoint 累积放大。
+        self.wal_writer.reset_bytes_appended();
 
         Ok(lsn)
     }

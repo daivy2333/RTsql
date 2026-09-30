@@ -65,7 +65,7 @@ async fn string_implicit_key_simple_equality_reaches_keyless_rows() {
         "键位 String 字面量等值必须经数据页求值命中无键行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：String 隐式键列 AND 组合等值必须命中无键行。
@@ -91,7 +91,7 @@ async fn string_implicit_key_and_combined_equality_reaches_keyless_rows() {
         "AND 组合的键位 String 字面量等值必须命中无键行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：Float 隐式键列 Float 字面量等值必须命中无键行。
@@ -113,7 +113,7 @@ async fn float_key_float_literal_equality_reaches_keyless_rows() {
         "Float 键位 Float 字面量等值必须命中无键行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S4：显式声明 TEXT PRIMARY KEY 的等值必须命中无键行。
@@ -134,7 +134,7 @@ async fn text_primary_key_equality_reaches_keyless_rows() {
         "TEXT PRIMARY KEY 声明键列的 String 字面量等值必须命中无键行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1 修复形态 plan 形状：简单非键控等值下推进 `DataScan` 行内求值。
@@ -158,7 +158,7 @@ async fn simple_non_keyable_equality_plan_is_data_scan_with_predicate() {
         other => panic!("简单非键控等值应为谓词下推 DataScan，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1 修复形态 plan 形状：非键控等值 + OR 保持 `Filter(DataScan)` 包装。
@@ -183,7 +183,7 @@ async fn non_keyable_equality_with_or_keeps_filter_over_data_scan() {
         other => panic!("非键控等值 + OR 应保持 Filter(DataScan)，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S1：Int 键列 + 非 Int 字面量的查询结果保持空集（变更前后 GREEN，
@@ -205,7 +205,7 @@ async fn int_key_non_int_literal_still_empty_result() {
         "Int 键列 + String 字面量等值必须保持空集（跨类型 equals false）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S5：restart（WAL 恢复 + 索引重建）后键位等值可达性保持。
@@ -223,7 +223,7 @@ async fn keyless_equality_reachability_survives_restart() {
     exec_ok(&db, "INSERT INTO t1 VALUES ('x', 1)").await;
     exec_ok(&db, "INSERT INTO t1 VALUES ('y', 2)").await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
@@ -234,7 +234,7 @@ async fn keyless_equality_reachability_survives_restart() {
         "restart 后键位 String 字面量等值必须保持可达"
     );
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -273,7 +273,7 @@ async fn float_key_int_literal_simple_equality_reaches_rows() {
         "Float 键列 + Int 字面量等值必须经数据页求值命中无键行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// I046-S2：Float 键列 + Int 字面量 AND 组合等值必须命中无键行。
@@ -299,7 +299,7 @@ async fn float_key_int_literal_and_combined_equality_reaches_rows() {
         "AND 组合的 Float 键列 + Int 字面量等值必须命中无键行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// I046-S3：Float 键列反向等值（`5 = f`）必须命中无键行。
@@ -321,7 +321,7 @@ async fn float_key_int_literal_reversed_equality_reaches_rows() {
         "反向 Float 键列 + Int 字面量等值必须经数据页求值命中无键行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// I046-S4 修复形态 plan 形状：Float 键列 + Int 字面量简单等值下推进
@@ -346,7 +346,7 @@ async fn float_key_int_literal_simple_equality_plan_is_data_scan_with_predicate(
         other => panic!("Float 键列 + Int 字面量等值应为谓词下推 DataScan，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// I046-S5：String 键列 + Int 字面量等值保持空集（变更前后 GREEN，锁结果
@@ -369,7 +369,7 @@ async fn string_key_int_literal_keeps_empty_result() {
         "String 键列 + Int 字面量等值必须保持空集（跨类型 equals false）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// I046-S6：restart（WAL 恢复 + 索引重建）后 Float 键列 + Int 字面量等值
@@ -387,7 +387,7 @@ async fn float_key_int_literal_reachability_survives_restart() {
     db.buffer_pool.flush_all().await.unwrap();
     exec_ok(&db, "INSERT INTO t4 VALUES (5.0, 1)").await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
@@ -398,5 +398,5 @@ async fn float_key_int_literal_reachability_survives_restart() {
         "restart 后 Float 键列 + Int 字面量等值必须保持可达"
     );
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }

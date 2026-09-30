@@ -47,6 +47,16 @@ pub struct FileStorage {
     cipher: Option<Arc<PageCipher>>,
     file_len: AtomicU64,
     free_pages: Mutex<Vec<u64>>,
+    /// MS26 T1：只读实例（`open_readonly*`）——写方法显式点名拒绝，
+    /// `sync` 为 no-op。只读打开的正常路径不可达这些守卫（写语句在
+    /// pipeline 层先被拒，见 `pipeline::readonly_rejection`），此处为
+    /// 结构性兜底。
+    readonly: bool,
+}
+
+/// 只读实例写方法的统一拒绝文案（`readonly-open-mode` R3）。
+fn read_only_violation(op: &str) -> StorageError {
+    StorageError::Internal(format!("cannot {op} on a read-only storage instance"))
 }
 
 impl FileStorage {
@@ -76,8 +86,7 @@ impl FileStorage {
             Err(std::fs::TryLockError::Error(e)) => return Err(StorageError::Io(e)),
         }
 
-        let metadata = file.metadata()?;
-        let file_len = metadata.len();
+        let file_len = file.metadata()?.len();
         let page_size = Page::PAGE_SIZE;
 
         // MS10-T03: format header — initialize (new database) or validate
@@ -85,80 +94,10 @@ impl FileStorage {
         // touched (design D4). No fsync (D7): a torn header on a database
         // that has no pages yet is rejected as NotADatabase on next open.
         let (cipher, record_size, page_count) = if file_len == 0 {
-            let header = match key {
-                Some(_) => {
-                    let mut salt = [0u8; 32];
-                    rand::rngs::OsRng.fill_bytes(&mut salt);
-                    FileHeader::current_encrypted(
-                        salt,
-                        DEFAULT_KDF_M_KIB,
-                        DEFAULT_KDF_T,
-                        DEFAULT_KDF_P,
-                    )
-                }
-                None => FileHeader::current(),
-            };
-            file.write_all_at(&header.encode(), 0)?;
-            let cipher = key.map(|password| {
-                Arc::new(PageCipher::new(derive_key(
-                    password.as_bytes(),
-                    &header.salt,
-                    DEFAULT_KDF_M_KIB,
-                    DEFAULT_KDF_T,
-                    DEFAULT_KDF_P,
-                )))
-            });
-            let record_size = if cipher.is_some() {
-                ENCRYPTED_PAGE_RECORD_SIZE
-            } else {
-                page_size
-            };
+            let (cipher, record_size) = Self::initialize_header(&file, key)?;
             (cipher, record_size, 0)
-        } else if file_len < HEADER_SIZE as u64 {
-            return Err(StorageError::NotADatabase(path.display().to_string()));
         } else {
-            let mut buf = [0u8; HEADER_SIZE];
-            file.read_exact_at(&mut buf, 0)?;
-            let header = FileHeader::decode(&buf).map_err(|e| header_rejection(e, path))?;
-            let encrypted = header.flags & FLAG_ENCRYPTED != 0;
-            let cipher = match (encrypted, key) {
-                (true, None) => {
-                    return Err(StorageError::InvalidKey(format!(
-                        "database is encrypted, supply --key or RTSQL_KEY: {}",
-                        path.display()
-                    )));
-                }
-                (false, Some(_)) => {
-                    return Err(StorageError::InvalidKey(format!(
-                        "database is not encrypted: {}",
-                        path.display()
-                    )));
-                }
-                (true, Some(password)) => {
-                    let (m_kib, t, p) = header.kdf_params();
-                    Some(Arc::new(PageCipher::new(derive_key(
-                        password.as_bytes(),
-                        &header.salt,
-                        m_kib,
-                        t,
-                        p,
-                    ))))
-                }
-                (false, None) => None,
-            };
-            let record_size = if encrypted {
-                ENCRYPTED_PAGE_RECORD_SIZE
-            } else {
-                page_size
-            };
-            let data_len = file_len - HEADER_SIZE as u64;
-            if !data_len.is_multiple_of(record_size as u64) {
-                return Err(StorageError::PageSizeMismatch {
-                    expected: record_size,
-                    actual: (data_len % record_size as u64) as usize,
-                });
-            }
-            (cipher, record_size, data_len / record_size as u64)
+            Self::validate_header(&file, path, key, file_len)?
         };
 
         Ok(Self {
@@ -168,7 +107,147 @@ impl FileStorage {
             cipher,
             file_len: AtomicU64::new(page_count),
             free_pages: Mutex::new(Vec::new()),
+            readonly: false,
         })
+    }
+
+    /// MS26 T1：只读打开（`readonly-open-mode` R1）——advisory 共享锁，
+    /// 文件句柄只读且不创建，缺失文件诚实报错。锁冲突与独占构造同型
+    /// （`WouldBlock` → `DatabaseLocked`，不等待）。头校验 / 密钥 / KDF /
+    /// 页长度语义与读写构造共用同一实现，逐字节一致。
+    pub fn open_readonly(path: &Path) -> Result<Self> {
+        Self::open_readonly_with_key(path, None)
+    }
+
+    /// MS26 T1：只读打开的加密库变体（`key` 为 `Some` 时按加密库解密读取，
+    /// 错误密钥沿既有 `InvalidKey` 拒绝）。
+    pub fn open_readonly_with_key(path: &Path, key: Option<&str>) -> Result<Self> {
+        // 只读句柄：无 `write`、无 `create` —— 缺失文件由 open 直接报错
+        // （点名路径，语义同「该路径尚不是 RTsql 数据库」）。
+        let file = match OpenOptions::new().read(true).open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StorageError::NotADatabase(path.display().to_string()));
+            }
+            Err(e) => return Err(StorageError::Io(e)),
+        };
+
+        match file.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(StorageError::DatabaseLocked(path.display().to_string()));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(StorageError::Io(e)),
+        }
+
+        let file_len = file.metadata()?.len();
+        // 0 字节文件尚不是数据库（读写构造此时会写头创建新库，只读构造
+        // 无写权限）→ 与截断头同类诚实拒绝。
+        let (cipher, record_size, page_count) = if file_len == 0 {
+            return Err(StorageError::NotADatabase(path.display().to_string()));
+        } else {
+            Self::validate_header(&file, path, key, file_len)?
+        };
+
+        Ok(Self {
+            file: Arc::new(file),
+            page_size: Page::PAGE_SIZE,
+            record_size,
+            cipher,
+            file_len: AtomicU64::new(page_count),
+            free_pages: Mutex::new(Vec::new()),
+            readonly: true,
+        })
+    }
+
+    /// MS10-T03：0 字节新库的格式头初始化（明文/加密两态），返回
+    /// （页加密器, 单页磁盘记录长度）。无 fsync（D7）。
+    fn initialize_header(
+        file: &std::fs::File,
+        key: Option<&str>,
+    ) -> Result<(Option<Arc<PageCipher>>, usize)> {
+        let page_size = Page::PAGE_SIZE;
+        let header = match key {
+            Some(_) => {
+                let mut salt = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut salt);
+                FileHeader::current_encrypted(salt, DEFAULT_KDF_M_KIB, DEFAULT_KDF_T, DEFAULT_KDF_P)
+            }
+            None => FileHeader::current(),
+        };
+        file.write_all_at(&header.encode(), 0)?;
+        let cipher = key.map(|password| {
+            Arc::new(PageCipher::new(derive_key(
+                password.as_bytes(),
+                &header.salt,
+                DEFAULT_KDF_M_KIB,
+                DEFAULT_KDF_T,
+                DEFAULT_KDF_P,
+            )))
+        });
+        let record_size = if cipher.is_some() {
+            ENCRYPTED_PAGE_RECORD_SIZE
+        } else {
+            page_size
+        };
+        Ok((cipher, record_size))
+    }
+
+    /// MS10-T03：既有库的格式头校验（明文/加密两态分类、KDF 参数读取、
+    /// 密钥一致性、页长度整除），返回（页加密器, 单页磁盘记录长度, 页数）。
+    /// 读写与只读构造共用（MS26 T1）——两条构造的头校验行为逐字节一致。
+    fn validate_header(
+        file: &std::fs::File,
+        path: &Path,
+        key: Option<&str>,
+        file_len: u64,
+    ) -> Result<(Option<Arc<PageCipher>>, usize, u64)> {
+        let page_size = Page::PAGE_SIZE;
+        if file_len < HEADER_SIZE as u64 {
+            return Err(StorageError::NotADatabase(path.display().to_string()));
+        }
+        let mut buf = [0u8; HEADER_SIZE];
+        file.read_exact_at(&mut buf, 0)?;
+        let header = FileHeader::decode(&buf).map_err(|e| header_rejection(e, path))?;
+        let encrypted = header.flags & FLAG_ENCRYPTED != 0;
+        let cipher = match (encrypted, key) {
+            (true, None) => {
+                return Err(StorageError::InvalidKey(format!(
+                    "database is encrypted, supply --key or RTSQL_KEY: {}",
+                    path.display()
+                )));
+            }
+            (false, Some(_)) => {
+                return Err(StorageError::InvalidKey(format!(
+                    "database is not encrypted: {}",
+                    path.display()
+                )));
+            }
+            (true, Some(password)) => {
+                let (m_kib, t, p) = header.kdf_params();
+                Some(Arc::new(PageCipher::new(derive_key(
+                    password.as_bytes(),
+                    &header.salt,
+                    m_kib,
+                    t,
+                    p,
+                ))))
+            }
+            (false, None) => None,
+        };
+        let record_size = if encrypted {
+            ENCRYPTED_PAGE_RECORD_SIZE
+        } else {
+            page_size
+        };
+        let data_len = file_len - HEADER_SIZE as u64;
+        if !data_len.is_multiple_of(record_size as u64) {
+            return Err(StorageError::PageSizeMismatch {
+                expected: record_size,
+                actual: (data_len % record_size as u64) as usize,
+            });
+        }
+        Ok((cipher, record_size, data_len / record_size as u64))
     }
 
     pub fn page_count(&self) -> u64 {
@@ -238,6 +317,9 @@ impl AsyncStorage for FileStorage {
     }
 
     async fn write_page(&self, page_id: PageId, page: &Page) -> Result<()> {
+        if self.readonly {
+            return Err(read_only_violation("write a page"));
+        }
         let file = self.file.clone();
         let cipher = self.cipher.clone();
         let record_size = self.record_size;
@@ -247,6 +329,9 @@ impl AsyncStorage for FileStorage {
     }
 
     async fn allocate_page(&self) -> Result<PageId> {
+        if self.readonly {
+            return Err(read_only_violation("allocate a page"));
+        }
         // Try free list first
         if let Some(freed_id) = self.free_pages.lock().unwrap().pop() {
             return Ok(PageId(freed_id));
@@ -283,6 +368,9 @@ impl AsyncStorage for FileStorage {
     }
 
     async fn free_page(&self, page_id: PageId) -> Result<()> {
+        if self.readonly {
+            return Err(read_only_violation("free a page"));
+        }
         self.free_pages.lock().unwrap().push(page_id.0);
         // Zero the page on disk
         let zero_page = Page::new(page_id);
@@ -291,6 +379,9 @@ impl AsyncStorage for FileStorage {
     }
 
     async fn sync(&self) -> Result<()> {
+        if self.readonly {
+            return Ok(());
+        }
         let file = self.file.clone();
         spawn_blocking(move || {
             file.as_ref().sync_all()?;

@@ -60,7 +60,7 @@ async fn min_key_searchable_at_scale() {
         other => panic!("新 PK INSERT 应成功，实际 {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R-T0b-R2 恢复侧: 10k 树崩溃重开后，重复 INSERT 最小键仍必须 DuplicateKey
@@ -87,7 +87,7 @@ async fn min_key_searchable_after_recovery() {
         db.commit(tx).await.unwrap();
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
@@ -106,7 +106,7 @@ async fn min_key_searchable_after_recovery() {
         other => panic!("恢复后重复 INSERT id=0 应被拒，实际 {:?}", other),
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R-T0b-R4: 10k 树 UPDATE 内部节点递归（覆盖最小键/中段/尾部）
@@ -176,7 +176,7 @@ async fn update_works_at_scale() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R-T0b-R3: 10k 树批量 DELETE（跨区段，触发 Page-full 路径）
@@ -253,7 +253,7 @@ async fn bulk_delete_at_scale() {
         }
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R-T0b-R5: 根分裂后 catalog root 同步——中位点 checkpoint 混合负载
@@ -305,7 +305,7 @@ async fn root_sync_survives_midpoint_checkpoint() {
         db.commit(tx).await.unwrap();
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
@@ -339,5 +339,5 @@ async fn root_sync_survives_midpoint_checkpoint() {
         }
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }

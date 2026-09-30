@@ -655,6 +655,11 @@ pub struct DerivedScanNode {
     pub alias: String,
     /// 输出列名列表
     pub columns: Vec<String>,
+    /// MS26 T8：外层 SELECT 清单解析到的派生列索引（投影裁剪）。
+    /// 语义与 `ScanNode`/`DataScanNode.projection` 同型——对物化行按索引
+    /// 裁剪；空 = 恒等（`SELECT *` / 聚合输入 / 表达式项 / ORDER BY 下
+    /// 由 Sort 承担裁剪的形态）。与 `columns` 共同描述输出形状。
+    pub projection: Vec<usize>,
 }
 
 /// 投影项（MS11-T01 Iter001 — SELECT 派生列）

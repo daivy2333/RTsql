@@ -79,7 +79,7 @@ async fn insert_int_key_rejects_float_value_with_zero_side_effects() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S2：Int 键列 INSERT String/Bool 值同样被拒绝（拒绝矩阵补全），零副作用。
@@ -113,7 +113,7 @@ async fn insert_int_key_rejects_string_and_bool_values() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S3：UPDATE SET 键列为 Float 被拒绝，原行零副作用。
@@ -163,7 +163,7 @@ async fn update_int_key_rejects_float_value_with_zero_side_effects() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S4：UPDATE SET 键列为 String 被拒绝（拒绝矩阵补全）。
@@ -200,7 +200,7 @@ async fn update_int_key_rejects_string_value() {
         other => panic!("Expected QueryResult，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S5 锚点：键位 INSERT NULL 保持既有无键行落库语义（变更前后恒 GREEN）。
@@ -234,7 +234,7 @@ async fn insert_null_key_stays_accepted_keyless() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S6 锚点：UPDATE SET 键列为 NULL 保持 I037 接受语义（变更前后恒
@@ -266,7 +266,7 @@ async fn update_set_key_null_stays_accepted() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S7 锚点：非 Int 键列不新增拒绝——Float 键列收 Int 值保持既有宽松
@@ -293,7 +293,7 @@ async fn float_key_column_keeps_accepting_int_value() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S8：显式列序键位越界被拒绝——列清单 `(v, id)` 重排后 id 收 5.0
@@ -332,5 +332,5 @@ async fn explicit_column_list_key_violation_rejected() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

@@ -179,7 +179,7 @@ async fn create_index_consistent_across_crash_recovery() {
             "runtime",
         );
         assert_eq!(runtime.len(), 3, "runtime equality must see all rows");
-        db.wal_buffer.shutdown().await;
+        db.wal_buffer.as_ref().unwrap().shutdown().await;
         drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
     }
     let db2 = Database::open(&path).await.unwrap();
@@ -525,7 +525,7 @@ async fn rollback_restores_index_entries_two_state() {
         );
         assert!(rows.is_empty(), "rolled-back new key must have no entry");
 
-        db.wal_buffer.shutdown().await;
+        db.wal_buffer.as_ref().unwrap().shutdown().await;
         drop(db);
     }
     let db2 = Database::open(&path).await.unwrap();

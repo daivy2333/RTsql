@@ -673,7 +673,7 @@ async fn rollback_index_restore_survives_clean_reopen() {
         "干净重开后原唯一值必须仍被占用，got: {:?}",
         resp
     );
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -852,7 +852,7 @@ async fn rollback_of_pk_rekey_consistent_across_crash_reopen() {
             rows
         );
 
-        db.wal_buffer.shutdown().await;
+        db.wal_buffer.as_ref().unwrap().shutdown().await;
         drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
     }
 
@@ -880,7 +880,7 @@ async fn rollback_of_pk_rekey_consistent_across_crash_reopen() {
         "恢复后新键 7 的 INSERT 必须可用，got: {:?}",
         resp
     );
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 附加形态：SET 唯一列从 NULL 改值的回滚——prev 该列为 NULL（派生键
@@ -1012,7 +1012,7 @@ async fn rollback_of_unique_set_to_null_consistent_across_crash_reopen() {
             resp
         );
 
-        db.wal_buffer.shutdown().await;
+        db.wal_buffer.as_ref().unwrap().shutdown().await;
         drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
     }
 
@@ -1031,5 +1031,5 @@ async fn rollback_of_unique_set_to_null_consistent_across_crash_reopen() {
         vec![vec![serde_json::json!(1), serde_json::json!(5)]],
         "恢复后原行 (1, 5) 必须经唯一列扫描可达"
     );
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }

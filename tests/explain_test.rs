@@ -98,7 +98,7 @@ async fn explain_simple_tree() {
         "EXPLAIN 不输出数据行: {lines:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：复合查询节点参数——JOIN 类型、Filter 谓词、Sort 排序键、Limit 值。
@@ -163,7 +163,7 @@ async fn explain_compound_nodes() {
         );
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：EXPLAIN 不执行目标语句——无数据行输出，随后同库查询数据完好。
@@ -192,7 +192,7 @@ async fn explain_no_execution() {
         "EXPLAIN 不得改变库内数据"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S4：计划期错误不豁免——`EXPLAIN` 对缺失表按既有错误面拒绝。
@@ -207,7 +207,7 @@ async fn explain_plan_error_not_exempt() {
         "缺失表按既有错误面点名: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S1：DML 拒绝（计划期点名，零副作用）。
@@ -231,7 +231,7 @@ async fn explain_dml_rejected() {
     let rows = query_rows(db.execute_sql("SELECT COUNT(*) FROM t").await);
     assert_eq!(rows, vec![vec![json!(2)]], "拒绝路径零副作用");
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S2：DDL 拒绝（计划期点名，零副作用——目标表未被创建）。
@@ -256,7 +256,7 @@ async fn explain_ddl_rejected() {
         "DROP 点名拒绝, got {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2 附加：`ANALYZE` / `VERBOSE` / `FORMAT` 修饰与嵌套 EXPLAIN 点名拒绝；
@@ -290,7 +290,7 @@ async fn explain_modifiers_rejected_and_desc_accepted() {
     let desc = plan_lines(&query_rows(db.execute_sql("DESC SELECT name FROM t").await));
     assert_eq!(explain, desc, "DESC 与 EXPLAIN 同语义");
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S1：非 EXPLAIN 语句零回归（含 `explain` 作列名的既有解析）。
@@ -318,7 +318,7 @@ async fn non_explain_unchanged() {
         "既有 DML 行为不变: {affected:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S2：同一 EXPLAIN 两次执行输出一致（无缓存、确定性渲染）。
@@ -332,7 +332,7 @@ async fn explain_repeatable() {
     let second = query_rows(db.execute_sql("EXPLAIN SELECT name FROM t").await);
     assert_eq!(first, second, "EXPLAIN 输出确定性可重复");
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1 输出经既有 CLI 四格式渲染面呈现（表头恒单列 `plan`）。

@@ -143,22 +143,8 @@ async fn test_truncate_wal() {
     assert_eq!(size_after, lsn2, "File should be truncated to LSN");
 }
 
-#[tokio::test]
-async fn test_checkpoint_threshold() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let db_path = temp_file.path();
-
-    let mut writer = WalWriter::open(db_path).unwrap();
-
-    // 验证默认阈值
-    assert_eq!(writer.get_checkpoint_threshold(), 1000);
-
-    // 设置新阈值
-    writer.set_checkpoint_threshold(500);
-    assert_eq!(writer.get_checkpoint_threshold(), 500);
-
-    // 写入记录验证计数器
-    let record = WalRecord::Abort { tx_id: 42 };
-    writer.write_record(record).await.unwrap();
-    assert_eq!(writer.get_write_count(), 1);
-}
+// MS26 T5：本文件原有的 `test_checkpoint_threshold`（默认阈值 1000 / set-get
+// 往返）随 `WalWriter` 的记录数阈值接口一并删除——该接口被
+// `wal-auto-checkpoint` R5 Requirement 强制移除（无消费方、不留第二套触发
+// 机制），用例的被测对象整体消失。字节水位通道的见证改由
+// `tests/wal_auto_checkpoint_test.rs` 承担（默认值 + 触发 + 禁用）。

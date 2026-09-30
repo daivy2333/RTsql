@@ -92,7 +92,7 @@ async fn insert_int_column_rejects_string_value_zero_side_effects() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S1 UPDATE：`SET v = 'abc'` 以 ColumnTypeMismatch 点名拒绝，原行
@@ -134,7 +134,7 @@ async fn update_int_column_rejects_string_value_zero_side_effects() {
         other => panic!("Expected QueryResult，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -181,7 +181,7 @@ async fn insert_string_column_rejects_int_value() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -216,7 +216,7 @@ async fn insert_float_column_upgrades_int_value_losslessly() {
         "Int 值必须无损升格为 Float 落库（读回 5.0），实际: {rows:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S3 UPDATE：`SET f = 5` 升格为 Float，读回 5.0。
@@ -251,7 +251,7 @@ async fn update_float_column_upgrades_int_value_losslessly() {
         "Int 值必须无损升格为 Float 落库（读回 5.0），实际: {rows:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -306,7 +306,7 @@ async fn insert_date_column_string_coerces_and_illegal_date_still_rejected() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -343,7 +343,7 @@ async fn int_pk_gate_takes_precedence_over_general_type_gate() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S5 锚点：UPDATE SET 键列为 String 仍走既有 PK 键位门文案。
@@ -371,7 +371,7 @@ async fn update_pk_gate_takes_precedence_over_general_type_gate() {
         "键列越界必须维持既有 KeyTypeMismatch 文案，实际: {message}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S5 锚点：INT 唯一列收 String 仍走既有 F1 守卫（KeyTypeMismatch 文本，
@@ -415,7 +415,7 @@ async fn unique_f1_guard_takes_precedence_over_general_type_gate() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S5 锚点：NOT NULL 门文本与优先级不变——NULL 写入 NOT NULL 列仍由既有
@@ -460,7 +460,7 @@ async fn not_null_gate_unchanged_and_null_exempt() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S5 锚点：重复键预检先于一般类型门——重复 PK + 跨类型值的组合仍报
@@ -497,7 +497,7 @@ async fn duplicate_key_precedes_general_type_gate() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -548,7 +548,7 @@ async fn dump_shaped_typed_literals_insert_without_false_positive() {
         "dump 形态值必须逐列保真，实际: {rows:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S6：import 通道形态——`csv_value` 按列类型产出（日期族裸 String 透传
@@ -594,5 +594,5 @@ async fn import_shaped_values_insert_without_false_positive() {
         "import 形态值必须逐列保真，实际: {rows:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

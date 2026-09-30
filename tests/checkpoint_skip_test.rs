@@ -101,7 +101,7 @@ async fn zero_work_close_skips_site_and_wal() {
     let db = Database::open(&path).await.unwrap();
     assert_eq!(count_users(&db).await, 2);
     assert_eq!(
-        db.wal_writer.get_write_count(),
+        db.wal_writer.as_ref().unwrap().get_write_count(),
         0,
         "precondition: a read-only session appends no WAL record"
     );
@@ -138,7 +138,7 @@ async fn fresh_db_zero_work_close_creates_no_site() {
         "precondition: a fresh database has no site file"
     );
     assert_eq!(
-        db.wal_writer.get_write_count(),
+        db.wal_writer.as_ref().unwrap().get_write_count(),
         0,
         "precondition: no WAL append"
     );
@@ -177,7 +177,7 @@ async fn dml_session_close_keeps_full_checkpoint() {
     let db = Database::open(&path).await.unwrap();
     insert_user(&db, 1).await;
     assert!(
-        db.wal_writer.get_write_count() > 0,
+        db.wal_writer.as_ref().unwrap().get_write_count() > 0,
         "precondition: a committed DML session appends WAL records"
     );
     let wal_before = read_bytes_opt(&wal_path(&path)).expect("WAL present");
@@ -213,7 +213,7 @@ async fn ddl_only_close_keeps_full_checkpoint_and_schema() {
     // must be defeated by the dirty pages alone.
     let db = Database::open(&path).await.unwrap();
     assert_eq!(
-        db.wal_writer.get_write_count(),
+        db.wal_writer.as_ref().unwrap().get_write_count(),
         0,
         "precondition: DDL writes no WAL"
     );
@@ -234,7 +234,7 @@ async fn ddl_only_close_keeps_full_checkpoint_and_schema() {
 
     let db = Database::open(&path).await.unwrap();
     assert_eq!(
-        db.wal_writer.get_write_count(),
+        db.wal_writer.as_ref().unwrap().get_write_count(),
         0,
         "precondition: DDL writes no WAL"
     );
@@ -317,12 +317,14 @@ async fn explicit_checkpoint_zero_work_is_noop() {
     let db = Database::open(&path).await.unwrap();
     assert_eq!(count_users(&db).await, 1);
     assert_eq!(
-        db.wal_writer.get_write_count(),
+        db.wal_writer.as_ref().unwrap().get_write_count(),
         0,
         "precondition: read-only"
     );
     let captured = db
         .checkpoint_manager
+        .as_ref()
+        .unwrap()
         .checkpoint(|| db.transaction_manager.current_tx_id())
         .await
         .unwrap();

@@ -10,6 +10,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::task::spawn_blocking;
 
+/// WAL 字节水位的默认阈值（MS26 T5，`wal-auto-checkpoint` R2）——16 MiB。
+///
+/// 提交边界按「自上次 checkpoint 以来的累计追加字节」判定是否触发，故该值
+/// 远大于单批写入量即可覆盖常规短会话；长会话按需下调（见
+/// [`WalWriter::set_checkpoint_bytes_threshold`]）。`0` 表示禁用自动触发。
+pub const DEFAULT_CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
+
 /// WAL 写入器（追加写入 + fsync）
 ///
 /// 持有单一持久文件句柄，全部 IO 操作经 `Arc<Mutex<File>>` 串行完成
@@ -18,7 +25,12 @@ pub struct WalWriter {
     wal_path: PathBuf,
     file: Arc<Mutex<File>>,
     write_count: AtomicU64,
-    checkpoint_threshold: u64,
+    /// MS26 T5：自上次 checkpoint 以来的累计追加字节（内存计数器，追加时
+    /// 累加、checkpoint 步骤 9 归零）——`wal-auto-checkpoint` R1 要求不得
+    /// 为水位判定引入每语句一次文件 `metadata()` 调用。
+    bytes_appended: AtomicU64,
+    /// MS26 T5：字节水位阈值；`0` 禁用自动 checkpoint。
+    checkpoint_bytes_threshold: AtomicU64,
 }
 
 impl WalWriter {
@@ -37,13 +49,15 @@ impl WalWriter {
             file: Arc::new(Mutex::new(file)),
             wal_path,
             write_count: AtomicU64::new(0),
-            checkpoint_threshold: 1000,
+            bytes_appended: AtomicU64::new(0),
+            checkpoint_bytes_threshold: AtomicU64::new(DEFAULT_CHECKPOINT_BYTES),
         })
     }
 
     /// 写入 WAL 记录（异步包装）
     pub async fn write_record(&self, record: WalRecord) -> Result<u64, WalError> {
         let buf = record.serialize();
+        let frame_len = buf.len() as u64;
         let file = Arc::clone(&self.file);
 
         let lsn = spawn_blocking(move || {
@@ -66,6 +80,7 @@ impl WalWriter {
         .map_err(|e| WalError::IoError(e.to_string()))??;
 
         self.write_count.fetch_add(1, Ordering::SeqCst);
+        self.bytes_appended.fetch_add(frame_len, Ordering::SeqCst);
         Ok(lsn)
     }
 
@@ -153,17 +168,26 @@ impl WalWriter {
         self.write_count.load(Ordering::SeqCst)
     }
 
-    pub fn get_checkpoint_threshold(&self) -> u64 {
-        self.checkpoint_threshold
+    /// MS26 T5（`wal-auto-checkpoint` R2）：字节水位阈值；`0` 禁用自动触发。
+    pub fn checkpoint_bytes_threshold(&self) -> u64 {
+        self.checkpoint_bytes_threshold.load(Ordering::SeqCst)
     }
 
-    pub fn set_checkpoint_threshold(&mut self, threshold: u64) {
-        self.checkpoint_threshold = threshold;
+    /// 设置字节水位阈值（`0` 禁用自动 checkpoint）。`&self` 即可调用——
+    /// 阈值经 `Arc<WalWriter>` 共享，库内与 CLI 均在打开后下发。
+    pub fn set_checkpoint_bytes_threshold(&self, bytes: u64) {
+        self.checkpoint_bytes_threshold
+            .store(bytes, Ordering::SeqCst);
     }
 
-    /// 检查是否应该触发 checkpoint
-    pub fn should_checkpoint(&self) -> bool {
-        self.write_count.load(Ordering::SeqCst) >= self.checkpoint_threshold
+    /// 自上次 checkpoint 以来的累计追加字节（MS26 T5）。
+    pub fn bytes_appended(&self) -> u64 {
+        self.bytes_appended.load(Ordering::SeqCst)
+    }
+
+    /// 重置字节水位计数（与 `reset_write_count` 同位由 checkpoint 步骤 9 调用）。
+    pub fn reset_bytes_appended(&self) {
+        self.bytes_appended.store(0, Ordering::SeqCst);
     }
 
     /// 重置写入计数（checkpoint 后调用）
@@ -196,24 +220,29 @@ impl WalWriter {
         let file = Arc::clone(&self.file);
         let count = records.len() as u64;
 
-        spawn_blocking(move || {
+        let appended = spawn_blocking(move || {
             let mut file = file.lock().unwrap();
+            let mut appended = 0u64;
 
             for (lsn, record) in &records {
                 let buf = record.serialize_with_lsn(*lsn);
                 file.write_all(&buf)
                     .map_err(|e| WalError::IoError(e.to_string()))?;
+                appended += buf.len() as u64;
             }
 
             file.sync_all()
                 .map_err(|e| WalError::IoError(e.to_string()))?;
 
-            Ok(())
+            Ok(appended)
         })
         .await
         .map_err(|e| WalError::IoError(e.to_string()))??;
 
         self.write_count.fetch_add(count, Ordering::SeqCst);
+        // 批内求和后一次原子累加（避免逐帧原子操作）；口径与 `write_record`
+        // 同源——该批各帧序列化长度之和。
+        self.bytes_appended.fetch_add(appended, Ordering::SeqCst);
         Ok(())
     }
 }

@@ -154,6 +154,201 @@ async fn derived_expression_item_unchanged() {
     );
 }
 
+// ==== R5：派生基座的外层投影裁剪（MS26 T8，change 2026-09-30-ms26-embedded-runtime）====
+//
+// 病灶：投影解析的 `base_schema` 仅从 `PhysicalPlan::Scan` 提取，DerivedScan 落入
+// identity 臂——纯列清单外层投影静默丢弃（行与表头均为派生全集）。三通道
+// （FROM 子查询 / CTE 引用 / 视图展开）共用 `DerivedScan` 装配路径，同病。
+
+fn error_msg(resp: rtsql::network::protocol::Response) -> String {
+    match resp {
+        rtsql::network::protocol::Response::Error { message, .. } => message,
+        other => panic!("Expected Error, got {other:?}"),
+    }
+}
+
+/// R5-S1：派生表基座的纯列清单按外层清单裁剪行。
+///
+/// RED（实施前实测）：返回派生全集两列（`[["b",1],["a",2]]`）。
+#[tokio::test]
+async fn derived_pure_list_trims_rows() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("SELECT n FROM (SELECT v, n FROM t) AS d")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
+}
+
+/// R5-S1：表头与行形状一致（真二进制 CLI 渲染）。
+#[test]
+fn derived_pure_list_trims_header() {
+    let out = query_cli("SELECT n FROM (SELECT v, n FROM t) AS d");
+    assert_eq!(out.code, Some(0), "query failed: {}", out.stderr);
+    assert_eq!(
+        out.columns(),
+        vec!["n".to_string()],
+        "derived base pure list must trim the header to the outer list"
+    );
+}
+
+/// R5-S2：CTE 通道与派生表形态同型。
+#[tokio::test]
+async fn cte_pure_list_trims_rows() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("WITH c AS (SELECT v, n FROM t) SELECT n FROM c")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
+}
+
+/// R5-S2：视图通道与派生表形态同型（零通道特判）。
+#[tokio::test]
+async fn view_pure_list_trims_rows() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+    exec_ok(&db, "CREATE VIEW vw AS SELECT v, n FROM t").await;
+
+    let rows = rows_of(db.execute_sql("SELECT n FROM vw").await);
+    assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
+}
+
+/// R5-S3：外层未知列计划期 `ColumnNotFound` 点名（不静默返回派生全集）。
+#[tokio::test]
+async fn derived_unknown_column_named_rejected() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+    exec_ok(&db, "CREATE VIEW vw AS SELECT v, n FROM t").await;
+
+    for sql in [
+        "SELECT zzz FROM (SELECT v, n FROM t) AS d",
+        "WITH c AS (SELECT v, n FROM t) SELECT zzz FROM c",
+        "SELECT zzz FROM vw",
+    ] {
+        let msg = error_msg(db.execute_sql(sql).await);
+        assert!(
+            msg.contains("Column not found") && msg.contains("zzz"),
+            "unknown outer column over derived base must be named: {sql:?} -> {msg}"
+        );
+    }
+}
+
+/// R5-S4：WHERE 组合面——Filter 承载的裁剪（过滤后单列输出）。
+#[tokio::test]
+async fn derived_where_combination_trims() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("SELECT n FROM (SELECT v, n FROM t) AS d WHERE n = 2")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!(2)]]);
+}
+
+/// R5-S4：ORDER BY 组合面——Sort 承载的裁剪（排序后单列输出）。
+#[tokio::test]
+async fn derived_order_by_combination_trims() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("SELECT v FROM (SELECT v, n FROM t) AS d ORDER BY v")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!("a")], vec![json!("b")]]);
+
+    let out = query_cli("SELECT v FROM (SELECT v, n FROM t) AS d ORDER BY v");
+    assert_eq!(out.code, Some(0), "query failed: {}", out.stderr);
+    assert_eq!(
+        out.columns(),
+        vec!["v".to_string()],
+        "Sort-owned trim must keep the header consistent with the row shape"
+    );
+}
+
+/// R5-S4：CTAS 列名取裁剪后表头并物化对应值。
+#[tokio::test]
+async fn ctas_from_derived_trims_columns() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    exec_ok(
+        &db,
+        "CREATE TABLE cn AS SELECT n FROM (SELECT v, n FROM t) AS d",
+    )
+    .await;
+    let rows = rows_of(db.execute_sql("SELECT n FROM cn").await);
+    assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
+
+    let dir = fixture();
+    let created = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE cn2 AS SELECT n FROM (SELECT v, n FROM t) AS d",
+        ],
+    );
+    assert_eq!(created.code, Some(0), "ctas failed: {}", created.stderr);
+    let listed = run_cli(dir.path(), &["app", "SELECT * FROM cn2"]);
+    assert_eq!(listed.code, Some(0), "query failed: {}", listed.stderr);
+    assert_eq!(
+        listed.columns(),
+        vec!["n".to_string()],
+        "CTAS over derived base must materialize the trimmed header"
+    );
+}
+
+/// R5-S5：`SELECT *` 恒等面不回归（两列）。
+#[tokio::test]
+async fn derived_wildcard_identity() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("SELECT * FROM (SELECT v, n FROM t) AS d")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("b"), json!(1)], vec![json!("a"), json!(2)]]
+    );
+}
+
+/// R5-S5：聚合恒等面不回归（输入保持全形状）。
+#[tokio::test]
+async fn derived_count_identity() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("SELECT COUNT(*) FROM (SELECT v, n FROM t) AS d")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!(2)]]);
+}
+
+/// R5-S6：嵌套派生的列序与注册一致——内层派生先裁剪，外层按清单重排裁剪。
+#[tokio::test]
+async fn nested_derived_column_order() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("SELECT n, v FROM (SELECT v, n FROM (SELECT v, n FROM t) AS d) AS e")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!(1), json!("b")], vec![json!(2), json!("a")]]
+    );
+}
+
 // ==== CLI 夹具（表头断言需要真二进制 JSON 列名）====
 
 fn query_cli(sql: &str) -> CliOutput {

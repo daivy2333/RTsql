@@ -98,7 +98,7 @@ async fn left_join_matched() {
         "LEFT JOIN 必须输出匹配组合并为未匹配左行补 NULL 右列"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：NULL 连接键不匹配任何行（左行走补 NULL 分支）。
@@ -130,7 +130,7 @@ async fn left_join_null_key_no_match() {
         "NULL 键不匹配任何行，左行自身值保留、右列补 NULL"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：非等值 ON 经 NLJ 通道可达（外连接不因 ON 形态改变承载通道）。
@@ -155,7 +155,7 @@ async fn left_join_non_equi_on() {
         "非等值 ON 的 LEFT JOIN：v=1 匹配 (3,'x')，v=5 无匹配补 NULL"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S1：RIGHT JOIN 未匹配右行补 NULL 左列，未匹配左行丢弃。
@@ -185,7 +185,7 @@ async fn right_join_unmatched_padded() {
         "RIGHT JOIN 必须保留全部右行并为未匹配右行补 NULL；未匹配左行丢弃"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S2：FULL JOIN 两侧未匹配补齐（未匹配右行在左输入耗尽后按右行序追加）。
@@ -215,7 +215,7 @@ async fn full_join_both_sides_padded() {
         "FULL JOIN 必须两侧补齐：未匹配左行补 NULL 右列、未匹配右行补 NULL 左列"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S1：外层 WHERE 过滤作用于补 NULL 后的行流（补 NULL 行被滤除）。
@@ -235,7 +235,7 @@ async fn where_filters_padded_rows() {
         "WHERE 引用补 NULL 列过滤时，未匹配左行（r.val 为 NULL，判定 Unknown）必须被滤除"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S2：ORDER BY 作用于外连接结果（裸列名键解析到 JOIN 输出形状）。
@@ -262,7 +262,7 @@ async fn order_by_on_outer_result() {
         "ORDER BY 裸列名键必须解析到 JOIN 输出形状并对补 NULL 行参与排序"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S3：IN 子查询中的外连接形态维持计划期点名拒绝（`ON true` 形态可达，
@@ -286,7 +286,7 @@ async fn in_subquery_join_still_rejected() {
         "拒绝信息不得误报为子查询返回多列，实际 {msg:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4：其余 JOIN 形态维持既有点名拒绝。
@@ -326,7 +326,7 @@ async fn natural_join_rejected() {
         );
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4：外连接一律经 NLJ（等值 ON 不走 Hash），RIGHT 计划期交换左右输入。
@@ -385,7 +385,7 @@ async fn outer_join_routes_to_nested_loop_join() {
         other => panic!("INNER 等值 ON 必须保持 Hash Join 形状，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// D2 边界：`IN (SELECT …)` / `EXISTS (SELECT …)` 谓词在 JOIN 基座上维持既有
@@ -412,7 +412,7 @@ async fn where_subquery_over_join_stays_rejected() {
         );
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// D2：WHERE × JOIN 在 INNER（等值 Hash 路径与 NLJ 路径）与 OUTER 上均可达。
@@ -453,7 +453,7 @@ async fn where_over_inner_join_reachable() {
         "OUTER JOIN + WHERE 必须作用于补 NULL 后的行流"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// D2：WHERE 谓词在组合行布局上解析——限定名 / 唯一非限定名可达，多表同名
@@ -503,7 +503,7 @@ async fn where_over_join_column_resolution() {
         "组合布局下缺失列必须点名列名，实际 {msg:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// D2：WHERE × JOIN × ORDER BY 的行形状与表头 = SELECT 清单（Sort 承担裁剪），
@@ -543,7 +543,7 @@ async fn where_over_join_projection_shape() {
         other => panic!("ORDER BY 查询必须以 Sort 为顶层节点，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// D2：WHERE × JOIN × 聚合分组可达（Filter 恒等承载，分组键在组合形状上解析）。
@@ -572,7 +572,7 @@ async fn where_over_join_aggregate() {
         "WHERE×JOIN×GROUP BY 必须在组合形状上解析分组键并聚合"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// D2：表头 = SELECT 清单的端到端见证（真二进制 JSON 渲染；ORDER BY 存在时

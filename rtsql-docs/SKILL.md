@@ -119,6 +119,14 @@ rtsql list
 
 A subcommand name takes precedence over a bare database name. To open a database literally named `list`, use a path such as `./list.db`.
 
+`:memory:` is a reserved main-command target for a database that never touches disk:
+
+```bash
+rtsql :memory: "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO t VALUES (1, 'Ada'); SELECT name FROM t"
+```
+
+It creates no `.db`, `.wal`, or `.checkpoint` file, `close()` and `checkpoint()` do nothing, and the data is gone when the process exits. Use it for tests, throwaway calculations, and multi-statement pipelines that should leave no cleanup behind. Reject lifecycle subcommands, `--key`, and `--readonly` for `:memory:` with exit code `2` instead of silently ignoring them.
+
 ## Execute SQL
 
 The main command accepts a database and SQL text:
@@ -297,7 +305,37 @@ The `.wal` file stores redo records. The `.checkpoint` file stores the safe repl
 
 RTsql takes an advisory exclusive lock when opening a database. A second process receives exit code `4` before SQL execution. Record the exact path, find the owning process, stop it gracefully, and retry only after the lock is released. Do not remove lock files to bypass the lock.
 
+`--readonly` takes an advisory shared lock instead, which enables many readers over one file while a writer stays alone:
+
+```bash
+rtsql --readonly demo "SELECT count(*) FROM people"
+rtsql --readonly demo "ATTACH './other.db' AS other; SELECT p.name FROM people p JOIN other.team t ON t.id = p.id"
+```
+
+Read-only sessions never write: they skip recovery and checkpoint, and they refuse `INSERT` / `UPDATE` / `DELETE` / `UPSERT` / `REPLACE` and all DDL at plan time with SQLSTATE `25006` (exit code `3`). `SELECT`, `ATTACH`, `DETACH`, and transaction statements still work, and an attached database opens read-only too.
+
+Two refusals are specific to read-only opens:
+
+- Exit code `1` with a message naming pending WAL: the database has unreplayed `.wal` records. Open it once without `--readonly` to complete recovery, then retry read-only. The refusal leaves every file unchanged.
+- Exit code `2`: `--readonly` was combined with a subcommand. `--readonly` belongs to the main command; subcommands keep their read-write open.
+
+An encrypted database opens read-only with `--key` as usual. A read-write session excludes readers and other writers, and a read-only session excludes a read-write one; conflicts are reported immediately as exit code `4` rather than waited out.
+
 A plaintext database starts with a 64-byte header and stores 4096-byte page images. An encrypted database uses the same header size, a 32-byte random salt, persisted Argon2id parameters, and 4124-byte encrypted page records containing a nonce, ciphertext, and authentication tag.
+
+## Keep the WAL bounded in long sessions
+
+A read-write session truncates the `.wal` file at `close()`. A long-running session that keeps writing also checkpoints automatically once the bytes appended since the last checkpoint reach a threshold (16 MiB by default), which keeps the file from growing without bound:
+
+```bash
+RTSQL_WAL_CHECKPOINT_BYTES=1048576 rtsql demo "INSERT INTO log (id, line) VALUES (1, 'first')"
+```
+
+- The check runs at each commit boundary — after an auto-commit statement and after an explicit `COMMIT` — and is deferred while another transaction of the same session is still active, so it never interleaves with in-flight work.
+- `RTSQL_WAL_CHECKPOINT_BYTES=0` disables the automatic checkpoint. The `.wal` then grows for the whole session and `close()` still truncates it.
+- A non-numeric, negative, or overflowing value is refused before the database opens: exit code `2` with a message naming the variable and the rejected value, and no file is created. Fix the value or unset the variable.
+- If the automatic checkpoint fails, the statement that triggered it reports the failure and names the checkpoint (exit code `3`). Committed data is unaffected — the commit is fsynced first, and a later commit retries. Treat a repeated `checkpoint failed` message as a disk or file-system problem on the database's directory and check the free space and write permissions of the `.wal` and `.checkpoint` sidecars.
+- Read-only and `:memory:` sessions hold no WAL, so the setting does nothing there.
 
 ## Uninstall
 

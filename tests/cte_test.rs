@@ -80,7 +80,7 @@ async fn basic_cte() {
     );
     assert_eq!(cached, rows, "缓存命中路径结果一致");
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1 附加：WITH × 复合查询——两臂共享语句级注册表（`WITH c AS (…) SELECT …
@@ -97,7 +97,7 @@ async fn cte_with_compound_query() {
     );
     assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)], vec![json!(9)]]);
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：CTE 名遮蔽同名基表（现状 RED：静默输出基表行 9）。
@@ -117,7 +117,7 @@ async fn cte_shadows_base_table() {
         "CTE 遮蔽同名基表（基表 c 含 9）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：多定义与前向引用（后定义引用先定义）。
@@ -135,7 +135,7 @@ async fn multi_def_forward_ref() {
     );
     assert_eq!(rows, vec![vec![json!(11)], vec![json!(12)]]);
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S4：列别名列表重命名 CTE 输出列（表头经 CLI 见证为 n、s）。
@@ -162,7 +162,7 @@ async fn column_alias_list() {
         "列数不符点名拒绝: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S5：反向引用（先定义引用后定义）点名拒绝。
@@ -180,7 +180,7 @@ async fn reverse_ref_rejected() {
         "反向引用按既有表缺失面拒绝: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S1：多引用行集一致（自 JOIN 双侧引用同一 CTE）。
@@ -202,7 +202,7 @@ async fn multi_ref_consistent_rows() {
         vec![vec![json!(1), json!(1)], vec![json!(2), json!(2)]]
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S2：两个标量子查询引用读同一行集。
@@ -230,7 +230,7 @@ async fn two_scalar_refs_same_rows() {
         "两个标量引用读同一行集（外层 FROM 的 v 尾随）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S1：`WITH RECURSIVE` 关键字拒绝（含内容非递归的形态）。
@@ -250,7 +250,7 @@ async fn recursive_keyword_rejected() {
         );
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S2：定义内自引用点名拒绝。
@@ -266,7 +266,7 @@ async fn self_reference_rejected() {
     );
     assert!(msg.contains("cte"), "自引用点名拒绝: {msg}");
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S3：子查询内 WITH 点名拒绝（范围仅顶层语句）。
@@ -287,7 +287,7 @@ async fn with_in_subquery_rejected() {
         "子查询内 WITH 点名拒绝: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3 附加：定义内嵌套 WITH 点名拒绝；引用处列别名列表点名拒绝（声明面唯一
@@ -319,7 +319,7 @@ async fn nested_with_and_reference_alias_list_rejected() {
         "引用处列别名列表点名拒绝: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4-S1：无 WITH 的全部查询零回归（含同名基表查询）。
@@ -344,7 +344,7 @@ async fn no_with_queries_unchanged() {
         "未定义表文案不变"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S4 表头见证：列别名列表经既有 CLI 渲染面输出 n、s。
