@@ -12,6 +12,11 @@ pub enum StorageError {
     #[error("database is locked: {0}")]
     DatabaseLocked(String),
 
+    /// MS26 T1：只读打开的 WAL 未决拒绝（`readonly-open-mode` R2）——
+    /// `.wal` 存在非 `Checkpoint` 标记记录，须先以读写模式打开完成恢复。
+    #[error("database has pending WAL, open read-write once to recover: {0}")]
+    WalPendingRecovery(String),
+
     #[error("not an RTsql database: {0}")]
     NotADatabase(String),
 

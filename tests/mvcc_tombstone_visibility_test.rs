@@ -359,7 +359,7 @@ async fn uncommitted_delete_not_applied_after_restart() {
     // Persist schema and committed rows (the flush equivalent of eviction)
     // without commit, rollback, or checkpoint — the uncommitted delete's WAL
     // records stay untruncated but must not be replayed on the next open.
-    db.wal_buffer.do_flush().await;
+    db.wal_buffer.as_ref().unwrap().do_flush().await;
     db.buffer_pool.flush_all().await.unwrap();
     drop(db);
     let db = open_db_at(&path).await;
@@ -392,7 +392,7 @@ async fn flushed_uncommitted_insert_does_not_resurrect() {
     // Persist the uncommitted row's pages and WAL records without committing
     // or checkpointing (deterministic equivalent of eviction-driven flush),
     // then terminate the process.
-    db.wal_buffer.do_flush().await;
+    db.wal_buffer.as_ref().unwrap().do_flush().await;
     db.buffer_pool.flush_all().await.unwrap();
     drop(db);
 
@@ -462,7 +462,7 @@ async fn tx_id_allocator_advances_past_recovered_ids_after_restart() {
         "precondition: at least two tx ids allocated, got {max_before_restart}"
     );
 
-    db.wal_buffer.do_flush().await;
+    db.wal_buffer.as_ref().unwrap().do_flush().await;
     db.buffer_pool.flush_all().await.unwrap();
     drop(db);
 

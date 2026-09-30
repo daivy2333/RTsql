@@ -1,6 +1,6 @@
 //! Derived scan executor - materializes subquery results as in-memory table
 
-use crate::executor::{ExecResult, Executor, Value};
+use crate::executor::{apply_projection, ExecResult, Executor, Value};
 use crate::storage::Result;
 
 pub struct DerivedScanExecutor {
@@ -9,7 +9,18 @@ pub struct DerivedScanExecutor {
 }
 
 impl DerivedScanExecutor {
-    pub fn new(rows: Vec<Vec<Value>>) -> Self {
+    /// MS26 T8: `projection` mirrors `ScanNode`/`DataScanNode.projection` — it
+    /// trims each materialized derived row to the outer Select list; empty
+    /// keeps the full derived row (identity). Applied through the same
+    /// `apply_projection` helper the scan and filter executors use.
+    pub fn new(rows: Vec<Vec<Value>>, projection: Vec<usize>) -> Self {
+        let rows = if projection.is_empty() {
+            rows
+        } else {
+            rows.into_iter()
+                .map(|row| apply_projection(&projection, row))
+                .collect()
+        };
         Self {
             rows,
             current_row: 0,

@@ -8,6 +8,7 @@ mod data_page;
 mod error;
 mod file_header;
 mod file_storage;
+mod memory_storage;
 mod page;
 pub mod page_format;
 mod page_frame;
@@ -32,6 +33,7 @@ pub use data_page::{
 pub use error::{Result, StorageError};
 pub use file_header::{FileHeader, FLAG_ENCRYPTED, FORMAT_VERSION, HEADER_SIZE, KNOWN_FLAGS_MASK};
 pub use file_storage::FileStorage;
+pub use memory_storage::MemoryStorage;
 pub use page::Page;
 pub use page_format::{ColumnType, Key, RowId, MAX_KEY_LEN};
 pub use page_frame::PageGuard;

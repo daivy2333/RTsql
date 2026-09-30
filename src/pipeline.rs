@@ -302,6 +302,14 @@ pub async fn execute_stage_routed(
     profiling: bool,
     routed: &RoutedTables,
 ) -> Response {
+    // MS26 T2：只读拒绝面——6 个执行入口（`execute` / `execute_stage` /
+    // `execute_stage_routed` / `execute_in_tx` / `execute_stage_in_tx` /
+    // `execute_stage_in_tx_routed`）的委托链都收敛到本函数与
+    // `execute_stage_in_tx_routed` 两个叶子，故在此与该叶子各挂一次即
+    // 覆盖全部入口。
+    if let Some(rejection) = readonly_rejection(database, &plan) {
+        return rejection;
+    }
     match &plan {
         PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
             let executor: Box<dyn Executor + Send> = match &plan {
@@ -460,11 +468,11 @@ pub async fn execute_stage_routed(
                     }
                 }
                 _ => {
-                    if let Err(commit_err) = database
-                        .transaction_manager
-                        .commit(tx, &database.buffer_pool)
-                        .await
-                    {
+                    // MS26 T5：收敛到 `Database::commit`（水位检查单点）。
+                    // 既有文案形态不变——内层错误已点名 `checkpoint failed`
+                    // （`wal-auto-checkpoint` R4）；本臂不做破坏性清理，与
+                    // CTAS 臂的语义差异见下。
+                    if let Err(commit_err) = database.commit(tx).await {
                         return Response::Error {
                             message: format!("Commit failed: {}", commit_err),
                             sqlstate: None,
@@ -515,6 +523,42 @@ pub async fn execute_stage_routed(
         }
     }
 }
+
+/// MS26 T2：只读会话的写计划拒绝（`readonly-open-mode` R4，design D3）——
+///
+/// 计划形状是语句语义的权威判据：13 个写变体在只读会话中于执行入口顶部
+/// （解析后、任何写入生效前）点名拒绝，SQLSTATE `25006`
+/// （read_only_sql_transaction）。`is_readonly()` 为假时零成本直通。
+pub(crate) fn readonly_rejection(db: &Database, plan: &PhysicalPlan) -> Option<Response> {
+    if !db.is_readonly() {
+        return None;
+    }
+    let kind = match plan {
+        PhysicalPlan::Insert(_) => "INSERT",
+        PhysicalPlan::Upsert(_) => "UPSERT",
+        PhysicalPlan::Update(_) => "UPDATE",
+        PhysicalPlan::Delete(_) => "DELETE",
+        PhysicalPlan::CreateTable(_) => "CREATE TABLE",
+        PhysicalPlan::CreateTableAsSelect(_) => "CREATE TABLE AS SELECT",
+        PhysicalPlan::CreateIndex(_) => "CREATE INDEX",
+        PhysicalPlan::AlterTable(_) => "ALTER TABLE",
+        PhysicalPlan::DropIndex(_) => "DROP INDEX",
+        PhysicalPlan::Truncate(_) => "TRUNCATE",
+        PhysicalPlan::CreateView(_) => "CREATE VIEW",
+        PhysicalPlan::DropView(_) => "DROP VIEW",
+        PhysicalPlan::DropTable(_) => "DROP TABLE",
+        // 防御臂：新增写变体未纳入枚举时不得误拒读形状（由契约测试在
+        // Plan Review 侧核对枚举完备性）。
+        _ => return None,
+    };
+    Some(Response::Error {
+        message: format!("cannot execute {kind} in a read-only session"),
+        sqlstate: Some(READ_ONLY_SQLSTATE.to_string()),
+    })
+}
+
+/// 只读写拒绝的 SQLSTATE 分类（PG `read_only_sql_transaction`，MS19 R2 通道）。
+const READ_ONLY_SQLSTATE: &str = "25006";
 
 /// MS10-T04：单结果执行路径（网络 / 显式事务）的多语句显式拒绝——
 /// 两条路径共用同一文案；拒绝必须发生在 plan_stage / cache put 之前。
@@ -673,7 +717,7 @@ async fn execute_ctas_routed(
         database.transaction_manager.clone(),
         rows,
         tx_id,
-        Some(database.wal_buffer.clone()),
+        database.wal_buffer.clone(),
     );
     let mut insert_failure: Option<String> = None;
     loop {
@@ -700,6 +744,11 @@ async fn execute_ctas_routed(
             sqlstate: None,
         };
     }
+    // 8. 收口：事务提交失败 → 尽力 drop_table（零副作用：同名可重试）。
+    //    MS26 T5：水位检查**不在**本段内——它失败时事务已提交（WAL 已
+    //    fsync、版本已标 committed），沿用上面的 drop_table 会删掉已提交
+    //    数据的表，违反 `wal-auto-checkpoint` R4。故拆两段：事务提交本身
+    //    失败才清理，提交成功后的 checkpoint 失败只点名传播（表存活）。
     if let Err(e) = database
         .transaction_manager
         .commit(tx, &database.buffer_pool)
@@ -708,6 +757,12 @@ async fn execute_ctas_routed(
         let _ = database.table_manager.drop_table(&node.table_name).await;
         return Response::Error {
             message: format!("Commit failed: {e}"),
+            sqlstate: None,
+        };
+    }
+    if let Err(e) = database.maybe_auto_checkpoint().await {
+        return Response::Error {
+            message: e.to_string(),
             sqlstate: None,
         };
     }
@@ -838,6 +893,12 @@ pub async fn execute_stage_in_tx_routed(
     tx_id: u64,
     routed: &RoutedTables,
 ) -> Response {
+    // MS26 T2：只读拒绝面（与 `execute_stage_routed` 同点，理由见该处）。
+    // 优先级高于既有的「显式事务内不支持」0A000 拒绝——只读会话的写语句
+    // 先按只读状态点名，事务保持活跃（沿既有语句级失败语义）。
+    if let Some(rejection) = readonly_rejection(database, &plan) {
+        return rejection;
+    }
     match &plan {
         PhysicalPlan::CreateTable(_)
         | PhysicalPlan::DropTable(_)
@@ -1203,7 +1264,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     database.transaction_manager.clone(),
                     node.values,
                     tx_id.expect("DML Insert requires a transaction id"),
-                    Some(database.wal_buffer.clone()),
+                    database.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -1218,7 +1279,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     node.action.clone(),
                     node.values,
                     tx_id.expect("DML Upsert requires a transaction id"),
-                    Some(database.wal_buffer.clone()),
+                    database.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -1232,7 +1293,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     node.column,
                     node.new_value,
                     tx_id.expect("DML Update requires a transaction id"),
-                    Some(database.wal_buffer.clone()),
+                    database.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -1244,7 +1305,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     database.transaction_manager.clone(),
                     node.key.as_bytes().to_vec(),
                     tx_id.expect("DML Delete requires a transaction id"),
-                    Some(database.wal_buffer.clone()),
+                    database.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -1545,7 +1606,10 @@ pub(crate) fn create_executor_from_plan<'a>(
                         None => break,
                     }
                 }
-                Ok(Box::new(DerivedScanExecutor::new(rows)) as Box<dyn Executor + Send>)
+                Ok(
+                    Box::new(DerivedScanExecutor::new(rows, node.projection.clone()))
+                        as Box<dyn Executor + Send>,
+                )
             }
 
             PhysicalPlan::Projection(node) => {

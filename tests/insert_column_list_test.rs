@@ -90,7 +90,7 @@ async fn out_of_order_list_maps_values_to_named_columns() {
         "值必须按列清单映射落位（id=2、v=1），实际: {rows:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R6-S2：乱序清单键位越界被键位类型校验拒绝——`(v, id) VALUES (1, 5.0)`
@@ -121,7 +121,7 @@ async fn out_of_order_list_key_violation_rejected() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R6-S3 → MS24 校准：部分清单在子集语义下合法——省略列（无声明 DEFAULT）
@@ -158,7 +158,7 @@ async fn partial_list_inserts_omitted_columns_no_panic() {
         other => panic!("Expected QueryResult，实际 {other:?}"),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R6-S4：未知列计划期拒绝——`(id, zz) VALUES (7, 1)` 报点名错误，
@@ -188,7 +188,7 @@ async fn unknown_column_rejected_at_plan_time() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R6-S5：无清单但值数不符计划期拒绝（panic 消除）——`VALUES (1)` 报
@@ -218,7 +218,7 @@ async fn no_list_row_length_mismatch_rejected_at_plan_time() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R6-S6 锚点：清单与表列序一致行为保持——`(id, v) VALUES (5, 100)` 落库
@@ -245,7 +245,7 @@ async fn in_order_list_behavior_unchanged() {
         "一致清单行为必须保持"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R6 Requirement SHALL（重复列拒绝，编号场景之外的需求面覆盖）：清单
@@ -275,5 +275,5 @@ async fn duplicate_column_in_list_rejected_at_plan_time() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

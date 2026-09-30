@@ -66,7 +66,7 @@ async fn distinct_single_col() {
         "SELECT DISTINCT 必须按输出行去重并保留首现序"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：多列元组去重。
@@ -86,7 +86,7 @@ async fn distinct_multi_col() {
         "多列 DISTINCT 必须按整行元组去重"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：NULL 相等折叠（NULL,NULL,1 → NULL 与 1 各一行）。
@@ -106,7 +106,7 @@ async fn distinct_null_folds() {
         "NULL 与 NULL 必须视为相等折叠为一行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S4：表达式投影按求值后值去重（'ab','AB','cd' → 'AB','CD'）。
@@ -126,7 +126,7 @@ async fn distinct_expression_dedup() {
         "DISTINCT 必须作用于表达式求值后的输出值"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S1：DISTINCT + ORDER BY 输出项（排序作用于去重结果）。
@@ -146,7 +146,7 @@ async fn distinct_order_by_output() {
         "DISTINCT + ORDER BY 输出项必须先去重后排序"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S2：DISTINCT + ORDER BY 非输出项计划期点名拒绝。
@@ -163,7 +163,7 @@ async fn distinct_order_by_non_output_rejected() {
         "DISTINCT 查询的 ORDER BY 非输出项必须点名拒绝，实际: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S3：DISTINCT × 聚合输出按输出行去重（行形状与值不变）。
@@ -223,7 +223,7 @@ async fn distinct_aggregate_output() {
         "未入选分组键不进输出行，每行恰 1 值（形状守恒）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 链位：LIMIT 作用于去重**之后**的行数（'a','a','b' LIMIT 2 → a,b 两行）。
@@ -243,7 +243,7 @@ async fn distinct_limit_above_dedup() {
         "LIMIT 必须作用于去重后的行流（先去重后截断）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 链位：DISTINCT 作用于 JOIN 组合形状的输出行（同一 id 出现两次 → 折叠）。
@@ -272,7 +272,7 @@ async fn distinct_over_join_result() {
         "DISTINCT 必须作用于 JOIN 组合形状的输出行（id=1 出现两次 → 一行）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S1：`DISTINCT ON(...)` 计划期点名拒绝。
@@ -288,7 +288,7 @@ async fn distinct_on_rejected() {
         "DISTINCT ON 必须点名拒绝，实际: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S2：`ALL` 量化词等价既有不去重行为。
@@ -310,7 +310,7 @@ async fn all_quantifier_identity() {
     );
     assert_eq!(all, plain, "SELECT ALL 必须与无量化词形态逐值一致");
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S3：既有非 DISTINCT 查询零回归（无量化词路径不新增任何节点）。
@@ -330,5 +330,5 @@ async fn non_distinct_queries_unchanged() {
         "无 DISTINCT 量化词的查询必须逐值不变"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

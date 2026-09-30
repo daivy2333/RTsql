@@ -91,7 +91,7 @@ async fn subset_insert_omitted_column_takes_declared_default() {
         "省略列必须取声明 DEFAULT（name='anon'），实际: {rows:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：子集清单省略无 DEFAULT 的可空列取 NULL。
@@ -123,7 +123,7 @@ async fn subset_insert_omitted_nullable_column_takes_null() {
         "省略列取 DEFAULT（name）/NULL（score），实际: {rows:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：省略 NOT NULL 且无 DEFAULT 的列被既有执行器门零副作用拒绝。
@@ -157,7 +157,7 @@ async fn subset_insert_omitted_not_null_column_rejected_zero_side_effects() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S4：VALUES 中的 DEFAULT 关键字等价省略——取声明 DEFAULT 或 NULL。
@@ -189,7 +189,7 @@ async fn default_keyword_in_values_takes_declared_default_or_null() {
         "DEFAULT 关键字必须取声明 DEFAULT（name）/NULL（score），实际: {rows:?}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S5：DEFAULT 跨重启生效——干净关闭重开后再子集 INSERT，省略列取
@@ -230,7 +230,7 @@ async fn declared_default_survives_restart() {
         "重开后省略列必须仍取声明 DEFAULT，实际: {rows:?}"
     );
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S8 锚点：全列清单与无清单 INSERT 行为不变（含 MS16 乱序映射语义），
@@ -284,5 +284,5 @@ async fn full_list_and_listless_inserts_unchanged() {
         "无清单行长度拒绝文案必须保持，实际: {message}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

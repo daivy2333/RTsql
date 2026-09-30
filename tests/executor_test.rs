@@ -731,31 +731,10 @@ async fn test_update_creates_new_version() -> Result<()> {
 #[tokio::test]
 async fn test_create_table_executor_success() -> Result<()> {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-    let table_manager = TableManager::new(buffer_pool.clone(), storage)
-        .await
-        .unwrap();
-
     use rtsql::database::Database;
     use rtsql::executor::ColumnType;
-    let wal_writer =
-        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
-    let database = Arc::new(Database {
-        buffer_pool: buffer_pool.clone(),
-        table_manager: table_manager.clone(),
-        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: wal_writer.clone(),
-        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
-            std::path::Path::new(":memory:"),
-            wal_writer.clone(),
-            buffer_pool.clone(),
-        )),
-        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
-        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
-        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-    });
+    let database = Arc::new(Database::open(&dir.path().join("test.db")).await.unwrap());
+    let table_manager = database.table_manager.clone();
 
     let plan = PhysicalPlan::CreateTable(rtsql::executor::CreateTableNode {
         table_name: "users".to_string(),
@@ -779,32 +758,11 @@ async fn test_create_table_executor_success() -> Result<()> {
 #[tokio::test]
 async fn test_create_table_executor_already_exists() -> Result<()> {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-    let table_manager = TableManager::new(buffer_pool.clone(), storage)
-        .await
-        .unwrap();
-
     use rtsql::database::Database;
     use rtsql::executor::ColumnType as ExecColumnType;
     use rtsql::storage::ColumnType as StorageColumnType;
-    let wal_writer =
-        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
-    let database = Arc::new(Database {
-        buffer_pool: buffer_pool.clone(),
-        table_manager: table_manager.clone(),
-        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: wal_writer.clone(),
-        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
-            std::path::Path::new(":memory:"),
-            wal_writer.clone(),
-            buffer_pool.clone(),
-        )),
-        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
-        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
-        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-    });
+    let database = Arc::new(Database::open(&dir.path().join("test.db")).await.unwrap());
+    let table_manager = database.table_manager.clone();
 
     // Create table first time (using storage::ColumnType)
     table_manager
@@ -840,31 +798,10 @@ async fn test_create_table_executor_already_exists() -> Result<()> {
 #[tokio::test]
 async fn test_drop_table_executor_success() -> Result<()> {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-    let table_manager = TableManager::new(buffer_pool.clone(), storage)
-        .await
-        .unwrap();
-
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
-    let wal_writer =
-        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
-    let database = Arc::new(Database {
-        buffer_pool: buffer_pool.clone(),
-        table_manager: table_manager.clone(),
-        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: wal_writer.clone(),
-        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
-            std::path::Path::new(":memory:"),
-            wal_writer.clone(),
-            buffer_pool.clone(),
-        )),
-        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
-        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
-        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-    });
+    let database = Arc::new(Database::open(&dir.path().join("test.db")).await.unwrap());
+    let table_manager = database.table_manager.clone();
 
     // Create table first
     table_manager
@@ -895,31 +832,9 @@ async fn test_drop_table_executor_success() -> Result<()> {
 #[tokio::test]
 async fn test_drop_table_executor_not_found() -> Result<()> {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-    let table_manager = TableManager::new(buffer_pool.clone(), storage)
-        .await
-        .unwrap();
-
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
-    let wal_writer =
-        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
-    let database = Arc::new(Database {
-        buffer_pool: buffer_pool.clone(),
-        table_manager: table_manager.clone(),
-        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: wal_writer.clone(),
-        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
-            std::path::Path::new(":memory:"),
-            wal_writer.clone(),
-            buffer_pool.clone(),
-        )),
-        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
-        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
-        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-    });
+    let database = Arc::new(Database::open(&dir.path().join("test.db")).await.unwrap());
 
     // Try to drop a non-existent table without IF EXISTS
     let plan = PhysicalPlan::DropTable(rtsql::executor::DropTableNode {
@@ -941,31 +856,9 @@ async fn test_drop_table_executor_not_found() -> Result<()> {
 #[tokio::test]
 async fn test_drop_table_if_exists_success() -> Result<()> {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
-    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
-    let table_manager = TableManager::new(buffer_pool.clone(), storage)
-        .await
-        .unwrap();
-
     use rtsql::database::Database;
     use rtsql::executor::DropTableExecutor;
-    let wal_writer =
-        Arc::new(rtsql::wal::WalWriter::open(std::path::Path::new(":memory:")).unwrap());
-    let database = Arc::new(Database {
-        buffer_pool: buffer_pool.clone(),
-        table_manager: table_manager.clone(),
-        transaction_manager: Arc::new(rtsql::transaction::TransactionManager::new()),
-        wal_writer: wal_writer.clone(),
-        checkpoint_manager: Arc::new(rtsql::wal::CheckpointManager::new(
-            std::path::Path::new(":memory:"),
-            wal_writer.clone(),
-            buffer_pool.clone(),
-        )),
-        wal_buffer: Arc::new(rtsql::wal::WALBuffer::new(wal_writer, 100, 100)),
-        plan_cache: Arc::new(rtsql::plan_cache::PlanCache::new()),
-        isolation: rtsql::transaction::IsolationLevel::RepeatableRead,
-        views: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-    });
+    let database = Arc::new(Database::open(&dir.path().join("test.db")).await.unwrap());
 
     // Drop a non-existent table with IF EXISTS - should succeed without error
     let plan = PhysicalPlan::DropTable(rtsql::executor::DropTableNode {

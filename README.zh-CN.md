@@ -181,6 +181,33 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql profile <db> <table> [--top n]` | 输出列画像和 String 高频值；默认 top 为 5，最大 20 |
 | `rtsql completions <bash\|zsh\|fish>` | 生成补全脚本；该命令不出现在 `--help` 中 |
 
+### 只读会话
+
+`rtsql --readonly <db> <sql>` 以 advisory 共享锁打开数据库（默认读写打开为独占锁），因此多个只读会话可以同时观察同一个文件，而写会话仍然独占。
+
+- **多读单写**：只读会话之间共享锁；读写会话排除只读者与其他写者，只读会话也排除读写会话。锁冲突立即以退出码 `4` 拒绝——RTsql 不等待锁。
+- **无未决 WAL**：只读会话不执行恢复，因此 `.wal` 中仍有未重放记录时拒绝打开，错误文案点名需以读写模式完成恢复，退出码为 `1`。
+- **零写入**：不运行恢复也不 checkpoint，`INSERT` / `UPDATE` / `DELETE` / `UPSERT` / `REPLACE` 与全部 DDL 在计划期以 SQLSTATE `25006` 拒绝（退出码 `3`）；`SELECT`、`ATTACH`、`DETACH` 与事务语句不受限。
+- **跨库**：只读会话内的 `ATTACH` 将附加库也以只读模式打开。
+- **加密库**：照常传入 `--key`；密钥错误仍为退出码 `5`。
+- **仅主命令**：`--readonly` 与生命周期或分析子命令组合是用法错误（退出码 `2`）——这些子命令维持读写打开。
+
+### 内存数据库
+
+`rtsql :memory: <sql>` 让整个会话在内存中运行。SQL 面完整可用（含 DDL、事务与 `ATTACH`），且不创建任何文件：没有 `.db`、`.wal` 或 `.checkpoint` 伴生文件，`close()` 与 `checkpoint()` 都是无操作，进程退出即丢弃全部数据。
+
+生命周期子命令、`--key` 与 `--readonly` 对 `:memory:` 都是用法错误（退出码 `2`）。
+
+### 按 WAL 大小自动 checkpoint
+
+读写会话在「自上次 checkpoint 以来累计追加的字节数」达到水位时自动 checkpoint，使长会话的 `.wal` 保持有界。检查发生在每个提交边界（auto-commit 语句提交后、显式 `COMMIT` 后）；同一会话内仍有其他活跃事务时顺延到后续提交边界。
+
+- **默认值**：16 MiB。常规会话远低于该值，行为与既有语义一致——只有 `close()` 与显式 checkpoint 才截断 WAL。
+- **环境变量**：`RTSQL_WAL_CHECKPOINT_BYTES=<字节数>` 覆盖水位；库内经 `Database::set_checkpoint_bytes_threshold` 可设置同一值。取 `0` 表示禁用自动 checkpoint——WAL 持续增长，`close()` 仍执行完整 checkpoint。
+- **非法值**：非数字、负数与溢出在打开数据库**之前**拒绝，报错文案点名变量名并回显非法值（退出码 `2`），不创建任何文件。
+- **失败传播**：自动 checkpoint 失败时，触发该边界的语句收到点名 checkpoint 失败的错误（退出码 `3`）。该语句已提交的数据保持可用——提交先于 checkpoint 完成 fsync，后续提交边界会自然重试。
+- **只读与内存会话**：两者都不持有 WAL 通道，该设置对其无效。
+
 ### 输出格式
 
 `--format` 接受 `table`、`json`、`csv` 和 `tsv`。未显式指定时，交互式终端默认使用 `table`，其他环境默认使用 `json`。
@@ -210,6 +237,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 - **事务：** 显式库 API 事务，以及 CLI `BEGIN` / `COMMIT` / `ROLLBACK` 会话。
 - **MVCC：** 默认 Repeatable Read，也可通过 `Database::open_with_isolation` 选择 Read Committed。
 - **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。
+- **运行形态：** 共享锁上的只读会话（多个并发读者、零写入），以及全程驻留内存的 `:memory:` 数据库。
 
 引擎使用显式类型检查和三值谓词逻辑，不会隐式转换不兼容的 SQL 类型。
 

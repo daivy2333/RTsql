@@ -26,6 +26,10 @@ use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+/// MS26 T4：`:memory:` 内存库实参（`in-memory-database` R1）——精确串相等，
+/// 不做大小写/引号变体归一；主命令特判，生命周期子命令点名拒绝。
+const MEMORY_DB: &str = ":memory:";
+
 /// 退出码分类：0 成功 / 1 一般错误 / 2 用法错误 / 3 SQL 错误 / 4 锁冲突 / 5 密钥错误。
 ///
 /// InvalidKey 由加密库的密钥错误面产生（MS17-T01：错误密钥 / 加密无钥 /
@@ -87,6 +91,11 @@ struct CliArgs {
     /// 加密库密钥；也可经 RTSQL_KEY 环境变量提供（显式 flag 优先）
     #[arg(long, value_name = "KEY", global = true, env = "RTSQL_KEY")]
     key: Option<String>,
+    /// MS26 T1：只读打开主库（advisory 共享锁，多读单写）。写语句在计划期
+    /// 以 SQLSTATE 25006 拒绝。仅主命令有效——生命周期子命令维持读写打开
+    /// （proposal 假设 10）。
+    #[arg(long)]
+    readonly: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -209,7 +218,30 @@ async fn execute_command(args: &CliArgs) -> ExitStatus {
     if args.key.as_deref() == Some("") {
         return ExitStatus::Usage("key must not be empty".to_string());
     }
+    // MS26 T5/T6（`wal-auto-checkpoint` R2）：非法水位配置在**打开前**点名
+    // 拒绝 exit 2（零副作用），与 `RTSQL_KEY` 空值同一纪律与通道。校验只对
+    // 开库路径生效——未开库命令（list/new/delete/completions）不消费 WAL
+    // 通道，故不施加该校验（Task Contract Forbidden）。
+    if let Err(message) = checkpoint_bytes_from_env() {
+        return ExitStatus::Usage(message);
+    }
+    // MS26 T4（`in-memory-database` R3）：六生命周期子命令对 `:memory:` 点名拒绝
+    // exit 2——守卫在名称解析与任何文件创建之前（`new` 是唯一会创建父目录的
+    // 入口，故必须早于分派）。stats/sample/profile 不在此列：它们沿既有
+    // `resolve_existing_db` 的 not-found 拒绝面（Cycle Non-goals）。
+    if let Some(target) = args.command.as_ref().and_then(lifecycle_db_target) {
+        if target == MEMORY_DB {
+            return ExitStatus::Usage(format!(
+                "{MEMORY_DB} is only supported by the main command (rtsql {MEMORY_DB} <sql>)"
+            ));
+        }
+    }
     match &args.command {
+        // MS26 T1：`--readonly` 只属主命令——生命周期子命令维持读写打开
+        // （proposal 假设 10），显式拒绝而非静默忽略。
+        Some(_) if args.readonly => ExitStatus::Usage(
+            "--readonly is only supported by the main command (rtsql <db> <sql>)".to_string(),
+        ),
         Some(Command::New { target }) => lifecycle::new_db(target, args.key.as_deref()).await,
         Some(Command::List) => lifecycle::list(args.format).await,
         Some(Command::Schema { db }) => lifecycle::schema(db, args.key.as_deref()).await,
@@ -248,6 +280,47 @@ async fn execute_command(args: &CliArgs) -> ExitStatus {
     }
 }
 
+/// WAL 字节水位的环境变量名（MS26 T5/T6，`wal-auto-checkpoint` R2）。
+const ENV_WAL_CHECKPOINT_BYTES: &str = "RTSQL_WAL_CHECKPOINT_BYTES";
+
+/// 解析 `RTSQL_WAL_CHECKPOINT_BYTES`（`wal-auto-checkpoint` R2）。
+///
+/// `Ok(None)` = 未设置，保持 `WalWriter` 的 16 MiB 默认值；`Ok(Some(n))` =
+/// 合法字节数（`0` 表示禁用自动 checkpoint）；`Err(msg)` = 非法值，文案点名
+/// 变量名与回显非法值，由调用方映射为 `Usage`（exit 2）。
+///
+/// 解析用 `u64`：非数字、负数与溢出三种非法形态同归此一支。
+fn checkpoint_bytes_from_env() -> Result<Option<u64>, String> {
+    match std::env::var(ENV_WAL_CHECKPOINT_BYTES) {
+        Err(_) => Ok(None),
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(_) => Err(format!(
+                "{ENV_WAL_CHECKPOINT_BYTES} must be a non-negative byte count (0 disables auto checkpoint), got {raw:?}"
+            )),
+        },
+    }
+}
+
+/// MS26 T4：六个 db 目标生命周期子命令的库实参（`:memory:` 拒绝面，
+/// `in-memory-database` R3）。`list` 无库实参；`stats`/`sample`/`profile`
+/// 刻意不在此列（见 `execute_command` 的守卫注释）。
+fn lifecycle_db_target(command: &Command) -> Option<&str> {
+    match command {
+        Command::New { target } => Some(target.as_str()),
+        Command::Schema { db }
+        | Command::Dump { db }
+        | Command::Restore { db, .. }
+        | Command::Import { db, .. }
+        | Command::Delete { db, .. } => Some(db.as_str()),
+        Command::List
+        | Command::Stats { .. }
+        | Command::Sample { .. }
+        | Command::Profile { .. }
+        | Command::Completions { .. } => None,
+    }
+}
+
 /// 主命令臂：db/sql 任一缺失 → 手动 usage（exit 2）；合法输入走既有全链路。
 async fn execute_main_command(args: &CliArgs) -> ExitStatus {
     let (db, sql) = match (&args.db, &args.sql) {
@@ -259,17 +332,41 @@ async fn execute_main_command(args: &CliArgs) -> ExitStatus {
             )
         }
     };
-    let db_path = match resolve::resolve_db_path(db) {
-        Ok(path) => path,
-        Err(e) => return ExitStatus::General(e),
+    // MS26 T4（`in-memory-database` R1/R3）：`:memory:` 特判在名称解析之前——
+    // 该实参不解析为文件、不取文件锁、不产生任何伴生文件；`--key`（无持久化，
+    // 加密无意义）与 `--readonly`（只读语义面向文件库的共享锁）组合点名拒绝
+    // exit 2。守卫早于 open，故拒绝路径零副作用。
+    let memory = db == MEMORY_DB;
+    if memory {
+        if args.key.is_some() {
+            return ExitStatus::Usage(format!(
+                "{MEMORY_DB} does not support --key / RTSQL_KEY (an in-memory database is never encrypted)"
+            ));
+        }
+        if args.readonly {
+            return ExitStatus::Usage(format!(
+                "{MEMORY_DB} does not support --readonly (read-only sessions open a file-backed database)"
+            ));
+        }
+    }
+    let db_path = if memory {
+        Path::new(MEMORY_DB).to_path_buf()
+    } else {
+        match resolve::resolve_db_path(db) {
+            Ok(path) => path,
+            Err(e) => return ExitStatus::General(e),
+        }
     };
     // sql/format/key 按值捕获：work future 拥有它们，满足 for<'a> 的 HRTB 工厂约束
     let sql = sql.clone();
     let format = args.format;
     let key = args.key.clone();
-    execute_command_inner(
+    let readonly = args.readonly;
+    execute_command_inner_mode(
         &db_path,
         args.key.as_deref(),
+        readonly,
+        memory,
         move |db| {
             let key = key.clone();
             Box::pin(async move { run_sql(db, &sql, format, key.as_deref()).await })
@@ -336,9 +433,27 @@ fn open_error_status(db_path: &Path, e: StorageError) -> ExitStatus {
 /// 取消安全：打开阶段取消与 kill -9 mid-recovery 等价（恢复从不截断 WAL，位点
 /// 重放收敛）；执行阶段取消只丢弃未提交 DML（恢复期 uncommitted 清理）。
 /// `close()` 期间不新增 select（快路径；二次 Ctrl-C 不强杀，kill -9 兜底）。
+/// 读写两阶段编排（D4）——既有全部调用方的委托壳（`readonly = false`）。
 async fn execute_command_inner(
     db_path: &Path,
     key: Option<&str>,
+    work: impl for<'a> FnOnce(&'a Database) -> WorkFuture<'a> + Send,
+    signal_int: impl Fn() -> SignalFuture + Send,
+    signal_term: impl Fn() -> SignalFuture + Send,
+) -> ExitStatus {
+    execute_command_inner_mode(db_path, key, false, false, work, signal_int, signal_term).await
+}
+
+/// MS26 T1/T4：带打开模式的两阶段编排——`readonly` 为真时经
+/// `Database::open_readonly_with_key` 取 advisory 共享锁打开（缺失文件拒绝、
+/// WAL 未决拒绝）；`in_memory` 为真时经 `Database::open_in_memory` 打开（无文件、
+/// 无锁，`db_path` 只用于错误文案）；否则走既有 `open_with_key`（行为逐字节
+/// 不变）。
+async fn execute_command_inner_mode(
+    db_path: &Path,
+    key: Option<&str>,
+    readonly: bool,
+    in_memory: bool,
     work: impl for<'a> FnOnce(&'a Database) -> WorkFuture<'a> + Send,
     signal_int: impl Fn() -> SignalFuture + Send,
     signal_term: impl Fn() -> SignalFuture + Send,
@@ -348,14 +463,31 @@ async fn execute_command_inner(
     // 轮询及其同步前缀（文件锁获取）。阶段 2 仍按工厂生成新实例。
     let phase1_sigint = signal_int();
     let phase1_sigterm = signal_term();
+    let open = async {
+        if in_memory {
+            Database::open_in_memory().await
+        } else if readonly {
+            Database::open_readonly_with_key(db_path, key).await
+        } else {
+            Database::open_with_key(db_path, IsolationLevel::RepeatableRead, key).await
+        }
+    };
     let db = tokio::select! {
-        opened = Database::open_with_key(db_path, IsolationLevel::RepeatableRead, key) => match opened {
+        opened = open => match opened {
             Ok(db) => db,
             Err(e) => return open_error_status(db_path, e),
         },
         _ = phase1_sigint => return ExitStatus::Signaled(2),
         _ = phase1_sigterm => return ExitStatus::Signaled(15),
     };
+
+    // MS26 T5/T6（`wal-auto-checkpoint` R2）：水位 env 通道的单点应用位——
+    // open 成功后、work 执行前，覆盖主命令与全部开库生命周期子命令。只读 /
+    // 内存会话无 WAL 通道，设置器为 no-op。合法性已在 `execute_command`
+    // 顶部（打开前）判定，此处只剩应用。
+    if let Ok(Some(bytes)) = checkpoint_bytes_from_env() {
+        db.set_checkpoint_bytes_threshold(bytes);
+    }
 
     let status = tokio::select! {
         result = work(&db) => result,
@@ -410,10 +542,15 @@ enum AttachFailure {
 
 /// ATTACH 执行面：路径解析 → 存在性前置 → 独占锁打开 → 注册。任一失败零副作用
 /// （注册表不变）。重复别名先于打开判定，避免同别名二次持锁。
+///
+/// MS26 T2（`readonly-open-mode` R5）：`readonly` 为真时附加库随会话只读打开
+/// （共享锁 + WAL 未决谓词，同主库语义）；模式直接取自主库实例的打开模式，
+/// 会话内不另存一份状态。
 async fn attach_database(
     session: &mut AttachSession,
     info: &AttachInfo,
     key: Option<&str>,
+    readonly: bool,
 ) -> Result<(), AttachFailure> {
     if session.contains(&info.alias) {
         return Err(AttachFailure::Sql(format!(
@@ -431,9 +568,12 @@ async fn attach_database(
         )));
     }
     // 附加库以主库同源参数打开（RR + 同一密钥通道）：加密面共用全局 --key。
-    let db = Database::open_with_key(&path, IsolationLevel::RepeatableRead, key)
-        .await
-        .map_err(|e| attach_open_failure(&path, e))?;
+    let db = if readonly {
+        Database::open_readonly_with_key(&path, key).await
+    } else {
+        Database::open_with_key(&path, IsolationLevel::RepeatableRead, key).await
+    }
+    .map_err(|e| attach_open_failure(&path, e))?;
     session.register(info.alias.clone(), db);
     Ok(())
 }
@@ -483,39 +623,41 @@ async fn run_sql(
         // MS20 T1：ATTACH 会话注册臂——不经 `TransactionSession`，与 MS11-T02
         // 三分派互斥（非 ATTACH 语句恒 `Ok(None)`），既有分派逐字节不变。
         match classify_attach_statement(stmt) {
-            Ok(Some(info)) => match attach_database(&mut attach_session, &info, key).await {
-                Ok(()) => {
-                    // D4 同构：注册语句无行集，渲染 Affected(0)
-                    if let Err(e) =
-                        emit_stdout(&render(kind(format), &[], &QueryPayload::Affected(0)))
-                    {
-                        rollback_session(db, &mut session).await;
-                        return ExitStatus::General(e);
-                    }
-                    continue;
-                }
-                Err(failure) => {
-                    // 失败路径与既有三分派同型：先回滚活跃会话事务（ATTACH 不改
-                    // 主库数据，但保持失败收口单一），再按语义类映射退出码。
-                    let in_tx = rollback_session(db, &mut session).await;
-                    let k = index + 1;
-                    return match failure {
-                        AttachFailure::Sql(text) => {
-                            sql_failure_status(k, total, &text, &statement_text, in_tx)
+            Ok(Some(info)) => {
+                match attach_database(&mut attach_session, &info, key, db.is_readonly()).await {
+                    Ok(()) => {
+                        // D4 同构：注册语句无行集，渲染 Affected(0)
+                        if let Err(e) =
+                            emit_stdout(&render(kind(format), &[], &QueryPayload::Affected(0)))
+                        {
+                            rollback_session(db, &mut session).await;
+                            return ExitStatus::General(e);
                         }
-                        AttachFailure::Locked(text) => ExitStatus::Locked(sql_failure_message(
-                            k,
-                            total,
-                            &text,
-                            &statement_text,
-                            in_tx,
-                        )),
-                        AttachFailure::InvalidKey(text) => ExitStatus::InvalidKey(
-                            sql_failure_message(k, total, &text, &statement_text, in_tx),
-                        ),
-                    };
+                        continue;
+                    }
+                    Err(failure) => {
+                        // 失败路径与既有三分派同型：先回滚活跃会话事务（ATTACH 不改
+                        // 主库数据，但保持失败收口单一），再按语义类映射退出码。
+                        let in_tx = rollback_session(db, &mut session).await;
+                        let k = index + 1;
+                        return match failure {
+                            AttachFailure::Sql(text) => {
+                                sql_failure_status(k, total, &text, &statement_text, in_tx)
+                            }
+                            AttachFailure::Locked(text) => ExitStatus::Locked(sql_failure_message(
+                                k,
+                                total,
+                                &text,
+                                &statement_text,
+                                in_tx,
+                            )),
+                            AttachFailure::InvalidKey(text) => ExitStatus::InvalidKey(
+                                sql_failure_message(k, total, &text, &statement_text, in_tx),
+                            ),
+                        };
+                    }
                 }
-            },
+            }
             Ok(None) => {}
             Err(e) => {
                 return sql_failure_status(
@@ -773,7 +915,7 @@ mod tests {
                 }
             }
             // 冲刷缓冲并停掉后台 flush loop：恢复期间不允许同进程并发写者
-            db.wal_buffer.shutdown().await;
+            db.wal_buffer.as_ref().unwrap().shutdown().await;
             drop(db);
         }
         let wal_before = std::fs::metadata(&wal_path).unwrap().len();

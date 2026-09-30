@@ -67,7 +67,7 @@ async fn count_distinct_basic() {
         "COUNT(DISTINCT v) 必须按去重非 NULL 计数（1,1,2,NULL → 2）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：全 NULL 组去重计数为 0。
@@ -82,7 +82,7 @@ async fn count_distinct_all_null_zero() {
     let rows = query_rows(db.execute_sql("SELECT count(DISTINCT v) FROM t").await);
     assert_eq!(rows, vec![vec![json!(0)]], "全 NULL 去重计数必须为 0");
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：多参数 `COUNT(DISTINCT a, b)` 计划期点名拒绝。
@@ -98,7 +98,7 @@ async fn count_distinct_multi_arg_rejected() {
         "多参数 COUNT(DISTINCT a, b) 必须点名拒绝并提及 COUNT，实际: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S1：`SUM(DISTINCT v)` 去重求和（1,1,2 → 3）。
@@ -118,7 +118,7 @@ async fn sum_distinct() {
         "SUM(DISTINCT v) 必须按去重值求和"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S2：`AVG(DISTINCT v)` 去重平均（1,1,3 → 2.0）。
@@ -138,7 +138,7 @@ async fn avg_distinct() {
         "AVG(DISTINCT v) 必须按去重值求平均（去重后 1,3 → 2.0）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S3：`MIN(DISTINCT v)` 等价普通 MIN（3,1,1 → 1）。
@@ -159,7 +159,7 @@ async fn min_distinct_eq_plain() {
         "MIN(DISTINCT v) 必须与普通 MIN(v) 逐值一致（SQLite 对齐）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S4：DISTINCT 量化词与 GROUP BY 组合按分组语义。
@@ -183,7 +183,7 @@ async fn distinct_with_group_by() {
         "count(DISTINCT v) 必须按分组去重计数（a 组 1,1,2 → 2）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S1：`group_concat(v)` 默认逗号分隔（'a','b','c' → 'a,b,c'）。
@@ -203,7 +203,7 @@ async fn group_concat_default_sep() {
         "group_concat 必须按输入行序以逗号连接组内非 NULL 值"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S2：`group_concat(v, '|')` 自定义字面量分隔符。
@@ -222,7 +222,7 @@ async fn group_concat_custom_sep() {
         "group_concat 第二参数字面量必须作为分隔符"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S3：NULL 跳过；全 NULL 组 → NULL。
@@ -249,7 +249,7 @@ async fn group_concat_null_skip_and_all_null_group() {
         "group_concat 必须跳过 NULL 值且全 NULL 组返回 NULL"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S4：非字面量分隔符计划期点名拒绝。
@@ -269,7 +269,7 @@ async fn group_concat_non_literal_sep_rejected() {
         "非字面量分隔符必须点名拒绝并提及 separator，实际: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4-S1：既有五聚合无 DISTINCT 形态结果与输出名零变化。
@@ -304,7 +304,7 @@ async fn existing_aggregates_unchanged() {
         "既有五聚合形态结果必须逐值不变"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1/R2/R3-④：新聚合形态的输出列名（契约 Required behavior ④）——

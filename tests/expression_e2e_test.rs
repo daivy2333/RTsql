@@ -367,7 +367,7 @@ async fn cast_string_to_int_both_faces() {
     );
     assert_eq!(rows, vec![vec![serde_json::json!("42")]]);
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let (db, _dir) = open_db().await;
@@ -544,7 +544,7 @@ async fn negative_number_literal_persists() {
         vec![vec![serde_json::json!(-1), serde_json::json!("x")]]
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
@@ -560,7 +560,7 @@ async fn negative_number_literal_persists() {
         vec![vec![serde_json::json!(-1.5), serde_json::json!("y")]],
         "负浮点行（Float 键列表）必须持久化并在重开后可见"
     );
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R5/S2：非字面量取负保持拒绝

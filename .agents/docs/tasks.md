@@ -195,9 +195,9 @@
 - **Split signals**: FULL OUTER JOIN 牵动执行器框架大改时拆出（LEFT/RIGHT 先行）；CTE 牵动 plan cache key 语义时单独成 change
 - **Related changes**: `openspec/changes/archive/2026-09-26-ms25-sql-read-surface/`（2026-09-28 收尾归档）
 
-### MS26：嵌入式运行形态（只读并发/checkpoint 水位/:memory:） — planned
+### MS26：嵌入式运行形态（只读并发/checkpoint 水位/:memory:） — completed
 
-- **Status**: planned
+- **Status**: completed（2026-09-30——change `2026-09-30-ms26-embedded-runtime` 四 Iteration 全 accepted 收尾并归档（执行序 000 只读模式 → 001 `:memory:` → 003 派生投影收口+收尾批 → 002 WAL 水位；编号与执行序无关）。T1/T2 只读打开模式：`FileStorage::open_readonly[_with_key]`（共享锁 + 头校验 helper 提取 + 写守卫）+ WAL 未决谓词（`WalPendingRecovery`，取锁后判定）+ `OpenMode`/`is_readonly`/三字段 Option 化 + `readonly_rejection` 13 写变体 25006（挂 2 叶子入口覆盖 6 公开入口）+ CLI `--readonly`（子命令组合 exit 2）+ ATTACH 只读传递。T3/T4 `:memory:`：`MemoryStorage`（页拷贝/free list 优先+写零/单调 `page_count`）+ `OpenMode::Memory` + `open_in_memory()`（构造裁剪零 WAL/恢复/checkpoint）+ CLI `:memory:` 特判（`--key`/`--readonly`/六子命令 exit 2 拒绝，早于 resolve 与父目录创建）。T8 派生基座投影收口（用户指令扩入，Act 001 Issue 候选本 change 解决不落账）：`DerivedScanNode.projection` + `base_schema`/无 WHERE 装配/`get_plan_output_columns`/`is_base_scan_chain` 四处接线——FROM 子查询/CTE/视图三通道外层投影裁剪行+表头、未知列 42703、CTAS 列名校正、恒等面不回归（delta spec `join-output-shape-resolution` +R5）；T9/T10/T7 收尾批：组合拒绝自动化用例、clippy --tests 5 条清零、孤儿 `:memory:.wal` 移除、README 双语 + rtsql-docs 文档三处。T5/T6 WAL 字节水位：`WalWriter` `bytes_appended`/`checkpoint_bytes_threshold` AtomicU64（写路径同源累加）+ `Database::commit` 尾部 `maybe_auto_checkpoint` 单点（四项合取：WAL 通道∧阈值>0∧达水位∧无其他活跃事务）+ pipeline 两站点收敛（CTAS 拆两段——提交失败才 drop_table，checkpoint 失败表存活）+ 死记录数阈值接口删除（含 2 测试消费方随删，Plan 调查错误经 Act 上报裁定）+ env `RTSQL_WAL_CHECKPOINT_BYTES`（CLI 顶部校验 exit 2 + open 后单点应用，非法对全命令生效经 Review 豁免——RTSQL_KEY 同位先例）+ 文档行。增量规格 +3 域（`readonly-open-mode` / `in-memory-database` / `wal-auto-checkpoint`）+ `database-file-lock` R1 按模式收窄 + `error-reporting` R2 增 25006 + `join-output-shape-resolution` +R5，语料 56 → 59 域；全量 1590 tests / 0 failures）
 - **Dependencies**: None（建议序在 MS18 后——T02 自动水位与 I062/MS18-T01 同 checkpoint 策略面，先收 close 路径避免同面冲突）
 - **Outcome**: 嵌入式多进程形态成立——只读打开模式经 advisory 共享锁多读单写（SQLite 模型：读读并发、读写互斥、写写互斥）；长会话 WAL 按大小水位自动 checkpoint（有界）；`:memory:` 库形态可用（测试/临时计算）
 - **Rationale**: 同上调查——open 一律 try_lock 独占（MS10-T02），两进程连只读 SELECT 都互斥，「嵌入式」多读单写模型缺席；checkpoint 仅 close()/手动（`src/database.rs:240-248`），长会话 WAL 无界增长；`:memory:` 无任何匹配。运行形态三面同主题聚合
@@ -266,7 +266,7 @@ MS25 SQL 读面 · MS20 ATTACH 跨库（独立，序自由）
 全部殿后 ──→ MS22 实测驱动性能批（量化定稿后转 ready）
 ```
 
-建议执行序：**MS23 → MS24 → MS19 → MS18 → MS25 ✓ → MS20 → MS21 → MS26 → MS27 → MS22**（截至 2026-09-30 前七项已完成〔MS20 一期完成、T02 二期除外；MS21 完成〕，下一项 MS26）
+建议执行序：**MS23 → MS24 → MS19 → MS18 → MS25 ✓ → MS20 → MS21 → MS26 ✓ → MS27 → MS22**（截至 2026-09-30 前八项已完成〔MS20 一期完成、T02 二期除外〕，下一项 MS27）
 
 无环；所有依赖均已满足。初版后工作（MS18-MS27）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
 
@@ -283,6 +283,8 @@ MS25 SQL 读面 · MS20 ATTACH 跨库（独立，序自由）
 - （无）
 
 ## 最近完成
+
+- **MS26 嵌入式运行形态（只读并发 + `:memory:` + WAL 水位 + 派生投影收口）**（2026-09-30）：change `2026-09-30-ms26-embedded-runtime` 四 Iteration 全 accepted——T1/T2 只读打开模式（共享锁多读单写 + WAL 未决拒绝 + 零写入会话 + 13 写变体 25006 + CLI `--readonly` + ATTACH 只读传递）；T3/T4 `:memory:` 库形态（`MemoryStorage` + `open_in_memory()` + CLI 特判与拒绝面、零文件退出即弃）；T8 派生基座外层投影收口（FROM 子查询/CTE/视图三通道裁剪行+表头、未知列 42703，2026-09-30 用户指令 Issue 候选本 change 解决）+ T9/T10/T7 收尾批（组合拒绝用例 / clippy 清零 / 孤儿移除 / 文档三处）；T5/T6 WAL 字节水位（提交边界 `maybe_auto_checkpoint` 单点、16 MiB 默认 + env/lib 双通道、0 禁用、顺延、失败传播且 CTAS 表存活、死接口删除）；增量规格 +3 域 + 3 处修改，语料 56 → 59 域；全量 1590 tests / 0 failures。
 
 - **MS21 DDL 演进与二级索引（CREATE/DROP INDEX + ALTER TABLE + TRUNCATE + VIEW + 索引一致性收口）**（2026-09-30）：change `2026-09-29-ms21-ddl-evolution` 六 Iteration 全 accepted——T1 索引条目维护一致性收口（rekey UPDATE 回滚按 rekey 语义回退、SET 唯一列为 NULL 的旧键还原、UPSERT `SlotNotFound` 容忍臂与 DELETE 对齐）；T2 二级索引端到端（catalog secondary 尾段 + `CatalogRootSlot::Secondary` + `IndexManager::delete_exact` + 建索引回填 + 写路径六处挂钩 + 恢复重建扩展 + 非 PK 等值 `IndexScanAll` 路由 + DROP INDEX 页释放回落）；T3 ALTER TABLE ADD/DROP COLUMN（`deserialize_tuple_width` 宽度感知 + DEFAULT 覆盖层 + 尾部加列 + 内隐式事务逐行重写删列 + 索引引用/最后一列守卫）；用户扩围 T4 TRUNCATE TABLE（checkpoint-first 序 + 数据页释放 + 三类索引空重建 + 无墓碑崩溃不复活 + 事务内拒绝 + 空表幂等）、T5 CREATE/DROP VIEW（catalog kind=View 行持久 + 视图注册表 + 创建期验证封死循环 + CTE 通道展开与内联逐字节一致 + 显式列清单 + DML 只读拒绝 + 非基表 DDL 目标拒绝 + plan cache 全清 + 附加库引用创建期拒绝）；二次扩围 T6 删除原语精确化（`LeafNode::delete` 精确键验证，DELETE 未命中零副作用不误删邻近条目/不误报 KeyNotFound）、T7 回滚 NULL-rekey 还原补口（SET 唯一列为 NULL 回滚后旧值占用恢复）；增量规格 +4 域（`sql-secondary-indexes` / `alter-table-column-evolution` / `truncate-table` / `sql-views`）+ `update-index-maintenance` 扩展至 5 Requirement，语料 52 → 56 域；全量 1541 tests / 0 failures / 2 ignored（净增 4 测试文件 47 例 + catalog lib 单测）。
 

@@ -72,7 +72,7 @@ async fn insert_null_rejected_naming_column() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (b) 拒绝零副作用——行数不变、表仍可写
@@ -96,7 +96,7 @@ async fn insert_null_rejection_is_side_effect_free() {
     expect_affected(&db, "INSERT INTO users VALUES (2, 'a@b.c')", 1).await;
     expect_count(&db, "users", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (c) 非 NULL 值插入成功
@@ -111,7 +111,7 @@ async fn insert_non_null_succeeds() {
     expect_affected(&db, "INSERT INTO users VALUES (1, 'a@b.c')", 1).await;
     expect_count(&db, "users", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (d) `PRIMARY KEY NOT NULL` 组合：键位 NULL 走 NullConstraintViolation
@@ -132,7 +132,7 @@ async fn insert_null_into_pk_not_null_combo_rejected() {
     .await;
     expect_count(&db, "t", 0).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (e) 未声明 NOT NULL 的列保持既有语义：普通列 NULL 照常落库；未声明
@@ -152,7 +152,7 @@ async fn undeclared_columns_keep_existing_semantics() {
     expect_affected(&db, "INSERT INTO t VALUES (NULL, 5)", 1).await;
     expect_count(&db, "t", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -184,7 +184,7 @@ async fn update_set_null_on_not_null_column_rejected_keeps_old_value() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// SET 非 NULL 值成功
@@ -205,7 +205,7 @@ async fn update_set_non_null_succeeds() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 目标行不存在时 KeyNotFound 优先于 NOT NULL 校验（Step 1 先行）
@@ -225,7 +225,7 @@ async fn update_key_not_found_takes_priority() {
     )
     .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -249,7 +249,7 @@ async fn insert_duplicate_unique_value_rejected_side_effect_free() {
     expect_affected(&db, "INSERT INTO items VALUES (2, 200)", 1).await;
     expect_count(&db, "items", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (b) 不同值插入成功（强制不误伤）
@@ -264,7 +264,7 @@ async fn insert_distinct_unique_values_succeed() {
     expect_affected(&db, "INSERT INTO items VALUES (2, 200)", 1).await;
     expect_count(&db, "items", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (c) 多行 NULL 全部成功（NULL 豁免——不入唯一索引、互不冲突）
@@ -279,7 +279,7 @@ async fn insert_multiple_nulls_into_unique_column_succeed() {
     expect_affected(&db, "INSERT INTO items VALUES (2, NULL)", 1).await;
     expect_count(&db, "items", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (d) 两个 INT UNIQUE 列各自独立强制
@@ -300,7 +300,7 @@ async fn two_unique_columns_enforced_independently() {
     expect_affected(&db, "INSERT INTO t VALUES (4, 11, 21)", 1).await;
     expect_count(&db, "t", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -333,7 +333,7 @@ async fn update_set_unique_to_existing_value_rejected_keeps_old() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (b) SET 非唯一列 → 唯一性检查继续正确（分支 1：条目随行回归见证）
@@ -353,7 +353,7 @@ async fn update_non_unique_column_keeps_uniqueness_enforced() {
     expect_error(&db, "INSERT INTO items VALUES (3, 100, 3)", "Duplicate key").await;
     expect_count(&db, "items", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (c)+(e) SET 唯一列新值 → 成功、旧值腾出（可再插）、新值占用（再插拒绝）
@@ -375,7 +375,7 @@ async fn update_set_unique_to_new_value_moves_occupancy() {
     expect_affected(&db, "INSERT INTO items VALUES (4, 100)", 1).await;
     expect_count(&db, "items", 3).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (d) SET 唯一列 NULL → 成功且同值可重插（NULL 不入索引，镜像 I037 分支）
@@ -394,7 +394,7 @@ async fn update_set_unique_to_null_frees_value() {
     expect_affected(&db, "INSERT INTO items VALUES (2, 100)", 1).await;
     expect_count(&db, "items", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (f) 多唯一列 × SET PK 列（rekey 改 row_id）：全部唯一条目随行，其后
@@ -418,7 +418,7 @@ async fn update_pk_rekey_follows_all_unique_entries() {
     expect_affected(&db, "INSERT INTO t VALUES (5, 12, 22)", 1).await;
     expect_count(&db, "t", 3).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -440,7 +440,7 @@ async fn delete_unique_row_then_reinsert_same_value_succeeds() {
     expect_affected(&db, "INSERT INTO items VALUES (2, 100)", 1).await;
     expect_count(&db, "items", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -464,7 +464,7 @@ async fn crash_recovery_rebuilds_unique_enforcement() {
         let sql = format!("INSERT INTO items VALUES ({i}, {})", 1000 + i);
         expect_affected(&db, &sql, 1).await;
     }
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db); // 无 close()——不 checkpoint，WAL 保留，重开走 redo + 重建
 
     let db2 = Database::open(&path).await.unwrap();
@@ -472,7 +472,7 @@ async fn crash_recovery_rebuilds_unique_enforcement() {
     expect_error(&db2, "INSERT INTO items VALUES (9, 1003)", "Duplicate key").await;
     expect_affected(&db2, "INSERT INTO items VALUES (9, 2000)", 1).await;
     expect_count(&db2, "items", 6).await;
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (b) 干净关闭重开（close → checkpoint → redo == 0 → catalog 根加载）后
@@ -493,7 +493,7 @@ async fn clean_reopen_keeps_unique_enforcement() {
     let db2 = Database::open(&path).await.unwrap();
     expect_error(&db2, "INSERT INTO items VALUES (2, 100)", "Duplicate key").await;
     expect_affected(&db2, "INSERT INTO items VALUES (2, 200)", 1).await;
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// (c) 跨链重复注入（直写数据页第二条同值 committed 链）→ 恢复以点名
@@ -533,7 +533,7 @@ async fn cross_chain_duplicate_unique_value_fails_recovery_named() {
         // 注入槽无 WAL 记录——直写必须手动落盘，否则 drop 即丢失
         db.buffer_pool.flush_all().await.unwrap();
 
-        db.wal_buffer.shutdown().await;
+        db.wal_buffer.as_ref().unwrap().shutdown().await;
         drop(db);
     } // meta/db 全部 Arc 出作用域——advisory 锁释放后才能重开
 
@@ -547,7 +547,7 @@ async fn cross_chain_duplicate_unique_value_fails_recovery_named() {
             );
         }
         Ok(db) => {
-            db.wal_buffer.shutdown().await;
+            db.wal_buffer.as_ref().unwrap().shutdown().await;
             panic!("Expected recovery failure for cross-chain duplicate UNIQUE value");
         }
     }
@@ -584,7 +584,7 @@ async fn drop_table_with_unique_index_releases_pages_for_reuse() {
         "drop must release data+pk+unique pages for reuse: before={pages_before} after={pages_after}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -615,7 +615,7 @@ async fn insert_non_int_into_int_unique_column_rejected_key_type_mismatch() {
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
     expect_count(&db, "items", 1).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// UPDATE：SET INT UNIQUE 列为非 Int 字面量 → 任何写入前 KeyTypeMismatch
@@ -649,5 +649,5 @@ async fn update_set_int_unique_column_to_non_int_rejected_keeps_old_value() {
     expect_affected(&db, "INSERT INTO items VALUES (2, 200)", 1).await;
     expect_count(&db, "items", 2).await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

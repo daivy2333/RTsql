@@ -45,7 +45,7 @@ async fn large_wal_recovers_after_unclean_shutdown() {
     );
 
     // 全量落 WAL（夹具先例：checkpoint_redo_reduction_test.rs）
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 
     // RED 判据（Plan Context 风险注记 5）：不依赖精确记录数，以 WAL >2KB 保证
     // 越过既有 <1KB 盲区（嗅探误判首例 ≈ 第 19 条记录，offset 1033）
@@ -69,7 +69,7 @@ async fn large_wal_recovers_after_unclean_shutdown() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 守护: 小 WAL（checkpoint 后 5 行，<19 条记录）重开恒成功，数据完整
@@ -85,7 +85,7 @@ async fn small_wal_recovers_unchanged() {
         db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
             .await;
     }
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
@@ -96,7 +96,7 @@ async fn small_wal_recovers_unchanged() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// T0b-1 (契约名 `eviction_scale_recovery_row_integrity`)：驱逐规模
@@ -131,7 +131,7 @@ async fn eviction_scale_recovery_row_integrity() {
         db.commit(tx).await.unwrap();
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     // 重开触发 full_recover
@@ -167,7 +167,7 @@ async fn eviction_scale_recovery_row_integrity() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// T0b-2 (契约名 `mixed_dml_recovery_semantics`)：混合 DML 重放语义
@@ -246,7 +246,7 @@ async fn mixed_dml_recovery_semantics() {
         }
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     // 重开
@@ -333,7 +333,7 @@ async fn mixed_dml_recovery_semantics() {
         }
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R-T0b-R6 (契约名 `count_after_update_exact`)：DataScan 对被更新行版本链
@@ -423,7 +423,7 @@ async fn count_after_update_exact() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R-T0b-R6 跨页场景：更新行分属 ≥3 数据页（实测 ~87 行/页，300 行 ≈ 4 页），
@@ -486,7 +486,7 @@ async fn count_after_cross_page_update_exact() {
         }
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// T0b-3 (契约名 `recovery_rerun_is_idempotent`)：重放重跑幂等。
@@ -513,7 +513,7 @@ async fn recovery_rerun_is_idempotent() {
         db.commit(tx).await.unwrap();
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     // 第一次重开
@@ -528,7 +528,7 @@ async fn recovery_rerun_is_idempotent() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    db1.wal_buffer.shutdown().await;
+    db1.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db1);
 
     // 第二次重开（WAL 仍在，无 checkpoint 截断）— 修复前会再 append 1 万
@@ -544,5 +544,5 @@ async fn recovery_rerun_is_idempotent() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }

@@ -31,7 +31,7 @@ async fn test_wal_records_survive_shutdown() {
     db.execute_sql("INSERT INTO t VALUES (2, 'bob')").await;
 
     // Graceful shutdown
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 
     // Read WAL file directly
     let wal_path = PathBuf::from(dir.path()).join("test.wal");
@@ -67,7 +67,7 @@ async fn test_recovery_classifies_committed_transactions() {
     db.execute_sql("INSERT INTO t VALUES (1)").await;
     db.execute_sql("INSERT INTO t VALUES (2)").await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     // Use basic recovery (just classify transactions)
@@ -106,7 +106,7 @@ async fn test_data_pages_survive_restart() {
     // 本测试模拟"页已落盘但进程崩溃"的场景，表定义必须先持久化。
     db.buffer_pool.flush_all().await.unwrap();
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     // Reopen — triggers recovery, then recreate table
@@ -129,7 +129,7 @@ async fn test_data_pages_survive_restart() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// Verify WAL contains Update records after UPDATE operations
@@ -144,7 +144,7 @@ async fn test_wal_update_records_written() {
     db.execute_sql("UPDATE t SET val = 'updated' WHERE id = 1")
         .await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 
     let wal_path = PathBuf::from(dir.path()).join("test.wal");
     let mut reader = WalReader::open(&wal_path).unwrap();
@@ -168,7 +168,7 @@ async fn test_wal_delete_records_written() {
     db.execute_sql("INSERT INTO t VALUES (1, 100)").await;
     db.execute_sql("DELETE FROM t WHERE id = 1").await;
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 
     let wal_path = PathBuf::from(dir.path()).join("test.wal");
     let mut reader = WalReader::open(&wal_path).unwrap();
@@ -188,11 +188,11 @@ async fn test_empty_wal_recovery() {
     let db = open_db(&dir).await;
 
     // Just open and close without operations
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     // Reopen should succeed without errors
     let db2 = open_db(&dir).await;
     db2.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }

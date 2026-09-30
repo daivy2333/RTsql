@@ -52,7 +52,7 @@ impl PlanBuilder {
         match plan {
             PhysicalPlan::Scan(node) => projected_columns(&node.columns, &node.projection),
             PhysicalPlan::DataScan(node) => projected_columns(&node.columns, &node.projection),
-            PhysicalPlan::DerivedScan(node) => node.columns.clone(),
+            PhysicalPlan::DerivedScan(node) => projected_columns(&node.columns, &node.projection),
             PhysicalPlan::Filter(node) => {
                 let mut columns = self.get_plan_output_columns(&node.input);
                 if !node.projection.is_empty() {
@@ -382,6 +382,9 @@ impl PlanBuilder {
                     subquery: Box::new(subquery_plan),
                     alias: alias_name.clone(),
                     columns,
+                    // MS26 T8：外层纯列清单的裁剪由下方投影解析阶段回填
+                    // （构造点先落恒等，与三构造点同型）。
+                    projection: Vec::new(),
                 });
                 (plan, alias_name)
             }
@@ -924,6 +927,7 @@ impl PlanBuilder {
                 subquery: Box::new(plan),
                 alias: effective.clone(),
                 columns,
+                projection: Vec::new(), // MS26 T8：同 FROM 派生表构造点
             }),
             effective,
         )))
@@ -970,6 +974,7 @@ impl PlanBuilder {
                 subquery: Box::new(inner_plan),
                 alias: effective.clone(),
                 columns,
+                projection: Vec::new(), // MS26 T8：同 FROM 派生表构造点
             }),
             effective,
         )))
@@ -1427,6 +1432,12 @@ impl PlanBuilder {
         // that is not a base column (alias / expression).
         let base_schema = match &base_plan {
             PhysicalPlan::Scan(node) => Some(node.columns.clone()),
+            // MS26 T8: the derived base (FROM subquery / CTE / view — one
+            // shared DerivedScan assembly path) resolves its pure column list
+            // against the derived column set, exactly like the Scan base.
+            // Unknown outer names now surface as ColumnNotFound instead of
+            // silently widening to the full derived row.
+            PhysicalPlan::DerivedScan(node) => Some(node.columns.clone()),
             _ => None,
         };
         let sort_due = !query.order_by.is_empty();
@@ -1669,6 +1680,13 @@ impl PlanBuilder {
                     scan_cap: None,
                     projection: proj_or_empty.clone(),
                 }),
+                // MS26 T8: the derived base has no WHERE wrapper to own the
+                // trim, so the node itself carries the projection (mirrors the
+                // DataScan swap above; empty when Sort owns it).
+                PhysicalPlan::DerivedScan(mut derived_node) => {
+                    derived_node.projection = proj_or_empty.clone();
+                    PhysicalPlan::DerivedScan(derived_node)
+                }
                 _ => base_plan,
             }
         };
@@ -2771,7 +2789,12 @@ fn is_base_scan_chain(plan: &PhysicalPlan) -> bool {
         PhysicalPlan::Scan(_)
         | PhysicalPlan::DataScan(_)
         | PhysicalPlan::IndexScan(_)
-        | PhysicalPlan::IndexScanAll(_) => true,
+        | PhysicalPlan::IndexScanAll(_)
+        // MS26 T8: the derived base emits full derived rows when its
+        // projection is empty (the Sort node then owns the trim), and its
+        // projection indices are resolved against the same derived column
+        // set the Select list was resolved from.
+        | PhysicalPlan::DerivedScan(_) => true,
         PhysicalPlan::Filter(node) => is_base_scan_chain(&node.input),
         _ => false,
     }

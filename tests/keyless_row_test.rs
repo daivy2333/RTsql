@@ -75,7 +75,7 @@ async fn string_first_column_table_accepts_inserts() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// T8-R1：NULL 键位行 INSERT → affected 1 且 SELECT 可见。
@@ -104,7 +104,7 @@ async fn null_key_position_row_insert_visible() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// T8-R1 行为保持守卫：可键控（Int 键位）重复插入仍被 DuplicateKey 拒绝。
@@ -125,7 +125,7 @@ async fn keyed_duplicate_still_rejected() {
         other => panic!("重复键位 INSERT 应被拒，实际 {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// T8-R2：无键行 INSERT + UPDATE 链 + 崩溃重开（MS15-Rest 001-replan 按
@@ -185,7 +185,7 @@ async fn keyless_row_update_recovery_after_crash() {
         other => panic!("对无键版本的键位等值 UPDATE 应被拒，实际 {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
 
     // 恢复重放 keyed→keyless Update 记录（keyless 桶 NEW 版本追踪）
@@ -243,5 +243,5 @@ async fn keyless_row_update_recovery_after_crash() {
         other => panic!("重开后旧键 5 INSERT 应成功，实际 {:?}", other),
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }

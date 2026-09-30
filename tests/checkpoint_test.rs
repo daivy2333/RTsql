@@ -60,38 +60,11 @@ async fn test_checkpoint_flow() {
     assert_eq!(site.lsn, 0, "截断后位点必须失效为重放全部");
 }
 
-#[tokio::test]
-async fn test_checkpoint_threshold_trigger() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let db_path = temp_file.path();
-
-    let mut writer = WalWriter::open(db_path).unwrap();
-    writer.set_checkpoint_threshold(3);
-    assert_eq!(writer.get_checkpoint_threshold(), 3);
-
-    let wal_writer = Arc::new(writer);
-    let storage = FileStorage::open(db_path).unwrap();
-    let buffer_pool = Arc::new(BufferPool::new(10, Arc::new(storage)).unwrap());
-    let manager = CheckpointManager::new(db_path, wal_writer.clone(), buffer_pool);
-
-    // 写 3 条记录后应触发 checkpoint
-    for i in 0..3 {
-        wal_writer
-            .write_record(WalRecord::Commit {
-                tx_id: i,
-                timestamp: i,
-            })
-            .await
-            .unwrap();
-
-        if wal_writer.should_checkpoint() {
-            manager.checkpoint(|| 0).await.unwrap();
-            wal_writer.reset_write_count();
-        }
-    }
-
-    // 验证 checkpoint 位点已写入
-    // MS07-T05：重写截断后位点置 0（语义 = 对已缩短文件重放全部）
-    let site = manager.read_checkpoint_site().unwrap().unwrap();
-    assert_eq!(site.lsn, 0, "截断后位点必须失效为重放全部");
-}
+// MS26 T5：本文件原有的 `test_checkpoint_threshold_trigger`（手写
+// `should_checkpoint` 判定循环演示记录数阈值触发）随该接口一并删除——
+// `wal-auto-checkpoint` R5 Requirement 强制移除记录数阈值接口
+// （`should_checkpoint` / `set_checkpoint_threshold` / `get_checkpoint_threshold`
+// / `checkpoint_threshold` 字段），用例的被测对象整体消失。它顺带覆盖的
+// `CheckpointManager::checkpoint` + `reset_write_count` + 位点截断语义由上方
+// `test_checkpoint_flow` 保持覆盖；字节水位触发通道的见证改由
+// `tests/wal_auto_checkpoint_test.rs` 承担。

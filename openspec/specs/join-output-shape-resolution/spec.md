@@ -1,7 +1,7 @@
 # join-output-shape-resolution Specification
 
 ## Purpose
-约束 JOIN 基座的名字解析与输出形状：聚合参数与分组键在完整组合列布局上精确解析（限定名按表、参数列为计划期索引），同名裸名歧义 `AmbiguousColumn` 点名、未知列 `ColumnNotFound` 点名，纯列引用别名项可达且表头为别名，任意表达式项 × JOIN 维持拒绝。来源：MS25（change `2026-09-26-ms25-sql-read-surface`，SQLite 语义对齐）。
+约束 JOIN 基座的名字解析与输出形状：聚合参数与分组键在完整组合列布局上精确解析（限定名按表、参数列为计划期索引），同名裸名歧义 `AmbiguousColumn` 点名、未知列 `ColumnNotFound` 点名，纯列引用别名项可达且表头为别名，任意表达式项 × JOIN 维持拒绝；派生基座（FROM 子查询/CTE/视图）的外层纯列清单按清单裁剪行与表头。来源：MS25（change `2026-09-26-ms25-sql-read-surface`，SQLite 语义对齐）+ MS26 T8（change `2026-09-30-ms26-embedded-runtime`，派生基座投影收口）。
 
 ## Requirements
 
@@ -78,3 +78,33 @@ JOIN 查询的 SELECT 投影 SHALL 逐项解析：未知列 SHALL 以 `ColumnNot
 
 - **WHEN** `cargo test -- --test-threads=1`
 - **THEN** 0 failed，测试总数只增不减（白名单外零校准）
+
+### Requirement: 派生基座的外层投影裁剪
+
+单表派生基座（`FROM (子查询) AS alias`、CTE 引用、视图展开——三者共用 `DerivedScan` 通道）上的纯列清单 SELECT SHALL 按外层 SELECT 清单裁剪输出行与表头：输出列恰为外层清单解析到的派生列，顺序与清单一致，表头与行形状一致。外层清单引用派生列集中不存在的列 SHALL 在计划期以 `ColumnNotFound`（42703）点名拒绝，SHALL NOT 静默返回多列（与基表 Scan 基座的严格投影解析同纪律）。WHERE（Filter 承载）与 ORDER BY（Sort 承载）组合 SHALL 保持同一裁剪语义；`CREATE TABLE AS SELECT` 以派生基座为源时列名 SHALL 取裁剪后的输出表头。`SELECT *`、聚合查询（输入保持全形状）、表达式与别名项（既有顶层 Projection 通路）SHALL 维持既有行为。
+
+#### Scenario: 派生表外层投影裁剪
+
+- **GIVEN** 表 `t(id, n)` 含两行
+- **WHEN** `SELECT n FROM (SELECT id, n FROM t) AS d`
+- **THEN** 输出一列 `["n"]`，行值仅含 n 列（表头与行形状一致）
+
+#### Scenario: CTE 与视图通道等价
+
+- **WHEN** `WITH c AS (SELECT id, n FROM t) SELECT n FROM c`；视图 `v AS SELECT id, n FROM t` 上执行 `SELECT n FROM v`
+- **THEN** 两者与派生表形态同型，各输出一列 `["n"]`
+
+#### Scenario: 未知外层列点名拒绝
+
+- **WHEN** `SELECT zzz FROM (SELECT id, n FROM t) AS d`
+- **THEN** 计划期 `ColumnNotFound`（42703）点名拒绝，不静默返回派生全集
+
+#### Scenario: 组合面
+
+- **WHEN** `SELECT n FROM (SELECT id, n FROM t) AS d WHERE id = 1`；`SELECT n FROM (SELECT id, n FROM t) AS d ORDER BY n`；`CREATE TABLE c AS SELECT n FROM (SELECT id, n FROM t) AS d`
+- **THEN** 分别为：Filter 过滤后单列输出；排序后单列输出；CTAS 建单列表 `n` 并物化对应值
+
+#### Scenario: 恒等面不回归
+
+- **WHEN** `SELECT * FROM (SELECT id, n FROM t) AS d`；`SELECT COUNT(*) FROM (SELECT id, n FROM t) AS d`；`SELECT n AS x FROM (SELECT id, n FROM t) AS d`
+- **THEN** 分别为：两列恒等输出；聚合正常计数；别名通路（`error-reporting` R5）输出 `["x"]` 单列——三者均与本 Requirement 增量前行为一致

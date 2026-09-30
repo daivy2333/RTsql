@@ -404,7 +404,7 @@ async fn drop_column_consistent_across_crash_recovery() {
         // DDL 无 WAL：catalog 变更经 flush_all 落盘（重写事务的 WAL DML 记录
         // 保留在 WAL 中——重放按 row_id 写回，两态一致）
         db.buffer_pool.flush_all().await.unwrap();
-        db.wal_buffer.shutdown().await;
+        db.wal_buffer.as_ref().unwrap().shutdown().await;
         drop(db);
     }
     let db2 = Database::open(&path).await.unwrap();

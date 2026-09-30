@@ -254,7 +254,7 @@ async fn truncate_consistent_across_crash_recovery() {
         exec_ok(&db, "TRUNCATE TABLE t", "truncate").await;
         // 模拟语句后崩溃：DDL 无行级 WAL，checkpoint 已截断——直接落盘退出
         db.buffer_pool.flush_all().await.unwrap();
-        db.wal_buffer.shutdown().await;
+        db.wal_buffer.as_ref().unwrap().shutdown().await;
         drop(db);
     }
     let db = Database::open(&path).await.unwrap();

@@ -55,7 +55,13 @@ async fn build_checkpoint_scenario(dir: &TempDir, mode: SiteMode) -> PathBuf {
     // 非 checkpoint 路径落盘 catalog + 数据页，使表定义在重启后可见
     db.buffer_pool.flush_all().await.unwrap();
 
-    let prefix_end = db.wal_writer.get_current_lsn().await.unwrap();
+    let prefix_end = db
+        .wal_writer
+        .as_ref()
+        .unwrap()
+        .get_current_lsn()
+        .await
+        .unwrap();
     match mode {
         SiteMode::None => {}
         SiteMode::Valid => write_site_file(&path, prefix_end, 42),
@@ -70,7 +76,7 @@ async fn build_checkpoint_scenario(dir: &TempDir, mode: SiteMode) -> PathBuf {
             .await;
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
     path
 }
@@ -288,7 +294,7 @@ async fn redo_count_converges_after_checkpoint() {
         db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
             .await;
     }
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let (buffer_pool, table_manager) = fresh_recovery_components(&path).await;

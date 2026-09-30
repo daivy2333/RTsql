@@ -75,7 +75,7 @@ async fn old_key_insert_accepted_after_key_nulled() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：键位置 NULL 后旧键点查返回空集。
@@ -114,7 +114,7 @@ async fn old_key_point_query_empty_after_key_nulled() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：键位置 NULL 后崩溃恢复两态一致。
@@ -156,7 +156,7 @@ async fn recovery_matches_runtime_after_key_nulled() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
 
     let db2 = Database::open(&path).await.unwrap();
@@ -198,7 +198,7 @@ async fn recovery_matches_runtime_after_key_nulled() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S4：非键列更新不影响索引条目。
@@ -232,7 +232,7 @@ async fn non_key_column_update_keeps_index_entry() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S1：键列原值更新条目保持。
@@ -266,7 +266,7 @@ async fn key_column_same_value_update_keeps_entry() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ============================================================================
@@ -317,7 +317,7 @@ async fn rekey_new_key_point_query_reachable() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4-S2：rekey 后旧键条目清理——旧键点查空集、旧键 INSERT 可用。
@@ -359,7 +359,7 @@ async fn rekey_old_key_cleaned_insert_available() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4-S3：碰撞 rekey 在任何写入前以 DuplicateKey 拒绝，零副作用。
@@ -422,7 +422,7 @@ async fn rekey_collision_rejected_before_write_zero_side_effects() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4-S4：rekey 后崩溃恢复两态一致。
@@ -472,7 +472,7 @@ async fn recovery_matches_runtime_after_rekey() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db); // 崩溃模拟：不 close（不 checkpoint、不刷数据页）
 
     let db2 = Database::open(&path).await.unwrap();
@@ -506,7 +506,7 @@ async fn recovery_matches_runtime_after_rekey() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db2.wal_buffer.shutdown().await;
+    db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 // ===========================================================================
@@ -580,7 +580,7 @@ async fn delete_missing_middle_key_leaves_no_side_effects() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// T6-②：DELETE 键大于全部键（id = 999）——affected 0 且不报错。
@@ -615,5 +615,5 @@ async fn delete_key_beyond_all_keys_reports_zero_without_error() {
         other => panic!("Expected QueryResult, got {:?}", other),
     }
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

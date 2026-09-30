@@ -6,14 +6,51 @@
 use crate::network::protocol::Response;
 use crate::plan_cache::PlanCache;
 use crate::storage::{
-    BufferPool, CatalogKind, ColumnType, FileStorage, Result, TableManager, TableMeta,
+    BufferPool, CatalogKind, ColumnType, FileStorage, MemoryStorage, Result, StorageError,
+    TableManager, TableMeta,
 };
 use crate::transaction::{IsolationLevel, Snapshot, Transaction, TransactionManager};
-use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalWriter};
+use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalReader, WalRecord, WalWriter};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// MS26 T1/D1：打开模式。`ReadWrite` 是既有全部入口的默认形态（行为逐字节
+/// 不变）；`ReadOnly` 经 advisory 共享锁多读单写，WAL / checkpoint 通道
+/// 结构性不存在（`readonly-open-mode` R1/R3）；`Memory` 是 MS26 T3 新增的
+/// `:memory:` 形态——可写、无文件（`in-memory-database` R1/R2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenMode {
+    ReadWrite,
+    ReadOnly,
+    Memory,
+}
+
+/// MS26 T1：只读打开的 WAL 未决谓词（`readonly-open-mode` R2）。
+///
+/// 判定在任何页写入与恢复重放之前完成：`.wal` 不存在、为空、或仅含
+/// `Checkpoint` 标记记录（干净关闭后步骤 6/7 的残留形态）放行；任何其他
+/// 记录（数据重放、未提交事务）点名拒绝。只读会话不执行重放——恢复经
+/// BufferPool 驱逐刷脏页落盘，只读会话无法保证不写盘。
+fn assert_no_pending_wal(path: &Path) -> Result<()> {
+    let wal_path = path.with_extension("wal");
+    if !wal_path.exists() {
+        return Ok(());
+    }
+    let to_storage = |e: crate::wal::WalError| StorageError::WalError(e.to_string());
+    let mut reader = WalReader::open(&wal_path).map_err(to_storage)?;
+    let records = reader.read_all().map_err(to_storage)?;
+    if records
+        .iter()
+        .all(|record| matches!(record, WalRecord::Checkpoint { .. }))
+    {
+        return Ok(());
+    }
+    Err(StorageError::WalPendingRecovery(
+        wal_path.display().to_string(),
+    ))
+}
 
 /// MS21 Iter005 (T5-a/D12): in-memory view registry entry — the persisted
 /// definition SQL plus the persisted column-name list (the explicit column
@@ -33,15 +70,20 @@ pub struct Database {
     pub buffer_pool: Arc<BufferPool>,
     pub table_manager: Arc<TableManager>,
     pub transaction_manager: Arc<TransactionManager>,
-    pub wal_writer: Arc<WalWriter>,
-    pub wal_buffer: Arc<WALBuffer>,
+    /// MS26 T1/D1：仅 `ReadWrite` 模式为 `Some`——只读会话不持有任何 WAL
+    /// 句柄（零写入的结构性保证，`readonly-open-mode` R3）。
+    pub wal_writer: Option<Arc<WalWriter>>,
+    pub wal_buffer: Option<Arc<WALBuffer>>,
     pub plan_cache: Arc<PlanCache>,
-    pub checkpoint_manager: Arc<CheckpointManager>,
+    /// MS26 T1/D1：同上，非 `ReadWrite` 模式为 `None`。
+    pub checkpoint_manager: Option<Arc<CheckpointManager>>,
     /// MS09 Iter000 (D4): isolation level fixed at open time. The default
     /// `RepeatableRead` keeps every existing behavior byte for byte.
     pub isolation: IsolationLevel,
     /// MS21 Iter005 (T5-a/D12): persisted view definitions by name.
     pub views: Arc<RwLock<HashMap<String, ViewMeta>>>,
+    /// MS26 T1/D1：打开模式（构造期一次定型，运行期不变）。
+    mode: OpenMode,
 }
 
 impl Database {
@@ -70,9 +112,84 @@ impl Database {
         isolation: IsolationLevel,
         key: Option<&str>,
     ) -> Result<Self> {
+        Self::open_internal(OpenMode::ReadWrite, path, isolation, key).await
+    }
+
+    /// MS26 T1：只读打开（`readonly-open-mode` R1/R2）——advisory 共享锁，
+    /// 多个只读会话可同时打开同一数据库，任一读写持有者的独占锁都排除
+    /// 只读打开（冲突立即 `DatabaseLocked`，不等待）。文件必须已存在（不
+    /// 创建），`.wal` 有未决记录时点名拒绝，不运行恢复、不写任何文件。
+    /// 隔离级别固定为 `RepeatableRead`（冻结库上「最新已提交」恒定）。
+    pub async fn open_readonly(path: &Path) -> Result<Self> {
+        Self::open_readonly_with_key(path, None).await
+    }
+
+    /// MS26 T1：只读打开的加密库变体（`key` 为 `Some` 时按加密库解密读取，
+    /// 错误密钥沿既有 `InvalidKey` 拒绝）。
+    pub async fn open_readonly_with_key(path: &Path, key: Option<&str>) -> Result<Self> {
+        Self::open_internal(
+            OpenMode::ReadOnly,
+            path,
+            IsolationLevel::RepeatableRead,
+            key,
+        )
+        .await
+    }
+
+    /// MS26 T3：`:memory:` 内存库（`in-memory-database` R1/R2）——全部页数据
+    /// 由 `MemoryStorage` 承载，不创建也不触碰任何文件（`.db` / `.wal` /
+    /// `.checkpoint` 均不产生），无恢复语义（进程退出即弃）。构造链按
+    /// `OpenMode::Memory` 裁剪：WAL writer/buffer、恢复与 checkpoint manager
+    /// 三段全部跳过，写路径经 `Option<Arc<WALBuffer>>` 天然降级，事务提交、
+    /// 回滚还原与版本可见性全部由页与事务管理器承载。内存库可写
+    /// （`is_readonly()` 为假）；隔离级别固定 `RepeatableRead`。
+    ///
+    /// `path` 占位值为 `":memory:"`——`Memory` 模式下不被任何构造步骤消费
+    /// （WAL / 恢复 / checkpoint 路径均由 `mode == ReadWrite` 门控）。
+    pub async fn open_in_memory() -> Result<Self> {
+        Self::open_internal(
+            OpenMode::Memory,
+            Path::new(":memory:"),
+            IsolationLevel::RepeatableRead,
+            None,
+        )
+        .await
+    }
+
+    /// True when this session was opened read-only — the pipeline rejects
+    /// every write plan shape in that mode (`readonly-open-mode` R4).
+    /// `Memory` sessions are writable, so they report `false`.
+    pub fn is_readonly(&self) -> bool {
+        self.mode == OpenMode::ReadOnly
+    }
+
+    /// 各打开模式共用的构造链。`ReadWrite` 走既有全部步骤（存储 → 缓冲池
+    /// → catalog → 视图 → 事务管理器 → WAL writer/buffer → 恢复 → 分配器
+    /// 推进 → catalog root 上下文 → plan cache → checkpoint manager）；
+    /// `ReadOnly` 裁剪 WAL / 恢复 / checkpoint 构造（写路径经
+    /// `Option<Arc<WALBuffer>>` 天然降级，`readonly-open-mode` R3）；`Memory`
+    /// 同样裁剪这三段并改用 `MemoryStorage`（`in-memory-database` R2——
+    /// 新实例 `page_count() == 0` 使 catalog 走 bootstrap，视图注册表空载入）。
+    async fn open_internal(
+        mode: OpenMode,
+        path: &Path,
+        isolation: IsolationLevel,
+        key: Option<&str>,
+    ) -> Result<Self> {
         // 1. Initialize storage
-        let storage: Arc<dyn crate::storage::AsyncStorage> =
-            Arc::new(FileStorage::open_with_key(path, key)?);
+        let storage: Arc<dyn crate::storage::AsyncStorage> = match mode {
+            OpenMode::ReadWrite => Arc::new(FileStorage::open_with_key(path, key)?),
+            // 只读：共享锁 + 只读句柄。与读写构造同纪律——锁先于伴生文件
+            // 判定，被拒的第二打开者不触碰任何文件（MS10-T02 R2）。
+            OpenMode::ReadOnly => {
+                let storage = FileStorage::open_readonly_with_key(path, key)?;
+                // WAL 未决谓词先于任何页写入与重放（`readonly-open-mode` R2）。
+                assert_no_pending_wal(path)?;
+                Arc::new(storage)
+            }
+            // 内存：无文件路径、无锁、无格式头（`in-memory-database` R1）。
+            OpenMode::Memory => Arc::new(MemoryStorage::new()),
+        };
         let buffer_pool = Arc::new(BufferPool::new(100, storage.clone())?);
         // MS07-T01: TableManager is async + takes storage. It bootstraps
         // or opens the catalog, then `open_or_init` rebuilds the in-memory
@@ -105,63 +222,76 @@ impl Database {
         let views = Arc::new(RwLock::new(views));
         let transaction_manager = Arc::new(TransactionManager::new());
 
-        // 2. Initialize WAL
-        let wal_writer = Arc::new(
-            WalWriter::open(path)
-                .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?,
-        );
+        // 2. Initialize WAL（只读模式不持有 WAL 句柄——R3 零写入）
+        let (wal_writer, wal_buffer) = if mode == OpenMode::ReadWrite {
+            let wal_writer = Arc::new(
+                WalWriter::open(path)
+                    .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?,
+            );
 
-        // 2b. Initialize WAL buffer with Group Commit
-        let wal_buffer = Arc::new(WALBuffer::new(wal_writer.clone(), 100, 100));
-        wal_buffer.start_flush_loop();
+            // 2b. Initialize WAL buffer with Group Commit
+            let wal_buffer = Arc::new(WALBuffer::new(wal_writer.clone(), 100, 100));
+            wal_buffer.start_flush_loop();
 
-        // 2c. Connect WAL buffer to TransactionManager
-        transaction_manager.set_wal_buffer(wal_buffer.clone()).await;
+            // 2c. Connect WAL buffer to TransactionManager
+            transaction_manager.set_wal_buffer(wal_buffer.clone()).await;
+            (Some(wal_writer), Some(wal_buffer))
+        } else {
+            (None, None)
+        };
 
-        // 3. Full recovery: Redo committed + cleanup uncommitted
-        let recovery_result =
-            RecoveryManager::full_recover(path, buffer_pool.clone(), table_manager.clone())
-                .await
-                .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?;
+        // 3. Full recovery: Redo committed + cleanup uncommitted（只读不运行）
+        if mode == OpenMode::ReadWrite {
+            let recovery_result =
+                RecoveryManager::full_recover(path, buffer_pool.clone(), table_manager.clone())
+                    .await
+                    .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?;
 
-        // MS09 Iter000 001-replan (D10/T6-R3): advance the tx id allocator
-        // past every id observed in recovery so ids are never reused after a
-        // restart — the next allocation is strictly greater than the max
-        // committed/aborted/uncommitted id. This is also the soundness
-        // premise of the Read Committed high-water mark ("every id ≤ the
-        // allocator's current value is committed, aborted, or active").
-        //
-        // MS17-T02 Iter002 (D8): a checkpointed restart loses the WAL id
-        // history (a clean close leaves no Begin/Commit frames), so the
-        // observed max alone would reset the allocator to zero. The
-        // checkpoint site carries the allocator watermark captured right
-        // after the LSN; advancing past the max of both keeps the premise
-        // sound on every restart path.
-        let wal_observed_max = recovery_result
-            .committed_tx_ids
-            .iter()
-            .chain(recovery_result.aborted_tx_ids.iter())
-            .chain(recovery_result.uncommitted_tx_ids.iter())
-            .max()
-            .copied()
-            .unwrap_or(0);
-        let site_watermark = recovery_result.checkpoint_tx_watermark.unwrap_or(0);
-        transaction_manager.advance_past(std::cmp::max(wal_observed_max, site_watermark));
+            // MS09 Iter000 001-replan (D10/T6-R3): advance the tx id allocator
+            // past every id observed in recovery so ids are never reused after a
+            // restart — the next allocation is strictly greater than the max
+            // committed/aborted/uncommitted id. This is also the soundness
+            // premise of the Read Committed high-water mark ("every id ≤ the
+            // allocator's current value is committed, aborted, or active").
+            //
+            // MS17-T02 Iter002 (D8): a checkpointed restart loses the WAL id
+            // history (a clean close leaves no Begin/Commit frames), so the
+            // observed max alone would reset the allocator to zero. The
+            // checkpoint site carries the allocator watermark captured right
+            // after the LSN; advancing past the max of both keeps the premise
+            // sound on every restart path.
+            let wal_observed_max = recovery_result
+                .committed_tx_ids
+                .iter()
+                .chain(recovery_result.aborted_tx_ids.iter())
+                .chain(recovery_result.uncommitted_tx_ids.iter())
+                .max()
+                .copied()
+                .unwrap_or(0);
+            let site_watermark = recovery_result.checkpoint_tx_watermark.unwrap_or(0);
+            transaction_manager.advance_past(std::cmp::max(wal_observed_max, site_watermark));
 
-        // R-T0b-R5: attach catalog root-sync contexts only AFTER recovery —
-        // replay-time root changes must not be persisted (the recovery load
-        // point stays fixed across re-recoveries).
-        table_manager.attach_index_catalog_contexts().await;
+            // R-T0b-R5: attach catalog root-sync contexts only AFTER recovery —
+            // replay-time root changes must not be persisted (the recovery load
+            // point stays fixed across re-recoveries).
+            table_manager.attach_index_catalog_contexts().await;
+        }
 
         // 4. Initialize plan cache
         let plan_cache = Arc::new(PlanCache::new());
 
-        // 5. Initialize checkpoint manager (MS07-T05)
-        let checkpoint_manager = Arc::new(CheckpointManager::new(
-            path,
-            wal_writer.clone(),
-            buffer_pool.clone(),
-        ));
+        // 5. Initialize checkpoint manager (MS07-T05)（只读模式为 None——R3）
+        let checkpoint_manager = if mode == OpenMode::ReadWrite {
+            Some(Arc::new(CheckpointManager::new(
+                path,
+                wal_writer
+                    .clone()
+                    .expect("ReadWrite mode holds a WAL writer"),
+                buffer_pool.clone(),
+            )))
+        } else {
+            None
+        };
 
         Ok(Self {
             buffer_pool,
@@ -173,6 +303,7 @@ impl Database {
             checkpoint_manager,
             isolation,
             views,
+            mode,
         })
     }
 
@@ -232,8 +363,60 @@ impl Database {
 
     /// Commit an explicit transaction, making all of its writes durable and
     /// visible (WAL commit record + version marking).
+    ///
+    /// MS26 T5：提交成功后到达水位检查（`wal-auto-checkpoint` R1）——累计
+    /// 追加字节达阈值且无其他活跃事务时，同步执行一次完整 checkpoint。
+    /// 顺序不可颠倒：事务提交（WAL fsync + 版本标 committed + 出活跃集）
+    /// 恒先于水位检查，checkpoint 失败不回滚已提交事务（R4）。
     pub async fn commit(&self, tx: Transaction) -> Result<()> {
-        self.transaction_manager.commit(tx, &self.buffer_pool).await
+        self.transaction_manager
+            .commit(tx, &self.buffer_pool)
+            .await?;
+        self.maybe_auto_checkpoint().await
+    }
+
+    /// 提交边界字节水位检查（MS26 T5，`wal-auto-checkpoint` R1/R3/R4）。
+    ///
+    /// 触发条件（四项合取）：本会话持有 WAL 通道（`ReadWrite`）∧ 阈值非 0
+    /// （`0` 禁用）∧ 累计追加字节达阈值 ∧ 无其他活跃事务（`R3` 顺延）。
+    /// 计数器为内存原子量，不引入每语句 `metadata()` 调用。
+    ///
+    /// 单一判定点：[`Database::commit`] 与 CTAS 隐式提交的第二段共用本方法，
+    /// pipeline 站点零复制（契约 Invariants「水位逻辑单点」）。
+    ///
+    /// 错误语义：触发后的 checkpoint 失败以点名 `checkpoint failed` 的错误
+    /// 返回给触发该边界的语句；此时事务早已提交，已提交数据不受影响
+    /// （`R4`），后续提交边界自然重试（字节计数未归零）。
+    pub async fn maybe_auto_checkpoint(&self) -> Result<()> {
+        // 只读 / 内存会话结构性无 WAL 通道（R3 零写入），直接返回。
+        let Some(writer) = &self.wal_writer else {
+            return Ok(());
+        };
+        let threshold = writer.checkpoint_bytes_threshold();
+        if threshold == 0 || writer.bytes_appended() < threshold {
+            return Ok(());
+        }
+        // R3 顺延：其他活跃事务存在时等下一个无活跃事务的提交边界
+        // （本事务已由 `commit` 移出活跃集，无需排除自身）。
+        if !self
+            .transaction_manager
+            .active_transactions()
+            .await
+            .is_empty()
+        {
+            return Ok(());
+        }
+        self.checkpoint().await.map_err(|e| {
+            crate::storage::StorageError::WalError(format!("checkpoint failed after commit: {e}"))
+        })
+    }
+
+    /// 设置 WAL 字节水位阈值（MS26 T5，`wal-auto-checkpoint` R2）——打开后
+    /// 下发，`0` 禁用自动 checkpoint。只读 / 内存会话无 WAL 通道，为 no-op。
+    pub fn set_checkpoint_bytes_threshold(&self, bytes: u64) {
+        if let Some(writer) = &self.wal_writer {
+            writer.set_checkpoint_bytes_threshold(bytes);
+        }
     }
 
     /// Roll back an explicit transaction: every version the transaction
@@ -297,6 +480,10 @@ impl Database {
     /// the site and WAL are left byte for byte untouched. Pending work of
     /// any kind — DML records, DDL dirty pages, crash-recovery replayed
     /// pages — still takes the full checkpoint path.
+    ///
+    /// MS26 T1: a read-only session holds no checkpoint manager at all
+    /// (`readonly-open-mode` R3) — `close()` is a structural no-op there, not
+    /// a zero-work skip that happens to match.
     pub async fn close(&self) -> Result<()> {
         self.checkpoint().await
     }
@@ -309,8 +496,15 @@ impl Database {
     /// capture, so a restart after WAL truncation still advances the
     /// allocator past every pre-restart id (Read Committed high-water
     /// soundness).
+    ///
+    /// MS26 T1: non-read-write sessions own no checkpoint manager and take
+    /// the zero-write path without touching the WAL, the site file, or the
+    /// buffer pool (`readonly-open-mode` R3).
     pub async fn checkpoint(&self) -> Result<()> {
-        self.checkpoint_manager
+        let Some(manager) = &self.checkpoint_manager else {
+            return Ok(());
+        };
+        manager
             .checkpoint(|| self.transaction_manager.current_tx_id())
             .await
             .map(|_captured_lsn| ())

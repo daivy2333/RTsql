@@ -76,7 +76,7 @@ async fn union_dedup() {
         "UNION 必须输出去重并集并保留首现序"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S2：UNION ALL 保留重复与序（4 行：1,2,2,3）。
@@ -101,7 +101,7 @@ async fn union_all_preserves() {
         "UNION ALL 必须保留重复行与输入序"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R1-S3：UNION 中 NULL 相等折叠（两支各一行 NULL → 一行）。
@@ -124,7 +124,7 @@ async fn union_null_folds() {
         "UNION 必须把两支的 NULL 折叠为一行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S1：INTERSECT 去重交集。
@@ -150,7 +150,7 @@ async fn intersect_basic() {
         "INTERSECT 必须输出去重交集（左侧 1,2,2 与右侧 2,3 → 仅 2）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S2：EXCEPT 去重差集。
@@ -175,7 +175,7 @@ async fn except_basic() {
         "EXCEPT 必须输出去重差集（左侧 1,2,2 减去右侧 2 → 仅 1）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R2-S3：EXCEPT 中 NULL 参与匹配（NULL 行被差集移除）。
@@ -199,7 +199,7 @@ async fn except_null_matching() {
         "EXCEPT 必须按 NULL 相等语义移除 NULL 行"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S1：链式三分支左结合去重。
@@ -226,7 +226,7 @@ async fn chained_three_way() {
         "三分支链式复合必须左结合去重"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S2：INTERSECT 优先级高于 UNION（`a UNION b INTERSECT c` = `a UNION (b ∩ c)`）。
@@ -253,7 +253,7 @@ async fn intersect_precedence() {
         "INTERSECT 必须先于 UNION 结合（b 与 c 先得 3，再与 a 求并）"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S3：`INTERSECT ALL` 与括号化侧臂计划期点名拒绝（断言点名文案，避免
@@ -282,7 +282,7 @@ async fn intersect_all_and_parens_rejected() {
         "括号化侧臂必须点名拒绝，实际: {paren_msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R3-S4：其余拒绝面——`BY NAME` 量化词、顶层 DISTINCT × 复合、子查询内复合。
@@ -329,7 +329,7 @@ async fn compound_other_forms_rejected() {
         "子查询内复合必须点名拒绝，实际: {in_subquery}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4-S1：复合结果 ORDER BY（作用于复合输出）。
@@ -353,7 +353,7 @@ async fn compound_order_by() {
         "复合语句尾 ORDER BY 必须作用于复合输出"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4-S2：分支列数不匹配计划期点名拒绝。
@@ -375,7 +375,7 @@ async fn column_count_mismatch_rejected() {
         "列数不匹配的复合必须点名拒绝并说明列数，实际: {msg}"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// R4-S3：既有单查询形态零回归。
@@ -392,7 +392,7 @@ async fn single_query_unchanged() {
         "单查询形态必须逐值不变"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
 
 /// 侧臂复用既有装配：JOIN + WHERE（D2 组合形状）× 外连接的复合查询。
@@ -424,5 +424,5 @@ async fn compound_arms_with_join_and_where() {
         "复合侧臂必须能承载 JOIN/WHERE 组合形状的完整 SELECT"
     );
 
-    db.wal_buffer.shutdown().await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

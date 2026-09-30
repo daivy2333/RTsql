@@ -181,6 +181,33 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql profile <db> <table> [--top n]` | Profile columns and frequent String values; default top count is 5, maximum 20 |
 | `rtsql completions <bash\|zsh\|fish>` | Generate a completion script; this command is hidden from `--help` |
 
+### Read-only sessions
+
+`rtsql --readonly <db> <sql>` opens the database with an advisory shared lock instead of the default exclusive lock, so many readers can observe one file at the same time while a writer still runs alone.
+
+- **Many readers, one writer:** read-only sessions share the lock with each other; a read-write session excludes readers and other writers, and a read-only session excludes a read-write one. A conflict is reported immediately as exit code `4` — RTsql never waits for a lock.
+- **No pending WAL:** a read-only session runs no recovery, so an open is refused when the `.wal` still holds unreplayed records. The message names the read-write path that performs the recovery; the exit code is `1`.
+- **No writes at all:** recovery and checkpoint are skipped, and `INSERT` / `UPDATE` / `DELETE` / `UPSERT` / `REPLACE` and every DDL statement are refused at plan time with SQLSTATE `25006` (exit code `3`). `SELECT`, `ATTACH`, `DETACH`, and transaction statements are unaffected.
+- **Cross-database:** `ATTACH` inside a read-only session opens the attached database read-only as well.
+- **Encrypted databases:** pass `--key` as usual; a wrong key still fails with exit code `5`.
+- **Main command only:** combining `--readonly` with a lifecycle or analysis subcommand is a usage error (exit code `2`) — those commands keep their read-write open.
+
+### In-memory databases
+
+`rtsql :memory: <sql>` runs the whole session in memory. The full SQL surface is available, including DDL, transactions, and `ATTACH`, and no file is created: there is no `.db`, `.wal`, or `.checkpoint` companion, `close()` and `checkpoint()` do nothing, and the data is discarded when the process exits.
+
+Lifecycle subcommands, `--key`, and `--readonly` are usage errors for `:memory:` (exit code `2`).
+
+### Automatic checkpoint by WAL size
+
+A read-write session checkpoints the WAL automatically once the bytes appended since the last checkpoint reach a threshold, so a long-running session keeps its `.wal` file bounded. The check happens at each commit boundary (after an auto-commit statement, and after an explicit `COMMIT`), and it is deferred while another transaction of the same session is still active.
+
+- **Default:** 16 MiB. Ordinary sessions stay far below it and keep the existing behavior, where only `close()` and an explicit checkpoint truncate the WAL.
+- **Environment variable:** `RTSQL_WAL_CHECKPOINT_BYTES=<bytes>` overrides the threshold; the same value is reachable from the library through `Database::set_checkpoint_bytes_threshold`. A value of `0` disables the automatic checkpoint — the WAL keeps growing and `close()` still performs a full checkpoint.
+- **Invalid values:** a non-numeric, negative, or overflowing value is refused before the database is opened, with a message naming the variable and the rejected value (exit code `2`); no file is created.
+- **Failures:** if the automatic checkpoint fails, the statement that triggered it reports the error and names the checkpoint failure (exit code `3`). The data it committed stays durable — the commit is fsynced before the checkpoint runs, and a later commit retries.
+- **Read-only and in-memory sessions:** they hold no WAL, so the setting has no effect there.
+
 ### Output formats
 
 `--format` accepts `table`, `json`, `csv`, and `tsv`. RTsql uses `table` for an interactive terminal and `json` otherwise unless the option is set.
@@ -210,6 +237,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 - **Transactions:** explicit library transactions and CLI `BEGIN` / `COMMIT` / `ROLLBACK` sessions.
 - **MVCC:** Repeatable Read by default and opt-in Read Committed through `Database::open_with_isolation`.
 - **Storage:** persistent schema, B-Tree primary-key indexes, WAL with frame checksums, checkpointing, crash recovery, and page reuse.
+- **Runtime forms:** read-only sessions over a shared lock with many concurrent readers and zero writes, plus `:memory:` databases that keep everything in memory for the life of the process.
 
 The engine uses explicit type checks and three-valued predicate logic. It does not implicitly convert incompatible SQL types.
 
