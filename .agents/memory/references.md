@@ -324,4 +324,12 @@
 - **用途**: 「拷贝/移动/重命名 RTsql 数据库文件时哪些部分必须成对携带」的实测复核路径——kill -9 构造未 checkpoint 尾部态（`MAX_ARG_STRLEN` 128 KiB 约束、定时命中与准入检查、先快照后开原库纪律）、裸名副本陷阱（主命令对不存在路径新建空库）、7 形态行数矩阵（成对完整 / 单拷静默不完整 / 改名丢尾部）；备份方案裁定与存储层改动后回归备份语义使用
 - **状态**: active
 
+## R31: one-shot CLI 子进程见证配方 Runbook
+
+- **类型**: runbook
+- **路径**: `.agents/runbooks/cli-subprocess-witnessing.md`
+- **日期**: 2026-09-30
+- **用途**: 集成测试中以子进程端到端见证 one-shot CLI（退出码/stderr 文案/文件副作用/存活期 `.wal` 采样）的操作配方——`RTSQL_HOME` 预建 `db/`、裸名实参不带后缀、SQL 负载按 `MAX_ARG_STRLEN` 128 KiB 定尺、stdout 丢弃或落文件防管道阻塞、stderr 落文件带进断言、deadline+kill 兜底；写作 CLI e2e 测试夹具或排障「exit 1 + 采样恒 0 / 假死 / ArgumentListTooLong」时使用（来源 MS26 Iteration 002，3 轮首跑失败实证收敛）
+- **状态**: active
+
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
