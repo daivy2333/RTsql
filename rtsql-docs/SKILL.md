@@ -4,7 +4,7 @@ description: "Use when working with the rtsql CLI or install.sh: install, create
 compatibility: "RTsql CLI on Linux or macOS; Bash and standard Unix user tools for install.sh."
 metadata:
   author: RTsql
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # RTsql Operations
