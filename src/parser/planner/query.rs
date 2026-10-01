@@ -213,9 +213,16 @@ impl PlanBuilder {
             }
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
                 let name = parts[1].value.clone();
+                // Cycle 001（replan）design D4：两段限定符先在 FROM 作用域内
+                // 点名（镜像 ORDER BY 路径）——归一后不可达即 42P01 携带限定符
+                // 原文，单表与 JOIN 两基座同语义，不再经末段静默命中或误报列
+                // 缺失；in-scope 限定符 + 列缺失维持既有错误面。
+                if !self.qualifier_in_scope(&parts[0].value) {
+                    return Err(PlanError::TableNotFound(parts[0].value.clone()));
+                }
                 if let Some(layout) = join_layout {
-                    // MS25 T8：限定名在布局上精确解析；表不在布局或列不在该表
-                    // 时沿用既有 NonAggregatedColumn 点名（不新增错误面）。
+                    // MS25 T8：限定名在布局上精确解析；in-scope 限定符下列
+                    // 不在该表沿用既有 NonAggregatedColumn 点名。
                     if let Some(idx) = resolve_layout_index(layout, Some(&parts[0].value), &name)? {
                         return Ok(GroupKey {
                             name: name.clone(),
@@ -315,13 +322,17 @@ impl PlanBuilder {
     /// `pure_column_list`（MS25 T8 design D9）——SELECT 清单为纯列引用时，
     /// 过滤式解析前逐项严格校验（未知列 `ColumnNotFound`、裸名多命中
     /// `AmbiguousColumn`）；`false`（表达式/聚合/子查询项）维持既有承载语义。
+    ///
+    /// design D4：返回 `(计划, 组合列声明限定符)`——第二元组与最终 JOIN 节点的
+    /// `output_columns` 同序同长（无 JOIN 臂时为空），供调用方在组合行布局与
+    /// 投影索引解析上按声明限定符匹配（真实表名无法区分自连接的两段同表）。
     pub(crate) fn build_from_clause_with_projection(
         &mut self,
         from: &[sqlparser::ast::TableWithJoins],
         qualified_columns: &[(Option<String>, String)],
         carry_all_columns: bool,
         pure_column_list: bool,
-    ) -> Result<PhysicalPlan, PlanError> {
+    ) -> Result<(PhysicalPlan, Vec<String>), PlanError> {
         use crate::parser::ast::extract_join_table_name;
         use sqlparser::ast::{JoinConstraint, JoinOperator};
 
@@ -330,7 +341,10 @@ impl PlanBuilder {
         }
 
         // 基础表 — 支持 TableFactor::Table（普通表）和 TableFactor::Derived（派生表）
-        let (base_plan, base_table) = match &from[0].relation {
+        //
+        // design D4：第三元组是本 FROM 臂的**声明限定符**（声明了别名即别名，
+        // 否则真实表名）——JOIN 组合形状按它分段，自连接同表两别名各占一段。
+        let (base_plan, base_table, base_qualifier) = match &from[0].relation {
             TableFactor::Table { name, alias, .. } => {
                 let table_name = object_name_to_table_name(name);
                 // MS25 T5: CTE 查找钩子置于 `validate_table` 之前（CTE 名遮蔽
@@ -340,11 +354,24 @@ impl PlanBuilder {
                 // `validate_table` 之前（CTE > 视图 > 基表优先级不变量）；
                 // 视图未命中时既有基表路径逐字节不变。
                 match self.resolve_cte_reference(&table_name, alias.as_ref())? {
-                    Some((plan, effective)) => (plan, effective),
+                    // design D4：CTE / 视图引用点的别名**就是** effective 键
+                    // （`resolve_cte_reference` / `resolve_view_reference` 已按
+                    // 别名注册 `self.tables`），无别名条目可登——登记恒等映射
+                    // 不改变任何查找结果。
+                    Some((plan, effective)) => (plan, effective.clone(), effective),
                     None => match self.resolve_view_reference(&table_name, alias.as_ref())? {
-                        Some((plan, effective)) => (plan, effective),
+                        Some((plan, effective)) => (plan, effective.clone(), effective),
                         None => {
                             self.validate_table(&table_name)?;
+                            // design D4：基表别名登记——`FROM people p` 的
+                            // `p` 映射到 `self.tables` 的真实键 `people`。
+                            let qualifier = match alias {
+                                Some(a) => {
+                                    self.register_table_alias(&a.name.value, &table_name);
+                                    a.name.value.to_lowercase()
+                                }
+                                None => table_name.clone(),
+                            };
                             let base_columns =
                                 self.tables.get(&table_name).cloned().unwrap_or_default();
                             let plan = PhysicalPlan::Scan(ScanNode {
@@ -352,7 +379,7 @@ impl PlanBuilder {
                                 columns: base_columns,
                                 projection: Vec::new(),
                             });
-                            (plan, table_name)
+                            (plan, table_name, qualifier)
                         }
                     },
                 }
@@ -386,7 +413,8 @@ impl PlanBuilder {
                     // （构造点先落恒等，与三构造点同型）。
                     projection: Vec::new(),
                 });
-                (plan, alias_name)
+                // design D4：派生表的别名即注册名，无需别名条目。
+                (plan, alias_name.clone(), alias_name)
             }
             _ => {
                 return Err(PlanError::InvalidQuery(
@@ -398,6 +426,12 @@ impl PlanBuilder {
         // 递归处理 JOIN 链
         let mut current_plan = base_plan;
         let mut current_tables = vec![base_table.clone()];
+        // design D4：与 `current_tables` 同序的声明限定符（每臂一个），供组合
+        // 形状分段与 NLJ 布局构造。
+        let mut current_qualifiers = vec![base_qualifier];
+        // design D4：末次迭代的 `output_qualifiers`（与最终节点 `output_columns`
+        // 同序同长）；无 JOIN 臂时保持空——调用方只在组合形状存在时消费。
+        let mut combined_qualifiers: Vec<String> = Vec::new();
 
         for join in &from[0].joins {
             // MS25 T1（design D1）：JOIN 形态分类。`Inner(On)` 与
@@ -424,6 +458,11 @@ impl PlanBuilder {
 
             // 解析右表
             let right_table = extract_join_table_name(&join.relation)?;
+            // design D4：右臂声明限定符（别名优先，否则真实表名）——组合形状
+            // 的分段键。CTE / 视图臂的 effective 键即其别名（无别名条目可登）。
+            let right_qualifier = table_factor_alias(&join.relation)
+                .map(|a| a.name.value.to_lowercase())
+                .unwrap_or_else(|| right_table.clone());
             // MS25 T5: JOIN 右臂同款 CTE 钩子（置于 `validate_table` 之前）。
             // MS21 Iter005 (T5-c)：JOIN 右臂同款视图钩子（CTE 未命中后、
             // 基表前）。
@@ -443,6 +482,11 @@ impl PlanBuilder {
                     }
                     None => {
                         self.validate_table(&right_table)?;
+                        // design D4：JOIN 右臂基表别名登记，与 FROM 基表臂
+                        // 同款（CTE / 视图右臂同上，别名即 effective 键）。
+                        if let Some(a) = table_factor_alias(&join.relation) {
+                            self.register_table_alias(&a.name.value, &right_table);
+                        }
                         let columns = self.tables.get(&right_table).cloned().unwrap_or_default();
                         let plan = PhysicalPlan::Scan(ScanNode {
                             table_name: right_table.clone(),
@@ -460,6 +504,10 @@ impl PlanBuilder {
             // 构建输出列（根据 qualified_columns 过滤）—— Hash 与 NLJ 两路由共享，
             // SELECT * 与列过滤行为对两种 join 节点一致。D2：WHERE 存在时承载
             // 全部组合列（SELECT 收窄交由其上的 Filter / Sort 承担）。
+            //
+            // design D4：`all_qualifiers` 与 `all_columns` 同序同长，记录每列
+            // 所属 FROM 臂的声明限定符。限定列按它匹配（自连接同表两别名各占
+            // 一段，真实表名无法区分归属）；`OutputColumn` 的真实表名字段不变。
             let all_columns: Vec<OutputColumn> = current_tables
                 .iter()
                 .flat_map(|t| {
@@ -488,6 +536,25 @@ impl PlanBuilder {
                         }),
                 )
                 .collect();
+            let all_qualifiers: Vec<String> = current_qualifiers
+                .iter()
+                .zip(&current_tables)
+                .flat_map(|(qualifier, t)| {
+                    let width = self
+                        .tables
+                        .get(t)
+                        .expect("validated table must exist in metadata")
+                        .len();
+                    std::iter::repeat_n(qualifier.clone(), width)
+                })
+                .chain(std::iter::repeat_n(
+                    right_qualifier.clone(),
+                    self.tables
+                        .get(&right_table)
+                        .expect("validated right_table must exist")
+                        .len(),
+                ))
+                .collect();
 
             let select_star = qualified_columns.iter().any(|(_, c)| c == "*");
             // MS25 T8（design D9）：过滤式解析前的严格校验——纯列清单里既不
@@ -495,14 +562,27 @@ impl PlanBuilder {
             // 静默产出零宽行、对裸名多命中静默产出重复列行）。校验在组合
             // 列形状上按限定名精确 / 裸名唯一命中判定，与 `build_expression`
             // 的布局解析臂同款错误变体。
+            // design D4：限定名按声明限定符匹配——限定符不属本 FROM 作用域
+            // 交由链末的 `validate_projection_qualifiers` 点名（42P01 携带限定符），
+            // 此处只判列存在性（未知列 42703 / 裸名多命中 42702）。
             if !carry_all_columns && !select_star && pure_column_list {
                 for (qual_table, qual_col) in qualified_columns {
+                    // design D4：不在 FROM 作用域内的限定符交由链末的
+                    // `validate_projection_qualifiers` 点名（42P01 携带限定符），
+                    // 此处只判列存在性，避免把「关系不存在」误报为列缺失。
+                    if qual_table
+                        .as_deref()
+                        .is_some_and(|table| !self.qualifier_in_scope(table))
+                    {
+                        continue;
+                    }
                     let hits = all_columns
                         .iter()
-                        .filter(|col| {
+                        .zip(&all_qualifiers)
+                        .filter(|(col, qualifier)| {
                             col.column.to_lowercase() == qual_col.to_lowercase()
                                 && match qual_table {
-                                    Some(table) => col.table.as_deref() == Some(table.as_str()),
+                                    Some(table) => qualifier.eq_ignore_ascii_case(table),
                                     None => true,
                                 }
                         })
@@ -515,29 +595,28 @@ impl PlanBuilder {
                     }
                 }
             }
-            let output_columns = if carry_all_columns || select_star {
+            let (output_columns, output_qualifiers) = if carry_all_columns || select_star {
                 // SELECT *（或 D2 的组合行全列承载）：输出所有列
-                all_columns
+                (all_columns, all_qualifiers)
             } else {
                 // SELECT col1, col2... 或 SELECT t.col1, t.col2...
-                all_columns
-                    .into_iter()
-                    .filter(|col| {
-                        qualified_columns.iter().any(|(qual_table, qual_col)| {
-                            match qual_table {
-                                Some(table) => {
-                                    // Qualified column: table.column
-                                    col.table.as_deref() == Some(table.as_str())
-                                        && col.column.to_lowercase() == qual_col.to_lowercase()
-                                }
-                                None => {
-                                    // Unqualified column: column
-                                    col.column.to_lowercase() == qual_col.to_lowercase()
-                                }
+                let mut kept: Vec<OutputColumn> = Vec::new();
+                let mut kept_qualifiers: Vec<String> = Vec::new();
+                for (col, qualifier) in all_columns.into_iter().zip(all_qualifiers) {
+                    let selected = qualified_columns.iter().any(|(qual_table, qual_col)| {
+                        col.column.to_lowercase() == qual_col.to_lowercase()
+                            && match qual_table {
+                                // Qualified column: qualifier.col
+                                Some(table) => qualifier.eq_ignore_ascii_case(table),
+                                None => true,
                             }
-                        })
-                    })
-                    .collect()
+                    });
+                    if selected {
+                        kept.push(col);
+                        kept_qualifiers.push(qualifier);
+                    }
+                }
+                (kept, kept_qualifiers)
             };
 
             // MS09-T02 (I015): 计划期启发式路由（delta spec R4）。结构探测的
@@ -571,15 +650,22 @@ impl PlanBuilder {
                         .clone()
                 };
                 let layout: Vec<(String, Vec<String>)> = if outer == OuterJoinKind::Right {
-                    let mut swapped = vec![(right_table.clone(), right_columns.clone())];
-                    swapped.extend(current_tables.iter().map(|t| (t.clone(), table_columns(t))));
+                    // design D4：段键为声明限定符（自连接两别名各占一段）
+                    let mut swapped = vec![(right_qualifier.clone(), right_columns.clone())];
+                    swapped.extend(
+                        current_qualifiers
+                            .iter()
+                            .zip(&current_tables)
+                            .map(|(qualifier, t)| (qualifier.clone(), table_columns(t))),
+                    );
                     swapped
                 } else {
-                    let mut ordered: Vec<(String, Vec<String>)> = current_tables
+                    let mut ordered: Vec<(String, Vec<String>)> = current_qualifiers
                         .iter()
-                        .map(|t| (t.clone(), table_columns(t)))
+                        .zip(&current_tables)
+                        .map(|(qualifier, t)| (qualifier.clone(), table_columns(t)))
                         .collect();
-                    ordered.push((right_table.clone(), table_columns(&right_table)));
+                    ordered.push((right_qualifier.clone(), table_columns(&right_table)));
                     ordered
                 };
                 self.join_column_layout = Some(layout);
@@ -634,9 +720,74 @@ impl PlanBuilder {
             }
 
             current_tables.push(right_table);
+            current_qualifiers.push(right_qualifier);
+            combined_qualifiers = output_qualifiers;
         }
 
-        Ok(current_plan)
+        // design D4：纯列清单的限定符在计划期点名——归一后无对应注册表即
+        // `TableNotFound`（42P01），不静默丢弃限定符按裸名解析（单表基座的
+        // 「静默成功」面与本地三段 `db.table.col` 的分裂面同源于此）。置于
+        // JOIN 链装配之后——各臂别名此时才全部登记，自连接两别名均在作用域内。
+        if pure_column_list {
+            self.validate_projection_qualifiers(qualified_columns)?;
+        }
+
+        // design D4：末次迭代的 `output_qualifiers` 与最终节点的 `output_columns`
+        // 同序同长，供调用方的组合行布局与投影索引解析按声明限定符匹配。
+        Ok((current_plan, combined_qualifiers))
+    }
+
+    /// design D4：限定符在本语句 FROM 作用域内可达？——别名归一后命中
+    /// `self.tables`，或限定符本身是注册键（真实表名 / CTE·视图 effective 名 /
+    /// 派生表别名 / attach 复合键）。
+    fn qualifier_in_scope(&self, qualifier: &str) -> bool {
+        let key = self.resolve_table_qualifier(qualifier).unwrap_or(qualifier);
+        self.tables.contains_key(key)
+    }
+
+    /// design D4：纯列清单的限定符计划期点名——归一（别名 → 真实键）后无对应
+    /// 注册表即 `TableNotFound`（42P01 = FROM 中无该关系），错误携带限定符原文。
+    ///
+    /// 覆盖单表基座此前「静默丢弃限定符按裸名解析」的路径（`SELECT x.name FROM
+    /// people` 与本地三段 `db.table.col` 静默成功即由此而来）。非纯列清单不在此
+    /// 校验——表达式 / 聚合 / 子查询项经 `build_expression` 与子查询通道各自
+    /// 点名既有错误面。`*`（含 `t.*`）不参与。
+    fn validate_projection_qualifiers(
+        &self,
+        qualified_columns: &[(Option<String>, String)],
+    ) -> Result<(), PlanError> {
+        for (qual_table, qual_col) in qualified_columns {
+            if qual_col == "*" {
+                continue;
+            }
+            let Some(qualifier) = qual_table else {
+                continue;
+            };
+            if !self.qualifier_in_scope(qualifier) {
+                return Err(PlanError::TableNotFound(qualifier.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Cycle 001（replan）design D4：无聚合查询的 GROUP BY 项限定符可达性校验。
+    /// 有聚合路径由 `resolve_group_by_item` 两段臂点名；无聚合时 GROUP BY 不经
+    /// 分组解析（既有静默语义保持），仅对两段限定名做同款作用域检查——归一后
+    /// 不可达即 42P01 携限定符原文，单表与 JOIN 同语义。
+    fn validate_group_by_qualifiers(
+        &self,
+        group_by: &sqlparser::ast::GroupByExpr,
+    ) -> Result<(), PlanError> {
+        if let sqlparser::ast::GroupByExpr::Expressions(exprs) = group_by {
+            for e in exprs {
+                if let Expr::CompoundIdentifier(parts) = e {
+                    if parts.len() == 2 && !self.qualifier_in_scope(&parts[0].value) {
+                        return Err(PlanError::TableNotFound(parts[0].value.clone()));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// MS25 T3（design D4）：复合查询构建——`UNION [ALL]` / `INTERSECT` /
@@ -679,7 +830,12 @@ impl PlanBuilder {
                 .order_by
                 .iter()
                 .map(|o| {
-                    let column = extract_column_name(&o.expr)?;
+                    let (qualifier, column) = extract_column_name(&o.expr)?;
+                    // design D4：复合查询无 FROM 作用域，任何限定键都不可达——
+                    // 点名限定符（42P01），维持裸名键既有面。
+                    if let Some(qualifier) = qualifier {
+                        return Err(PlanError::TableNotFound(qualifier));
+                    }
                     let asc = o.asc.unwrap_or(true);
                     Ok(OrderByColumn {
                         column,
@@ -1139,7 +1295,7 @@ impl PlanBuilder {
                 _ => false,
             })
         };
-        let base_plan = self.build_from_clause_with_projection(
+        let (base_plan, combined_qualifiers) = self.build_from_clause_with_projection(
             &select.from,
             &qualified_columns,
             select.selection.is_some() || projection_has_aggregates,
@@ -1150,8 +1306,10 @@ impl PlanBuilder {
         // 就是 Sort/Aggregate 输入行的真实列序（无 WHERE 且无聚合 = 过滤后布局；
         // 有 WHERE 或有聚合 = 全组合布局）。名字解析（投影项、ORDER BY 别名键、
         // 分组键、聚合参数）与组合形状严格同基座。
-        let join_layout: Option<Vec<(String, Vec<String>)>> =
-            join_combined_columns(&base_plan).map(join_row_layout);
+        // design D4：段键取 `build_from_clause_with_projection` 返回的声明
+        // 限定符（与 `output_columns` 同序同长），自连接同表两别名各占一段。
+        let join_layout: Option<Vec<(String, Vec<String>)>> = join_combined_columns(&base_plan)
+            .map(|combined| join_row_layout(combined, &combined_qualifiers));
 
         // Extract table name from base plan for single-table queries (for WHERE/ORDER BY processing)
         let table_name = match &base_plan {
@@ -1503,11 +1661,11 @@ impl PlanBuilder {
                         "WHERE CLAUSE ON JOIN".into(),
                     ));
                 }
-                // 布局 = 组合行形状（按表分组为连续段——限定名解析臂在首个
-                // 同名表项内查找，非限定名解析臂全表搜索；非限定名在组合列
-                // 中唯一命中才解析，多表命中 → AmbiguousColumn，缺失 →
-                // ColumnNotFound——既有布局解析臂的行为，零新文案）。
-                let layout = join_row_layout(combined);
+                // 布局 = 组合行形状（按 FROM 臂声明限定符分连续段——限定名
+                // 解析臂在首个同名段内查找，非限定名解析臂全表搜索；非限定名
+                // 在组合列中唯一命中才解析，多表命中 → AmbiguousColumn，缺失
+                // → ColumnNotFound——既有布局解析臂的行为，零新文案）。
+                let layout = join_row_layout(combined, &combined_qualifiers);
                 self.join_column_layout = Some(layout);
                 let compiled = self.build_where(&table_name, where_expr);
                 self.join_column_layout = None;
@@ -1515,6 +1673,7 @@ impl PlanBuilder {
 
                 let select_indices = resolve_join_projection_indices(
                     combined,
+                    &combined_qualifiers,
                     &qualified_columns,
                     select_list_is_pure_column_list(
                         select,
@@ -1935,22 +2094,34 @@ impl PlanBuilder {
                             .map(Some)
                             .ok_or_else(|| PlanError::ColumnNotFound(ident.value.clone())),
                     },
-                    Some(Expr::CompoundIdentifier(parts)) if parts.len() == 2 => match &join_layout
-                    {
-                        Some(layout) => {
-                            resolve_layout_index(layout, Some(&parts[0].value), &parts[1].value)
+                    Some(Expr::CompoundIdentifier(parts)) if parts.len() == 2 => {
+                        // Cycle 001（replan）design D4：两段限定符先在 FROM 作用域
+                        // 内点名（42P01 携限定符原文，单表与 JOIN 同语义），再按
+                        // 基座既有路径解析；in-scope 限定符 + 列缺失维持既有错误面。
+                        if !self.qualifier_in_scope(&parts[0].value) {
+                            Err(PlanError::TableNotFound(parts[0].value.clone()))
+                        } else {
+                            match &join_layout {
+                                Some(layout) => resolve_layout_index(
+                                    layout,
+                                    Some(&parts[0].value),
+                                    &parts[1].value,
+                                )
                                 .and_then(|idx| {
                                     idx.map(Some).ok_or_else(|| {
                                         PlanError::ColumnNotFound(parts[1].value.clone())
                                     })
-                                })
+                                }),
+                                None => column_indices
+                                    .get(&parts[1].value.to_lowercase())
+                                    .copied()
+                                    .map(Some)
+                                    .ok_or_else(|| {
+                                        PlanError::ColumnNotFound(parts[1].value.clone())
+                                    }),
+                            }
                         }
-                        None => column_indices
-                            .get(&parts[1].value.to_lowercase())
-                            .copied()
-                            .map(Some)
-                            .ok_or_else(|| PlanError::ColumnNotFound(parts[1].value.clone())),
-                    },
+                    }
                     // 非列引用参数（字面量等）沿既有名字查找语义
                     _ => Ok(None),
                 })
@@ -1987,6 +2158,9 @@ impl PlanBuilder {
                 None => with_having,
             }
         } else {
+            // Cycle 001（replan）design D4：无聚合路径的 GROUP BY 限定符点名
+            // （有聚合路径由 resolve_group_by_item 承担）。
+            self.validate_group_by_qualifiers(&select.group_by)?;
             plan_with_where
         };
 
@@ -1996,7 +2170,16 @@ impl PlanBuilder {
                 .order_by
                 .iter()
                 .map(|o| {
-                    let column = extract_column_name(&o.expr)?;
+                    let (qualifier, column) = extract_column_name(&o.expr)?;
+                    // design D4：限定键先在 FROM 作用域内点名（别名归一后仍
+                    // 不可达 → 42P01 携带限定符），再按末段列名进入既有键
+                    // 校验集（`sort_columns` ∪ 输出别名）——排序键语义与裸名
+                    // 键同源，SortExecutor 无需感知限定符。
+                    if let Some(qualifier) = &qualifier {
+                        if !self.qualifier_in_scope(qualifier) {
+                            return Err(PlanError::TableNotFound(qualifier.clone()));
+                        }
+                    }
                     // sqlparser: asc field is Option<bool>
                     // None or Some(true) = ASC, Some(false) = DESC
                     let asc = o.asc.unwrap_or(true);
@@ -2643,16 +2826,20 @@ fn is_identity_filter_over_join(plan: &PhysicalPlan) -> bool {
     }
 }
 
-/// MS25 T8（design D9）：由 JOIN 节点的实际输出列构造行布局（表别名段 → 列名，
+/// MS25 T8（design D9）：由 JOIN 节点的实际输出列构造行布局（FROM 臂段 → 列名，
 /// 按行序连续）。与 `build_from_clause_with_projection` 内 WHERE 路径的布局装配
 /// 同型，但以 `output_columns` 为唯一真源——该列表就是 Sort/Aggregate 输入行的
 /// 真实列序（无 WHERE 的 JOIN 承载过滤后布局，有 WHERE/聚合的承载全组合布局）。
-fn join_row_layout(columns: &[OutputColumn]) -> Vec<(String, Vec<String>)> {
+/// design D4：段键取 `qualifiers`（声明限定符，与 `columns` 同序同长，来自
+/// FROM 构建器）——`columns` 的 `table_alias` 是真实表名，自连接同表两别名
+/// 无法据此分段。
+fn join_row_layout(columns: &[OutputColumn], qualifiers: &[String]) -> Vec<(String, Vec<String>)> {
     let mut layout: Vec<(String, Vec<String>)> = Vec::new();
-    for col in columns {
+    for (idx, col) in columns.iter().enumerate() {
+        let qualifier = qualifiers.get(idx).cloned().unwrap_or_default();
         match layout.last_mut() {
-            Some((alias, seg)) if *alias == col.table_alias => seg.push(col.column.clone()),
-            _ => layout.push((col.table_alias.clone(), vec![col.column.clone()])),
+            Some((alias, seg)) if *alias == qualifier => seg.push(col.column.clone()),
+            _ => layout.push((qualifier, vec![col.column.clone()])),
         }
     }
     layout
@@ -2726,20 +2913,25 @@ fn select_list_is_pure_column_list(
 /// MS25 T1（design D2）：把 SELECT 清单解析为 JOIN 组合行形状上的投影索引。
 ///
 /// 命中规则与 `build_from_clause_with_projection` 的 `output_columns` 过滤同
-/// 谓词（限定名按表名匹配；非限定名命中任一表即入选——两表同名列按既有语义
-/// 两列都入选），索引按组合形状的列序。`None` = 恒等（`SELECT *` / 空清单 /
+/// 谓词（限定名按 FROM 臂声明限定符匹配；非限定名命中任一表即入选——两表同名列按
+/// 既有语义两列都入选），索引按组合形状的列序。`None` = 恒等（`SELECT *` / 空清单 /
 /// 非纯列清单）。纯列清单中的列在组合形状上不存在时点名为 `ColumnNotFound`
 /// （MS19 T5 同款模型：不静默产出与 SELECT 清单不符的行形状）。
+/// design D4：`qualifiers` 与 `combined` 同序同长（声明限定符）。
 fn resolve_join_projection_indices(
     combined: &[OutputColumn],
+    qualifiers: &[String],
     qualified_columns: &[(Option<String>, String)],
     pure_column_list: bool,
 ) -> Result<Option<Vec<usize>>, PlanError> {
-    let matches_select = |col: &OutputColumn| -> bool {
+    let matches_select = |idx: usize, col: &OutputColumn| -> bool {
         qualified_columns.iter().any(|(qual_table, qual_col)| {
             col.column.to_lowercase() == qual_col.to_lowercase()
                 && match qual_table {
-                    Some(table) => col.table.as_deref() == Some(table.as_str()),
+                    Some(table) => qualifiers
+                        .get(idx)
+                        .map(|q| q.eq_ignore_ascii_case(table))
+                        .unwrap_or(false),
                     None => true,
                 }
         })
@@ -2751,10 +2943,14 @@ fn resolve_join_projection_indices(
         for (qual_table, qual_col) in qualified_columns {
             let hits = combined
                 .iter()
-                .filter(|col| {
+                .enumerate()
+                .filter(|(idx, col)| {
                     col.column.to_lowercase() == qual_col.to_lowercase()
                         && match qual_table {
-                            Some(table) => col.table.as_deref() == Some(table.as_str()),
+                            Some(table) => qualifiers
+                                .get(*idx)
+                                .map(|q| q.eq_ignore_ascii_case(table))
+                                .unwrap_or(false),
                             None => true,
                         }
                 })
@@ -2774,7 +2970,7 @@ fn resolve_join_projection_indices(
         combined
             .iter()
             .enumerate()
-            .filter(|(_, col)| matches_select(col))
+            .filter(|(idx, col)| matches_select(*idx, col))
             .map(|(idx, _)| idx)
             .collect(),
     ))
@@ -2897,10 +3093,17 @@ fn contains_or(expr: &Expr) -> bool {
     }
 }
 
-/// Extract column name from ORDER BY expression
-fn extract_column_name(expr: &Expr) -> Result<String, PlanError> {
+/// Extract column name from ORDER BY expression.
+///
+/// design D4：两段形态（`t.col`）解出限定符与列名——限定符由调用方按本语句的
+/// FROM 作用域归一 / 点名，排序键取末段列名（与 `compare_rows` 的按名查找同型）。
+/// 三段及以上与表达式项维持既有 `ORDER BY only supports column names` 拒绝。
+fn extract_column_name(expr: &Expr) -> Result<(Option<String>, String), PlanError> {
     match expr {
-        Expr::Identifier(ident) => Ok(ident.value.clone()),
+        Expr::Identifier(ident) => Ok((None, ident.value.clone())),
+        Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+            Ok((Some(parts[0].value.to_lowercase()), parts[1].value.clone()))
+        }
         _ => Err(PlanError::ParseError(
             "ORDER BY only supports column names".to_string(),
         )),

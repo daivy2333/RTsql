@@ -127,6 +127,63 @@ rtsql :memory: "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO 
 
 It creates no `.db`, `.wal`, or `.checkpoint` file, `close()` and `checkpoint()` do nothing, and the data is gone when the process exits. Use it for tests, throwaway calculations, and multi-statement pipelines that should leave no cleanup behind. Reject lifecycle subcommands, `--key`, and `--readonly` for `:memory:` with exit code `2` instead of silently ignoring them.
 
+## Command reference
+
+### Main command
+
+`rtsql <db> <sql>` opens the database, runs the SQL, and exits. `<db>` is a bare name or a file path (see Resolve a database). `:memory:` targets a throwaway in-memory database instead.
+
+| Surface | Effect |
+|---|---|
+| `--format <table\|json\|csv\|tsv>` | Output format; default is `table` on a TTY and `json` otherwise. Global flag. |
+| `--key <key>` | Key for an encrypted database; `RTSQL_KEY` is the fallback. Global flag; applies to every command that opens a database. |
+| `--readonly` | Open the main database read-only (shared advisory lock; writes are refused at plan time with SQLSTATE `25006`, exit `3`). Main command only; rejected with exit `2` alongside a subcommand. |
+| `;`-separated statements | Each statement runs as its own auto-commit transaction, in order, with fail-fast reporting (`statement k of n failed`). Wrap atomic work in `BEGIN` … `COMMIT` inside one invocation. |
+
+### Lifecycle subcommands
+
+| Command | Example | Effect |
+|---|---|---|
+| `new` | `rtsql new demo` | Create an empty database; fails if the target already exists. This is the only creation channel for a missing database. |
+| `list` | `rtsql list` | Enumerate `$RTSQL_HOME/db/*.db` without opening the files. |
+| `schema` | `rtsql schema demo` | Print user-table DDL. |
+| `dump` | `rtsql dump demo > demo.sql` | Export SQL text (`CREATE TABLE` + `INSERT` rows). A missing or damaged data-page chain is reported on stderr (see Behavioral notes) while the reachable part is still exported. |
+| `restore` | `rtsql restore demo-restored demo.sql` | Load a dump into an existing, still-empty target database (create it with `new` first); `-` reads the dump from stdin. |
+| `import` | `rtsql import demo people people.csv --csv` | Load a CSV file into an existing table; the CSV header must match the column names; rows commit one by one. |
+| `delete` | `rtsql delete demo --dry-run` | Remove a database file and its `.wal`/`.checkpoint` sidecars and report each file. `--dry-run` previews only; a locked file is refused with exit `4`. |
+| `stats` | `rtsql stats demo people` | Per-column row count, null rate, distinct count, min/max, numeric percentiles. |
+| `sample` | `rtsql sample demo people 5` | Reservoir sample of N rows; default 10, `N` of `0` or a non-integer is a usage error. |
+| `profile` | `rtsql profile demo people --top 10` | Frequent values for String columns; default top 5, maximum 20. |
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `RTSQL_HOME` | Base directory for bare-name resolution (`<home>/db/<name>.db`); defaults to `$HOME/.rtsql`. |
+| `RTSQL_KEY` | Default key for encrypted databases; an explicit `--key` wins. An empty value is refused with exit `2`. |
+| `RTSQL_WAL_CHECKPOINT_BYTES` | Auto-checkpoint threshold in bytes (default 16 MiB); `0` disables. An invalid value is refused before the database opens with exit `2`. |
+
+### Exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | Success |
+| 1 | General error: I/O, storage, missing database, or output format |
+| 2 | CLI usage error (bad flag combination, empty key, invalid environment value) |
+| 3 | SQL parse or execution error |
+| 4 | Database is locked by another process |
+| 5 | Encryption-key error |
+| 130 | SIGINT received |
+| 143 | SIGTERM received |
+
+Per-code action guidance is in Select output and handle failures.
+
+### Behavioral notes
+
+- The main command does not create a missing database. A missing bare name or path is refused with exit `1` and a `rtsql new <name>` hint, and no file is created. The `new` subcommand and the library API keep their creation behavior.
+- `dump` runs a data-page chain integrity precheck for each user table. When a table's page chain ends before the catalog-persisted tail page, one warning line goes to stderr — naming the table, the catalog tail page, and the chain end — while the reachable rows are still exported. stdout stays pure SQL and the exit code stays `0`.
+- `SELECT` resolves `FROM` table aliases across all clauses: qualified references such as `u.id` work in `SELECT`, `ON`, `WHERE`, `GROUP BY`, aggregate arguments, and `ORDER BY`; an unknown qualifier is a plan-time error.
+
 ## Execute SQL
 
 The main command accepts a database and SQL text:
@@ -273,7 +330,7 @@ Without `--format`, an interactive terminal receives a table and redirected outp
 | Exit code | Meaning | Action |
 |---:|---|---|
 | 0 | Success | Continue |
-| 1 | General I/O, storage, or format error | Inspect the path and storage before retrying |
+| 1 | General I/O, storage, missing-database, or format error | Inspect the path and storage before retrying |
 | 2 | CLI usage error | Correct the command or empty-key input |
 | 3 | SQL parse or execution error | Inspect the SQL and statement number |
 | 4 | Database is locked | Find the owning process and release the lock |

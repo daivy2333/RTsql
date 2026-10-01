@@ -60,6 +60,29 @@ pub struct SecondaryIndexMeta {
     pub index: Arc<IndexManager>,
 }
 
+/// Iter 002 T9 (change 2026-09-30-catalog-durability-and-cli-surface):
+/// read-only data-page chain integrity status for the dump precheck.
+/// `terminal` is the page whose `next_page_id` is 0 (`None` when a cyclic
+/// `next` was detected — the walk stops there instead of hanging); `tail`
+/// is the catalog-persisted chain tail. A healthy chain ends exactly at
+/// `tail`: `write_tuple` advances it on every new page, `truncate` resets
+/// it in place, empty tables keep `head == tail`.
+pub struct DataChainStatus {
+    /// Chain terminal page (`next_page_id == 0`); `None` if a cycle was hit.
+    pub terminal: Option<PageId>,
+    /// `next_page_id` loop detected (chain does not terminate at 0).
+    pub cyclic: bool,
+    /// Catalog-persisted data page tail.
+    pub tail: PageId,
+}
+
+impl DataChainStatus {
+    /// The chain terminates exactly at the catalog-persisted tail.
+    pub fn is_complete(&self) -> bool {
+        self.terminal == Some(self.tail)
+    }
+}
+
 /// Table metadata: schema, primary key, per-table index, data page chain.
 pub struct TableMeta {
     pub name: String,
@@ -969,6 +992,44 @@ impl TableManager {
             }
         }
         Ok(false)
+    }
+
+    /// Iter 002 T9 (change 2026-09-30-catalog-durability-and-cli-surface):
+    /// walk the table's data page chain from `data_page_head` and report the
+    /// terminal page against the catalog-persisted `data_page_tail`. Read-only
+    /// (buffer pool page reads only, no locks or WAL); the `visited` guard
+    /// bounds the walk so a cyclic `next_page_id` cannot hang the caller — a
+    /// cycle is reported via `cyclic` instead.
+    pub async fn data_chain_status(&self, table: &str) -> Result<DataChainStatus> {
+        let meta = self.get_table(table).await?;
+        let tail = *meta.data_page_tail.lock().unwrap();
+        let mut visited: HashSet<PageId> = HashSet::new();
+        let mut current = Some(meta.data_page_head);
+        let mut terminal = None;
+        let mut cyclic = false;
+        while let Some(pid) = current {
+            if !visited.insert(pid) {
+                cyclic = true;
+                break;
+            }
+            let next_page = self
+                .buffer_pool
+                .with_page_data(pid, |data| -> Result<u32> {
+                    Ok(SlottedPageRef::new(data).header().next_page_id)
+                })
+                .await?;
+            current = if next_page == 0 {
+                terminal = Some(pid);
+                None
+            } else {
+                Some(PageId(next_page as u64))
+            };
+        }
+        Ok(DataChainStatus {
+            terminal,
+            cyclic,
+            tail,
+        })
     }
 
     /// MS10-T02 Iter000 004-rework (R-T0b-R8, D10): swap in the

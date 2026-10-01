@@ -106,6 +106,11 @@ fn run_cli_ok(dir: &Path, db: &str, sql: &str, what: &str) {
 /// 另建 `third`（v）供多附加库场景使用。
 fn cross_db_fixture() -> TempDir {
     let dir = cli_fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建三个库（断言语义不变）。
+    for name in ["app", "other", "third"] {
+        let out = run_cli(dir.path(), &["new", name]);
+        assert_eq!(out.code, Some(0), "new {name} failed: {}", out.stderr);
+    }
     run_cli_ok(
         dir.path(),
         "app",

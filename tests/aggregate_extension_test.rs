@@ -316,6 +316,20 @@ fn new_aggregate_output_names() {
     // 含 `/` 的路径直开（裸名会解析到 $RTSQL_HOME/db/，与本夹具位置不同）
     let db_str = db_path(&dir).to_str().unwrap().to_string();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    let new_out = Command::new(env!("CARGO_BIN_EXE_rtsql"))
+        .args(["new", &db_str])
+        .current_dir(&dir)
+        .env("RTSQL_HOME", dir.path())
+        .env_remove("RTSQL_KEY")
+        .output()
+        .expect("spawn rtsql new");
+    assert!(
+        new_out.status.success(),
+        "rtsql new failed: {}",
+        String::from_utf8_lossy(&new_out.stderr)
+    );
+
     for sql in [
         "CREATE TABLE t (k INT PRIMARY KEY, v INT, s VARCHAR)",
         "INSERT INTO t VALUES (1, 1, 'a')",

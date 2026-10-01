@@ -370,6 +370,10 @@ fn column_alias_list_headers_via_cli() {
         )
     };
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    let (new_code, _, new_err) = run(&["new", "app"]);
+    assert_eq!(new_code, Some(0), "new failed: {new_err}");
+
     let (code, _, err) = run(&["app", "CREATE TABLE t (a INT, b STRING)"]);
     assert_eq!(code, Some(0), "seed DDL failed: {err}");
     let (code, _, err) = run(&["app", "INSERT INTO t VALUES (1, 'x')"]);

@@ -9,6 +9,7 @@
 use rtsql::database::Database;
 use rtsql::network::protocol::Response;
 use rtsql::storage::page_format::ColumnType;
+use rtsql::storage::HEADER_SIZE;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -111,8 +112,11 @@ fn fixture() -> TempDir {
 }
 
 /// 建表 + 插入一行种子数据（裸名 `app` → `$RTSQL_HOME/db/app.db`）；
-/// 任何一步失败即 panic。
+/// 任何一步失败即 panic。T10 机械校准：主命令不再隐式建库，先经 `new` 创建。
 fn seed_users(dir: &Path) {
+    let out = run_cli(dir, &["new", "app"]);
+    assert_eq!(out.code, Some(0), "new app failed: {}", out.stderr);
+
     let out = run_cli(
         dir,
         &[
@@ -527,18 +531,26 @@ fn test_close_persists_and_truncates_wal() {
     );
 }
 
-/// T5: 不存在的裸名库沿用 open 语义静默创建，建表后往返可查
+/// T10 语义更新（原「T5: 不存在的裸名库沿用 open 语义静默创建，建表后往返
+/// 可查」）：主命令对缺失库显式拒绝（exit 1 + `rtsql new` 指引、零文件创建），
+/// 经 `new` 创建后建表与查询往返可查。lib `Database::open` 建库语义不变
+/// （由 lib 侧既有用例锁定）。
 #[test]
-fn test_new_database_created_silently() {
+fn test_fresh_db_requires_new_then_selects_empty() {
     let dir = fixture();
     assert!(!dir.path().join("db/fresh.db").exists());
 
     let out = run_cli(dir.path(), &["fresh", "CREATE TABLE t (id INT)"]);
-    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.code, Some(1), "stderr: {}", out.stderr);
     assert!(
-        dir.path().join("db/fresh.db").exists(),
-        "db file must be created by open"
+        !dir.path().join("db/fresh.db").exists(),
+        "missing db must not be created by the main command"
     );
+
+    let out = run_cli(dir.path(), &["new", "fresh"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(dir.path(), &["fresh", "CREATE TABLE t (id INT)"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
 
     let out = run_cli(dir.path(), &["fresh", "SELECT id FROM t"]);
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
@@ -1036,6 +1048,8 @@ fn test_list_empty_or_missing_dir() {
 #[test]
 fn test_schema_outputs_ddl() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -1077,6 +1091,8 @@ fn test_schema_unique_roundtrip() {
     // MS23 Iter001 校准：原夹具 `name STRING UNIQUE` 依赖旧的静默接受行为；
     // 新契约（R4-S1）对非 INT 列 UNIQUE 点名拒绝，此处改用 INT UNIQUE 列，
     // schema 渲染保真断言等价。
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -1267,6 +1283,8 @@ fn test_dump_empty_db_no_output() {
 #[test]
 fn test_dump_restore_roundtrip() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -1363,6 +1381,8 @@ fn test_dump_restore_roundtrip() {
 #[test]
 fn test_dump_restore_roundtrip_full_shape() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -1945,6 +1965,8 @@ fn test_projection_table_render() {
 fn test_bare_datascans_projection_header_matches_rows() {
     let dir = fixture();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "s"]);
     let out = run_cli(
         dir.path(),
         &["s", "CREATE TABLE s (id INT PRIMARY KEY, name STRING)"],
@@ -1977,6 +1999,8 @@ fn test_bare_datascans_projection_header_matches_rows() {
 fn test_pushdown_datascans_projection_header_matches_rows() {
     let dir = fixture();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "t"]);
     let out = run_cli(
         dir.path(),
         &["t", "CREATE TABLE t (id INT, n INT, s STRING)"],
@@ -2017,6 +2041,8 @@ fn test_pushdown_datascans_projection_header_matches_rows() {
 fn test_aggregate_and_expression_header_anchors() {
     let dir = fixture();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "t"]);
     let out = run_cli(
         dir.path(),
         &["t", "CREATE TABLE t (id INT, n INT, s STRING)"],
@@ -2053,6 +2079,8 @@ fn test_aggregate_and_expression_header_anchors() {
 fn test_quoted_create_then_bare_name_access() {
     let dir = fixture();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "s"]);
     let out = run_cli(
         dir.path(),
         &["s", "CREATE TABLE \"items\" (id INT PRIMARY KEY, n INT)"],
@@ -2082,6 +2110,8 @@ fn test_quoted_create_then_bare_name_access() {
 fn test_quoted_bare_spelling_equivalence() {
     let dir = fixture();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "s"]);
     let out = run_cli(
         dir.path(),
         &["s", "CREATE TABLE items (id INT PRIMARY KEY, n INT)"],
@@ -2156,6 +2186,8 @@ fn test_quoted_bare_spelling_equivalence() {
 fn test_update_delete_bare_names_on_quoted_created_table() {
     let dir = fixture();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "s"]);
     let out = run_cli(
         dir.path(),
         &["s", "CREATE TABLE \"logs\" (id INT PRIMARY KEY, n INT)"],
@@ -2187,6 +2219,8 @@ fn test_update_delete_bare_names_on_quoted_created_table() {
 #[test]
 fn test_dump_restore_dump_table_name_stable() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "a"]);
 
     let out = run_cli(dir.path(), &["a", "CREATE TABLE mixed (a INT, v STRING)"]);
     assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
@@ -2248,6 +2282,8 @@ fn test_dump_restore_dump_table_name_stable() {
 fn test_schema_output_rebuilds_same_table_name() {
     let dir = fixture();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "a"]);
     let out = run_cli(
         dir.path(),
         &["a", "CREATE TABLE \"items\" (id INT PRIMARY KEY, n INT)"],
@@ -2301,6 +2337,8 @@ fn test_schema_output_rebuilds_same_table_name() {
 fn test_escaped_name_dump_restore_identity() {
     let dir = fixture();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "a"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -2361,6 +2399,8 @@ fn test_escaped_name_dump_restore_identity() {
 
 /// 建分布表：id 1..=5（INT 主键）、score 含 1 个 NULL（10/20/30/NULL/50）。
 fn seed_stats_db(dir: &Path) {
+    // T10 机械校准：先经 new 通道创建库（断言语义不变）。
+    run_cli(dir, &["new", "app"]);
     let out = run_cli(
         dir,
         &[
@@ -2475,6 +2515,8 @@ fn test_stats_date_column_min_max_and_null_percentiles() {
 #[test]
 fn test_stats_empty_table_zero_division_guard() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &["app", "CREATE TABLE empty_t (id INT PRIMARY KEY, v INT)"],
@@ -2554,6 +2596,8 @@ fn test_stats_format_and_error_surface() {
 
 /// 建 12 行表 `pop`：id 1..=12。
 fn seed_sample_db(dir: &Path) {
+    // T10 机械校准：先经 new 通道创建库（断言语义不变）。
+    run_cli(dir, &["new", "app"]);
     let out = run_cli(
         dir,
         &["app", "CREATE TABLE pop (id INT PRIMARY KEY, label STRING)"],
@@ -2651,6 +2695,8 @@ fn test_sample_missing_table_exit_3() {
 /// 建混合列画像表 `mix`：id INT（数值无 top-k）、name STRING（top-k 主战场）、
 /// d DATE（日期无 top-k）。
 fn seed_profile_db(dir: &Path) {
+    // T10 机械校准：先经 new 通道创建库（断言语义不变）。
+    run_cli(dir, &["new", "app"]);
     let out = run_cli(
         dir,
         &[
@@ -2714,6 +2760,8 @@ fn test_profile_mixed_columns() {
 #[test]
 fn test_profile_topk_tie_break_is_deterministic() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &["app", "CREATE TABLE twotie (id INT PRIMARY KEY, s STRING)"],
@@ -2752,6 +2800,8 @@ fn test_profile_topk_tie_break_is_deterministic() {
 #[test]
 fn test_profile_default_top_k_is_5() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &["app", "CREATE TABLE many (id INT PRIMARY KEY, s STRING)"],
@@ -2799,6 +2849,8 @@ fn test_profile_top_gt_20_usage_error() {
 
 /// emp/dept 关联夹具：dept.rid ↔ emp.id，标量子查询恰返回单行。
 fn seed_emp_region(dir: &Path) {
+    // T10 机械校准：先经 new 通道创建库（断言语义不变）。
+    run_cli(dir, &["new", "app"]);
     let out = run_cli(
         dir,
         &["app", "CREATE TABLE emp (id INT, name STRING, salary INT)"],
@@ -2896,6 +2948,8 @@ fn test_scalar_subquery_last_column_table_header() {
 #[test]
 fn test_import_escaped_quoted_table_name() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(dir.path(), &["app", "CREATE TABLE \"a\"\"b\" (i INT)"]);
     assert_eq!(
         out.code,
@@ -3237,6 +3291,8 @@ fn completions_hidden_and_usage_errors() {
 #[test]
 fn not_null_violation_auto_commit_exit3_with_template() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -3275,6 +3331,8 @@ fn not_null_violation_auto_commit_exit3_with_template() {
 #[test]
 fn not_null_violation_in_tx_rolls_back_and_reports() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -3344,6 +3402,8 @@ fn not_null_violation_in_tx_rolls_back_and_reports() {
 #[test]
 fn unique_insert_rollback_then_reinsert_same_value_succeeds() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -3380,6 +3440,8 @@ fn unique_insert_rollback_then_reinsert_same_value_succeeds() {
 #[test]
 fn unique_conflict_auto_rollback_then_reinsert_succeeds() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -3429,6 +3491,8 @@ fn unique_conflict_auto_rollback_then_reinsert_succeeds() {
 #[test]
 fn unique_table_dump_restore_enforcement_roundtrip() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -3484,6 +3548,8 @@ fn unique_table_dump_restore_enforcement_roundtrip() {
 #[test]
 fn pk_bool_unique_dump_form_restores() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -3535,6 +3601,8 @@ fn pk_bool_unique_dump_form_restores() {
 #[test]
 fn test_dump_restore_roundtrip_preserves_defaults() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -3640,6 +3708,8 @@ fn test_dump_restore_roundtrip_preserves_defaults() {
 #[test]
 fn test_upsert_rejection_error_face_exit_3() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -4018,6 +4088,8 @@ fn test_delete_absent_companions_skipped() {
 #[test]
 fn test_unsupported_statement_names_capability_cli() {
     let dir = fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    run_cli(dir.path(), &["new", "app"]);
     let out = run_cli(
         dir.path(),
         &[
@@ -4107,6 +4179,215 @@ fn test_unknown_order_by_key_cli() {
     assert!(
         out.stderr.contains("nosuch"),
         "错误信息必须点名未知排序键: {:?}",
+        out.stderr
+    );
+}
+
+// ===================================================================
+// change 2026-09-30-catalog-durability-and-cli-surface / Iteration 002
+// T9：dump 数据链完整性预检；T10：主命令打开不存在库显式拒绝
+// （delta spec cli-noninteractive-shell 两个 ADDED Requirement）
+// ===================================================================
+
+/// T9 夹具：lib 侧单语句 INSERT 500 行构造多页表 → close 落盘 → 重开读
+/// catalog 持久 head/tail（Iteration 000 保证其跨进程持久）。
+async fn seed_multi_page_db(path: &Path) -> (u64, u64) {
+    {
+        let db = Database::open(path).await.expect("open fixture db");
+        let resp = db
+            .execute_sql("CREATE TABLE items (id INT PRIMARY KEY, val STRING)")
+            .await;
+        assert!(
+            !matches!(resp, Response::Error { .. }),
+            "create items failed: {:?}",
+            resp
+        );
+        let mut insert = String::with_capacity(500 * 48);
+        insert.push_str("INSERT INTO items (id, val) VALUES ");
+        for i in 1..=500 {
+            if i > 1 {
+                insert.push(',');
+            }
+            insert.push_str(&format!("({i}, 'v{i:0>32}')"));
+        }
+        let resp = db.execute_sql(&insert).await;
+        assert!(
+            !matches!(resp, Response::Error { .. }),
+            "bulk insert failed: {:?}",
+            resp
+        );
+        db.close().await.expect("close fixture db");
+    } // drop 释放 advisory 锁后才能重开
+    let reopened = Database::open(path).await.expect("reopen fixture db");
+    let meta = reopened
+        .table_manager
+        .get_table("items")
+        .await
+        .expect("items meta");
+    let head = meta.data_page_head;
+    let tail = *meta.data_page_tail.lock().unwrap();
+    drop(reopened);
+    assert!(
+        tail.0 > head.0,
+        "fixture must span multiple pages (head={head}, tail={tail})"
+    );
+    (head.0, tail.0)
+}
+
+/// 修补 head 页头 `next_page_id`（页内 bytes [5..9] LE）为 0，构造
+/// 「链终止 = head ≠ catalog tail」断链形态。偏移锚定
+/// `src/storage/file_header.rs`（页 N 偏移 = HEADER_SIZE + N×4096）与
+/// `src/storage/page_format/slotted_page.rs`（SlottedPageHeader 字段布局）——
+/// 布局变化时夹具先行失败，属计划风险段认可的维护面。
+fn break_chain_at_head(path: &Path, head: u64) {
+    use std::io::Seek;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open db file for patching");
+    f.seek(std::io::SeekFrom::Start(
+        HEADER_SIZE as u64 + head * 4096 + 5,
+    ))
+    .expect("seek to head page header");
+    f.write_all(&0u32.to_le_bytes())
+        .expect("patch next_page_id to 0");
+}
+
+/// R-dump S1：干净库 dump 零告警、全行导出、exit 0。
+#[tokio::test]
+async fn test_dump_clean_db_no_warning() {
+    let dir = fixture();
+    let path = dir.path().join("db").join("app.db");
+    seed_multi_page_db(&path).await;
+    let out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(out.code, Some(0), "stderr: {:?}", out.stderr);
+    assert_eq!(out.stderr, "", "clean db must not warn");
+    assert_eq!(
+        out.stdout.matches("INSERT INTO").count(),
+        500,
+        "all rows exported"
+    );
+}
+
+/// R-dump S2/S3：断链库 dump —— stderr 恰一行告警（表名 + catalog 尾页 +
+/// 链终止页 + 「备份可能不完整/已损坏」语义）、继续导出可达行、rc 0；
+/// stdout 纯 SQL 不含告警；对照：修补前同库 dump stderr 空。
+#[tokio::test]
+async fn test_dump_broken_chain_warns_and_continues() {
+    let dir = fixture();
+    let path = dir.path().join("db").join("app.db");
+    let (head, tail) = seed_multi_page_db(&path).await;
+    let clean = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(clean.code, Some(0));
+    assert_eq!(clean.stderr, "", "pre-patch dump must be silent");
+    assert_eq!(clean.stdout.matches("INSERT INTO").count(), 500);
+    break_chain_at_head(&path, head);
+
+    let out = run_cli(dir.path(), &["dump", "app"]);
+    assert_eq!(out.code, Some(0), "rc stays 0: {:?}", out.stderr);
+    assert!(
+        out.stdout.contains("CREATE TABLE") && out.stdout.contains("INSERT INTO"),
+        "reachable part still exported"
+    );
+    let inserts = out.stdout.matches("INSERT INTO").count();
+    assert!(
+        (1..500).contains(&inserts),
+        "chain truncated to head-page rows, got {inserts}"
+    );
+    assert_eq!(
+        out.stderr.lines().count(),
+        1,
+        "exactly one warning line: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("items"),
+        "names table: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(&format!("tail page {tail}")),
+        "names catalog tail page: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(&format!("ends at page {head}")),
+        "names chain terminal page: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("incomplete") || out.stderr.contains("damaged"),
+        "states backup may be incomplete / damaged: {:?}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("warning")
+            && !out.stdout.contains("incomplete")
+            && !out.stdout.contains("damaged"),
+        "stdout stays pure SQL"
+    );
+}
+
+/// R-open S1：裸名缺失库拒绝 —— exit 1、点名库与 `rtsql new` 指引、零文件创建。
+#[test]
+fn test_main_command_missing_db_bare_name_rejected() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["typo", "SELECT 1"]);
+    assert_eq!(out.code, Some(1), "output: {:?}", out.stderr);
+    assert!(
+        out.stderr.contains("typo") && out.stderr.contains("rtsql new typo"),
+        "names db and guides `rtsql new`: {:?}",
+        out.stderr
+    );
+    assert!(
+        !dir.path().join("db").join("typo.db").exists(),
+        "no file created"
+    );
+}
+
+/// R-open S2：路径模式缺失拒绝 —— exit 1、零创建（父目录已存在，RED 态
+/// 该形态会静默建库）。
+#[test]
+fn test_main_command_missing_db_path_mode_rejected() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["./db/nope.db", "SELECT 1"]);
+    assert_eq!(out.code, Some(1), "output: {:?}", out.stderr);
+    assert!(
+        !dir.path().join("db").join("nope.db").exists(),
+        "no file created"
+    );
+    // 父目录缺失形态：同样 exit 1 且不创建目录（守卫面，两态均不得创建）。
+    let out = run_cli(dir.path(), &["./db/nested/x.db", "SELECT 1"]);
+    assert_eq!(out.code, Some(1), "output: {:?}", out.stderr);
+    assert!(!dir.path().join("db").join("nested").exists());
+}
+
+/// R-open：`--key` 组合缺失 → exit 1 且不得走加密建库路径，零文件。
+#[test]
+fn test_main_command_missing_db_with_key_rejected() {
+    let dir = fixture();
+    let out = run_cli(
+        dir.path(),
+        &["enc_typo", "SELECT 1", "--key", "test-key-123"],
+    );
+    assert_eq!(out.code, Some(1), "output: {:?}", out.stderr);
+    assert!(
+        !dir.path().join("db").join("enc_typo.db").exists(),
+        "no file created (encrypted-create path must not run)"
+    );
+}
+
+/// R-open S3：`new` 创建后主命令可用（new 通道不受影响；零回归护栏）。
+#[test]
+fn test_new_then_main_command_works() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "typo"]);
+    assert_eq!(out.code, Some(0), "new still creates: {:?}", out.stderr);
+    let out = run_cli(dir.path(), &["typo", "SELECT 1"]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "main command after new: {:?}",
         out.stderr
     );
 }

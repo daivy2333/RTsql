@@ -205,6 +205,20 @@ fn run_cli(dir: &Path, args: &[&str]) -> CliOutput {
 fn cli_fixture() -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("db")).unwrap();
+    // T10 机械校准：主命令不再隐式建库，夹具先经 new 通道创建 `app`
+    //（断言语义不变）。
+    let out = Command::new(env!("CARGO_BIN_EXE_rtsql"))
+        .args(["new", "app"])
+        .current_dir(dir.path())
+        .env("RTSQL_HOME", dir.path())
+        .env_remove("RTSQL_KEY")
+        .output()
+        .expect("spawn rtsql new");
+    assert!(
+        out.status.success(),
+        "rtsql new app failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     dir
 }
 

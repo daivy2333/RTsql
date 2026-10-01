@@ -360,6 +360,10 @@ fn explain_cli_four_formats() {
     };
     let seed_args: &[&str] = &["app", "CREATE TABLE t (id INT PRIMARY KEY, name STRING)"];
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    let (new_code, _, new_err) = run(&["new", "app"]);
+    assert_eq!(new_code, Some(0), "new failed: {new_err}");
+
     let (code, _, err) = run(seed_args);
     assert_eq!(code, Some(0), "seed DDL failed: {err}");
 
