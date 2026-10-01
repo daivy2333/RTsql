@@ -141,6 +141,9 @@ fn cli_fixture() -> TempDir {
 #[test]
 fn view_header_shape() {
     let dir = cli_fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    let new_out = run_cli(dir.path(), &["new", "main"]);
+    assert_eq!(new_out.code, Some(0), "new main failed: {}", new_out.stderr);
     let seed = run_cli(
         dir.path(),
         &[
@@ -425,6 +428,9 @@ fn run_cli(dir: &Path, args: &[&str]) -> CliOutput {
 #[test]
 fn view_definition_attach_reference_rejected() {
     let dir = cli_fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    let new_out = run_cli(dir.path(), &["new", "main"]);
+    assert_eq!(new_out.code, Some(0), "new main failed: {}", new_out.stderr);
     let seed = run_cli(
         dir.path(),
         &[

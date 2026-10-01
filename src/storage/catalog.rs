@@ -260,12 +260,18 @@ impl Catalog {
     }
 
     /// Scan all `__tables` rows.
+    ///
+    /// Same-name copies collapse to the newest one (an append always allocates
+    /// a greater logical_id), which closes the crash window of the
+    /// variable-length catalog update — appending the new copy and removing the
+    /// stale one are two steps. Chain order is otherwise preserved.
     pub async fn scan_tables(&self) -> Result<Vec<CatalogRow>> {
         let _guard = self.lock.lock().await;
-        scan_chain(&self.buffer_pool, PageId(TABLES_PAGE_ID), |data| {
+        let rows = scan_chain(&self.buffer_pool, PageId(TABLES_PAGE_ID), |data| {
             deserialize_catalog_row(data)
         })
-        .await
+        .await?;
+        Ok(collapse_newest_same_name(rows))
     }
 
     /// Scan all `__columns` rows for `table_name`.
@@ -277,6 +283,7 @@ impl Catalog {
         .await?;
         Ok(all
             .into_iter()
+            .map(|(_, col)| col)
             .filter(|c| c.table_name == table_name)
             .collect())
     }
@@ -577,15 +584,23 @@ async fn chain_head(bp: &BufferPool, start: PageId) -> Result<PageId> {
 // Chain operations
 // ---------------------------------------------------------------------------
 
+/// Raw rows of one page as `(logical_id, row bytes)`, paired with the next
+/// page-id in the chain.
+type PageRows = (Vec<(u16, Vec<u8>)>, u32);
+
+/// A located catalog row to update: `(logical_id, current length, new bytes)`.
+type LocatedUpdate = Option<(u16, usize, Vec<u8>)>;
+
 /// Append `payload` as a new slot in the chain starting at `root`. If the
 /// last page is full, allocate a new page, init it, link it from the
-/// previous page, and write into the new page.
+/// previous page, and write into the new page. Returns the `(page, logical_id)`
+/// the payload landed on.
 async fn append_to_chain(
     bp: &BufferPool,
     storage: &Arc<dyn AsyncStorage>,
     root: PageId,
     payload: &[u8],
-) -> Result<()> {
+) -> Result<(PageId, u16)> {
     let last = chain_head(bp, root).await?;
 
     // Try to append to the last page first.
@@ -598,7 +613,7 @@ async fn append_to_chain(
     };
 
     match add_result {
-        Ok(_) => Ok(()),
+        Ok((lid, _)) => Ok((last, lid)),
         Err(_) => {
             // Page full — allocate a fresh page, init, link, write.
             let new_id = storage.allocate_page().await?;
@@ -620,18 +635,20 @@ async fn append_to_chain(
                     let mut slotted = SlottedPage::new(page);
                     slotted.add_slot(payload)
                 });
-            write_result.map_err(|_| StorageError::PageFull)?;
-            // Drop cache for the newly-allocated page so subsequent
-            // `chain_head` walk sees the on-disk link.
-            bp.free_page(new_id).await?;
-            Ok(())
+            let (lid, _) = write_result.map_err(|_| StorageError::PageFull)?;
+            // The freshly written page stays cached and dirty: evicting it
+            // here would drop the row before it reaches disk (and push the
+            // page-id onto the storage free list, where a later allocation
+            // could hand the same id to an unrelated chain). The normal flush
+            // paths (checkpoint full flush / eviction) persist it.
+            Ok((new_id, lid))
         }
     }
 }
 
-/// Walk a chain starting at `root`, calling `parse` on each row's bytes
-/// and collecting the results.
-async fn scan_chain<P, T>(bp: &BufferPool, root: PageId, parse: P) -> Result<Vec<T>>
+/// Walk a chain starting at `root`, calling `parse` on each row's bytes and
+/// collecting `(logical_id, parsed)` in chain order.
+async fn scan_chain<P, T>(bp: &BufferPool, root: PageId, parse: P) -> Result<Vec<(u16, T)>>
 where
     P: Fn(&[u8]) -> Result<T>,
 {
@@ -644,20 +661,20 @@ where
             break;
         }
         let (rows, next) = bp
-            .with_page_data(page_id, |data| -> Result<(Vec<Vec<u8>>, u32)> {
+            .with_page_data(page_id, |data| -> Result<PageRows> {
                 let slotted = SlottedPageRef::new(data);
                 let mut rows = Vec::with_capacity(slotted.slot_count());
                 for i in 0..slotted.slot_count() {
                     if let Some(slot) = slotted.get_slot(i) {
                         let bytes = slotted.get_slot_data(&slot).to_vec();
-                        rows.push(bytes);
+                        rows.push((slot.logical_id, bytes));
                     }
                 }
                 Ok((rows, slotted.header().next_page_id))
             })
             .await?;
-        for row_bytes in rows {
-            out.push(parse(&row_bytes)?);
+        for (lid, row_bytes) in rows {
+            out.push((lid, parse(&row_bytes)?));
         }
         current = if next == 0 {
             None
@@ -733,6 +750,22 @@ where
 
 /// Update the bytes of a row whose name matches `target_name`, using
 /// `updater` to produce the new payload from the current bytes.
+///
+/// The write strategy follows the payload length:
+///
+/// - **Equal length** — overwrite the live slot in place
+///   ([`SlottedPage::update_slot_in_place`]). Every fixed-width field update
+///   takes this path (tail / root / ordinal root / column count): no page
+///   space is consumed, no slot is allocated, and the write still lands on a
+///   page whose data area is already exhausted.
+/// - **Different length** — append the new copy at the chain tail, then delete
+///   every same-name copy left on the chain, so exactly one copy (the new one)
+///   remains when the call returns. Appending first keeps a failure
+///   non-destructive. The two steps are not atomic; a crash between them leaves
+///   two copies, which [`Catalog::scan_tables`] collapses deterministically.
+///
+/// No-op if the row does not exist. An update that cannot be persisted never
+/// reports success.
 async fn update_field_in_chain<F>(
     bp: &BufferPool,
     storage: &Arc<dyn AsyncStorage>,
@@ -743,66 +776,127 @@ async fn update_field_in_chain<F>(
 where
     F: Fn(&[u8]) -> Result<Option<Vec<u8>>>,
 {
+    // Pass 1: locate the first same-name row and compute its new payload.
+    let mut current = Some(root);
+    let mut visited = std::collections::HashSet::new();
+    let mut target: Option<(PageId, u16, usize, Vec<u8>)> = None;
+    while let Some(page_id) = current {
+        if !visited.insert(page_id.0) {
+            break;
+        }
+        let (next, found) = bp
+            .with_page_data(page_id, |data| -> Result<(u32, LocatedUpdate)> {
+                let slotted = SlottedPageRef::new(data);
+                let mut found = None;
+                for i in 0..slotted.slot_count() {
+                    let Some(slot) = slotted.get_slot(i) else {
+                        continue;
+                    };
+                    let bytes = slotted.get_slot_data(&slot);
+                    if matches_catalog_row_name(bytes, target_name) {
+                        if let Some(new_bytes) = updater(bytes)? {
+                            found = Some((slot.logical_id, bytes.len(), new_bytes));
+                            break;
+                        }
+                    }
+                }
+                Ok((slotted.header().next_page_id, found))
+            })
+            .await?;
+        if let Some((lid, old_len, new_bytes)) = found {
+            target = Some((page_id, lid, old_len, new_bytes));
+            break;
+        }
+        current = if next == 0 {
+            None
+        } else {
+            Some(PageId(next as u64))
+        };
+    }
+
+    // Row absent: existing no-op contract.
+    let Some((page_id, lid, old_len, new_bytes)) = target else {
+        return Ok(());
+    };
+
+    if new_bytes.len() == old_len {
+        let guard = bp.get_page(page_id).await?;
+        let updated: std::result::Result<(), String> = guard.modify_page(|page| {
+            let mut slotted = SlottedPage::new(page);
+            slotted.update_slot_in_place(lid, &new_bytes)
+        });
+        return updated.map_err(|e| {
+            StorageError::Internal(format!(
+                "catalog update of table '{target_name}' failed: {e}"
+            ))
+        });
+    }
+
+    let (new_page, new_lid) = append_to_chain(bp, storage, root, &new_bytes)
+        .await
+        .map_err(|e| {
+            StorageError::Internal(format!(
+                "catalog update of table '{target_name}' failed: {e}"
+            ))
+        })?;
+    delete_named_copies_except(bp, root, target_name, (new_page.0, new_lid)).await
+}
+
+/// Delete every same-name row in the chain except the copy identified by
+/// `keep (page_id, logical_id)`. Collect-then-delete per page keeps the delete
+/// targets valid while the page is being mutated.
+async fn delete_named_copies_except(
+    bp: &BufferPool,
+    root: PageId,
+    target_name: &str,
+    keep: (u64, u16),
+) -> Result<()> {
     let mut current = Some(root);
     let mut visited = std::collections::HashSet::new();
     while let Some(page_id) = current {
         if !visited.insert(page_id.0) {
             break;
         }
-        // Find first matching logical_id on this page.
-        let found: Option<(u16, Vec<u8>)> = bp
-            .with_page_data(page_id, |data| -> Result<Option<(u16, Vec<u8>)>> {
+        let (next, to_delete) = bp
+            .with_page_data(page_id, |data| -> Result<(u32, Vec<u16>)> {
                 let slotted = SlottedPageRef::new(data);
+                let mut del = Vec::new();
                 for i in 0..slotted.slot_count() {
-                    if let Some(slot) = slotted.get_slot(i) {
-                        let bytes = slotted.get_slot_data(&slot);
-                        if matches_catalog_row_name(bytes, target_name) {
-                            if let Some(new_bytes) = updater(bytes)? {
-                                return Ok(Some((slot.logical_id, new_bytes)));
-                            }
-                        }
+                    let Some(slot) = slotted.get_slot(i) else {
+                        continue;
+                    };
+                    // Keep exactly the copy just appended — the stale copies
+                    // sit before it in slot order and share its page whenever
+                    // the row still had room to grow.
+                    if page_id.0 == keep.0 && slot.logical_id == keep.1 {
+                        continue;
+                    }
+                    if matches_catalog_row_name(slotted.get_slot_data(&slot), target_name) {
+                        del.push(slot.logical_id);
                     }
                 }
-                Ok(None)
+                Ok((slotted.header().next_page_id, del))
             })
             .await?;
 
-        if let Some((lid, new_bytes)) = found {
-            // SlottedPage has no update-in-place API. Strategy: append the
-            // new row, then delete the old one. If the page is full, the
-            // new row lands on a fresh page (via `add_slot` Err path
-            // handled by the caller returning Ok early) — but here we are
-            // inside `update_field_in_chain`, not the append path. The
-            // payload is small (CatalogRow ≈ 31 bytes + 6 slot = 37 B),
-            // and a 4 KB page fits ~100 rows, so the page-full case is
-            // extremely unlikely in practice. We still guard explicitly.
+        if !to_delete.is_empty() {
             let guard = bp.get_page(page_id).await?;
-            let add_result: std::result::Result<(u16, usize), String> = guard.modify_page(|page| {
+            let failed: Option<String> = guard.modify_page(|page| {
                 let mut slotted = SlottedPage::new(page);
-                slotted.add_slot(&new_bytes)
+                for lid in &to_delete {
+                    if let Err(e) = slotted.delete_slot_by_logical_id(*lid) {
+                        return Some(format!("logical_id {lid}: {e}"));
+                    }
+                }
+                None
             });
-            match add_result {
-                Ok(_) => {
-                    // New row appended. Delete the old row by logical_id.
-                    let guard = bp.get_page(page_id).await?;
-                    guard.modify_page(|page| {
-                        let mut slotted = SlottedPage::new(page);
-                        let _ = slotted.delete_slot_by_logical_id(lid);
-                    });
-                }
-                Err(_) => {
-                    let _ = storage;
-                    return Ok(());
-                }
+            if let Some(e) = failed {
+                return Err(StorageError::Internal(format!(
+                    "catalog update of table '{target_name}' failed to remove stale copy ({e})"
+                )));
             }
         }
 
-        let next = bp
-            .with_page_data(page_id, |data| -> Result<u32> {
-                let slotted = SlottedPageRef::new(data);
-                Ok(slotted.header().next_page_id)
-            })
-            .await?;
         current = if next == 0 {
             None
         } else {
@@ -810,6 +904,32 @@ where
         };
     }
     Ok(())
+}
+
+/// Collapse same-name `__tables` rows, keeping the copy with the greatest
+/// logical_id (an append always allocates a greater id) while preserving the
+/// first-appearance order of the surviving names.
+fn collapse_newest_same_name(rows: Vec<(u16, CatalogRow)>) -> Vec<CatalogRow> {
+    let mut order: Vec<String> = Vec::new();
+    let mut newest: std::collections::HashMap<String, (u16, CatalogRow)> =
+        std::collections::HashMap::new();
+    for (lid, row) in rows {
+        let name = row.table_name.clone();
+        match newest.get(&name) {
+            Some((best_lid, _)) if *best_lid >= lid => {}
+            Some(_) => {
+                newest.insert(name, (lid, row));
+            }
+            None => {
+                order.push(name.clone());
+                newest.insert(name, (lid, row));
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|name| newest.remove(&name).map(|(_, row)| row))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1471,6 +1591,7 @@ fn matches_column_row_index(data: &[u8], column_index: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::page_format::Slot;
     use crate::storage::FileStorage;
     use tempfile::tempdir;
 
@@ -1634,6 +1755,243 @@ mod tests {
         row.data_page_tail = 42;
         let scanned = cat.scan_tables().await.unwrap();
         assert_eq!(scanned[0], row);
+    }
+
+    // ===========================================================================
+    // Catalog durability (T2): equal-length in-place update, variable-length
+    // relocation, same-name dedup, honest error propagation
+    // ===========================================================================
+
+    /// `(slot_count, free_space_offset, free_space)` of a catalog page.
+    async fn page_space(bp: &BufferPool, page: PageId) -> (u16, u16, usize) {
+        bp.with_page_data(page, |data| {
+            let page_ref = SlottedPageRef::new(data);
+            let h = page_ref.header();
+            let free =
+                Page::PAGE_SIZE - h.slot_count as usize * Slot::SIZE - h.free_space_offset as usize;
+            Ok((h.slot_count, h.free_space_offset, free))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Fill `page` with well-formed `__tables` rows of a filler table until no
+    /// further slot fits — the same page-space exhaustion a long-lived
+    /// database reaches through repeated row updates.
+    async fn suffocate_page(bp: &BufferPool, page: PageId) {
+        let bytes = serialize_catalog_row(&filler_row());
+        let guard = bp.get_page(page).await.unwrap();
+        guard.modify_page(|p| {
+            let mut slotted = SlottedPage::new(p);
+            while slotted.free_space() >= Slot::SIZE + bytes.len() {
+                slotted.add_slot(&bytes).unwrap();
+            }
+        });
+    }
+
+    fn filler_row() -> CatalogRow {
+        let mut row = sample_row();
+        row.table_name = "filler".to_string();
+        row
+    }
+
+    /// The one live `__tables` row named `name` (asserts it is unique).
+    fn live_row<'a>(rows: &'a [CatalogRow], name: &str) -> &'a CatalogRow {
+        let mut hits = rows.iter().filter(|r| r.table_name == name);
+        let row = hits.next().expect("row must exist");
+        assert!(hits.next().is_none(), "exactly one row named {name}");
+        row
+    }
+
+    /// Re-open the catalog from `path` with a fresh storage + buffer pool. The
+    /// first session's advisory lock must already be released.
+    async fn reopen_tables(path: &std::path::Path) -> Vec<CatalogRow> {
+        let storage = Arc::new(FileStorage::open(path).unwrap());
+        let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let cat = Catalog::open(bp.clone(), storage.clone()).await.unwrap();
+        let rows = cat.scan_tables().await.unwrap();
+        bp.flush_all().await.unwrap();
+        drop(cat);
+        drop(bp);
+        drop(storage);
+        rows
+    }
+
+    /// 200 fixed-width `update_table_tail` calls must not consume page space and
+    /// the last value must survive a flush + re-open.
+    #[tokio::test]
+    async fn update_table_tail_200_cycles_zero_leak_and_persists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        {
+            let storage = Arc::new(FileStorage::open(&path).unwrap());
+            let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+            let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+                .await
+                .unwrap();
+            cat.insert_table(&sample_row(), &[]).await.unwrap();
+
+            let before = page_space(&bp, PageId(TABLES_PAGE_ID)).await;
+            for i in 0..200u32 {
+                cat.update_table_tail("users", 1_000 + i).await.unwrap();
+            }
+            let after = page_space(&bp, PageId(TABLES_PAGE_ID)).await;
+            assert_eq!(
+                (after.0, after.1),
+                (before.0, before.1),
+                "fixed-width updates must not grow slot_count / free_space_offset"
+            );
+
+            bp.flush_all().await.unwrap();
+            drop(cat);
+            drop(bp);
+            drop(storage);
+        }
+        let rows = reopen_tables(&path).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].data_page_tail, 1_199);
+    }
+
+    /// An equal-length update on a page whose data area is exhausted still
+    /// lands and survives a re-open (the old append-then-delete path dropped it
+    /// silently).
+    #[tokio::test]
+    async fn update_table_tail_on_suffocated_page_persists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        {
+            let storage = Arc::new(FileStorage::open(&path).unwrap());
+            let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+            let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+                .await
+                .unwrap();
+            cat.insert_table(&sample_row(), &[]).await.unwrap();
+
+            suffocate_page(&bp, PageId(TABLES_PAGE_ID)).await;
+            let (_, _, free) = page_space(&bp, PageId(TABLES_PAGE_ID)).await;
+            assert!(
+                free < serialize_catalog_row(&filler_row()).len() + Slot::SIZE,
+                "fixture must leave no room for another catalog row (free={free})"
+            );
+
+            cat.update_table_tail("users", 777).await.unwrap();
+            let rows = cat.scan_tables().await.unwrap();
+            assert_eq!(live_row(&rows, "users").data_page_tail, 777);
+
+            bp.flush_all().await.unwrap();
+            drop(cat);
+            drop(bp);
+            drop(storage);
+        }
+        let rows = reopen_tables(&path).await;
+        assert_eq!(live_row(&rows, "users").data_page_tail, 777);
+    }
+
+    /// A variable-length update on a full page relocates to a fresh chain page,
+    /// leaves exactly one copy behind, and survives a re-open.
+    #[tokio::test]
+    async fn append_secondary_index_on_full_page_relocates_and_persists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let entry = CatalogSecondaryIndex {
+            name: "idx_payload".to_string(),
+            column_index: 1,
+            root: 42,
+        };
+        {
+            let storage = Arc::new(FileStorage::open(&path).unwrap());
+            let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+            let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+                .await
+                .unwrap();
+            cat.insert_table(&sample_row(), &[]).await.unwrap();
+            suffocate_page(&bp, PageId(TABLES_PAGE_ID)).await;
+
+            cat.append_secondary_index("users", &entry).await.unwrap();
+
+            let rows = cat.scan_tables().await.unwrap();
+            assert_eq!(
+                live_row(&rows, "users").secondary_indexes,
+                vec![entry.clone()],
+                "relocation must leave one copy carrying the registration"
+            );
+
+            bp.flush_all().await.unwrap();
+            drop(cat);
+            drop(bp);
+            drop(storage);
+        }
+        let rows = reopen_tables(&path).await;
+        assert_eq!(live_row(&rows, "users").secondary_indexes, vec![entry]);
+    }
+
+    /// `scan_tables` collapses same-name copies and keeps the newest one (the
+    /// greatest logical_id, which an append always allocates).
+    #[tokio::test]
+    async fn scan_tables_keeps_highest_logical_id_copy() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+            .await
+            .unwrap();
+        cat.insert_table(&sample_row(), &[]).await.unwrap();
+
+        // Manually add a second copy of the same row carrying a newer payload,
+        // as a crashed variable-length update would leave behind.
+        let mut newer = sample_row();
+        newer.data_page_tail = 999;
+        let bytes = serialize_catalog_row(&newer);
+        {
+            let guard = bp.get_page(PageId(TABLES_PAGE_ID)).await.unwrap();
+            guard.modify_page(|page| {
+                let mut slotted = SlottedPage::new(page);
+                slotted.add_slot(&bytes).unwrap();
+            });
+        }
+
+        let rows = cat.scan_tables().await.unwrap();
+        assert_eq!(rows.len(), 1, "same-name copies must collapse to one row");
+        assert_eq!(rows[0].data_page_tail, 999);
+    }
+
+    /// A variable-length update that cannot land anywhere fails loudly, names
+    /// the table, and leaves the live row untouched.
+    #[tokio::test]
+    async fn append_secondary_index_failure_names_table_and_keeps_row() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        let bp = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let cat = Catalog::bootstrap(bp.clone(), storage.clone())
+            .await
+            .unwrap();
+        cat.insert_table(&sample_row(), &[]).await.unwrap();
+        suffocate_page(&bp, PageId(TABLES_PAGE_ID)).await;
+
+        // A registration whose serialized row exceeds a whole page: neither the
+        // exhausted page nor the fresh page `append_to_chain` allocates can
+        // hold it.
+        let entry = CatalogSecondaryIndex {
+            name: "x".repeat(5000),
+            column_index: 1,
+            root: 7,
+        };
+        let err = cat
+            .append_secondary_index("users", &entry)
+            .await
+            .expect_err("variable-length update must not report success");
+        assert!(
+            err.to_string().contains("users"),
+            "error must name the table, got: {err}"
+        );
+
+        let rows = cat.scan_tables().await.unwrap();
+        assert!(
+            live_row(&rows, "users").secondary_indexes.is_empty(),
+            "failed update must not leave a registration behind"
+        );
     }
 
     // ===========================================================================

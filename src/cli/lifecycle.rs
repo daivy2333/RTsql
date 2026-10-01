@@ -5,7 +5,7 @@
 
 use super::render::{render, QueryPayload};
 use super::resolve;
-use super::{emit_stdout, kind, sigint_future, sigterm_future, ExitStatus, FormatArg};
+use super::{emit_stderr, emit_stdout, kind, sigint_future, sigterm_future, ExitStatus, FormatArg};
 use crate::database::Database;
 use crate::network::protocol::Response;
 use crate::pipeline::{execute_stage, parse_stage, plan_stage};
@@ -259,6 +259,33 @@ pub(super) async fn dump(db: &str, key: Option<&str>) -> ExitStatus {
                 // MS21 Iter005 (T5-a/D12)：视图行不进 dump（D15：dump 文本
                 // 仍为 CREATE TABLE + INSERT，视图不跨 dump 存续）。
                 for table in tables.into_iter().filter(|t| t.kind == CatalogKind::Table) {
+                    // Iter 002 T9（change 2026-09-30-catalog-durability-and-cli-surface）：
+                    // 导出前数据页链完整性预检（纵深防御——Iteration 000 已根因
+                    // 修复 catalog 持久化，此处覆盖存量损坏形态）。断链不阻断
+                    // 导出：stderr 一行告警，继续导出可达部分，退出码保持 0。
+                    let chain =
+                        match db.table_manager.data_chain_status(&table.table_name).await {
+                            Ok(chain) => chain,
+                            Err(e) => {
+                                return ExitStatus::General(format!(
+                                    "failed to inspect table {}: {}",
+                                    table.table_name, e
+                                ))
+                            }
+                        };
+                    if !chain.is_complete() {
+                        let warning = match chain.terminal {
+                            Some(terminal) => format!(
+                                "warning: table '{}' data page chain is incomplete (catalog tail page {}, chain ends at page {}); backup may be incomplete, database may be damaged",
+                                table.table_name, chain.tail.0, terminal.0
+                            ),
+                            None => format!(
+                                "warning: table '{}' data page chain does not terminate (catalog tail page {}); backup may be incomplete, database may be damaged",
+                                table.table_name, chain.tail.0
+                            ),
+                        };
+                        emit_stderr(&warning);
+                    }
                     let mut columns = match catalog.scan_columns(&table.table_name).await {
                         Ok(columns) => columns,
                         Err(e) => {

@@ -148,6 +148,18 @@ fn run_cli_sampling_wal(db_stem: &str, sql: &str, env: &[(&str, &str)]) -> CliSa
     let stderr_path = dir.path().join("cli-stderr.txt");
     let stderr_file = std::fs::File::create(&stderr_path).expect("create stderr sink");
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建目标库（断言语义不变）。
+    let new_status = Command::new(env!("CARGO_BIN_EXE_rtsql"))
+        .args(["new", db_stem])
+        .current_dir(dir.path())
+        .env("RTSQL_HOME", dir.path())
+        .env_remove("RTSQL_KEY")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("spawn rtsql new");
+    assert!(new_status.success(), "rtsql new {db_stem} failed");
+
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtsql"));
     cmd.args([db_stem, sql])
         .current_dir(dir.path())

@@ -283,6 +283,33 @@ impl<'a> SlottedPage<'a> {
         self.delete_slot(slot_index)
     }
 
+    /// Overwrite an existing slot's data in place, equal length only.
+    ///
+    /// Header fields are untouched: `slot_count` / `free_space_offset` /
+    /// `next_logical_id` keep their values and the header is not re-serialized,
+    /// so a fixed-size field update never leaks row bytes nor consumes a slot.
+    /// On a page whose data area is exhausted this still succeeds, because the
+    /// live row keeps its original slot.
+    pub fn update_slot_in_place(&mut self, logical_id: u16, data: &[u8]) -> Result<(), String> {
+        let (slot, _) = self
+            .get_slot_by_logical_id(logical_id)
+            .ok_or_else(|| format!("logical_id {} not found", logical_id))?;
+
+        if slot.length as usize != data.len() {
+            return Err(format!(
+                "in-place update requires equal length: slot {} bytes, got {} bytes",
+                slot.length,
+                data.len()
+            ));
+        }
+
+        let start = slot.offset as usize;
+        let end = start + slot.length as usize;
+        self.page.data[start..end].copy_from_slice(data);
+
+        Ok(())
+    }
+
     /// Calculate available space
     pub fn free_space(&self) -> usize {
         let free_space_start = self.header.free_space_offset as usize;
@@ -419,6 +446,93 @@ mod tests {
 
         // lid1 should be gone
         assert!(slotted.get_slot_by_logical_id(lid1).is_none());
+    }
+
+    #[test]
+    fn test_update_slot_in_place_overwrites_data() {
+        let mut page = Page::new(PageId(0));
+        let mut slotted = SlottedPage::init(&mut page, 0x03);
+
+        let (lid, _) = slotted.add_slot(b"aaaa").unwrap();
+        let new_data = b"bbbb";
+        assert_ne!(new_data, b"aaaa");
+
+        slotted.update_slot_in_place(lid, new_data).unwrap();
+
+        let (slot, _) = slotted.get_slot_by_logical_id(lid).unwrap();
+        assert_eq!(slotted.get_slot_data(&slot), b"bbbb");
+        assert_eq!(slotted.slot_count(), 1);
+    }
+
+    #[test]
+    fn test_update_slot_in_place_rejects_length_mismatch() {
+        let mut page = Page::new(PageId(0));
+        let mut slotted = SlottedPage::init(&mut page, 0x03);
+
+        let (lid, _) = slotted.add_slot(b"aaaa").unwrap();
+
+        assert!(slotted.update_slot_in_place(lid, b"bb").is_err());
+        assert!(slotted.update_slot_in_place(lid, b"bbbbbb").is_err());
+
+        // Rejected update leaves the original bytes untouched
+        let (slot, _) = slotted.get_slot_by_logical_id(lid).unwrap();
+        assert_eq!(slotted.get_slot_data(&slot), b"aaaa");
+    }
+
+    #[test]
+    fn test_update_slot_in_place_rejects_missing_logical_id() {
+        let mut page = Page::new(PageId(0));
+        let mut slotted = SlottedPage::init(&mut page, 0x03);
+
+        let (lid, _) = slotted.add_slot(b"aaaa").unwrap();
+        assert!(slotted.update_slot_in_place(lid + 100, b"bbbb").is_err());
+    }
+
+    #[test]
+    fn test_update_slot_in_place_leaves_header_bytes_unchanged() {
+        let mut page = Page::new(PageId(0));
+        let mut slotted = SlottedPage::init(&mut page, 0x03);
+
+        let (lid, _) = slotted.add_slot(b"aaaa").unwrap();
+        let header_before = slotted.page_data()[..SlottedPageHeader::SIZE].to_vec();
+        let slot_count_before = slotted.slot_count();
+        let fso_before = slotted.header().free_space_offset;
+        let next_lid_before = slotted.header().next_logical_id;
+
+        slotted.update_slot_in_place(lid, b"zzzz").unwrap();
+
+        assert_eq!(
+            slotted.page_data()[..SlottedPageHeader::SIZE],
+            header_before[..]
+        );
+        assert_eq!(slotted.slot_count(), slot_count_before);
+        assert_eq!(slotted.header().free_space_offset, fso_before);
+        assert_eq!(slotted.header().next_logical_id, next_lid_before);
+    }
+
+    #[test]
+    fn test_update_slot_in_place_200_cycles_no_leak() {
+        let mut page = Page::new(PageId(0));
+        let mut slotted = SlottedPage::init(&mut page, 0x03);
+
+        let (lid, _) = slotted.add_slot(b"aaaa").unwrap();
+        let slot_count_before = slotted.slot_count();
+        let fso_before = slotted.header().free_space_offset;
+        let next_lid_before = slotted.header().next_logical_id;
+        let free_space_before = slotted.free_space();
+
+        for i in 0..200u16 {
+            let payload = [i as u8, 0xAA, 0xBB, 0xCC];
+            slotted.update_slot_in_place(lid, &payload).unwrap();
+        }
+
+        assert_eq!(slotted.slot_count(), slot_count_before);
+        assert_eq!(slotted.header().free_space_offset, fso_before);
+        assert_eq!(slotted.header().next_logical_id, next_lid_before);
+        assert_eq!(slotted.free_space(), free_space_before);
+
+        let (slot, _) = slotted.get_slot_by_logical_id(lid).unwrap();
+        assert_eq!(slotted.get_slot_data(&slot), &[199u8, 0xAA, 0xBB, 0xCC]);
     }
 
     #[test]

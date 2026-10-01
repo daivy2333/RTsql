@@ -583,6 +583,20 @@ fn where_over_join_cli_header() {
     let db = db_path(&dir);
     let db_str = db.to_str().unwrap().to_string();
 
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    let new_out = Command::new(env!("CARGO_BIN_EXE_rtsql"))
+        .args(["new", &db_str])
+        .current_dir(&dir)
+        .env("RTSQL_HOME", dir.path())
+        .env_remove("RTSQL_KEY")
+        .output()
+        .expect("spawn rtsql new");
+    assert!(
+        new_out.status.success(),
+        "rtsql new failed: {}",
+        String::from_utf8_lossy(&new_out.stderr)
+    );
+
     for sql in [
         "CREATE TABLE hl (id INT PRIMARY KEY)",
         "INSERT INTO hl VALUES (1)",

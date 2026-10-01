@@ -108,3 +108,59 @@ async fn test_locked_bad_file_reports_lock_not_format() {
     let err = expect_locked(FileStorage::open(&path));
     assert_locked(&err);
 }
+
+/// Cycle 001（replan）T12：重试耗尽拒绝——锁被原生 fd 稳定持有时，
+/// `Database::open` 经有界重试（~8ms 窗口）后仍以 `DatabaseLocked` 拒绝。
+/// 确定性用例；现实现即绿——语义保持见证（错误面与拒绝语义不变）。
+#[tokio::test]
+async fn test_retry_exhaustion_still_rejects_active_holder() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+
+    // 先建一个有效库文件，再以原生 fd 稳定持有路径锁（模拟活跃持有者）。
+    {
+        let db = Database::open(&path).await.unwrap();
+        drop(db);
+    }
+    let holder = std::fs::File::open(&path).unwrap();
+    holder.try_lock().expect("test process acquires flock");
+
+    let err = expect_locked(Database::open(&path).await);
+    assert_locked(&err);
+}
+
+/// Cycle 001（replan）T12：只读打开同型变体——独占锁被持有时，共享锁
+/// 打开经重试耗尽后仍以 `DatabaseLocked` 拒绝（`readonly-open-mode` 锁矩阵
+/// 活跃持有者照旧拒绝，仅时延 + 窗口量级）。
+#[tokio::test]
+async fn test_retry_exhaustion_still_rejects_readonly_open() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+
+    {
+        let db = Database::open(&path).await.unwrap();
+        drop(db);
+    }
+    let holder = std::fs::File::open(&path).unwrap();
+    holder.try_lock().expect("test process acquires flock");
+
+    let err = expect_locked(FileStorage::open_readonly(&path));
+    assert_locked(&err);
+}
+
+/// Cycle 001（replan）T12：close→立即重开循环回归见证——flock 释放可见性
+/// 窗口（design D10）不再以测试可见频率产生假 `DatabaseLocked`。修复前为
+/// 统计性偶发（纯 std 探针 2/20000 量级，父 Cycle Review Finding 9），
+/// 本用例作回归见证，不构成 RED 判据；确定性判据是重试机制本身。
+#[tokio::test]
+async fn test_close_reopen_loop_no_false_locked() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+
+    for round in 0..300 {
+        match Database::open(&path).await {
+            Ok(db) => drop(db),
+            Err(e) => panic!("round {round}: close→reopen hit false DatabaseLocked: {e:?}"),
+        }
+    }
+}

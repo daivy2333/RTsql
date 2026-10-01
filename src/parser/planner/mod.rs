@@ -212,6 +212,11 @@ pub struct PlanBuilder {
     /// FROM/JOIN 展开钩子（T5-c）共同消费。加性通道：无注入（空表）时主库
     /// 面行为逐字节不变。
     pub(crate) views: HashMap<String, ViewDef>,
+    /// design D4：FROM / JOIN 处声明的表别名 → `self.tables` 真实键（小写归一）。
+    /// 与 `tables` 键空间分离——别名不参与表名查找，`attached_tables` 复合键
+    /// （`"o.dept_map"`）等既有注册形态不被污染。四个限定名消费点经
+    /// `resolve_table_qualifier` 单点归一，自连接同表两个别名天然各持一条。
+    pub(crate) table_aliases: HashMap<String, String>,
 }
 
 /// MS21 Iter005 (T5-b/D12)：一个已注册的持久化视图定义。列名清单 = 显式
@@ -255,6 +260,7 @@ impl PlanBuilder {
             cte_plans: Vec::new(),
             pending_cte_names: Vec::new(),
             views: HashMap::new(),
+            table_aliases: HashMap::new(),
         }
     }
 
@@ -269,6 +275,22 @@ impl PlanBuilder {
     /// `register_table` signature unchanged; the key is lowercase, consistent with `register_table`).
     pub fn set_pk_column_type(&mut self, name: &str, ct: ColumnType) {
         self.primary_key_types.insert(name.to_lowercase(), ct);
+    }
+
+    /// design D4：登记 FROM / JOIN 处声明的表别名 → `self.tables` 真实键。
+    /// 键同 `register_table` 纪律小写归一；同名别名后写覆盖先写（SQL 中同一
+    /// FROM 作用域内别名不重复，重复只可能来自子查询重建，不构成可达语义）。
+    pub(crate) fn register_table_alias(&mut self, alias: &str, target_key: &str) {
+        self.table_aliases
+            .insert(alias.to_lowercase(), target_key.to_lowercase());
+    }
+
+    /// design D4：限定名单点归一——命中别名映射返回其真实键，否则 `None`
+    /// 交回调用方按原样使用限定符（真实表名、CTE/视图 effective 名、派生表
+    /// 别名、attach 复合键均走此分支）。四个消费点据此在 `self.tables`、
+    /// NLJ 布局与 JOIN 输出列上用同一套真实名比较。
+    pub(crate) fn resolve_table_qualifier<'a>(&'a self, qualifier: &'a str) -> Option<&'a str> {
+        self.table_aliases.get(qualifier).map(|s| s.as_str())
     }
 
     /// MS24 Iteration 000 (D1): Register the table's per-column declared
@@ -536,6 +558,40 @@ mod tests {
 
         assert!(builder.validate_table("users").is_ok());
         assert!(builder.validate_table("nonexistent").is_err());
+    }
+
+    /// design D4：自连接两个别名各自归一到同一基表键；未注册的限定符与真实
+    /// 表名逐字回传（既有点名文案与 `TableNotFound` 语义不变）。
+    #[test]
+    fn test_resolve_table_qualifier_normalizes_aliases() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("people", vec!["id".into(), "name".into()], "id");
+        builder.register_table_alias("p", "people");
+        builder.register_table_alias("q", "people");
+
+        assert_eq!(builder.resolve_table_qualifier("p"), Some("people"));
+        assert_eq!(builder.resolve_table_qualifier("q"), Some("people"));
+        assert_eq!(builder.resolve_table_qualifier("people"), None);
+        assert_eq!(builder.resolve_table_qualifier("nope"), None);
+    }
+
+    /// attach 复合键（`"o.dept_map"`）已按限定名注册，归一化不得改写它。
+    #[test]
+    fn test_resolve_table_qualifier_keeps_attach_composite_key() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("o.dept_map", vec!["emp".into()], "emp");
+        builder.register_table_alias("p", "people");
+
+        assert_eq!(builder.resolve_table_qualifier("o.dept_map"), None);
+    }
+
+    /// 别名注册与限定符查询同用标识符小写归一。
+    #[test]
+    fn test_register_table_alias_is_case_insensitive() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table_alias("P", "people");
+
+        assert_eq!(builder.resolve_table_qualifier("p"), Some("people"));
     }
 }
 

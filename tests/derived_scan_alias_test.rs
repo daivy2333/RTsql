@@ -359,6 +359,9 @@ fn query_cli(sql: &str) -> CliOutput {
 fn fixture() -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("db")).unwrap();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    let new_out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(new_out.code, Some(0), "new app failed: {}", new_out.stderr);
     for sql in [
         "CREATE TABLE t (v STRING, n INT)",
         "INSERT INTO t VALUES ('b', 1)",

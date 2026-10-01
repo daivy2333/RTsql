@@ -709,6 +709,9 @@ fn t4_cli_memory_session_attaches_file_db_and_ctas() {
     let db_dir = dir.path().join("db");
     std::fs::create_dir(&db_dir).unwrap();
     // 预置一个真实文件库（非 memory）。
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
+    let new_out = run_cli(dir.path(), &["new", "seed"]);
+    assert_eq!(new_out.code, 0, "new seed failed: {}", new_out.stderr);
     let seed = run_cli(
         dir.path(),
         &[

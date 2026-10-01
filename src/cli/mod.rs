@@ -352,10 +352,20 @@ async fn execute_main_command(args: &CliArgs) -> ExitStatus {
     let db_path = if memory {
         Path::new(MEMORY_DB).to_path_buf()
     } else {
-        match resolve::resolve_db_path(db) {
+        let path = match resolve::resolve_db_path(db) {
             Ok(path) => path,
             Err(e) => return ExitStatus::General(e),
+        };
+        // Iter 002 T10（change 2026-09-30-catalog-durability-and-cli-surface）：
+        // 主命令显式开库——路径解析后、打开前校验存在性，缺失 exit 1 并指引
+        // `rtsql new`，零文件创建（`FileStorage::open` 的 create 语义保持不变，
+        // lib 与生命周期子命令不受影响；`:memory:` 不解析为文件，天然豁免）。
+        if !path.exists() {
+            return ExitStatus::General(format!(
+                "database '{db}' does not exist; create it first with: rtsql new {db}"
+            ));
         }
+        path
     };
     // sql/format/key 按值捕获：work future 拥有它们，满足 for<'a> 的 HRTB 工厂约束
     let sql = sql.clone();

@@ -1,7 +1,7 @@
 # join-output-shape-resolution Specification
 
 ## Purpose
-约束 JOIN 基座的名字解析与输出形状：聚合参数与分组键在完整组合列布局上精确解析（限定名按表、参数列为计划期索引），同名裸名歧义 `AmbiguousColumn` 点名、未知列 `ColumnNotFound` 点名，纯列引用别名项可达且表头为别名，任意表达式项 × JOIN 维持拒绝；派生基座（FROM 子查询/CTE/视图）的外层纯列清单按清单裁剪行与表头。来源：MS25（change `2026-09-26-ms25-sql-read-surface`，SQLite 语义对齐）+ MS26 T8（change `2026-09-30-ms26-embedded-runtime`，派生基座投影收口）。
+约束 JOIN 基座的名字解析与输出形状：聚合参数与分组键在完整组合列布局上精确解析（限定名按表、参数列为计划期索引），同名裸名歧义 `AmbiguousColumn` 点名、未知列 `ColumnNotFound` 点名，纯列引用别名项可达且表头为别名，任意表达式项 × JOIN 维持拒绝；派生基座（FROM 子查询/CTE/视图）的外层纯列清单按清单裁剪行与表头。来源：MS25（change `2026-09-26-ms25-sql-read-surface`，SQLite 语义对齐）+ MS26 T8（change `2026-09-30-ms26-embedded-runtime`，派生基座投影收口）+ 本 change `2026-09-30-catalog-durability-and-cli-surface` Iteration 001（投影严格解析纳入表别名限定符归一化）。
 
 ## Requirements
 
@@ -45,7 +45,7 @@ JOIN 查询中裸名（非限定）列引用命中多张被连接表的同名卷
 
 ### Requirement: JOIN 基座投影严格解析与别名列可达
 
-JOIN 查询的 SELECT 投影 SHALL 逐项解析：未知列 SHALL 以 `ColumnNotFound` 计划期点名拒绝（现状零宽行静默产出的缺陷终止）；纯列引用的别名项（`t.c AS alias`）SHALL 可达且表头为别名（MS19 T4b 机制对 JOIN 基座的扩展）；任意表达式项 × JOIN 维持既有显式拒绝。
+JOIN 查询的 SELECT 投影 SHALL 逐项解析：未知列 SHALL 以 `ColumnNotFound` 计划期点名拒绝（现状零宽行静默产出的缺陷终止）；纯列引用的别名项（`t.c AS alias`）SHALL 可达且表头为别名（MS19 T4b 机制对 JOIN 基座的扩展）；限定列引用的限定符 SHALL 先经表别名归一化（`sql-table-alias-resolution` 域）再匹配组合形状的真实表名——归一化后不可达的限定符 SHALL 点名拒绝而非计入列缺失；任意表达式项 × JOIN 维持既有显式拒绝。纯列清单的严格校验与过滤（命中计数、歧义点名）在归一化后的限定符上执行，判定规则不变。
 
 #### Scenario: 未知列点名拒绝
 
@@ -57,7 +57,13 @@ JOIN 查询的 SELECT 投影 SHALL 逐项解析：未知列 SHALL 以 `ColumnNot
 
 - **GIVEN** 同上种子
 - **WHEN** `SELECT p.g AS pg FROM p JOIN q ON p.g < q.h`
-- **THEN** 输出 pg 列含各组合行的 p.g 值，表头为 `pg`（现状 RED：零宽行）
+- **THEN** 输出 pg 列含各组合行的 p.g 值，表头为 `pg`
+
+#### Scenario: 别名限定列可达
+
+- **GIVEN** `FROM people a JOIN people b ON a.id = b.id`（两别名指向同表）
+- **WHEN** `SELECT a.name FROM …`（历史缺陷形态：`Column not found: name`）
+- **THEN** 返回左别名侧 name 列，表头 `name`
 
 #### Scenario: 表达式项 × JOIN 维持拒绝
 

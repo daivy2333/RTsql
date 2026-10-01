@@ -108,7 +108,7 @@
 
 - **Status**: planned（候选范围经 profile/bench 定稿后转 ready——沿用 MS08「先量化再决定」纪律）
 - **Dependencies**: None 硬前置（建议序在 MS18 后——I062 先收 close/checkpoint 路径，避免与 I026/I049 同面冲突）
-- **Outcome**: 经量化证实的性能积压按收益排序清收（第一批）。候选池：I049 WAL fsync 合并（组提交）/ I021 INSERT 多值批量 / I026 脏页 writev 批量写回 / I050 RowLockTable DashMap 化 / I024 Varint Key 变长编码 / I038 GC 无键行盲区 / I020 clone 消除 / I066 分配器评估（jemalloc/mimalloc）——每项先 bench/profile，达标立项，不达标退还 improvements 并留量化记录
+- **Outcome**: 经量化证实的性能积压按收益排序清收（第一批）。候选池：I049 WAL fsync 合并（组提交）/ I021 INSERT 多值批量 / I026 脏页 writev 批量写回 / I050 RowLockTable DashMap 化 / I024 Varint Key 变长编码 / I038 GC 无键行盲区 / I020 clone 消除 / I066 分配器评估（jemalloc/mimalloc）/ import 逐行 auto-commit 吞吐（无 Ixx——2026-09-30 实测 ≈4.1 ms/行、2000 行 8.246s、30000 行 ≈123s，逐行提交含 `sync_all`；量化来源 change `2026-09-30-catalog-durability-and-cli-surface` Iteration 000 Act 实测）——每项先 bench/profile，达标立项，不达标退还 improvements 并留量化记录
 - **Rationale**: MS08 实测驱动批处理先例的复活（2026-09-14 剥离时各项「先量化再决定」纪律随条目保留）；各项独立故障域但共享同一验收主题「实测证实的性能收益」，每项独立 change 独立验收，单项失败不阻塞其余
 - **Scope**: 候选池见 Outcome；定稿范围以量化数据为准（规模：小-中 change × N）
 - **Non-goals**: 撕裂树运行期根修（I031 中-大，量化后另行评估）、代价模型（I016）、扫描流式化（I065）、B+Tree 节点级锁（I025）、io_uring（I028）、瘦内部节点（I029）、合并 Tag byte（I030）——全部留 improvements 域

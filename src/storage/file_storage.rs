@@ -59,6 +59,32 @@ fn read_only_violation(op: &str) -> StorageError {
     StorageError::Internal(format!("cannot {op} on a read-only storage instance"))
 }
 
+/// Cycle 001（replan）design D10：advisory 锁获取的有界退避重试。平台
+/// flock 释放可见性窗口下，紧随释放的获取可能短暂 `WouldBlock`（假
+/// `DatabaseLocked`）；同 fd 以 2ms × 4 次重试吸收窗口（连同首次共 5 次
+/// 尝试，总窗口 ~8ms 量级）。真实冲突耗尽后仍按 `DatabaseLocked` 拒绝，
+/// 错误面不变；`Error(e)` 为真实 I/O 失败，不重试直传。
+fn try_lock_with_backoff(
+    file: &std::fs::File,
+    path: &Path,
+    lock: impl Fn(&std::fs::File) -> std::result::Result<(), std::fs::TryLockError>,
+) -> Result<()> {
+    let mut retries = 0;
+    loop {
+        match lock(file) {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if retries >= 4 {
+                    return Err(StorageError::DatabaseLocked(path.display().to_string()));
+                }
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(StorageError::Io(e)),
+        }
+    }
+}
+
 impl FileStorage {
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_with_key(path, None)
@@ -78,13 +104,7 @@ impl FileStorage {
         // MS10-T02: advisory exclusive lock, held for the fd's lifetime and
         // released on drop/process exit. Taken before WAL open and recovery
         // so a rejected second opener never touches companion files.
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(StorageError::DatabaseLocked(path.display().to_string()));
-            }
-            Err(std::fs::TryLockError::Error(e)) => return Err(StorageError::Io(e)),
-        }
+        try_lock_with_backoff(&file, path, |f| f.try_lock())?;
 
         let file_len = file.metadata()?.len();
         let page_size = Page::PAGE_SIZE;
@@ -113,8 +133,8 @@ impl FileStorage {
 
     /// MS26 T1：只读打开（`readonly-open-mode` R1）——advisory 共享锁，
     /// 文件句柄只读且不创建，缺失文件诚实报错。锁冲突与独占构造同型
-    /// （`WouldBlock` → `DatabaseLocked`，不等待）。头校验 / 密钥 / KDF /
-    /// 页长度语义与读写构造共用同一实现，逐字节一致。
+    /// （`WouldBlock` 经有界重试后仍 `DatabaseLocked`，design D10）。头校验 /
+    /// 密钥 / KDF / 页长度语义与读写构造共用同一实现，逐字节一致。
     pub fn open_readonly(path: &Path) -> Result<Self> {
         Self::open_readonly_with_key(path, None)
     }
@@ -132,13 +152,7 @@ impl FileStorage {
             Err(e) => return Err(StorageError::Io(e)),
         };
 
-        match file.try_lock_shared() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(StorageError::DatabaseLocked(path.display().to_string()));
-            }
-            Err(std::fs::TryLockError::Error(e)) => return Err(StorageError::Io(e)),
-        }
+        try_lock_with_backoff(&file, path, |f| f.try_lock_shared())?;
 
         let file_len = file.metadata()?.len();
         // 0 字节文件尚不是数据库（读写构造此时会写头创建新库，只读构造

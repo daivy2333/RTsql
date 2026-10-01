@@ -107,6 +107,11 @@ fn run_cli_ok(dir: &Path, db: &str, sql: &str, what: &str) {
 /// RTSQL_HOME 路径，不是 CWD 下的同名文件）。
 fn two_db_fixture() -> TempDir {
     let dir = cli_fixture();
+    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建两个库（断言语义不变）。
+    for name in ["app", "other"] {
+        let out = run_cli(dir.path(), &["new", name]);
+        assert_eq!(out.code, Some(0), "new {name} failed: {}", out.stderr);
+    }
     run_cli_ok(
         dir.path(),
         "app",
@@ -216,6 +221,14 @@ fn attach_locked_database_rejected_with_exit_4() {
 #[test]
 fn attach_duplicate_alias_rejected() {
     let dir = two_db_fixture();
+    // T10 机械校准：先经 new 通道创建第三个库（断言语义不变）。
+    let new_out = run_cli(dir.path(), &["new", "second"]);
+    assert_eq!(
+        new_out.code,
+        Some(0),
+        "new second failed: {}",
+        new_out.stderr
+    );
     run_cli_ok(
         dir.path(),
         "second",

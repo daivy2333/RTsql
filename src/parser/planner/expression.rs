@@ -78,19 +78,28 @@ impl PlanBuilder {
 
     /// 限定列引用的共同解析体（`t.col` 与 MS20 T2 的 `alias.table.col`）——
     /// 表必须已注册，列必须存在。
+    ///
+    /// design D4：限定符先经 `resolve_table_qualifier` 归一（FROM / JOIN 处
+    /// 声明的别名 → `self.tables` 真实键），三段形态的 `alias.table` 复合键
+    /// 未命中别名映射时原样使用。归一后仍无对应注册表 → `TableNotFound`
+    /// 点名限定符本身（42P01 = FROM 中无该关系），不再先经 `validate_table`
+    /// 报「表不存在」（42601）——别名被当表名的误导文案随之消失。
     fn resolve_qualified_column(&self, table: &str, column: &str) -> Result<ColumnRef, PlanError> {
-        self.validate_table(table)?;
-
+        let key = self.resolve_table_qualifier(table).unwrap_or(table);
         let columns = self
             .tables
-            .get(table)
+            .get(key)
             .ok_or_else(|| PlanError::TableNotFound(table.to_string()))?;
         if !columns.iter().any(|c| c.to_lowercase() == column) {
             return Err(PlanError::ColumnNotFound(column.to_string()));
         }
 
+        // `table` 携带**归一后的真实键**：ON 腿的左右交换判定
+        // （`extract_join_conditions`）与嵌套 JOIN / SemiJoin / AntiJoin 的
+        // 链首表名（`extract_column_indices` 对 `OutputColumn.table_alias` 的
+        // 归属比较）都按真实名工作，别名形态下逐字限定符会与之失配。
         Ok(ColumnRef {
-            table: Some(table.to_string()),
+            table: Some(key.to_string()),
             column: column.to_string(),
         })
     }
@@ -266,6 +275,9 @@ impl PlanBuilder {
         // qualified names resolve to their table's layout offset +
         // in-table position. Correlated outer refs were returned
         // above, so this only sees the join's own tables.
+        // design D4：布局段键是各 FROM 臂的**声明限定符**（有别名即别名），
+        // 故本臂按书写限定符直接比较——自连接同表两别名（`a` / `b`）各占一段，
+        // 归一后的真实表名无歧义归属，形状侧无需归一。
         if let Some(layout) = &self.join_column_layout {
             let mut offset = 0;
             for (table, columns) in layout {
@@ -284,10 +296,14 @@ impl PlanBuilder {
         }
 
         // Resolve the table reference
+        // design D4：限定符归一（别名 → 真实键）后再查注册表；未命中
+        // 点名限定符（42P01），与 JOIN 布局臂 / `resolve_qualified_column`
+        // 的未知限定符语义同款。
+        let key = self.resolve_table_qualifier(table_ref).unwrap_or(table_ref);
         let columns = self
             .tables
-            .get(table_ref)
-            .ok_or_else(|| PlanError::ParseError(format!("Table '{}' not found", table_ref)))?;
+            .get(key)
+            .ok_or_else(|| PlanError::TableNotFound(table_ref.to_string()))?;
         let column_index = columns
             .iter()
             .position(|c| c.to_lowercase() == column_name)
