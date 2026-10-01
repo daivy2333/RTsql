@@ -87,8 +87,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: （本批主提交：catalog 持久化正确性与 CLI/别名面收尾——hash 由后续 docs 提交回填；上一主批次 1668c95 = v0.2.0 版本定义与部署升级）
-- **ahead of origin**: 4
+- **提交基线**: 7dadfb7（本批主提交：catalog 持久化正确性与 CLI/别名面收尾；上一主批次 1668c95 = v0.2.0 版本定义与部署升级）
+- **ahead of origin**: 11（origin/master 停留 bc1d18d——此前 SNAPSHOT 记载的「ahead 4」系失准历史值，本批核对 `git log origin/master..master` 实数修正）
 - **工作区**: 干净（本 change 收尾提交后无未提交项）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 1632 tests pass, 0 failures, 2 ignored（2026-10-01 Iteration 002 Act Response 全量 M19 分批新鲜执行，Plan Review 采信 + 用户裁定「实施测试可信」；本 change 净增 42 例——catalog_durability 14（含修复前 RED 见证）/ table_alias_resolution 16 + database_file_lock 扩展（001 replan T12）/ cli_test 净增 6（T9 +2、T10 +4）+ 15 测试文件 T10 机械校准「先 `new`」插入断言语义零变化）
