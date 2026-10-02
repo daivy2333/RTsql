@@ -90,8 +90,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: （本批主提交：MS20-T02 跨文件 DML 二期 + MS28/MS29 实施面统一入库——hash 由后续 docs 提交回填；上一基线 4e1944f = docs hash 回填）
-- **ahead of origin**: 12（本批主提交后；docs 回填提交后为 13，以 `git log origin/master..master` 实数核对）
+- **提交基线**: 24ae134（本批主提交：MS20-T02 跨文件 DML 二期 + MS28/MS29 实施面统一入库；上一基线 4e1944f = docs hash 回填）
+- **ahead of origin**: 13（主批次 24ae134 + 本 docs 回填提交后，`git log origin/master..master` 实数核对——主批次提交后实测 12，回填提交自增 1）
 - **工作区**: 干净（本批收尾提交入库：MS28 + MS29 + MS20-T02 三 change 实施面、增量规格合并、状态文档与归档 carrier）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 1739 tests pass, 0 failures, 2 ignored（2026-10-02 Iteration 002 Act Response M19 收尾轮 11 批 + lib + bins 新鲜执行，Plan Review 独立 diff 审读采信；MS20-T02 全批净增 50 例——cross_db_dml_test 17 + insert_select_test 10 + recovery_replay_convergence_test 3 + cross_db_query_test 扩展与 planner/slotted_page 单测）
