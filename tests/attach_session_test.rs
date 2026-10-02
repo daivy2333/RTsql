@@ -44,10 +44,21 @@ struct CliOutput {
 /// （夹具模式与 tests/tx_statement_test.rs 一致：独立 TempDir CWD + RTSQL_HOME，
 /// stdout/stderr 均为管道 → 默认 json 格式）。
 fn run_cli(dir: &Path, args: &[&str]) -> CliOutput {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtsql"))
-        .args(args)
+    run_cli_env(dir, args, &[])
+}
+
+/// T4（D8 校准）：锁冲突断言子进程用例的显式短预算注入
+/// （`RTSQL_BUSY_TIMEOUT=0` ＝ 仅 ~8ms 下限窗口；断言本身零变化）。
+fn run_cli_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> CliOutput {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtsql"));
+    cmd.args(args)
         .current_dir(dir)
         .env("RTSQL_HOME", dir)
+        .env_remove("RTSQL_BUSY_TIMEOUT");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -211,7 +222,11 @@ fn attach_locked_database_rejected_with_exit_4() {
     // 等待子线程真正完成 open（避免竞态：CLI 先于持锁者启动）。
     std::thread::sleep(Duration::from_millis(500));
 
-    let out = run_cli(dir.path(), &["app", "ATTACH 'other' AS o"]);
+    let out = run_cli_env(
+        dir.path(),
+        &["app", "ATTACH 'other' AS o"],
+        &[("RTSQL_BUSY_TIMEOUT", "0")],
+    );
 
     assert_failure(&out, 4, "database is locked", "ATTACH of a locked database");
     held.join().unwrap();
@@ -249,7 +264,11 @@ fn attach_duplicate_alias_rejected() {
 fn attach_main_database_itself_rejected_with_exit_4() {
     let dir = two_db_fixture();
 
-    let out = run_cli(dir.path(), &["app", "ATTACH 'app' AS m"]);
+    let out = run_cli_env(
+        dir.path(),
+        &["app", "ATTACH 'app' AS m"],
+        &[("RTSQL_BUSY_TIMEOUT", "0")],
+    );
 
     assert_failure(&out, 4, "database is locked", "self-attach");
 }

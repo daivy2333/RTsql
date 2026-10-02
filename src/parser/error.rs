@@ -21,6 +21,9 @@ pub enum PlanError {
     EmptyColumnDefinition,
     /// CTAS 输出列类型冲突（载荷为列名与参与类型，MS20-T04）
     CtasColumnTypeConflict(String),
+    /// 声明期 DEFAULT 类型不一致（载荷为列名/期望/实际，MS29-T04：建表与
+    /// 加列的 DEFAULT 字面量计划期校验失败，规则与写入值类型一致门对齐）
+    DefaultTypeMismatch(String),
     /// CREATE TABLE 多主键
     MultiplePrimaryKey,
     /// WHERE 列不存在
@@ -83,6 +86,9 @@ impl fmt::Display for PlanError {
             }
             PlanError::CtasColumnTypeConflict(detail) => {
                 write!(f, "CTAS column type conflict: {}", detail)
+            }
+            PlanError::DefaultTypeMismatch(detail) => {
+                write!(f, "DEFAULT type mismatch: {}", detail)
             }
             PlanError::MultiplePrimaryKey => write!(f, "Multiple primary keys in CREATE TABLE"),
             PlanError::ColumnNotFound(col) => write!(f, "Column not found: {}", col),
@@ -186,6 +192,7 @@ mod tests {
             (PlanError::MissingField("f".into()), "58000"),
             (PlanError::EmptyColumnDefinition, "58000"),
             (PlanError::CtasColumnTypeConflict("c".into()), "58000"),
+            (PlanError::DefaultTypeMismatch("d".into()), "58000"),
             (PlanError::MultiplePrimaryKey, "58000"),
             (PlanError::InvalidConstraint("c".into()), "58000"),
             (PlanError::MissingOnClause, "58000"),

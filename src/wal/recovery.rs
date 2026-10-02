@@ -126,8 +126,10 @@ enum PrescanSlotKey {
 ///   2. 页类型字节 0 则 init(0x03) 数据页。
 ///   3. `get_slot_by_logical_id(row_id.slot_id)` 若 Some → 已存在，
 ///      幂等跳据（crash-during-recovery re-entry）。
-///   4. `add_slot` 并校验落位 logical_id == row_id.slot_id（稠密性），
-///      不等 → `WalError::RedoFailed`（K05：序列不一致时显式失败）。
+///   4. 按 WAL 记录的 logical_id 强制落位（`add_slot_with_logical_id`，
+///      Iteration 002 T8/R10 收敛；幂等命中已在 3 跳过）。显式报错收窄为
+///      物理落位失败（页满 / IO；K05 语义保持——不再假设重放分配序列 ==
+///      运行期分配序列）。
 ///   5. 页链更新：若 ctx 中上次目标页 != 当前目标页，置 prev.next = current。
 ///   6. 内存 `data_page_tail` 跟随到当前目标页。
 ///   7. M21 镜像：`clear_all_visible` + `update_visibility_on_insert`。
@@ -164,18 +166,15 @@ async fn redo_tuple_at_row_id(
             return Ok(());
         }
 
-        // 2c. add_slot
-        let (new_logical_id, _slot_index) = slotted
-            .add_slot(&slot_data)
+        // 2c. 落位：按 WAL 记录的 logical_id 强制收敛（Iteration 002 T8/R10）。
+        //     运行期页内 logical_id 单调分配且永不回收 → (page, logical_id)
+        //     唯一对应一个版本；重放按记录 id 落位即收敛，不再依赖「重放分配
+        //     序列 == 运行期分配序列」假设——中止事务的数据记录不重放（redo
+        //     只重放已提交事务）而其运行期 id 已消耗、后续已提交记录引用更大
+        //     id 的形态（abort → 重插）即此前 dense 校验的失配源。
+        let _slot_index = slotted
+            .add_slot_with_logical_id(&slot_data, row_id.slot_id)
             .map_err(|e| format!("add_slot failed: {}", e))?;
-
-        // 2d. 稠密落位校验：写入的 logical_id 必须等于 WAL 记录的 slot_id
-        if new_logical_id != row_id.slot_id {
-            return Err(format!(
-                "dense-assignment violation: WAL slot_id={} but page assigned logical_id={}",
-                row_id.slot_id, new_logical_id
-            ));
-        }
         Ok(())
     });
 

@@ -21,7 +21,7 @@
 //!   R2    ORDER BY 别名 / DISTINCT / CTE   distinct_cte_and_order_by_alias_combine_across_databases
 //!   R2    集合操作                         set_operation_combines_main_and_attached_rows
 //!   R2    多附加库自由组合                  two_attached_databases_combine_with_main
-//!   R3/S1 附加库 DML 拒绝                  attached_database_dml_rejected_at_plan_time
+//!   R3/S1 附加库 DML 路由（MS20-T02）        attached_database_dml_routes_to_attached
 //!   R3/S2 附加库 DDL 拒绝                  attached_database_ddl_rejected_at_plan_time
 //!   R3    零副作用 / 错误目标               write_rejection_leaves_both_databases_untouched
 //!   R3    主库写面零回归                    main_database_writes_still_work_with_attached_registry
@@ -372,29 +372,35 @@ fn two_attached_databases_combine_with_main() {
 // R3 — attached-database read-only boundary
 // ---------------------------------------------------------------------------
 
-/// R3/S1：INSERT / UPDATE / DELETE 指向附加库 → 计划期点名拒绝（附加库只读）。
+/// R3/S1（MS20-T02 迁移）：INSERT / UPDATE / DELETE 指向附加库 → 路由成功，
+/// 仅修改附加库；主库同名 decoy 不变（原一期「计划期拒绝」断言随能力交付
+/// 改为成功路由见证，见 `cross-db-dml` R1）。
 #[test]
-fn attached_database_dml_rejected_at_plan_time() {
+fn attached_database_dml_routes_to_attached() {
     let dir = cross_db_fixture();
 
     for sql in [
         "ATTACH 'other' AS o; INSERT INTO o.u VALUES (5, 'z')",
         "ATTACH 'other' AS o; UPDATE o.u SET tag = 'q' WHERE id = 1",
-        "ATTACH 'other' AS o; DELETE FROM o.u WHERE id = 1",
+        "ATTACH 'other' AS o; DELETE FROM o.u WHERE id = 9",
     ] {
         let out = run_cli(dir.path(), &["app", sql]);
-        assert_failure(
-            &out,
-            3,
-            "attached databases are read-only",
-            "attached DML rejection",
-        );
-        assert!(
-            out.stderr.contains("WRITE TO ATTACHED DATABASE"),
-            "rejection must name the capability, got {:?}",
+        assert_eq!(
+            out.code,
+            Some(0),
+            "attached DML must route successfully: {}",
             out.stderr
         );
     }
+
+    let attached = run_cli(dir.path(), &["other", "SELECT * FROM u ORDER BY id"]);
+    assert_rows(
+        &attached,
+        r#""rows":[[1,"q"],[5,"z"]]"#,
+        "attached rows after routed DML",
+    );
+    let main_decoy = run_cli(dir.path(), &["app", "SELECT * FROM \"o.u\""]);
+    assert_rows(&main_decoy, r#""rows":[[5]]"#, "main decoy untouched");
 }
 
 /// R3/S2：`CREATE TABLE o.newt` / `DROP TABLE o.u` 计划期点名拒绝。
@@ -417,23 +423,21 @@ fn attached_database_ddl_rejected_at_plan_time() {
 }
 
 /// R3：拒绝零副作用——附加库内容与 schema 不变，且主库同名 `"o.u"` 表未被
-/// 静默写入（错误目标面）。
+/// 静默写入（错误目标面）。MS20-T02 起附加 DML 已可写，此见证改用仍拒绝的
+/// 附加 DDL 目标（`cross-db-dml` R4）。
 #[test]
 fn write_rejection_leaves_both_databases_untouched() {
     let dir = cross_db_fixture();
 
     let out = run_cli(
         dir.path(),
-        &[
-            "app",
-            "ATTACH 'other' AS o; INSERT INTO o.u VALUES (5, 'z')",
-        ],
+        &["app", "ATTACH 'other' AS o; CREATE TABLE o.newt (a INT)"],
     );
     assert_failure(
         &out,
         3,
         "attached databases are read-only",
-        "rejected write",
+        "rejected DDL write",
     );
 
     let attached = run_cli(dir.path(), &["other", "SELECT * FROM u"]);
@@ -466,6 +470,113 @@ fn main_database_writes_still_work_with_attached_registry() {
         &read,
         r#""rows":[[1,"a"],[2,"b"],[3,"c"]]"#,
         "main write applied",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R9（MS20-T02 Iteration 002 / T7）—— 两段附加 FROM 项的隐式短名限定引用
+// ---------------------------------------------------------------------------
+
+/// R9/S1：JOIN 右臂两段附加项无显式别名时，尾段短名限定列在 SELECT/ON/WHERE/
+/// GROUP BY/ORDER BY 全子句面可达（计划形状与全限定 `o.u.tag` 等价）。
+#[test]
+fn attached_join_short_name_reaches_all_clauses() {
+    let dir = cross_db_fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "ATTACH 'other' AS o; \
+             SELECT u.tag FROM t JOIN o.u ON t.id = u.id \
+             WHERE u.tag = 'x' ORDER BY u.tag",
+        ],
+    );
+    assert_rows(
+        &out,
+        r#""rows":[["x"]]"#,
+        "join short name select/where/order",
+    );
+
+    let grouped = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "ATTACH 'other' AS o; \
+             SELECT u.tag, COUNT(*) FROM t JOIN o.u ON t.id = u.id GROUP BY u.tag",
+        ],
+    );
+    assert_rows(
+        &grouped,
+        r#""rows":[["x",1]]"#,
+        "join short name group/aggregate",
+    );
+}
+
+/// R9/S2：单表两段附加项的短名限定列可达（`SELECT u.tag FROM o.u`）。
+#[test]
+fn attached_single_table_short_name_qualifier() {
+    let dir = cross_db_fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "ATTACH 'other' AS o; SELECT u.tag FROM o.u WHERE u.tag = 'y'",
+        ],
+    );
+    assert_rows(&out, r#""rows":[["y"]]"#, "single-table short name");
+}
+
+/// R9/S3：显式别名优先——`JOIN o.u x` 后 `x.tag` 可达，短名 `u.tag` 不登记、
+/// 维持既有 `TableNotFound` 点名面。
+#[test]
+fn attached_short_name_explicit_alias_priority() {
+    let dir = cross_db_fixture();
+
+    let aliased = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "ATTACH 'other' AS o; SELECT x.tag FROM t JOIN o.u x ON t.id = x.id",
+        ],
+    );
+    assert_rows(
+        &aliased,
+        r#""rows":[["x"]]"#,
+        "explicit alias keeps working",
+    );
+
+    let short = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "ATTACH 'other' AS o; SELECT u.tag FROM t JOIN o.u x ON t.id = x.id",
+        ],
+    );
+    assert_failure(
+        &short,
+        3,
+        "Table not found: u",
+        "short name stays unregistered with explicit alias",
+    );
+}
+
+/// R9/S4：字面含点主库表名不带附加标记——`FROM "o.u"`（单段引号名）的短名
+/// 形态仍点名，不误登记隐式关联名。
+#[test]
+fn attached_short_name_literal_dotted_not_registered() {
+    let dir = cross_db_fixture();
+
+    let out = run_cli(
+        dir.path(),
+        &["app", "ATTACH 'other' AS o; SELECT u.id FROM \"o.u\""],
+    );
+    assert_failure(
+        &out,
+        3,
+        "Table not found: u",
+        "literal dotted main-db table must not register the short name",
     );
 }
 

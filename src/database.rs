@@ -14,7 +14,8 @@ use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalReader, WalRe
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::Duration;
+use tokio::sync::{oneshot, RwLock};
 
 /// MS26 T1/D1：打开模式。`ReadWrite` 是既有全部入口的默认形态（行为逐字节
 /// 不变）；`ReadOnly` 经 advisory 共享锁多读单写，WAL / checkpoint 通道
@@ -50,6 +51,38 @@ fn assert_no_pending_wal(path: &Path) -> Result<()> {
     Err(StorageError::WalPendingRecovery(
         wal_path.display().to_string(),
     ))
+}
+
+/// MS28 T2（design D5）：FileStorage 的同步构造（锁等待 + 头校验 + KDF 均为
+/// 阻塞段）在专用 `std::thread` 中执行，经 oneshot 回传——open future 在锁
+/// 等待期间真实让出，CLI 阶段 1 `tokio::select!` 的信号分支可达（等待可被
+/// SIGINT/SIGTERM 即时中断，分支代码零改动）。`Memory` 臂无锁无阻塞，保持
+/// 内联不走本通道。`RecvError` 仅 detached 线程 panic 形态可达（线程不被
+/// runtime drop 等待，取消安全随进程退出终止），映射 `StorageError::Internal`。
+async fn construct_file_storage(
+    mode: OpenMode,
+    path: &Path,
+    key: Option<&str>,
+    lock_wait: Option<Duration>,
+) -> Result<FileStorage> {
+    let path = path.to_path_buf();
+    let key = key.map(str::to_string);
+    let (tx, rx) = oneshot::channel();
+    std::thread::spawn(move || {
+        let result = match mode {
+            OpenMode::ReadWrite => FileStorage::open_with_lock(&path, key.as_deref(), lock_wait),
+            OpenMode::ReadOnly => {
+                FileStorage::open_readonly_with_lock(&path, key.as_deref(), lock_wait)
+            }
+            // 内存臂在 open_internal 内联构造，永不达本通道。
+            OpenMode::Memory => unreachable!("memory mode constructs MemoryStorage inline"),
+        };
+        let _ = tx.send(result);
+    });
+    match rx.await {
+        Ok(result) => result,
+        Err(e) => Err(StorageError::Internal(format!("storage init failed: {e}"))),
+    }
 }
 
 /// MS21 Iter005 (T5-a/D12): in-memory view registry entry — the persisted
@@ -112,7 +145,23 @@ impl Database {
         isolation: IsolationLevel,
         key: Option<&str>,
     ) -> Result<Self> {
-        Self::open_internal(OpenMode::ReadWrite, path, isolation, key).await
+        Self::open_internal(OpenMode::ReadWrite, path, isolation, key, None).await
+    }
+
+    /// MS28 T2：锁等待预算可配置的打开核心（`database-file-lock` R1 MODIFIED
+    /// 的 lib 面通道）。`lock_wait` 为 advisory 锁等待预算——`None` → 默认
+    /// 5000ms；`Some(0)` ＝ 仅 ~8ms 可见性下限窗口（MS28 前语义的显式表达）；
+    /// 预算耗尽维持 `DatabaseLocked` 既有错误面。FileStorage 构造（锁等待 +
+    /// 头校验 + KDF 均为阻塞段）在专用 `std::thread` 中执行，open future 在
+    /// 等待期间让出、可被信号路径取消（design D5）。既有 open 家族委托
+    /// `open_internal` 传 `None`。
+    pub async fn open_with_lock_wait(
+        path: &Path,
+        isolation: IsolationLevel,
+        key: Option<&str>,
+        lock_wait: Option<Duration>,
+    ) -> Result<Self> {
+        Self::open_internal(OpenMode::ReadWrite, path, isolation, key, lock_wait).await
     }
 
     /// MS26 T1：只读打开（`readonly-open-mode` R1/R2）——advisory 共享锁，
@@ -127,11 +176,23 @@ impl Database {
     /// MS26 T1：只读打开的加密库变体（`key` 为 `Some` 时按加密库解密读取，
     /// 错误密钥沿既有 `InvalidKey` 拒绝）。
     pub async fn open_readonly_with_key(path: &Path, key: Option<&str>) -> Result<Self> {
+        Self::open_readonly_with_lock_wait(path, key, None).await
+    }
+
+    /// MS28 T3：只读打开的锁等待预算通道（`readonly-open-mode` R1 MODIFIED
+    /// 共享锁同款等待）——预算语义与错误面同 `open_with_lock_wait` 逐字节
+    /// 一致；既有 `open_readonly*` 委托本函数传 `None`。
+    pub async fn open_readonly_with_lock_wait(
+        path: &Path,
+        key: Option<&str>,
+        lock_wait: Option<Duration>,
+    ) -> Result<Self> {
         Self::open_internal(
             OpenMode::ReadOnly,
             path,
             IsolationLevel::RepeatableRead,
             key,
+            lock_wait,
         )
         .await
     }
@@ -151,6 +212,7 @@ impl Database {
             OpenMode::Memory,
             Path::new(":memory:"),
             IsolationLevel::RepeatableRead,
+            None,
             None,
         )
         .await
@@ -175,14 +237,20 @@ impl Database {
         path: &Path,
         isolation: IsolationLevel,
         key: Option<&str>,
+        lock_wait: Option<Duration>,
     ) -> Result<Self> {
         // 1. Initialize storage
         let storage: Arc<dyn crate::storage::AsyncStorage> = match mode {
-            OpenMode::ReadWrite => Arc::new(FileStorage::open_with_key(path, key)?),
+            // MS28 T2（design D5）：FileStorage 构造移入专用 std::thread +
+            // oneshot 回传——锁等待期间 open future 真实让出，CLI 阶段 1
+            // select! 的信号分支可达（等待可被 SIGINT/SIGTERM 即时中断）。
+            OpenMode::ReadWrite => {
+                Arc::new(construct_file_storage(mode, path, key, lock_wait).await?)
+            }
             // 只读：共享锁 + 只读句柄。与读写构造同纪律——锁先于伴生文件
             // 判定，被拒的第二打开者不触碰任何文件（MS10-T02 R2）。
             OpenMode::ReadOnly => {
-                let storage = FileStorage::open_readonly_with_key(path, key)?;
+                let storage = construct_file_storage(mode, path, key, lock_wait).await?;
                 // WAL 未决谓词先于任何页写入与重放（`readonly-open-mode` R2）。
                 assert_no_pending_wal(path)?;
                 Arc::new(storage)

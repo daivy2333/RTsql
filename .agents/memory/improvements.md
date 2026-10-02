@@ -20,14 +20,6 @@
 
 ---
 
-## Phase 1 基础设施（已完成）
-
-**I001-I003 全部完成**（M41/M30/M38，详见 R08-R13；原 K14-16/D09-10 随 2026-09-24 K/D 退役入清理 carrier，经 knowledge/decisions spec 底部 arc 墓碑可解析）
-
-## Phase 2 存储引擎核心（已完成）
-
-**I004-I008 全部完成**（M20/M19/M21/M36/M19，详见 R10-R13 与 R28 分析沉淀；原 K17-19/K22/D11-12 随 2026-09-24 K/D 退役入清理 carrier）
-
 ## Phase 3 并发控制
 
 ## I012: M42 消息传递重构
@@ -293,7 +285,7 @@
 - **问题**: PG 层仅 Simple Protocol，无 Extended Query（prepared statement）；`psql` 及依赖协议扩展的生态工具不可用；server 保留为库能力，无 `rtsql serve` 入口
 - **证据**: R18 主题 3 差距清单「PG Extended Query | 对内置 CLI 形态优先级下降（REPL 不需要）；对 psql 生态工具仍有价值」+ 主题 4 规划输入 3（2026-09-05 用户形态决策：server 代码停止投入，将来可选 `rtsql serve` 复活；原 MS09-T03 移除）
 - **影响**: 仅影响 psql 生态消费者；非交互 CLI 形态与嵌入式库用法不受影响
-- **方案**: 届时随 `rtsql serve` 子命令复活一并评估；协议扩展对 server 库能力独立成立
+- **方案**: 届时随 `rtsql serve` 子命令复活一并评估；协议扩展对 server 库能力独立成立。2026-10-01 定位注记（随 I077 登记）：serve 复活定位为 CLI 串行化并发模型（I077）达吞吐天花板后的扩容路径（FIFO 公平 / psql 生态 / 会话连续性需求触发），与串行模型非对立方案
 - **状态**: planned（用户裁定降级未排期，2026-09-05/06）
 
 ## I073: 主流平台构建验证（x86_64-linux-musl 静态与 macOS）
@@ -314,15 +306,6 @@
 - **方案**: 按 R25 四刀顺序，每刀独立验收全量 GREEN→GREEN、磁盘格式/行为零变化硬锚；启动前置条件包含 I051（CI）落地或等价的本地 feature 组合门纪律（F8：组合无人跑则缺陷无人发现）；`PhysicalPlan` 词表化 vs trait 化为第三刀单点架构决策需专项设计；matklad 告诫 crate 墙有真实成本——每刀以「边界值得墙」准入，两刀后停留也是合法终态；与 I059（多文件会话抽象）、I066（可选件 feature 化）顺风
 - **状态**: planned（2026-09-24 用户裁定初版后启动，未排期）
 
-## I075: ORDER BY 输出别名排序（按别名键排序）
-
-- **分类**: SQL 读面 / 能力扩展
-- **问题**: `ORDER BY` 引用顶层投影项输出别名（`SELECT upper(name) AS u FROM t ORDER BY u`、`SELECT name AS n FROM t ORDER BY n`）现为计划期可解析但静默不排序——键经 SortNode 携带后被 `SortExecutor` 既有 None 跳过臂丢弃，结果保持输入序不报错。SQLite/PostgreSQL 语义为按别名引用输出列排序
-- **证据**: MS19 change `2026-09-26-ms19-cli-admin-hardening` Iteration 002 Plan Review Minor 4（2026-09-26）：T6 计划期校验收窄时明确「不实现按输出别名排序」为 Forbidden 能力边界；语料 `sql-scalar-functions` R5 与行为规格 `openspec/specs/error-reporting/spec.md` R7 锁定别名键静默保持输入序为当前语义
-- **影响**: agent 生成 SQL 常用「按别名排序」形态，现静默不排序（不报错但结果非预期序）；补齐后与主流引擎对齐
-- **方案**: 排序键解析增加输出别名解析（别名优先于基础列的语义序随调查定稿，SQLite 为输出名优先）；实现面在计划期把别名键映射到投影输出位置 + Sort/Projection 链（表达式查询顶层为 `Projection(Sort)`，别名键需 Projection 感知或前置投影），牵动 D10「Sort 拥有投影裁剪」设计，需独立调查；实现时同步修订语料 `sql-scalar-functions` R5 与 `error-reporting` R7 的「静默保持输入序」语义
-- **状态**: promoted（2026-09-26 用户批准排期 → MS25-T06 独立任务行，`.agents/docs/tasks.md`）
-
 ## I076: DETACH 注销附加库语句
 
 - **分类**: SQL 会话面 / 能力扩展
@@ -332,7 +315,37 @@
 - **方案**: 重评触发条件为 REPL（I067）或 serve/PG 长会话形态（I071）落地——届时 sqlparser 版本与自有元命令通道（REPL 元命令形态可能优先于 SQL 语句）可能已改变实现结论；触发前不实施
 - **状态**: open（2026-09-29 登记，MS20 一期豁免转登记）
 
+## I077: CLI 串行化并发模型（busy-timeout 锁等待 + 持锁窗口治理）
+
+- **分类**: 架构 / 并发与进程形态（嵌入式 one-shot 形态的并发策略）
+- **问题**: one-shot 形态下并发写同一库立即 `DatabaseLocked` exit 4（`WouldBlock` 仅 ~8ms 有界退避，`database-file-lock` R1）——多 agent/多进程并发使用场景中「接受任务、串行完成、互不干扰」的语义缺席；且最长持锁操作放大串行等待尾延迟（import 逐条 auto-commit ≈ 4.1ms/行、30000 行 ≈ 123s 全程持锁）
+- **证据**: 2026-10-01 用户方向（原话要点：「把一个命令行视为一个原子化的……同一时间多个并发的操作命令行，全都接受但是实际上一个一个不相互干扰地串行实施，就像操作系统底层调度 task 一样……达到假并发，实则高效异步原子化输入……要求数据库足够高效，或者实现一个合理的调度机制」）；设计判断随登记采信——advisory 文件锁本身即跨进程串行化原语（调度器已存在），同步阻塞 CLI 下「队列调度」与「等锁再执行」对调用者不可区分，无需常驻进程；MS18 one-shot 固定开销 ~6.5ms（串行吞吐 ~150 ops/s 量级天花板）；import 量化来源 change `2026-09-30-catalog-durability-and-cli-surface` Iteration 000 Act 实测
+- **影响**: 多 agent 并发写场景从硬失败变为全部接受、逐个原子完成（每次调用全程持独占锁，重叠结构性不可能）；语义对齐 SQLite `busy_timeout` 先例；跨进程多写者决策可大幅推迟
+- **方案**: 三件套——① 锁等待策略可配置：`--busy-timeout` / env / lib 三通道（沿用 `RTSQL_KEY`/`RTSQL_WAL_CHECKPOINT_BYTES` 通道先例，复用 `try_lock_with_backoff` 改策略，默认保守值，超时后维持 `DatabaseLocked` exit 4 既有错误面；读共享锁与写独占锁两侧统一生效）；② 长操作持锁窗口治理：import 攒批提交（fsync 次数按批数量级下降）+ I021 批量 INSERT，压缩最长持锁尾；③ I071 定位注记已随本条更新——`rtsql serve` 为串行模型达吞吐天花板后的扩容路径，非对立方案
+- **边界**: 原子单元 = 单次 CLI 调用，跨调用语句序列不构成事务（复合原子性由单次调用内多语句/显式事务承担，MS11-T02 已支持）；flock 非 FIFO，不自造票据队列（公平性诉求留给 I071 扩容路径）；I049 组提交在本模型下无效（串行单写者无并发提交可攒）——MS22 范围裁定的避坑项
+- **状态**: promoted（2026-10-01 用户批准重排纳入路线——① busy-timeout → MS28-T01、② import 攒批/持锁窗口治理 → MS22 候选池、③ I071 定位注记已随本条完成；`.agents/docs/tasks.md`）
+
+## I078: stdin 管道输入与免建表导入（CSV → 内存库/新表）
+
+- **分类**: 功能 / CLI 输入面（Unix 组合入口）
+- **问题**: 输入侧只有出口没有入口——`import` 是生命周期子命令（`:memory:` 拒绝，exit 2）、目标表必须已存在且表头精确匹配、不收 stdin（`restore` 有 `-` 通道而 import 无）；「echo CSV | rtsql :memory: import -」类 Unix 组合结构性不可能，一次性分析必须先落盘建库建表再清理
+- **证据**: 2026-10-01 外部评审 #7（基于 rtsql-docs/SKILL.md 显式内容），经 SKILL.md:128/255 与 SNAPSHOT 生命周期子命令面核实成立；台账此前无对应条目
+- **影响**: 与输出侧 `--format json/csv/tsv` 的管道友好度不对称；管道/临时分析场景被迫污染磁盘（new + import + delete 三步）
+- **方案**: 组合随调查定稿——import 收 `-` stdin（对齐 restore 先例）；目标表不存在时按 CSV 表头建表（类型推导复用 MS20 CTAS `infer_ctas_column_types` 矩阵先例）；`:memory:` 豁免面或主命令 CSV 通道的形态取舍；须与「主命令缺库显式拒绝、创建通道收敛 `rtsql new`」（`cli-noninteractive-shell`）既有语义协调边界
+- **状态**: promoted（2026-10-01 用户批准重排纳入路线——MS29-T01；`.agents/docs/tasks.md`）
+
+## I079: 显式 checkpoint CLI 命令（用户主动落盘原语）
+
+- **分类**: 功能 / 生命周期控制（运维可观测面）
+- **问题**: checkpoint 触发面只有 close()（隐式）、WAL 字节水位（自动，MS26）与 lib `Database::checkpoint()`——无用户主动触发的 CLI 入口；「已提交数据落稳后再做外部备份/拷贝」类操作无法表达
+- **证据**: 2026-10-01 外部评审 #3，经 SNAPSHOT 触发面核查（MS07-T05 / MS18 零工作跳过 / MS26 水位）成立；与 MS27-T02（`rtsql check`/页校验和）同属「被自动化信任的运维原语」主题但相互独立
+- **影响**: 长会话中途的持久化确认、外部工具接管文件前的同步点，均只能靠断开会话表达；I072 备份边界实操序列缺一个干净落盘点
+- **方案**: `rtsql checkpoint <db>` 子命令（复用 `resolve_existing_db` + 开库 + `checkpoint()`，输出形态随调查）；`--readonly`/`:memory:` 组合拒绝面沿用既有 exit 2 先例
+- **状态**: promoted（2026-10-01 用户批准重排纳入路线——MS28-T02；`.agents/docs/tasks.md`）
+
 <!-- arc: ARC-202609092322 --> 7 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
 <!-- arc: ARC-202609241843a --> 2 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609241843a/proposal.md
 
 <!-- arc: ARC-202609242151 --> 24 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609242151/proposal.md
+
+<!-- arc: 4e1944f --> 9 条已归档 (2026-10-01)：I001-I003（Phase 1 已完成段）/ I004-I008（Phase 2 已完成段）/ I075（promoted → MS25-T06 已实施，spec `order-by-alias-sorting`）

@@ -293,6 +293,32 @@ impl PlanBuilder {
         self.table_aliases.get(qualifier).map(|s| s.as_str())
     }
 
+    /// Iteration 002 T7（R9）：两段附加 FROM 项（`o.u`）无显式别名时，以尾段
+    /// 登记隐式关联名（`u` → `o.u`）——短名限定列经 `resolve_table_qualifier`
+    /// 归一化后沿既有通道解析。登记条件：flat 名在 `attached_tables`（字面
+    /// 含点主库表名不带该标记，不登记）且恰分两段。显式别名路径不调用本
+    /// 方法，登记不发生（显式别名优先）。
+    pub(crate) fn register_implicit_attached_short_name(&mut self, flat_name: &str) {
+        let name = flat_name.to_lowercase();
+        if self.attached_tables.contains(&name) {
+            let parts: Vec<&str> = name.split('.').collect();
+            if parts.len() == 2 {
+                self.register_table_alias(parts[1], &name);
+            }
+        }
+    }
+
+    /// Iteration 002 T7（R9）：书写限定符与 FROM 臂声明限定符的匹配——原文
+    /// 相等，或书写限定符经 `resolve_table_qualifier` 归一后命中该臂（隐式
+    /// 短名 `u` ↔ 声明限定符 `o.u`）。显式别名的声明限定符即别名文本，原文
+    /// 相等分支先行命中，既有行为零变化。
+    pub(crate) fn qualifier_matches_declared(&self, written: &str, declared: &str) -> bool {
+        declared.eq_ignore_ascii_case(written)
+            || self
+                .resolve_table_qualifier(written)
+                .is_some_and(|key| key.eq_ignore_ascii_case(declared))
+    }
+
     /// MS24 Iteration 000 (D1): Register the table's per-column declared
     /// DEFAULT literals (additive channel — `register_table` signature
     /// unchanged; the key is lowercase, consistent with `register_table`).
@@ -592,6 +618,57 @@ mod tests {
         builder.register_table_alias("P", "people");
 
         assert_eq!(builder.resolve_table_qualifier("p"), Some("people"));
+    }
+
+    /// T7（R9）：两段附加 FROM 项无显式别名 → 尾段隐式关联名登记。
+    #[test]
+    fn test_implicit_short_name_registered_for_attached_two_segment() {
+        let mut builder = PlanBuilder::new();
+        builder.mark_attached_table("o.u");
+        builder.register_implicit_attached_short_name("o.u");
+
+        assert_eq!(builder.resolve_table_qualifier("u"), Some("o.u"));
+    }
+
+    /// T7（R9）：登记条件要求附加标记——字面含点主库表名（未 mark）不登记，
+    /// 短名维持 `TableNotFound` 既有点名面。
+    #[test]
+    fn test_implicit_short_name_requires_attached_marker() {
+        let mut builder = PlanBuilder::new();
+        builder.register_implicit_attached_short_name("o.u");
+
+        assert_eq!(builder.resolve_table_qualifier("u"), None);
+    }
+
+    /// T7（R9）：显式别名登记不被隐式登记覆盖（显式别名优先——调用点仅在
+    /// 无显式别名时调用隐式登记；此处固定同作用域内二者并存时显式条目不变）。
+    #[test]
+    fn test_implicit_short_name_keeps_explicit_alias() {
+        let mut builder = PlanBuilder::new();
+        builder.mark_attached_table("o.u");
+        builder.register_table_alias("x", "o.u");
+        builder.register_implicit_attached_short_name("o.u");
+
+        assert_eq!(builder.resolve_table_qualifier("x"), Some("o.u"));
+        assert_eq!(builder.resolve_table_qualifier("u"), Some("o.u"));
+    }
+
+    /// T7（R9）：匹配 helper——原文相等与归一化命中两分支，未登记限定符
+    /// 不命中。
+    #[test]
+    fn test_qualifier_matches_declared_branches() {
+        let mut builder = PlanBuilder::new();
+        builder.mark_attached_table("o.u");
+        builder.register_table_alias("x", "o.u");
+        builder.register_implicit_attached_short_name("o.u");
+
+        // 原文相等（显式别名 / 全限定）。
+        assert!(builder.qualifier_matches_declared("x", "x"));
+        assert!(builder.qualifier_matches_declared("o.u", "o.u"));
+        // 归一化命中（隐式短名）。
+        assert!(builder.qualifier_matches_declared("u", "o.u"));
+        // 未登记限定符不命中。
+        assert!(!builder.qualifier_matches_declared("z", "o.u"));
     }
 }
 

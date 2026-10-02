@@ -3,6 +3,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rand::RngCore;
@@ -59,26 +60,37 @@ fn read_only_violation(op: &str) -> StorageError {
     StorageError::Internal(format!("cannot {op} on a read-only storage instance"))
 }
 
-/// Cycle 001（replan）design D10：advisory 锁获取的有界退避重试。平台
-/// flock 释放可见性窗口下，紧随释放的获取可能短暂 `WouldBlock`（假
-/// `DatabaseLocked`）；同 fd 以 2ms × 4 次重试吸收窗口（连同首次共 5 次
-/// 尝试，总窗口 ~8ms 量级）。真实冲突耗尽后仍按 `DatabaseLocked` 拒绝，
-/// 错误面不变；`Error(e)` 为真实 I/O 失败，不重试直传。
+/// MS28 design D1：锁等待预算常量。
+///
+/// `LOCK_VISIBILITY_FLOOR` 是平台 flock 释放可见性窗口的吸收机制
+/// （Cycle 001 replan design D10 的既有正确性机制，恒存、非用户等待
+/// 策略的一部分）；`DEFAULT_LOCK_WAIT` 是 busy-timeout 通道的默认预算
+/// （proposal 默认假设 1）。
+const LOCK_VISIBILITY_FLOOR: Duration = Duration::from_millis(8);
+const DEFAULT_LOCK_WAIT: Duration = Duration::from_millis(5000);
+
+/// MS28 T1（`database-file-lock` R1 MODIFIED）：advisory 锁获取的 deadline
+/// 循环——首次尝试失败后以 2ms 间隔重试，直至 `Instant::now()` 越过
+/// `now + max(wait, LOCK_VISIBILITY_FLOOR)`。`wait` 为用户等待预算
+/// （`None` 由调用方解析为 `DEFAULT_LOCK_WAIT`）；`Some(0)` 经 `max` 自然
+/// 落到 ~8ms 下限窗口（MS28 前语义的显式表达）。预算耗尽后仍按
+/// `DatabaseLocked` 拒绝，错误面不变；`Error(e)` 为真实 I/O 失败，不重试
+/// 直传。
 fn try_lock_with_backoff(
     file: &std::fs::File,
     path: &Path,
     lock: impl Fn(&std::fs::File) -> std::result::Result<(), std::fs::TryLockError>,
+    wait: Duration,
 ) -> Result<()> {
-    let mut retries = 0;
+    let deadline = Instant::now() + wait.max(LOCK_VISIBILITY_FLOOR);
     loop {
         match lock(file) {
             Ok(()) => return Ok(()),
             Err(std::fs::TryLockError::WouldBlock) => {
-                if retries >= 4 {
+                if Instant::now() >= deadline {
                     return Err(StorageError::DatabaseLocked(path.display().to_string()));
                 }
-                retries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(2));
             }
             Err(std::fs::TryLockError::Error(e)) => return Err(StorageError::Io(e)),
         }
@@ -94,6 +106,22 @@ impl FileStorage {
     /// 加密新库）。打开顺序守卫：锁 → 头校验 → 密钥检查/KDF → 页长度校验
     /// （加密无密钥 / 明文带密钥在页解析与 WAL 触碰前拒绝）。
     pub fn open_with_key(path: &Path, key: Option<&str>) -> Result<Self> {
+        Self::open_with_lock(path, key, None)
+    }
+
+    /// MS28 T1：锁等待预算可配置的读写打开核心（`database-file-lock` R1
+    /// MODIFIED）。`lock_wait` 为等待预算——`None` → `DEFAULT_LOCK_WAIT`
+    /// （5000ms，MS28 目标默认语义）；`Some(0)` ＝ 不额外等待，仅
+    /// `LOCK_VISIBILITY_FLOOR`（~8ms）下限窗口生效（MS28 前语义的显式
+    /// 表达）；预算耗尽维持 `DatabaseLocked` 既有错误面。构造语义与打开
+    /// 顺序守卫（锁 → 头校验 → 密钥/KDF → 页长度校验）同 `open_with_key`
+    /// 逐字节一致，仅锁窗口参数化；既有 open 家族委托本函数传 `None`。
+    pub fn open_with_lock(
+        path: &Path,
+        key: Option<&str>,
+        lock_wait: Option<Duration>,
+    ) -> Result<Self> {
+        let wait = lock_wait.unwrap_or(DEFAULT_LOCK_WAIT);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -104,7 +132,7 @@ impl FileStorage {
         // MS10-T02: advisory exclusive lock, held for the fd's lifetime and
         // released on drop/process exit. Taken before WAL open and recovery
         // so a rejected second opener never touches companion files.
-        try_lock_with_backoff(&file, path, |f| f.try_lock())?;
+        try_lock_with_backoff(&file, path, |f| f.try_lock(), wait)?;
 
         let file_len = file.metadata()?.len();
         let page_size = Page::PAGE_SIZE;
@@ -142,6 +170,18 @@ impl FileStorage {
     /// MS26 T1：只读打开的加密库变体（`key` 为 `Some` 时按加密库解密读取，
     /// 错误密钥沿既有 `InvalidKey` 拒绝）。
     pub fn open_readonly_with_key(path: &Path, key: Option<&str>) -> Result<Self> {
+        Self::open_readonly_with_lock(path, key, None)
+    }
+
+    /// MS28 T1：锁等待预算可配置的只读打开核心——advisory 共享锁，预算
+    /// 语义与错误面同 `open_with_lock` 逐字节一致（`database-file-lock` R1
+    /// MODIFIED 共享锁同款；既有 `open_readonly*` 委托本函数传 `None`）。
+    pub fn open_readonly_with_lock(
+        path: &Path,
+        key: Option<&str>,
+        lock_wait: Option<Duration>,
+    ) -> Result<Self> {
+        let wait = lock_wait.unwrap_or(DEFAULT_LOCK_WAIT);
         // 只读句柄：无 `write`、无 `create` —— 缺失文件由 open 直接报错
         // （点名路径，语义同「该路径尚不是 RTsql 数据库」）。
         let file = match OpenOptions::new().read(true).open(path) {
@@ -152,7 +192,7 @@ impl FileStorage {
             Err(e) => return Err(StorageError::Io(e)),
         };
 
-        try_lock_with_backoff(&file, path, |f| f.try_lock_shared())?;
+        try_lock_with_backoff(&file, path, |f| f.try_lock_shared(), wait)?;
 
         let file_len = file.metadata()?.len();
         // 0 字节文件尚不是数据库（读写构造此时会写头创建新库，只读构造

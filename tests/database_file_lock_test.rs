@@ -7,10 +7,16 @@
 //! - 错误信息含 `database is locked` 前缀与路径（CLI stderr 断言锚点）。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rtsql::database::Database;
 use rtsql::storage::{FileStorage, StorageError};
+use rtsql::transaction::IsolationLevel;
 use tempfile::TempDir;
+
+/// T4（D8 校准）：锁冲突断言用例的显式短预算——`Some(0)` ＝ 仅 ~8ms 可见性
+/// 下限窗口即拒绝（MS28 前默认语义的显式表达），断言本身零变化。
+const ZERO_WAIT: Option<Duration> = Some(Duration::from_millis(0));
 
 fn db_path(dir: &TempDir) -> PathBuf {
     dir.path().join("lock_test.db")
@@ -43,7 +49,9 @@ async fn test_same_process_double_open_database_rejected() {
         first.as_ref().err()
     );
 
-    let second = expect_locked(Database::open(&path).await);
+    let second = expect_locked(
+        Database::open_with_lock_wait(&path, IsolationLevel::RepeatableRead, None, ZERO_WAIT).await,
+    );
     assert_locked(&second);
 }
 
@@ -69,7 +77,7 @@ async fn test_file_storage_double_open_rejected() {
     let path = db_path(&dir);
 
     let first = FileStorage::open(&path).unwrap();
-    let second = expect_locked(FileStorage::open(&path));
+    let second = expect_locked(FileStorage::open_with_lock(&path, None, ZERO_WAIT));
     assert_locked(&second);
     drop(first);
     assert!(FileStorage::open(&path).is_ok(), "reopen after drop");
@@ -81,7 +89,9 @@ async fn test_locked_error_message_contains_path() {
     let path = db_path(&dir);
 
     let _holder = Database::open(&path).await.unwrap();
-    let err = expect_locked(Database::open(&path).await);
+    let err = expect_locked(
+        Database::open_with_lock_wait(&path, IsolationLevel::RepeatableRead, None, ZERO_WAIT).await,
+    );
     let msg = err.to_string();
     assert!(
         msg.contains("database is locked"),
@@ -105,13 +115,15 @@ async fn test_locked_bad_file_reports_lock_not_format() {
     let holder = std::fs::File::open(&path).unwrap();
     holder.try_lock().expect("test process acquires flock");
 
-    let err = expect_locked(FileStorage::open(&path));
+    let err = expect_locked(FileStorage::open_with_lock(&path, None, ZERO_WAIT));
     assert_locked(&err);
 }
 
 /// Cycle 001（replan）T12：重试耗尽拒绝——锁被原生 fd 稳定持有时，
 /// `Database::open` 经有界重试（~8ms 窗口）后仍以 `DatabaseLocked` 拒绝。
 /// 确定性用例；现实现即绿——语义保持见证（错误面与拒绝语义不变）。
+/// T4（D8 校准）：显式短预算 `Some(0)` 承载旧「默认即 ~8ms 窗口」语义，
+/// 断言零变化。
 #[tokio::test]
 async fn test_retry_exhaustion_still_rejects_active_holder() {
     let dir = TempDir::new().unwrap();
@@ -125,13 +137,15 @@ async fn test_retry_exhaustion_still_rejects_active_holder() {
     let holder = std::fs::File::open(&path).unwrap();
     holder.try_lock().expect("test process acquires flock");
 
-    let err = expect_locked(Database::open(&path).await);
+    let err = expect_locked(
+        Database::open_with_lock_wait(&path, IsolationLevel::RepeatableRead, None, ZERO_WAIT).await,
+    );
     assert_locked(&err);
 }
 
 /// Cycle 001（replan）T12：只读打开同型变体——独占锁被持有时，共享锁
 /// 打开经重试耗尽后仍以 `DatabaseLocked` 拒绝（`readonly-open-mode` 锁矩阵
-/// 活跃持有者照旧拒绝，仅时延 + 窗口量级）。
+/// 活跃持有者照旧拒绝，仅时延 + 窗口量级）。T4（D8 校准）：显式短预算。
 #[tokio::test]
 async fn test_retry_exhaustion_still_rejects_readonly_open() {
     let dir = TempDir::new().unwrap();
@@ -144,7 +158,7 @@ async fn test_retry_exhaustion_still_rejects_readonly_open() {
     let holder = std::fs::File::open(&path).unwrap();
     holder.try_lock().expect("test process acquires flock");
 
-    let err = expect_locked(FileStorage::open_readonly(&path));
+    let err = expect_locked(FileStorage::open_readonly_with_lock(&path, None, ZERO_WAIT));
     assert_locked(&err);
 }
 

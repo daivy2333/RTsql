@@ -41,6 +41,9 @@ fn render_node(plan: &PhysicalPlan, depth: usize, out: &mut Vec<String>) {
         PhysicalPlan::DerivedScan(node) => render_node(&node.subquery, depth + 1, out),
         // MS20 T4: CTAS 的物化源作为子树下探（表头与行宽描述在 CTAS 行本身）
         PhysicalPlan::CreateTableAsSelect(node) => render_node(&node.select, depth + 1, out),
+        // MS20-T02 Iter001：INSERT SELECT 的源 SELECT 子树下探（目标映射在
+        // InsertSelect 行本身）。
+        PhysicalPlan::InsertSelect(node) => render_node(&node.source, depth + 1, out),
         PhysicalPlan::Explain(node) => render_node(&node.input, depth + 1, out),
         PhysicalPlan::Join(node) => {
             render_node(&node.left, depth + 1, out);
@@ -160,6 +163,22 @@ fn describe(plan: &PhysicalPlan) -> String {
                 ConflictAction::Replace => "action=REPLACE".to_string(),
             });
             format!("Upsert {} ({})", node.table_name, params.join(", "))
+        }
+        // MS20-T02 Iter001：INSERT SELECT——确定性直出列清单/源宽度/冲突动作
+        //（DO UPDATE 只报赋值个数；仲裁目标与 Upsert 臂同口径不展开）。
+        PhysicalPlan::InsertSelect(node) => {
+            let mut params = vec![format!("columns=[{}]", node.columns.join(", "))];
+            params.push(format!("source_width={}", node.source_width));
+            if let Some((_, action)) = &node.upsert {
+                params.push(match action {
+                    ConflictAction::DoNothing => "action=DO NOTHING".to_string(),
+                    ConflictAction::DoUpdate(assignments) => {
+                        format!("action=DO UPDATE ({} assignments)", assignments.len())
+                    }
+                    ConflictAction::Replace => "action=REPLACE".to_string(),
+                });
+            }
+            format!("InsertSelect {} ({})", node.table_name, params.join(", "))
         }
         PhysicalPlan::Update(node) => format!(
             "Update {} (key={}, column={})",

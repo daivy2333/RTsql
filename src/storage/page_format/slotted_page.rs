@@ -200,6 +200,29 @@ impl<'a> SlottedPage<'a> {
 
     /// Add a new slot, returns (logical_id, slot_index)
     pub fn add_slot(&mut self, data: &[u8]) -> Result<(u16, usize), String> {
+        self.add_slot_inner(data, None)
+    }
+
+    /// Iteration 002 T8（R10）：恢复面专用强制落位原语——按给定 logical_id
+    /// （来自 WAL 记录）写 slot，并把 `next_logical_id` 推进到其上（max）。
+    /// 安全性依据：运行期页内 logical_id 单调分配且永不回收 →
+    /// (page, logical_id) 唯一对应一个版本；重放按记录 id 落位即收敛，不再
+    /// 依赖「重放分配序列 == 运行期分配序列」假设（中止事务的数据记录不重放
+    /// 而其 id 已消耗的形态——abort 后重插——即失配源）。仅恢复面消费；
+    /// 运行期 `add_slot` 及全部执行器/事务路径零变化。
+    pub fn add_slot_with_logical_id(
+        &mut self,
+        data: &[u8],
+        logical_id: u16,
+    ) -> Result<usize, String> {
+        self.add_slot_inner(data, Some(logical_id))
+            .map(|(_, slot_index)| slot_index)
+    }
+
+    /// 共享落位主体：数据写入 + slot 写入 + header 更新。`forced = None` →
+    /// 运行期自然分配（`next_logical_id` 递增）；`Some(id)` → 恢复面按 id
+    /// 落位（`next_logical_id` 推进到 id+1，取 max 不回退）。
+    fn add_slot_inner(&mut self, data: &[u8], forced: Option<u16>) -> Result<(u16, usize), String> {
         // 1. Calculate required space
         let data_len = data.len();
         let needed_space = Slot::SIZE + data_len;
@@ -219,7 +242,7 @@ impl<'a> SlottedPage<'a> {
         let slot_index = self.slot_count();
         let slot_start = Page::PAGE_SIZE - (slot_index + 1) * Slot::SIZE;
 
-        let logical_id = self.header.next_logical_id;
+        let logical_id = forced.unwrap_or(self.header.next_logical_id);
         let slot = Slot {
             logical_id,
             offset: free_space_start as u16,
@@ -238,7 +261,12 @@ impl<'a> SlottedPage<'a> {
         // 5. Update header
         self.header.slot_count += 1;
         self.header.free_space_offset += data_len as u16;
-        self.header.next_logical_id += 1;
+        match forced {
+            None => self.header.next_logical_id += 1,
+            Some(id) => {
+                self.header.next_logical_id = self.header.next_logical_id.max(id.saturating_add(1));
+            }
+        }
         self.header
             .serialize(&mut self.page.data[..SlottedPageHeader::SIZE]);
 
@@ -553,5 +581,46 @@ mod tests {
 
         let (slot2, _) = slotted.get_slot_by_logical_id(lid2).unwrap();
         assert_eq!(slotted.get_slot_data(&slot2), b"data2");
+    }
+
+    /// T8（R10）：恢复面强制落位——跳号 id 写入推进计数器，后续自然分配
+    /// 不冲突。
+    #[test]
+    fn test_add_slot_with_logical_id_advances_counter() {
+        let mut page = Page::new(PageId(0));
+        let mut slotted = SlottedPage::init(&mut page, 0x03);
+
+        slotted.add_slot(b"row-0").unwrap(); // id 0
+        slotted.add_slot(b"row-1").unwrap(); // id 1
+
+        // 恢复面跳号落位：WAL 记录 id 5（中间 id 2..=4 已被中止事务在运行期
+        // 消耗，无记录重放）。
+        let idx = slotted.add_slot_with_logical_id(b"row-5", 5).unwrap();
+        assert_eq!(idx, 2);
+        let (slot, _) = slotted.get_slot_by_logical_id(5).unwrap();
+        assert_eq!(slotted.get_slot_data(&slot), b"row-5");
+
+        // 计数器推进到 6；后续自然分配取 6，不与强制落位冲突。
+        assert_eq!(slotted.header().next_logical_id, 6);
+        let (lid, _) = slotted.add_slot(b"row-6").unwrap();
+        assert_eq!(lid, 6);
+    }
+
+    /// T8（R10）：低于计数器的空洞补位不回退计数器（max 语义）。
+    #[test]
+    fn test_add_slot_with_logical_id_keeps_counter_on_lower_gap() {
+        let mut page = Page::new(PageId(0));
+        let mut slotted = SlottedPage::init(&mut page, 0x03);
+
+        slotted.add_slot_with_logical_id(b"row-0", 0).unwrap();
+        slotted.add_slot_with_logical_id(b"row-2", 2).unwrap();
+        assert_eq!(slotted.header().next_logical_id, 3);
+
+        // 补位 id 1：落位成功且计数器不回退；后续自然分配仍取 3。
+        slotted.add_slot_with_logical_id(b"row-1", 1).unwrap();
+        assert_eq!(slotted.header().next_logical_id, 3);
+        assert!(slotted.get_slot_by_logical_id(1).is_some());
+        let (lid, _) = slotted.add_slot(b"row-3").unwrap();
+        assert_eq!(lid, 3);
     }
 }

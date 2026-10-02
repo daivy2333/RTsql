@@ -95,6 +95,11 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
             // 参数注入与 `Projection` 语义由源计划自身承担）。
             inject_correlated_values(&node.select, param_values);
         }
+        PhysicalPlan::InsertSelect(node) => {
+            // MS20-T02 Iter001：INSERT SELECT 的源是完整 SELECT 子树，关联
+            // 参数注入与 CTAS 源同型（目标映射无表达式，不参与注入）。
+            inject_correlated_values(&node.source, param_values);
+        }
         PhysicalPlan::SetOperation(node) => {
             // MS25 T3: 复合两侧的谓词/表达式参数注入（两侧均为完整 SELECT）
             inject_correlated_values(&node.left, param_values);

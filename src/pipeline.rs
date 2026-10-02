@@ -4,10 +4,11 @@ use crate::executor::{
     CreateTableAsSelectNode, CreateTableExecutor, CreateViewExecutor, DataScanExecutor,
     DeleteExecutor, DerivedScanExecutor, DistinctExecutor, DropIndexExecutor, DropTableExecutor,
     DropViewExecutor, ExecResult, Executor, ExplainExecutor, FilterExecutor, HavingExecutor,
-    IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, JoinConfig, JoinExecutor,
-    JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, PhysicalPlan, ProjectionExecutor,
-    ScanExecutor, SemiJoinExecutorV2, SetOperationExecutor, SingleRowExecutor, SortExecutor,
-    SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor, UpsertExecutor, Value,
+    IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, InsertNode, InsertSelectNode,
+    JoinConfig, JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor,
+    PhysicalPlan, ProjectionExecutor, ScanExecutor, SemiJoinExecutorV2, SetOperationExecutor,
+    SingleRowExecutor, SortExecutor, SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor,
+    UpsertExecutor, UpsertNode, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::planner::ViewDef;
@@ -50,8 +51,9 @@ pub struct RoutedTable {
 
 /// MS20 T2：会话级附加库别名注册表（别名小写 → 打开的附加库实例）。
 ///
-/// 由 CLI `AttachSession` 构造后随语句穿线；lib 执行路径恒 `None`，
-/// 行为逐字节零变化。一期只读：别名表只参与读面路由与写面拒绝。
+/// 由 CLI `AttachSession` 构造后随语句穿线；lib 缺省入口（`execute`/
+/// `execute_stage`）不带路由，行为逐字节零变化。MS20-T02 起：别名表参与
+/// 读面与写面路由（附加 DML 目标归附加库），DDL/CTAS 附加目标维持拒绝。
 #[derive(Clone, Default)]
 pub struct AttachRoute {
     dbs: HashMap<String, Arc<Database>>,
@@ -395,27 +397,71 @@ pub async fn execute_stage_routed(
             database.plan_cache.clear();
             response
         }
+        PhysicalPlan::InsertSelect(node) => {
+            // MS20-T02 Iter001（design D4）：只读守卫已在函数顶部以 INSERT
+            // 形态拒绝（先于源求值）。源**完整物化**成功后才经递归进入 DML
+            // 臂——begin/abort_tables/abort/commit 与执行器接线不在此复制；
+            // 同表写回只消费物化前行（物化先于 begin，结构性保证）。
+            let snapshot = database.statement_snapshot(None).await;
+            let rows =
+                match materialize_insert_select_source(database, &node.source, snapshot, routed)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(message) => {
+                        return Response::Error {
+                            message,
+                            sqlstate: None,
+                        }
+                    }
+                };
+            let normalized = match normalize_insert_select(node, rows) {
+                Ok(plan) => plan,
+                Err(message) => {
+                    return Response::Error {
+                        message,
+                        sqlstate: None,
+                    }
+                }
+            };
+            Box::pin(execute_stage_routed(
+                database, normalized, profiling, routed,
+            ))
+            .await
+        }
         PhysicalPlan::Insert(_)
         | PhysicalPlan::Upsert(_)
         | PhysicalPlan::Update(_)
         | PhysicalPlan::Delete(_) => {
-            // DML must run inside a real transaction (MS06-T01 spec).
-            let tx = database.transaction_manager.begin().await;
-            let tx_id = tx.id();
-
-            let table_name = match &plan {
-                PhysicalPlan::Insert(n) => &n.table_name,
-                PhysicalPlan::Upsert(n) => &n.table_name,
-                PhysicalPlan::Update(n) => &n.table_name,
-                PhysicalPlan::Delete(n) => &n.table_name,
+            // 目标名取自有 String（`plan` 随后被移入执行器构造，借自 `plan`
+            // 的 `&str` 不能跨越该 move）。
+            let target_name = match &plan {
+                PhysicalPlan::Insert(n) => n.table_name.clone(),
+                PhysicalPlan::Upsert(n) => n.table_name.clone(),
+                PhysicalPlan::Update(n) => n.table_name.clone(),
+                PhysicalPlan::Delete(n) => n.table_name.clone(),
                 _ => unreachable!("is_dml guarantees a DML plan"),
             };
-            let abort_tables = database
+            // MS20-T02（design D1/D2）：DML 目标经计划期路由表选定目标库；
+            // 非显式根在 begin 前同时检查实际目标只读（主库只读已在上方拦截，
+            // 此处覆盖目标库判定）。abort 表键用 catalog 本地名——与
+            // record_version / WAL 记录的表名一致。
+            let (target_db, local_name) = routed_db(routed, database, &target_name);
+            if let Some(rejection) = readonly_rejection(target_db, &plan) {
+                return rejection;
+            }
+
+            // DML must run inside a real transaction (MS06-T01 spec) — the
+            // transaction, buffer pool and WAL all belong to the target db.
+            let tx = target_db.transaction_manager.begin().await;
+            let tx_id = tx.id();
+
+            let abort_tables = target_db
                 .table_manager
-                .get_table(table_name)
+                .get_table(local_name)
                 .await
                 .ok()
-                .map(|tm| HashMap::from([(table_name.clone(), tm)]));
+                .map(|tm| HashMap::from([(local_name.to_string(), tm)]));
 
             let executor_creation_start = if profiling {
                 Some(Instant::now())
@@ -427,9 +473,9 @@ pub async fn execute_stage_routed(
                     Ok(e) => e,
                     Err(e) => {
                         if let Some(abort_tables) = &abort_tables {
-                            let _ = database
+                            let _ = target_db
                                 .transaction_manager
-                                .abort(tx, &database.buffer_pool, abort_tables)
+                                .abort(tx, &target_db.buffer_pool, abort_tables)
                                 .await;
                         }
                         return Response::Error {
@@ -455,9 +501,9 @@ pub async fn execute_stage_routed(
             match &response {
                 Response::Error { .. } => {
                     if let Some(abort_tables) = &abort_tables {
-                        if let Err(abort_err) = database
+                        if let Err(abort_err) = target_db
                             .transaction_manager
-                            .abort(tx, &database.buffer_pool, abort_tables)
+                            .abort(tx, &target_db.buffer_pool, abort_tables)
                             .await
                         {
                             return Response::Error {
@@ -468,11 +514,11 @@ pub async fn execute_stage_routed(
                     }
                 }
                 _ => {
-                    // MS26 T5：收敛到 `Database::commit`（水位检查单点）。
-                    // 既有文案形态不变——内层错误已点名 `checkpoint failed`
-                    // （`wal-auto-checkpoint` R4）；本臂不做破坏性清理，与
-                    // CTAS 臂的语义差异见下。
-                    if let Err(commit_err) = database.commit(tx).await {
+                    // MS26 T5：收敛到目标库的 `Database::commit`（水位检查单点
+                    // ——每个提交库按自身阈值检查，design D3）。既有文案形态
+                    // 不变——内层错误已点名 `checkpoint failed`
+                    // （`wal-auto-checkpoint` R4）；本臂不做破坏性清理。
+                    if let Err(commit_err) = target_db.commit(tx).await {
                         return Response::Error {
                             message: format!("Commit failed: {}", commit_err),
                             sqlstate: None,
@@ -536,6 +582,9 @@ pub(crate) fn readonly_rejection(db: &Database, plan: &PhysicalPlan) -> Option<R
     let kind = match plan {
         PhysicalPlan::Insert(_) => "INSERT",
         PhysicalPlan::Upsert(_) => "UPSERT",
+        // MS20-T02 Iter001：INSERT SELECT 是 INSERT 形态，同一只读拒绝面
+        //（新变体显式加臂——守卫先于源求值与目标写入）。
+        PhysicalPlan::InsertSelect(_) => "INSERT",
         PhysicalPlan::Update(_) => "UPDATE",
         PhysicalPlan::Delete(_) => "DELETE",
         PhysicalPlan::CreateTable(_) => "CREATE TABLE",
@@ -560,6 +609,32 @@ pub(crate) fn readonly_rejection(db: &Database, plan: &PhysicalPlan) -> Option<R
 /// 只读写拒绝的 SQLSTATE 分类（PG `read_only_sql_transaction`，MS19 R2 通道）。
 const READ_ONLY_SQLSTATE: &str = "25006";
 
+/// MS20-T02（design D2）：显式事务内附加库写入拒绝——写节点的**目标**命中
+/// 本语句路由表即点名拒绝（SQLSTATE `0A000`），发生于执行器构造 / 源求值 /
+/// begin 之前。只判目标：主库目标 + 附加源的语句不受影响（`routed` 非空不
+/// 误拒主库写）；lib 路径路由表恒空，零变化。
+fn attached_write_in_tx_rejection(plan: &PhysicalPlan, routed: &RoutedTables) -> Option<Response> {
+    let target = match plan {
+        PhysicalPlan::Insert(n) => &n.table_name,
+        PhysicalPlan::Upsert(n) => &n.table_name,
+        // MS20-T02 Iter001：INSERT SELECT 同为写面——目标命中附加路由即拒绝，
+        // 先于源求值（守卫清单显式加臂，新变体不得逃逸）。
+        PhysicalPlan::InsertSelect(n) => &n.table_name,
+        PhysicalPlan::Update(n) => &n.table_name,
+        PhysicalPlan::Delete(n) => &n.table_name,
+        _ => return None,
+    };
+    if routed.contains_key(target) {
+        return Some(Response::Error {
+            message: format!(
+                "WRITE TO ATTACHED DATABASE is not supported inside a transaction: '{target}'"
+            ),
+            sqlstate: Some("0A000".to_string()),
+        });
+    }
+    None
+}
+
 /// MS10-T04：单结果执行路径（网络 / 显式事务）的多语句显式拒绝——
 /// 两条路径共用同一文案；拒绝必须发生在 plan_stage / cache put 之前。
 fn multi_statement_rejected(count: usize) -> Response {
@@ -568,6 +643,71 @@ fn multi_statement_rejected(count: usize) -> Response {
             "only a single statement is supported on this path (got {count} statements); use the CLI (rtsql) to run multi-statement scripts"
         ),
         sqlstate: None,
+    }
+}
+
+/// MS20-T02 Iter001（design D4）：把 `InsertSelect` 源完整物化为原生 Value
+/// 行——CTAS 同款消费模式（不经 JSON/SQL 文本往返，不流式）。任何错误都在
+/// 目标 begin / 写入之前返回。
+async fn materialize_insert_select_source(
+    database: &Database,
+    source: &PhysicalPlan,
+    snapshot: Option<Snapshot>,
+    routed: &RoutedTables,
+) -> std::result::Result<Vec<Vec<Value>>, String> {
+    let mut select =
+        match create_executor_from_plan(source.clone(), database, None, snapshot, routed).await {
+            Ok(executor) => executor,
+            Err(e) => return Err(e.to_string()),
+        };
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    loop {
+        match select.next().await {
+            Ok(Some(ExecResult::Row(values))) => rows.push(values),
+            // 源计划恒为 SELECT（`build_insert_select` 产出），只有行输出；
+            // RowId / AffectedRows 是写面信号，视为物化结束。
+            Ok(Some(_)) | Ok(None) => break,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(rows)
+}
+
+/// MS20-T02 Iter001（design D4）：物化行按预编译位置拼装全宽目标行，并把
+/// 计划归一为既有 `Insert`/`Upsert`——类型/NOT NULL/PK/UNIQUE/二级索引/
+/// 冲突动作语义全部沿用既有写面，不复制提交/回滚逻辑。运行期行宽不符点名
+/// 错误，不静默 zip 截断。
+fn normalize_insert_select(
+    node: &InsertSelectNode,
+    rows: Vec<Vec<Value>>,
+) -> std::result::Result<PhysicalPlan, String> {
+    let mut values: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.len() != node.source_width {
+            return Err(format!(
+                "INSERT ... SELECT source row width {} does not match planned width {}",
+                row.len(),
+                node.source_width
+            ));
+        }
+        let mut full = node.fill.clone();
+        for (requested, &target) in node.target_positions.iter().enumerate() {
+            full[target] = row[requested].clone();
+        }
+        values.push(full);
+    }
+    match &node.upsert {
+        Some((arbiter, action)) => Ok(PhysicalPlan::Upsert(UpsertNode {
+            table_name: node.table_name.clone(),
+            values,
+            arbiter: arbiter.clone(),
+            action: action.clone(),
+        })),
+        None => Ok(PhysicalPlan::Insert(InsertNode {
+            table_name: node.table_name.clone(),
+            columns: node.columns.clone(),
+            values,
+        })),
     }
 }
 
@@ -774,7 +914,10 @@ async fn execute_ctas_routed(
 /// 全 NULL → `STRING(255)`（沿用 DDL 路径 VARCHAR 默认长度，见
 /// `ColumnDef::to_schema_column`）；同型保留；`Int∪Float` → `FLOAT`
 /// （无损提升，与 MS24 FLOAT 列写面同语义）；其余混合点名拒绝。
-fn infer_ctas_column_types(
+///
+/// MS29 T2：`pub(crate)` 供 CLI import 免建表导入复用同一推导矩阵
+/// （逻辑零改动）。
+pub(crate) fn infer_ctas_column_types(
     columns: &[String],
     rows: &[Vec<Value>],
 ) -> std::result::Result<Vec<StorageColumnType>, PlanError> {
@@ -899,6 +1042,12 @@ pub async fn execute_stage_in_tx_routed(
     if let Some(rejection) = readonly_rejection(database, &plan) {
         return rejection;
     }
+    // MS20-T02（design D2）：显式事务内附加库写入点名拒绝（0A000），先于
+    // 执行器构造 / 源求值 / begin——会话事务（主库）保持活跃，由 CLI 失败
+    // 收口回滚。
+    if let Some(rejection) = attached_write_in_tx_rejection(&plan, routed) {
+        return rejection;
+    }
     match &plan {
         PhysicalPlan::CreateTable(_)
         | PhysicalPlan::DropTable(_)
@@ -961,6 +1110,37 @@ pub async fn execute_stage_in_tx_routed(
             message: "TRUNCATE TABLE is not supported inside a transaction".to_string(),
             sqlstate: Some("0A000".to_string()),
         },
+        PhysicalPlan::InsertSelect(node) => {
+            // MS20-T02 Iter001（design D4）：显式事务内**主库目标**的 INSERT
+            // SELECT——只读（25006）与附加目标（0A000）拒绝已在本函数顶部
+            // 完成（先于源求值）。物化沿用会话事务的语句级快照（自身未提交
+            // 写可见），插入复用该 tx_id，不另开提交点。
+            let snapshot = database.statement_snapshot(Some(tx_id)).await;
+            let rows =
+                match materialize_insert_select_source(database, &node.source, snapshot, routed)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(message) => {
+                        return Response::Error {
+                            message,
+                            sqlstate: None,
+                        }
+                    }
+                };
+            let normalized = match normalize_insert_select(node, rows) {
+                Ok(plan) => plan,
+                Err(message) => {
+                    return Response::Error {
+                        message,
+                        sqlstate: None,
+                    }
+                }
+            };
+            // 归一后的 Insert/Upsert 落 `_` 通用臂：会话事务保持活跃，提交/
+            // 回滚由调用方收口。
+            Box::pin(execute_stage_in_tx_routed(database, normalized, tx_id, routed)).await
+        }
         _ => {
             // MS09 Iter000 (D4): in-transaction statements take their
             // statement-start snapshot with the transaction's own id as the
@@ -1138,7 +1318,8 @@ fn routed_db<'a>(
 /// 命中路由时以 `local_name` 取表。
 ///
 /// 限定扁平名留在计划节点（`node.table_name`）与列引用上，不改写
-/// `TableMeta.name`：读执行器不消费该字段，写执行器不路由。
+/// `TableMeta.name`：写执行器的目标资源经 `routed_db` 取目标库，WAL/版本
+/// 记录使用目标 catalog 本地名（MS20-T02）。
 async fn load_table_meta(
     routed: &RoutedTables,
     database: &Database,
@@ -1162,8 +1343,8 @@ async fn load_table_meta(
 /// `routed` 是本语句计划期判定的跨库路由表（MS20 T2）：键为限定扁平名
 /// （`"o.u"`），值是该限定名所属的附加库实例。扫描臂据此取 schema、缓冲池与
 /// 事务管理器——**附加库必须用自己的 `transaction_manager`**：tx-id 空间按库
-/// 独立，串用主库实例会错误抑制墓碑（design D6）。写执行器臂不路由（附加库
-/// 写面在计划期已被拒绝）。
+/// 独立，串用主库实例会错误抑制墓碑（design D6）。写执行器臂同样经
+/// `routed_db` 取目标库资源（MS20-T02）。
 pub(crate) fn create_executor_from_plan<'a>(
     plan: PhysicalPlan,
     database: &'a Database,
@@ -1255,57 +1436,64 @@ pub(crate) fn create_executor_from_plan<'a>(
                 Ok(Box::new(executor.with_projection(node.projection)) as Box<dyn Executor + Send>)
             }
 
+            // MS20-T02（design D1）：四个写构造臂经既有路由取目标库——附加库
+            // 目标使用其自身 TableManager/BufferPool/TransactionManager/WAL 与
+            // catalog 本地表名；主库目标沿 `routed_db` 未命中回落，逐字节不变。
             PhysicalPlan::Insert(node) => {
-                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(InsertExecutor::with_table_manager(
                     table_meta,
-                    Some(database.table_manager.clone()),
-                    database.buffer_pool.clone(),
-                    database.transaction_manager.clone(),
+                    Some(db.table_manager.clone()),
+                    db.buffer_pool.clone(),
+                    db.transaction_manager.clone(),
                     node.values,
                     tx_id.expect("DML Insert requires a transaction id"),
-                    database.wal_buffer.clone(),
+                    db.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Upsert(node) => {
-                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(UpsertExecutor::with_table_manager(
                     table_meta,
-                    Some(database.table_manager.clone()),
-                    database.buffer_pool.clone(),
-                    database.transaction_manager.clone(),
+                    Some(db.table_manager.clone()),
+                    db.buffer_pool.clone(),
+                    db.transaction_manager.clone(),
                     node.arbiter.clone(),
                     node.action.clone(),
                     node.values,
                     tx_id.expect("DML Upsert requires a transaction id"),
-                    database.wal_buffer.clone(),
+                    db.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Update(node) => {
-                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(UpdateExecutor::new(
                     table_meta,
-                    database.buffer_pool.clone(),
-                    database.transaction_manager.clone(),
+                    db.buffer_pool.clone(),
+                    db.transaction_manager.clone(),
                     node.key.as_bytes().to_vec(),
                     node.column,
                     node.new_value,
                     tx_id.expect("DML Update requires a transaction id"),
-                    database.wal_buffer.clone(),
+                    db.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Delete(node) => {
-                let table_meta = database.table_manager.get_table(&node.table_name).await?;
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(DeleteExecutor::new(
                     table_meta,
-                    database.buffer_pool.clone(),
-                    database.transaction_manager.clone(),
+                    db.buffer_pool.clone(),
+                    db.transaction_manager.clone(),
                     node.key.as_bytes().to_vec(),
                     tx_id.expect("DML Delete requires a transaction id"),
-                    database.wal_buffer.clone(),
+                    db.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -1329,6 +1517,12 @@ pub(crate) fn create_executor_from_plan<'a>(
             // 单一 executor。
             PhysicalPlan::CreateTableAsSelect(_) => {
                 panic!("CTAS should be handled by execute_ctas_routed()")
+            }
+
+            // MS20-T02 Iter001：INSERT SELECT 由两个 execute 叶子先物化归一为
+            // Insert/Upsert 再进入写路径，本函数只见归一后的计划。
+            PhysicalPlan::InsertSelect(_) => {
+                panic!("INSERT SELECT should be materialized by the execute leaves")
             }
 
             PhysicalPlan::Aggregate(node) => {
@@ -1856,7 +2050,18 @@ fn extract_all_table_names(stmt: &Statement) -> Vec<TableRef> {
         // MS25 T6: `EXPLAIN <SELECT>` 的被观测语句贡献其表名（`EXPLAIN` 走
         // plan_stage 的非 DDL 分支，目录注册为其内层语句服务）。
         Statement::Explain { statement, .. } => extract_all_table_names(statement),
-        Statement::Insert { table_name, .. } => vec![TableRef::new(table_name)],
+        // MS20-T02 Iter001 (design D4)：INSERT 保留写目标，SELECT 源贡献其
+        // 完整表面（CTE 感知提取）——源表经 `register_table` 注册 schema/
+        // 路由/视图豁免。VALUES 源提取结果为空，行为与此前逐字节一致。
+        Statement::Insert {
+            table_name, source, ..
+        } => {
+            let mut tables = vec![TableRef::new(table_name)];
+            if let Some(q) = source {
+                tables.extend(extract_all_query_table_names(q));
+            }
+            tables
+        }
         Statement::Update { table, .. } => extract_all_from_table_with_joins_item(table),
         // MS20 T4: CTAS 的物化源是完整 SELECT（含 CTEs / JOIN / 子查询），
         // 目录注册为该 SELECT 服务；写目标名不参与提取（目标由 DDL 标记与

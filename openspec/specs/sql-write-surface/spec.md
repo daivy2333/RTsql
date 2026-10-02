@@ -2,7 +2,7 @@
 
 ## Purpose
 
-定义 SQL 写入面的补全语义：子集列清单 INSERT 与 DEFAULT 的解析、持久化与应用闭环；写入值与列声明类型的强制一致门（ISS04）；UPSERT（ON CONFLICT DO NOTHING / DO UPDATE）与 REPLACE INTO 的冲突仲裁与原位更新语义；UPSERT 冲突目标与不支持形态的计划期点名拒绝；既有写面语义零回归。来源：MS24（change `2026-09-25-ms24-write-surface-completion`，2026-09-25 规划、2026-09-26 收尾）。
+定义 SQL 写入面的补全语义：子集列清单 INSERT 与 DEFAULT 的解析、持久化与应用闭环；写入值与列声明类型的强制一致门（ISS04）；UPSERT（ON CONFLICT DO NOTHING / DO UPDATE）与 REPLACE INTO 的冲突仲裁与原位更新语义；UPSERT 冲突目标与不支持形态的计划期点名拒绝；INSERT SELECT（既有表目标的查询物化写入，源可含附加库，复用写面类型/约束/冲突语义）；声明期 DEFAULT 类型校验/归一（CREATE TABLE 与 ALTER ADD COLUMN 的 DEFAULT 字面量与列类型计划期一致，规则与写入类型门对齐）与 TypedString 日期字面量声明、dump→restore 往返修复；CREATE TABLE 重复列名计划期守卫；既有写面语义零回归。来源：MS24（change `2026-09-25-ms24-write-surface-completion`，2026-09-25 规划、2026-09-26 收尾）；声明期校验与重复列名守卫来源 MS29（change `2026-10-01-ms29-import-input-and-default-declaration`，2026-10-01 收尾）；INSERT SELECT 来源 MS20-T02（change `2026-10-02-ms20-cross-db-dml`，2026-10-02 收尾）。
 
 ## Requirements
 
@@ -169,6 +169,129 @@ INSERT 与 UPDATE 在写入任何数据页、WAL、版本链或索引之前 SHAL
 - **GIVEN** 表含非 INT 唯一声明不可能存在（既有诚实化拒绝），非 INT 主键列无索引
 - **WHEN** 执行以非 INT 主键列为目标的 ON CONFLICT
 - **THEN** 计划期拒绝（该列无唯一性索引可仲裁）
+
+### Requirement: 声明期 DEFAULT 类型一致
+
+建表（`CREATE TABLE`）与加列（`ALTER TABLE ADD COLUMN`）声明的 DEFAULT 字面量 SHALL 在计划期与列声明类型校验/归一，规则与「写入值类型一致门」对齐：`DEFAULT NULL` SHALL 豁免（NULL 性由 NOT NULL 门裁决）；FLOAT 列的整数字面量 SHALL 无损升格为 FLOAT 归一后持久化；日期族（DATE/TIMESTAMP）列的 String 字面量 SHALL 经既有强制解析通道验证——解析成功视为一致，解析失败 SHALL 建表/加列计划期点名拒绝且零副作用；其余跨类型声明（如 BOOL 列 `DEFAULT 1`、INT 列 `DEFAULT 'x'`、STRING 列 `DEFAULT 1`、INT 列 `DEFAULT 1.5`）SHALL 计划期点名拒绝（错误点名列名、期望类型与实际值类型）且零副作用。类型字面量形态（TypedString，如 `DEFAULT DATE '2026-01-02'`）SHALL 在日期族列上解析并接受（目录存储形态与 String 字面量一致），在非日期族列上 SHALL 维持既有计划期拒绝。dump 生成的 `DEFAULT DATE '…'` / `DEFAULT TIMESTAMP '…'` 文本 SHALL 可经 restore 重建——dump→restore 往返保真对日期族 DEFAULT 成立（本 Requirement 落地修复现存的 TypedString 解析缺失缺陷）。声明期归一后的 catalog 默认值 SHALL 跨重启与 dump→restore 保真。既有建表与既有 DEFAULT 场景（无 DEFAULT、类型一致 DEFAULT、`DEFAULT NULL`）SHALL 逐字节零回归。
+
+#### Scenario: BOOL 列 DEFAULT 整数字面量建表拒绝
+
+- **GIVEN** 建表语句 `CREATE TABLE t (b BOOL DEFAULT 1)`
+- **WHEN** 执行建表
+- **THEN** 计划期点名拒绝（列 `b`、期望 BOOL、实际 INT）；表不存在，零副作用
+
+#### Scenario: 跨类型声明拒绝矩阵
+
+- **GIVEN** 建表语句 `CREATE TABLE t (a INT DEFAULT 'x')`、`CREATE TABLE t (s STRING DEFAULT 1)`、`CREATE TABLE t (a INT DEFAULT 1.5)`
+- **WHEN** 分别执行建表
+- **THEN** 均计划期点名拒绝且零副作用（错误含列名与类型不一致语义）
+
+#### Scenario: FLOAT 列整数 DEFAULT 升格归一
+
+- **GIVEN** 建表 `CREATE TABLE t (id INT PRIMARY KEY, score FLOAT DEFAULT 2)`
+- **WHEN** 建表成功后执行省略 `score` 的 INSERT 并查询
+- **THEN** `score` 读回 FLOAT `2.0`（声明期归一为 FLOAT 持久化）；重开库与 dump→restore 往返后行为一致；dump 渲染 `DEFAULT 2.0`
+
+#### Scenario: 日期族 DEFAULT String 强制解析
+
+- **GIVEN** 建表 `CREATE TABLE t (id INT PRIMARY KEY, d DATE DEFAULT '2026-01-02')`
+- **WHEN** 建表成功后执行省略 `d` 的 INSERT 并查询
+- **THEN** `d` 为 DATE `2026-01-02`（String 经解析通道验证一致）；建表 `d DATE DEFAULT '2026-13-99'`（非法日期）SHALL 计划期点名拒绝且零副作用
+
+#### Scenario: TypedString 声明与 dump→restore 往返修复
+
+- **GIVEN** 建表 `CREATE TABLE t (id INT PRIMARY KEY, d DATE DEFAULT DATE '2026-01-02')`（或 String 形态建表后 dump）
+- **WHEN** 执行建表；对含日期族 DEFAULT 的表执行 dump 后向空库 restore
+- **THEN** 建表成功；restore 成功重建（`DEFAULT DATE '2026-01-02'` 经 TypedString 解析臂接受），restore 后表 schema 含 DEFAULT 声明、省略列 INSERT 行为与原库一致（修复前：restore 报 `Unsupported value type` 失败——实证缺陷闭环）
+
+#### Scenario: 非日期族 TypedString 维持拒绝
+
+- **WHEN** 执行 `CREATE TABLE t (a INT DEFAULT INT '5')` 等非日期族类型字面量声明
+- **THEN** 维持既有计划期拒绝（Unsupported value 语义不变）
+
+#### Scenario: DEFAULT NULL 豁免
+
+- **GIVEN** 建表 `CREATE TABLE t (b BOOL DEFAULT NULL)`
+- **WHEN** 执行建表与省略 `b` 的 INSERT
+- **THEN** 建表成功，该行 `b` 为 NULL（NULL 性由 NOT NULL 门裁决，声明期不拒绝）
+
+#### Scenario: ALTER ADD COLUMN 同款规则
+
+- **GIVEN** 任意已有表
+- **WHEN** 执行 `ALTER TABLE t ADD COLUMN b BOOL DEFAULT 1`
+- **THEN** 计划期点名拒绝且零副作用（表结构不变）；`ALTER TABLE t ADD COLUMN d DATE DEFAULT '2026-01-02'` 建列成功，存量行读回该列为声明默认值
+
+#### Scenario: 既有 DEFAULT 场景零回归
+
+- **GIVEN** 既有 DEFAULT 全部用例（`name STRING DEFAULT 'anon'`、`score INT DEFAULT 0`、子集 INSERT/DEFAULT 关键字/跨重启/dump→restore 矩阵）
+- **WHEN** 重复执行
+- **THEN** 行为与错误面逐字节一致（声明期校验只新增拒绝面，不改变既有接受面的持久化与应用语义）
+
+### Requirement: CREATE TABLE 重复列名计划期拒绝
+
+`CREATE TABLE` 的列定义 SHALL 在计划期拒绝重复列名（含经引号包裹与大小写归一后相同的名称，planner 列名小写归一语义一致）：错误 SHALL 点名重复列名，拒绝零副作用（表不存在于失败结果中）。该守卫使「重复列名表被静默建成且 dump→restore 必触发 `MultiplePrimaryKey`」的既有缺陷闭环（2026-10-01 实证：`CREATE TABLE dup ("a" INT, "a" INT)` 曾 rc=0 且 schema 渲染双 `PRIMARY KEY`）。CSV import 自动建表经常规建表通道执行，本守卫自然覆盖其重复表头形态。CTAS 输出列重复既有拒绝与普通建表唯一列名零回归。
+
+#### Scenario: 重复列名建表拒绝
+
+- **WHEN** 执行 `CREATE TABLE dup ("a" INT, "a" INT)`
+- **THEN** 计划期点名拒绝（错误含重复列名 `a`）；表不存在，零副作用
+
+#### Scenario: 归一后同名拒绝
+
+- **WHEN** 执行 `CREATE TABLE t (A INT, a INT)`（引号/大小写归一后同名）
+- **THEN** 计划期点名拒绝且零副作用（与裸名归一化语义一致）
+
+#### Scenario: 唯一列名建表与 CTAS 既有面零回归
+
+- **GIVEN** 既有建表与 CTAS 全部用例（列名互异建表成功；CTAS 输出列名重复既有计划期拒绝）
+- **WHEN** 重复执行
+- **THEN** 行为与错误面逐字节一致（本守卫只新增重复形态拒绝面）
+
+### Requirement: INSERT SELECT 物化后写入
+
+INSERT INTO 既有表 SELECT 查询 SHALL 支持主库或附加库目标，源 SHALL 使用现有完整 SELECT 编译和查询路由能力（含 JOIN、子查询、派生表、视图、聚合、DISTINCT、CTE、集合操作及排序分页，仍受各能力已有拒绝面约束）。系统 SHALL 在任何目标插入前完整物化源为原生 Value 行，SHALL NOT 经 JSON 或 SQL 文本往返；目标表不创建或改结构。列清单 SHALL 按位置接收源列，允许子集和任意顺序，省略列按声明 DEFAULT 或 NULL 填充，显式源 NULL SHALL 保持 NULL。列数、未知列及重复目标列 SHALL 在源求值前拒绝（包括空源）。同库读写 SHALL 只消费物化前源行，不递归读取本语句新插入的行。
+
+目标插入 SHALL 复用既有 INSERT/Upsert 执行器与类型、NOT NULL、PK、UNIQUE、二级索引语义；支持既有 ON CONFLICT/REPLACE 动作及拒绝边界。非显式事务语句 SHALL 只在目标文件开启一个隐式事务；任何源失败 SHALL 不写目标，插入中途失败 SHALL 回滚当前目标语句全部写入。空源 SHALL 返回 affected_rows=0；输出 SHALL 为受影响行数而非源行集。附加目标的显式事务限制按 cross-db-dml；主库目标在已有主库事务中 SHALL 复用该事务，按现有错误收口与回滚语义处理，不另开独立提交。
+
+#### Scenario: 多库查询写入附加目标
+
+- **GIVEN** 主库 t、附加库 a.u 与 b.v 已存在
+- **WHEN** INSERT INTO b.v SELECT ... FROM t JOIN a.u ...
+- **THEN** 仅 b.v 插入查询结果，源表不变，返回实际受影响行数，重开结果一致
+
+#### Scenario: 写回主库与同表读写
+
+- **GIVEN** 主库与附加库均有源行
+- **WHEN** 分别把附加查询写主库、把目标表自身查询变换后写回同表
+- **THEN** 路由准确，同表只消费写入前完整物化的行，调用有限结束
+
+#### Scenario: 目标列映射与 DEFAULT
+
+- **GIVEN** 目标有 DEFAULT 与可 NULL 列
+- **WHEN** 指定重排列子集 INSERT SELECT，源含 NULL、整数、日期族及字符串值
+- **THEN** 按位置正确填充，省略位用 DEFAULT/NULL，源 NULL 不被替换，类型门与 VALUES 相同
+
+#### Scenario: 空源仍验证列结构
+
+- **WHEN** 源产生零行，目标列清单合法或存在列数/未知列/重复列错误
+- **THEN** 合法语句 affected_rows=0；非法语句计划期点名拒绝，目标不变
+
+#### Scenario: 源失败与插入失败
+
+- **GIVEN** 目标有既有数据与唯一索引
+- **WHEN** 源求值失败，或物化行中后续行违反目标类型/NOT NULL/PK/UNIQUE
+- **THEN** 源失败不写目标；隐式事务插入失败回滚本语句全部行及索引，已有数据保持
+
+#### Scenario: SELECT 源冲突动作
+
+- **WHEN** 对主库或附加目标执行 INSERT SELECT ON CONFLICT DO NOTHING/DO UPDATE，或 REPLACE INTO ... SELECT
+- **THEN** 使用既有冲突仲裁、动作和计数语义；非法冲突目标或赋值形态继续拒绝
+
+#### Scenario: 主库显式事务读写
+
+- **GIVEN** BEGIN 内有主库自身写入
+- **WHEN** INSERT INTO 主库表 SELECT 主库或附加库源，然后 ROLLBACK 或 COMMIT
+- **THEN** 复用主库事务与既有查询可见性，ROLLBACK 撤销目标插入，COMMIT 保留，附加源不改变
 
 ### Requirement: 既有写面语义零回归
 
