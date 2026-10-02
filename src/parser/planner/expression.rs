@@ -281,7 +281,10 @@ impl PlanBuilder {
         if let Some(layout) = &self.join_column_layout {
             let mut offset = 0;
             for (table, columns) in layout {
-                if table == table_ref {
+                // T7（R9）：原文相等或书写限定符归一化命中该段（隐式短名 `u`
+                // ↔ 声明段键 `o.u`）。显式别名段键即别名文本，原文相等分支
+                // 先行命中，既有行为零变化。
+                if self.qualifier_matches_declared(table_ref, table) {
                     return match columns.iter().position(|c| c.to_lowercase() == column_name) {
                         Some(pos) => Ok(Arc::new(ColumnExpression {
                             column_name: column_name.to_string(),

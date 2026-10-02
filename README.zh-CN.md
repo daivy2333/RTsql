@@ -104,7 +104,7 @@ rtsql --format table demo-restored "SELECT id, name, age FROM people ORDER BY id
 | 成对移动到另一目录（文件名不变） | 完整（938 行） |
 | 只重命名主文件（`.wal` 留在原处） | **不完整：938 行中的 1 行**，且孤立的 `<db>.wal` 被忽略 |
 
-伴生文件名由主文件名派生，因此任何重命名或移动都必须让 `<db>.wal` 与 `<db>.checkpoint` 随主文件以同一基名同行。写入进行中的文件级拷贝必须包含 `<db>.wal`；否则先让写入方关闭，再对副本执行 `rtsql <db> "SELECT count(*) FROM t"` 确认。
+伴生文件名由主文件名派生，因此任何重命名或移动都必须让 `<db>.wal` 与 `<db>.checkpoint` 随主文件以同一基名同行。写入进行中的文件级拷贝必须包含 `<db>.wal`；否则先让写入方关闭——或运行 `rtsql checkpoint <db>` 将 WAL 折入主文件——再对副本执行 `rtsql <db> "SELECT count(*) FROM t"` 确认。
 
 `rtsql delete <db>` 删除单个数据库文件族；`./install.sh --uninstall --purge-data` 在卸载时清空整个数据目录。两者均不可通过 RTsql 恢复。
 
@@ -174,8 +174,9 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql schema <db>` | 输出用户表 DDL |
 | `rtsql dump <db>` | 将 DDL 和数据导出为 SQL 文本 |
 | `rtsql restore <db> <file>` | 将 dump 恢复到空数据库；`-` 表示 stdin |
-| `rtsql import <db> <table> <file> --csv` | 按表头列名导入 CSV |
+| `rtsql import <db> <table> <file\|-> --csv` | 按表头列名导入 CSV，或按表头自动建表；`-` 表示 stdin；接受 `:memory:` 目标 |
 | `rtsql delete <db> [--dry-run]` | 删除数据库及其 `.wal` / `.checkpoint` 伴生文件；`--dry-run` 只列出 |
+| `rtsql checkpoint <db>` | 将已提交数据刷入主文件（截断 WAL、推进 checkpoint 位点）；文件级备份或交接前的干净同步点 |
 | `rtsql stats <db> <table>` | 汇总行数、空值率、去重值、范围和数值分位数 |
 | `rtsql sample <db> <table> [n]` | 使用蓄水池抽样；默认 `n` 为 10 |
 | `rtsql profile <db> <table> [--top n]` | 输出列画像和 String 高频值；默认 top 为 5，最大 20 |
@@ -185,7 +186,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 
 `rtsql --readonly <db> <sql>` 以 advisory 共享锁打开数据库（默认读写打开为独占锁），因此多个只读会话可以同时观察同一个文件，而写会话仍然独占。
 
-- **多读单写**：只读会话之间共享锁；读写会话排除只读者与其他写者，只读会话也排除读写会话。锁冲突立即以退出码 `4` 拒绝——RTsql 不等待锁。
+- **多读单写**：只读会话之间共享锁；读写会话排除只读者与其他写者，只读会话也排除读写会话。锁冲突按可配置预算等待——`--busy-timeout <毫秒>` 或 `RTSQL_BUSY_TIMEOUT`，默认 5000 ms；`0` 仅等待内部 ~8 ms 可见性下限窗口——预算耗尽后才以退出码 `4` 拒绝。该预算对全部开库命令生效，独占锁与只读共享锁同侧；`:memory:` 接受并忽略，`delete` 的锁探测永不等待。
 - **无未决 WAL**：只读会话不执行恢复，因此 `.wal` 中仍有未重放记录时拒绝打开，错误文案点名需以读写模式完成恢复，退出码为 `1`。
 - **零写入**：不运行恢复也不 checkpoint，`INSERT` / `UPDATE` / `DELETE` / `UPSERT` / `REPLACE` 与全部 DDL 在计划期以 SQLSTATE `25006` 拒绝（退出码 `3`）；`SELECT`、`ATTACH`、`DETACH` 与事务语句不受限。
 - **跨库**：只读会话内的 `ATTACH` 将附加库也以只读模式打开。
@@ -198,11 +199,28 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 
 生命周期子命令、`--key` 与 `--readonly` 对 `:memory:` 都是用法错误（退出码 `2`）。
 
+### 跨库会话
+
+一个 CLI 会话可用 `ATTACH '<路径>' AS <别名>` 注册其他数据库文件，并用限定名（`别名.表`）访问；裸名始终指向主库。会话在其生命周期内持有每个附加文件的 advisory 锁，`--busy-timeout` 预算对这些锁的等待与对主文件完全一致。
+
+```bash
+rtsql app "ATTACH 'orders' AS o; \
+  INSERT INTO o.recent SELECT id, name FROM t WHERE id > 100; \
+  SELECT COUNT(*) FROM o.recent"
+```
+
+- **写入路由到附加文件**：对 `别名.表` 的 `INSERT`、`UPDATE`、`DELETE` 及 upsert 形态在该文件上执行，使用其自身的事务、WAL 与缓冲池。每个文件独立提交：某条语句失败时，之前的语句保持已提交——包括写到其他文件的那些。
+- **无跨文件事务**：`BEGIN` 内对附加库的写入在任何行被触碰之前以 SQLSTATE `0A000`（退出码 `3`）拒绝。主库写入保持完整的 `BEGIN` / `COMMIT` / `ROLLBACK` 语义，显式主库事务内可以读取附加库。
+- **DDL 仅限主库**：附加库只接受查询与 DML——对附加目标的 `CREATE TABLE`、`DROP TABLE`、`CREATE TABLE AS SELECT` 及其他 DDL 在计划期点名拒绝。
+- **`INSERT ... SELECT`**：`INSERT INTO <既有表> SELECT ...` 先完整物化源行，再走常规插入路径写入。源可以跨库 JOIN、写回自身目标表（只消费语句开始前读到的行），并支持 `ON CONFLICT DO NOTHING` / `DO UPDATE` 或 `REPLACE INTO`。显式列清单按位置映射，省略列取声明的 `DEFAULT` 或 `NULL`；源失败则目标零变化，空源报告 `affected_rows: 0`。
+- **只读会话**以只读模式打开附加库，所有写入照常以 SQLSTATE `25006` 拒绝。
+
 ### 按 WAL 大小自动 checkpoint
 
 读写会话在「自上次 checkpoint 以来累计追加的字节数」达到水位时自动 checkpoint，使长会话的 `.wal` 保持有界。检查发生在每个提交边界（auto-commit 语句提交后、显式 `COMMIT` 后）；同一会话内仍有其他活跃事务时顺延到后续提交边界。
 
 - **默认值**：16 MiB。常规会话远低于该值，行为与既有语义一致——只有 `close()` 与显式 checkpoint 才截断 WAL。
+- **显式命令**：`rtsql checkpoint <db>` 按需执行同样的截断并输出一行确认——干净库报告 `no pending work` 且仍以退出码 `0` 结束。外部备份或文件交接前以它为同步点。
 - **环境变量**：`RTSQL_WAL_CHECKPOINT_BYTES=<字节数>` 覆盖水位；库内经 `Database::set_checkpoint_bytes_threshold` 可设置同一值。取 `0` 表示禁用自动 checkpoint——WAL 持续增长，`close()` 仍执行完整 checkpoint。
 - **非法值**：非数字、负数与溢出在打开数据库**之前**拒绝，报错文案点名变量名并回显非法值（退出码 `2`），不创建任何文件。
 - **失败传播**：自动 checkpoint 失败时，触发该边界的语句收到点名 checkpoint 失败的错误（退出码 `3`）。该语句已提交的数据保持可用——提交先于 checkpoint 完成 fsync，后续提交边界会自然重试。
@@ -220,7 +238,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | 1 | 一般 I/O、存储或格式错误 |
 | 2 | CLI 用法错误 |
 | 3 | SQL 解析或执行错误 |
-| 4 | 数据库已被其他进程锁定 |
+| 4 | 数据库已被其他进程锁定（`--busy-timeout` 预算耗尽后） |
 | 5 | 加密密钥错误 |
 | 130 / 143 | 被 SIGINT / SIGTERM 终止 |
 
@@ -256,6 +274,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 
 - **列清单：** `INSERT INTO t (col, ...) VALUES ...` 接受表列的任意子集且顺序任意。省略列取声明 `DEFAULT`，无声明则取 `NULL`；NOT NULL 列这样被填入 `NULL` 时点名拒绝。`VALUES` 中的 `DEFAULT` 等价于省略该列。声明默认值经 catalog 持久化、重启后生效，并由 `rtsql dump` 与 `rtsql schema` 渲染。
 - **值类型：** 写入值必须与列声明类型一致。`NULL` 豁免，日期列接受其类型化字面量，`FLOAT` 列接受整数值（以等价浮点存储），其余跨类型写入以 `column '<列名>' expects <类型>, got <类型>` 拒绝。`dump` / `restore` / `import` 通道经同一规则。
+- **声明默认值：** `CREATE TABLE` 或 `ALTER TABLE ADD COLUMN` 声明的 `DEFAULT` 字面量在计划期按同一规则与列类型校验——`NULL` 豁免，`FLOAT` 列整数字面量升格（以浮点持久化），`DATE`/`TIMESTAMP` 列解析字符串（非法日期拒绝），其余跨类型声明以 `DEFAULT type mismatch: column '<列名>': expected <类型>, got <类型>` 在建表前拒绝、零副作用。类型化日期字面量（如 `DEFAULT DATE '2026-01-02'`）可接受，含日期默认值的表 `dump` → `restore` 往返保真。
 - **`ON CONFLICT DO NOTHING`：** 冲突行被跳过，不计入受影响行数。
 - **`ON CONFLICT (col) DO UPDATE SET ...`：** 冲突行原位更新。右值接受字面量、`DEFAULT`、`excluded.<列名>`（待插行值）或裸列名（冲突行旧值），可一次赋值多列。仅被赋值列发生变化。
 - **冲突目标：** 省略目标时仲裁主键与全部唯一索引（先主键，再按声明序的唯一列）。显式目标必须是承载唯一性的单列——`INT` 主键列或 `UNIQUE` 列。
@@ -276,6 +295,8 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 - `Database::open(path)`：以 Repeatable Read 打开或创建数据库。
 - `Database::open_with_isolation(path, level)`：选择 Repeatable Read 或 Read Committed。
 - `Database::open_with_key(path, isolation, key)`：打开明文或加密存储。
+- `Database::open_with_lock_wait(path, isolation, key, lock_wait)`：以可配置锁等待预算打开（`None` = 默认 5000 ms）。
+- `Database::open_readonly_with_lock_wait(path, key, lock_wait)`：同一预算的只读打开。
 - `Database::execute_sql(sql)`：执行 SQL。
 - `Database::execute_in_tx(...)`：在显式库事务中执行。
 - `Database::checkpoint()`：刷写 checkpoint。

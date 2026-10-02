@@ -7,14 +7,21 @@ use super::render::{render, QueryPayload};
 use super::resolve;
 use super::{emit_stderr, emit_stdout, kind, sigint_future, sigterm_future, ExitStatus, FormatArg};
 use crate::database::Database;
+use crate::executor::Value;
 use crate::network::protocol::Response;
-use crate::pipeline::{execute_stage, parse_stage, plan_stage};
+use crate::parser::PlanError;
+use crate::pipeline::{execute_stage, infer_ctas_column_types, parse_stage, plan_stage};
 use crate::storage::catalog::{CatalogColumnRow, CatalogKind, CatalogRow};
 use crate::storage::page_format::ColumnType;
 use std::path::Path;
+use std::time::Duration;
 
 /// `new <name|path>`：已存在拒绝 → 建父目录 → open 建库 + close checkpoint → 静默。
-pub(super) async fn new_db(target: &str, key: Option<&str>) -> ExitStatus {
+pub(super) async fn new_db(
+    target: &str,
+    key: Option<&str>,
+    lock_wait: Option<Duration>,
+) -> ExitStatus {
     let db_path = match resolve::resolve_db_path(target) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
@@ -37,6 +44,7 @@ pub(super) async fn new_db(target: &str, key: Option<&str>) -> ExitStatus {
     super::execute_command_inner(
         &db_path,
         key,
+        lock_wait,
         move |_db| Box::pin(async { ExitStatus::Success }),
         sigint_future,
         sigterm_future,
@@ -193,8 +201,59 @@ fn delete_file_family(db_path: &Path, dry_run: bool) -> ExitStatus {
     }
 }
 
+/// `checkpoint <db>`：显式落盘——WAL 截断 + checkpoint 位点推进，已提交数据
+/// 落稳且外部备份/接管文件前有一个干净同步点（I079）。零工作（无 WAL 追加
+/// 且无脏页）时 stdout 明示早退，`Database::checkpoint()` 的 MS18 零工作跳过
+/// 语义不变。锁冲突经 `--busy-timeout`/env 等待预算后维持 `DatabaseLocked`
+/// exit 4（`open_error_status` 既有承载）；`--readonly`/`:memory:` 组合由
+/// 全局守卫前置 exit 2，不可达本函数。
+pub(super) async fn checkpoint_db(
+    db: &str,
+    key: Option<&str>,
+    lock_wait: Option<Duration>,
+) -> ExitStatus {
+    let db_path = match resolve_existing_db(db) {
+        Ok(p) => p,
+        Err(status) => return status,
+    };
+    super::execute_command_inner(
+        &db_path,
+        key,
+        lock_wait,
+        move |db| {
+            Box::pin(async move {
+                // 零工作谓词必须在 checkpoint() 之前取样（checkpoint 清脏页）。
+                // 会话持独占锁期间无并发写者，取样稳定；恢复重放的 redo 页经
+                // BufferPool 置脏，故「WAL 有未决」时谓词正确为 false。新会话
+                // get_write_count 恒 0，判定由 has_dirty_pages 承载。wal_writer
+                // 为 None 的臂在本命令路径不可达（只读/内存组合已被守卫拦截），
+                // 防御性按「有工作」处理即可，不加专门拒绝。
+                let zero_work = match &db.wal_writer {
+                    Some(wal) => wal.get_write_count() == 0 && !db.buffer_pool.has_dirty_pages(),
+                    None => true,
+                };
+                if let Err(e) = db.checkpoint().await {
+                    return ExitStatus::General(format!("checkpoint failed: {e}"));
+                }
+                let line = if zero_work {
+                    "checkpoint complete (no pending work; wal untouched)"
+                } else {
+                    "checkpoint complete (wal truncated; checkpoint site advanced)"
+                };
+                match emit_stdout(line) {
+                    Ok(()) => ExitStatus::Success,
+                    Err(e) => ExitStatus::General(e),
+                }
+            })
+        },
+        sigint_future,
+        sigterm_future,
+    )
+    .await
+}
+
 /// `schema <db>`：逐用户表输出一行 CREATE TABLE DDL；空库无输出、静默 exit 0。
-pub(super) async fn schema(db: &str, key: Option<&str>) -> ExitStatus {
+pub(super) async fn schema(db: &str, key: Option<&str>, lock_wait: Option<Duration>) -> ExitStatus {
     let db_path = match resolve::resolve_db_path(db) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
@@ -205,6 +264,7 @@ pub(super) async fn schema(db: &str, key: Option<&str>) -> ExitStatus {
     super::execute_command_inner(
         &db_path,
         key,
+        lock_wait,
         move |db| {
             Box::pin(async move {
                 // 系统表不可经 SQL 查询，DDL 数据只能走内部 catalog 读 API
@@ -238,7 +298,7 @@ pub(super) async fn schema(db: &str, key: Option<&str>) -> ExitStatus {
 
 /// `dump <db>`：逐用户表输出 DDL 行 + 全行 INSERT 语句流（SQL 文本导出）；
 /// 空库无输出、静默 exit 0。catalog 表序即输出序。
-pub(super) async fn dump(db: &str, key: Option<&str>) -> ExitStatus {
+pub(super) async fn dump(db: &str, key: Option<&str>, lock_wait: Option<Duration>) -> ExitStatus {
     let db_path = match resolve::resolve_db_path(db) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
@@ -249,6 +309,7 @@ pub(super) async fn dump(db: &str, key: Option<&str>) -> ExitStatus {
     super::execute_command_inner(
         &db_path,
         key,
+        lock_wait,
         move |db| {
             Box::pin(async move {
                 let catalog = db.table_manager.catalog();
@@ -425,7 +486,12 @@ fn typed_datetime_literal(v: &serde_json::Value, col_type: &ColumnType) -> Strin
 /// `restore <db> <file|->`：目标须为空库；读 dump SQL 文本逐条静默执行
 /// （每条独立 auto-commit，逐条生效），成功静默 exit 0。执行期任一语句失败
 /// 立即停止：exit 3 序号定位，失败前语句已生效。
-pub(super) async fn restore(db: &str, file: &str, key: Option<&str>) -> ExitStatus {
+pub(super) async fn restore(
+    db: &str,
+    file: &str,
+    key: Option<&str>,
+    lock_wait: Option<Duration>,
+) -> ExitStatus {
     let db_path = match resolve::resolve_db_path(db) {
         Ok(path) => path,
         Err(e) => return ExitStatus::General(e),
@@ -439,6 +505,7 @@ pub(super) async fn restore(db: &str, file: &str, key: Option<&str>) -> ExitStat
     super::execute_command_inner(
         &db_path,
         key,
+        lock_wait,
         move |db| {
             Box::pin(async move {
                 // 空库前置（D8）：先空库检查后读文件（避免对拒绝目标白读大文件）
@@ -514,9 +581,18 @@ fn read_restore_input(file: &str) -> Result<String, String> {
     }
 }
 
-/// `import <db> <table> <file> --csv`：CSV 导入已存在的表。首行表头按列名
-/// 与表列匹配（顺序无关），逐行按 schema 重排 + 类型转换，逐条 INSERT
+/// `import <db> <table> <file|-> --csv`：CSV 导入。首行表头按列名与表列
+/// 匹配（顺序无关），逐行按 schema 重排 + 类型转换，逐条 INSERT
 /// （auto-commit）；成功输出受影响行数。
+///
+/// MS29 T1/T2/T3：`file` 接受 `-`（stdin，对齐 restore 先例）；目标表
+/// 不存在时按 CSV 表头自动建表（类型推导复用 `infer_ctas_column_types`
+/// 矩阵、无主键）；`:memory:` 组合豁免生命周期子命令的内存库拒绝
+/// （内存库打开，进程退出即弃）。
+// MS29 Cycle 001-replan 自检修复：T1/T2/T3 通道参数（stdin 豁免 + 自动建表
+// + memory 路由）使形参数超出 clippy 默认阈值；参数均为分派臂直达语义，
+// 收拢成结构体反而加间接层，按通道先例显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn import_csv(
     db: &str,
     table: &str,
@@ -524,6 +600,8 @@ pub(super) async fn import_csv(
     csv_flag: bool,
     format: Option<FormatArg>,
     key: Option<&str>,
+    lock_wait: Option<Duration>,
+    memory: bool,
 ) -> ExitStatus {
     // 当前唯一支持格式必须显式声明；先于一切 IO
     if !csv_flag {
@@ -531,35 +609,44 @@ pub(super) async fn import_csv(
             "rtsql import requires --csv (the only supported import format)".to_string(),
         );
     }
-    let db_path = match resolve::resolve_db_path(db) {
-        Ok(path) => path,
-        Err(e) => return ExitStatus::General(e),
+    // MS29 T3：`:memory:` 不解析为文件路径、不校验存在性（内存库无文件；
+    // db_path 只用于错误文案）。
+    let db_path = if memory {
+        Path::new(db).to_path_buf()
+    } else {
+        let db_path = match resolve::resolve_db_path(db) {
+            Ok(path) => path,
+            Err(e) => return ExitStatus::General(e),
+        };
+        if !db_path.exists() {
+            return ExitStatus::General(format!("{} does not exist", db_path.display()));
+        }
+        db_path
     };
-    if !db_path.exists() {
-        return ExitStatus::General(format!("{} does not exist", db_path.display()));
-    }
     let table = table.to_string();
     let file = file.to_string();
-    let db_path_in_work = db_path.clone();
-    super::execute_command_inner(
+    super::execute_command_inner_mode(
         &db_path,
         key,
-        move |db| {
+        false,
+        memory,
+        lock_wait,
+        move |db, _attach_session| {
             Box::pin(async move {
-                let meta = match db.get_table(&table).await {
-                    Ok(meta) => meta,
-                    Err(_) => {
-                        return ExitStatus::General(format!(
-                            "table {} does not exist in {}",
-                            table,
-                            db_path_in_work.display()
-                        ))
-                    }
-                };
-                let mut reader = match csv::Reader::from_path(&file) {
-                    Ok(reader) => reader,
-                    Err(e) => {
-                        return ExitStatus::General(format!("failed to read {}: {}", file, e))
+                // MS29 T2：目标表缺失不再是拒绝——进入自动建表路径；既有表
+                // 路径逐字节保持。
+                let meta = db.get_table(&table).await.ok();
+                // MS29 T1（D1）：`-` 读 stdin，其余按文件路径打开；两分支统一
+                // 为 trait 对象 reader（stdin 读错误随 headers/records 读取面
+                // 自然产生）。
+                let mut reader: csv::Reader<Box<dyn std::io::Read + Send>> = if file == "-" {
+                    csv::Reader::from_reader(Box::new(std::io::stdin()))
+                } else {
+                    match csv::Reader::from_path(&file) {
+                        Ok(reader) => csv::Reader::from_reader(Box::new(reader.into_inner())),
+                        Err(e) => {
+                            return ExitStatus::General(format!("failed to read {}: {}", file, e))
+                        }
                     }
                 };
                 let headers = match reader.headers() {
@@ -571,40 +658,120 @@ pub(super) async fn import_csv(
                         ))
                     }
                 };
-                let schema = meta.columns.clone();
 
-                // 表头匹配：表全部列必须在表头中（缺失 → General 含列名）
-                let mut col_index: Vec<usize> = Vec::with_capacity(schema.len());
-                for (name, _) in &schema {
-                    match headers.iter().position(|h| h == name) {
-                        Some(index) => col_index.push(index),
-                        None => {
-                            return ExitStatus::General(format!(
-                                "CSV header is missing column \"{}\" of table {}",
-                                name, table
-                            ))
+                // MS29 T2：schema 来源分叉——既有表按列名匹配；表缺失时按
+                // 表头推导类型并经常规建表通道建表（守卫自然生效）。两臂收敛
+                // 为同一 schema/col_index/records 组合，插入循环零分叉。
+                let (schema, col_index, records) = if let Some(meta) = meta {
+                    let schema = meta.columns.clone();
+
+                    // 表头匹配：表全部列必须在表头中（缺失 → General 含列名）
+                    let mut col_index: Vec<usize> = Vec::with_capacity(schema.len());
+                    for (name, _) in &schema {
+                        match headers.iter().position(|h| h == name) {
+                            Some(index) => col_index.push(index),
+                            None => {
+                                return ExitStatus::General(format!(
+                                    "CSV header is missing column \"{}\" of table {}",
+                                    name, table
+                                ))
+                            }
                         }
                     }
-                }
-                // 表头不得含表外列（未知 → General 含列名）
-                for header in headers.iter() {
-                    if !schema.iter().any(|(name, _)| name == header) {
-                        return ExitStatus::General(format!(
-                            "CSV header contains unknown column \"{}\" of table {}",
-                            header, table
-                        ));
+                    // 表头不得含表外列（未知 → General 含列名）
+                    for header in headers.iter() {
+                        if !schema.iter().any(|(name, _)| name == header) {
+                            return ExitStatus::General(format!(
+                                "CSV header contains unknown column \"{}\" of table {}",
+                                header, table
+                            ));
+                        }
                     }
-                }
 
-                // 先收齐数据行（n 需已知，row k of n 定位）；RFC4180 引号/转义/
-                // 跨行由 csv crate 承载，记录长度不一致按解析错误拒绝
-                let records: Vec<csv::StringRecord> =
-                    match reader.records().collect::<Result<Vec<_>, _>>() {
+                    // 先收齐数据行（n 需已知，row k of n 定位）；RFC4180 引号/转义/
+                    // 跨行由 csv crate 承载，记录长度不一致按解析错误拒绝
+                    let records: Vec<csv::StringRecord> = match reader
+                        .records()
+                        .collect::<Result<Vec<_>, _>>()
+                    {
                         Ok(records) => records,
                         Err(e) => {
                             return ExitStatus::General(format!("failed to parse {}: {}", file, e))
                         }
                     };
+                    (schema, col_index, records)
+                } else {
+                    // 自动建表：推导需全量数据行 → 先收齐（同上预收集语义）
+                    let records: Vec<csv::StringRecord> = match reader
+                        .records()
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(records) => records,
+                        Err(e) => {
+                            return ExitStatus::General(format!("failed to parse {}: {}", file, e))
+                        }
+                    };
+                    let names: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
+                    let rows: Vec<Vec<Value>> = records
+                        .iter()
+                        .map(|record| {
+                            (0..names.len())
+                                .map(|i| csv_field_guess(record.get(i).unwrap_or("")))
+                                .collect()
+                        })
+                        .collect();
+                    let inferred = match infer_ctas_column_types(&names, &rows) {
+                        Ok(types) => types,
+                        Err(PlanError::CtasColumnTypeConflict(detail)) => {
+                            // 推导冲突在任何写入前判定（零副作用），General
+                            // 点名列名与冲突类型（不做 STRING 宽化）
+                            return ExitStatus::General(format!(
+                                "cannot infer column types from CSV: {}",
+                                detail
+                            ));
+                        }
+                        Err(e) => {
+                            return ExitStatus::General(format!(
+                                "cannot infer column types from CSV: {}",
+                                e
+                            ))
+                        }
+                    };
+                    // 建表 DDL（无主键——首列重复值合法，无键行语义；保留名/
+                    // 重复列名等常规建表守卫自然生效），失败走既有 SQL 失败
+                    // 通道（exit 3）且零副作用
+                    let columns: Vec<String> = names
+                        .iter()
+                        .zip(inferred.iter())
+                        .map(|(name, ty)| format!("{} {}", quote_ident(name), column_type_sql(ty)))
+                        .collect();
+                    let ddl = format!(
+                        "CREATE TABLE {} ({});",
+                        quote_ident(&table),
+                        columns.join(", ")
+                    );
+                    match db.execute_sql(&ddl).await {
+                        Response::AffectedRows { .. } => {}
+                        Response::Error { message, .. } => {
+                            return ExitStatus::Sql(format!(
+                                "failed to auto-create table {}: {}",
+                                table, message
+                            ))
+                        }
+                        other => {
+                            return ExitStatus::Sql(format!(
+                                "failed to auto-create table {}: unexpected response {:?}",
+                                table, other
+                            ))
+                        }
+                    }
+                    // 恒等列映射：插入转换直接消费推导结果，不重取 catalog
+                    //（规避 get_table 大小写归一化二次查询）
+                    let schema: Vec<(String, ColumnType)> =
+                        names.into_iter().zip(inferred).collect();
+                    let col_index: Vec<usize> = (0..schema.len()).collect();
+                    (schema, col_index, records)
+                };
 
                 let total = records.len();
                 let mut imported: u64 = 0;
@@ -692,6 +859,22 @@ fn csv_value(field: &str, col_type: &ColumnType) -> Result<serde_json::Value, St
         }
         ColumnType::String(_) => Ok(serde_json::Value::String(field.to_string())),
     }
+}
+
+/// MS29 T2：CSV 字段 → 推导用引擎 JSON 值（免建表导入的类型猜测纯函数）。
+/// 空 → NULL（参与任意类型推导）；i64 → INT；f64 → FLOAT；其余 → STRING。
+/// 解析口径与 `csv_value` 同款（`from_str` 语义，不特判 inf/NaN）。
+fn csv_field_guess(field: &str) -> Value {
+    if field.is_empty() {
+        return Value::Null;
+    }
+    if let Ok(i) = field.parse::<i64>() {
+        return Value::Int(i);
+    }
+    if let Ok(f) = field.parse::<f64>() {
+        return Value::Float(f);
+    }
+    Value::String(field.to_string())
 }
 
 /// 生成一表的单行 CREATE TABLE DDL（含结尾分号；schema 与 dump 共用）。
@@ -838,6 +1021,7 @@ pub(super) async fn stats(
     table: &str,
     format: Option<FormatArg>,
     key: Option<&str>,
+    lock_wait: Option<Duration>,
 ) -> ExitStatus {
     let db_path = match resolve_existing_db(db) {
         Ok(p) => p,
@@ -847,6 +1031,7 @@ pub(super) async fn stats(
     super::execute_command_inner(
         &db_path,
         key,
+        lock_wait,
         move |db| {
             Box::pin(async move {
                 let (columns, rows) = match fetch_table_rows(db, &table).await {
@@ -1055,6 +1240,7 @@ pub(super) async fn sample(
     n: Option<usize>,
     format: Option<FormatArg>,
     key: Option<&str>,
+    lock_wait: Option<Duration>,
 ) -> ExitStatus {
     if let Some(0) = n {
         return ExitStatus::Usage("sample size N must be at least 1".to_string());
@@ -1068,6 +1254,7 @@ pub(super) async fn sample(
     super::execute_command_inner(
         &db_path,
         key,
+        lock_wait,
         move |db| {
             Box::pin(async move {
                 let (columns, rows) = match fetch_table_rows(db, &table).await {
@@ -1123,6 +1310,7 @@ pub(super) async fn profile(
     top: Option<usize>,
     format: Option<FormatArg>,
     key: Option<&str>,
+    lock_wait: Option<Duration>,
 ) -> ExitStatus {
     let k = top.unwrap_or(5);
     if !(1..=20).contains(&k) {
@@ -1136,6 +1324,7 @@ pub(super) async fn profile(
     super::execute_command_inner(
         &db_path,
         key,
+        lock_wait,
         move |db| {
             Box::pin(async move {
                 let (columns, rows) = match fetch_table_rows(db, &table).await {

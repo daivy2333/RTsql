@@ -17,9 +17,14 @@ use rtsql::network::protocol::Response;
 use rtsql::storage::StorageError;
 use rtsql::transaction::IsolationLevel;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 
 const KEY: &str = "pw";
+
+/// T4（D8 校准）：锁冲突断言用例的显式短预算——`Some(0)` ＝ 仅 ~8ms 可见性
+/// 下限窗口即拒绝（MS28 前默认语义的显式表达），断言本身零变化。
+const ZERO_WAIT: Option<Duration> = Some(Duration::from_millis(0));
 
 fn db_path(dir: &TempDir) -> PathBuf {
     dir.path().join("ro.db")
@@ -116,7 +121,7 @@ async fn r1_readonly_rejected_while_writer_holds_lock() {
     let before = std::fs::read(&path).unwrap();
 
     let _writer = Database::open(&path).await.unwrap();
-    let err = expect_err(Database::open_readonly(&path).await);
+    let err = expect_err(Database::open_readonly_with_lock_wait(&path, None, ZERO_WAIT).await);
     assert_locked(&err);
 
     assert_eq!(
@@ -133,7 +138,9 @@ async fn r1_writer_rejected_while_readonly_holds_lock() {
     let path = seed(&dir).await;
 
     let reader = Database::open_readonly(&path).await.unwrap();
-    let err = expect_err(Database::open(&path).await);
+    let err = expect_err(
+        Database::open_with_lock_wait(&path, IsolationLevel::RepeatableRead, None, ZERO_WAIT).await,
+    );
     assert_locked(&err);
 
     drop(reader);
@@ -357,7 +364,7 @@ async fn append_pending_wal_records(db: &Path) {
 use rtsql::transaction::Transaction;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// R4：只读会话 13 个写计划变体逐一点名拒绝（SQLSTATE 25006），库与 schema
 /// 无变化；拒绝先于任何写入生效。
@@ -490,9 +497,10 @@ async fn r5_readonly_session_attaches_readonly() {
     // 附加库被写者独占 → 只读会话 ATTACH 失败（锁冲突，零副作用）。
     {
         let _writer = Database::open(&attached).await.unwrap();
-        let out = run_cli(
+        let out = run_cli_env(
             dir.path(),
             &["--readonly", main.to_str().unwrap(), &attach_sql],
+            &[("RTSQL_BUSY_TIMEOUT", "0")],
         );
         assert_eq!(out.code, Some(4), "locked attach: {}", out.stderr);
         assert!(
@@ -557,9 +565,10 @@ async fn cli_readonly_open_modes() {
     // 锁冲突 → exit 4（锁先于伴生文件判定，同读写构造纪律）。
     {
         let _writer = Database::open(&path).await.unwrap();
-        let locked = run_cli(
+        let locked = run_cli_env(
             dir.path(),
             &["--readonly", path.to_str().unwrap(), "SELECT n FROM t"],
+            &[("RTSQL_BUSY_TIMEOUT", "0")],
         );
         assert_eq!(locked.code, Some(4), "locked readonly: {}", locked.stderr);
         assert!(
@@ -665,11 +674,21 @@ struct CliOutput {
 }
 
 fn run_cli(dir: &Path, args: &[&str]) -> CliOutput {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtsql"))
-        .args(args)
+    run_cli_env(dir, args, &[])
+}
+
+/// T4（D8 校准）：锁冲突断言子进程用例的显式短预算注入
+/// （`RTSQL_BUSY_TIMEOUT=0` ＝ 仅 ~8ms 下限窗口；断言本身零变化）。
+fn run_cli_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> CliOutput {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtsql"));
+    cmd.args(args)
         .current_dir(dir)
         .env("RTSQL_HOME", dir)
-        .env_remove("RTSQL_KEY")
+        .env_remove("RTSQL_KEY");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

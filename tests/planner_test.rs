@@ -1009,6 +1009,158 @@ fn test_create_table_table_level_single_column_unique_non_int_rejected() {
 }
 
 // ===========================================================================
+// MS29 T8：CREATE TABLE 重复列名计划期拒绝（归一后同名同面）
+// ===========================================================================
+
+/// T8（R-S1）：同名重复列计划期点名拒绝——该形态静默建成会导致
+/// dump→restore 必触发 MultiplePrimaryKey（调查直证在案）。
+#[test]
+fn test_create_table_duplicate_column_rejected() {
+    let sql = r#"CREATE TABLE dup ("a" INT, "a" STRING)"#;
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("duplicate column name") && e.to_string().contains("'a'"),
+            "重复列名必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected duplicate column rejection, got {:?}", plan),
+    }
+}
+
+/// T8（R-S2）：引号大小写归一后同名同拒绝——列名小写归一后重复。
+#[test]
+fn test_create_table_duplicate_column_case_normalized_rejected() {
+    let sql = r#"CREATE TABLE dup ("A" INT, "a" INT)"#;
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("duplicate column name") && e.to_string().contains("'a'"),
+            "归一后同名必须点名拒绝，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected duplicate column rejection, got {:?}", plan),
+    }
+}
+
+/// T8（R-S3）：唯一列名建表零回归抽样（守卫不误伤既有通道）。
+#[test]
+fn test_create_table_unique_column_names_still_accepted() {
+    let sql = r#"CREATE TABLE ok ("a" INT, "b" STRING, "c" INT)"#;
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Ok(PhysicalPlan::CreateTable(node)) => {
+            assert_eq!(node.columns.len(), 3);
+        }
+        Err(e) => panic!("Unique column names must stay accepted, got: {e}"),
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+// ===========================================================================
+// MS29 T4：CREATE TABLE 声明期 DEFAULT 类型校验/归一（计划期单元）
+// ===========================================================================
+
+/// T4（R-S1）：BOOL 列整数字面量 DEFAULT 计划期点名拒绝。
+#[test]
+fn test_create_table_default_type_mismatch_rejected_in_plan() {
+    let sql = "CREATE TABLE t (b BOOL DEFAULT 1)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let result = builder.build_plan(&stmts[0]);
+
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("DEFAULT type mismatch")
+                && e.to_string().contains('b')
+                && e.to_string().contains("BOOL")
+                && e.to_string().contains("INT"),
+            "声明期 DEFAULT 必须点名列名与期望/实际类型，实际: {e}"
+        ),
+        Ok(plan) => panic!("Expected DEFAULT type mismatch rejection, got {:?}", plan),
+    }
+}
+
+/// T4（R-S3）：FLOAT 列整数字面量 DEFAULT 归一为 Float 载荷。
+#[test]
+fn test_create_table_float_int_default_normalized_in_plan() {
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, score FLOAT DEFAULT 2)";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::CreateTable(node) => {
+            let score = node
+                .columns
+                .iter()
+                .find(|c| c.name == "score")
+                .expect("score column");
+            match score.constraints.first() {
+                Some(ColumnConstraint::DefaultValue(v)) => {
+                    assert_eq!(
+                        v,
+                        &rtsql::Value::Float(2.0),
+                        "DEFAULT 2 必须归一为 Float(2.0)"
+                    );
+                }
+                other => panic!("Expected DefaultValue constraint, got {:?}", other),
+            }
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+/// T4（R-S7 对照）：DEFAULT NULL 豁免与同型 DEFAULT 载荷不变（零回归）。
+#[test]
+fn test_create_table_null_and_same_type_defaults_unchanged() {
+    let sql =
+        "CREATE TABLE t (id INT PRIMARY KEY, b BOOL DEFAULT NULL, name STRING DEFAULT 'anon')";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = PlanBuilder::new();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::CreateTable(node) => {
+            let b = node
+                .columns
+                .iter()
+                .find(|c| c.name == "b")
+                .expect("b column");
+            match b.constraints.first() {
+                Some(ColumnConstraint::DefaultValue(v)) => {
+                    assert_eq!(v, &rtsql::Value::Null, "DEFAULT NULL 豁免且载荷保持 Null");
+                }
+                other => panic!("Expected DefaultValue constraint, got {:?}", other),
+            }
+            let name = node
+                .columns
+                .iter()
+                .find(|c| c.name == "name")
+                .expect("name column");
+            match name.constraints.first() {
+                Some(ColumnConstraint::DefaultValue(v)) => {
+                    assert_eq!(
+                        v,
+                        &rtsql::Value::String("anon".to_string()),
+                        "同型 String DEFAULT 原样保持"
+                    );
+                }
+                other => panic!("Expected DefaultValue constraint, got {:?}", other),
+            }
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+// ===========================================================================
 // MS24 Iteration 000 (1.5/D2): 子集列清单 INSERT 与 DEFAULT 填充
 // ===========================================================================
 

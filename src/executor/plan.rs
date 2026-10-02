@@ -36,6 +36,10 @@ pub enum PhysicalPlan {
     /// 插入或冲突消解（MS24 Iter001：`ON CONFLICT DO NOTHING/DO UPDATE`、
     /// `REPLACE INTO`）
     Upsert(UpsertNode),
+    /// `INSERT INTO ... SELECT`（MS20-T02 Iter001 design D4）：源 SELECT
+    /// 子树在执行面完整物化为原生 Value 行，按位置映射拼装全宽目标行后
+    /// 归一为既有 `Insert`/`Upsert` 计划进入写路径。
+    InsertSelect(InsertSelectNode),
     /// 更新
     Update(UpdateNode),
     /// 删除
@@ -239,6 +243,32 @@ pub struct UpsertNode {
     pub arbiter: ConflictArbiter,
     /// 冲突动作
     pub action: ConflictAction,
+}
+
+/// `INSERT ... SELECT` 节点（MS20-T02 Iter001 design D4）
+///
+/// 源 SELECT 在计划期以**顶层上下文**编译为子树（WITH/DISTINCT/JOIN/视图/
+/// 集合操作全量消费，不误用 `building_subquery` 抑制分支）。执行面先把源
+/// 完整物化为原生 Value 行，再按 `target_positions`/`fill` 逐行拼装全宽
+/// 目标行，归一为既有 `Insert`/`Upsert` 计划——类型/NOT NULL/PK/UNIQUE/
+/// 二级索引/冲突动作语义全部沿用既有写面，不经 JSON 或 SQL 文本往返。
+#[derive(Debug, Clone)]
+pub struct InsertSelectNode {
+    /// 目标表名（限定扁平名，与 `InsertNode`/`UpsertNode` 同形）
+    pub table_name: String,
+    /// 语句列清单（小写；空 = 未写清单，按表列位全量接收）
+    pub columns: Vec<String>,
+    /// 源 SELECT 计划子树（顶层上下文编译）
+    pub source: Box<PhysicalPlan>,
+    /// 源输出宽度（计划期判定——空源同样校验，结构验证不依赖数据行）
+    pub source_width: usize,
+    /// 清单→表列位置映射（`columns[i]` 的目标列位）；未写清单时为恒等映射
+    pub target_positions: Vec<usize>,
+    /// 全宽填充值（表列宽：声明 DEFAULT 或 NULL）；清单省略位的落点值。
+    /// 未写清单时恒等映射覆盖全部位置，本字段不被消费。
+    pub fill: Vec<Value>,
+    /// 可选冲突仲裁/动作（`ON CONFLICT` / `REPLACE INTO` 复用既有解析）
+    pub upsert: Option<(ConflictArbiter, ConflictAction)>,
 }
 
 /// 更新节点（单行单列更新）

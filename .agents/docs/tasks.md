@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-09-30（MS21 DDL 演进与二级索引收尾归档——change `2026-09-29-ms21-ddl-evolution` 六 Iteration 全 accepted：T1 索引条目一致性收口（rekey 回滚语义化回退 + NULL-rekey 还原 + UPSERT SlotNotFound 对齐）+ T2 二级索引端到端（catalog 登记段/`delete_exact`/回填/写路径挂钩/恢复重建/`IndexScanAll` 路由）+ T3 ALTER TABLE ADD/DROP COLUMN（宽度感知解码 + DEFAULT 覆盖层 + 内隐式事务重写删列）+ 用户扩围 T4 TRUNCATE、T5 CREATE/DROP VIEW、T6 删除原语精确化、T7 NULL-rekey 补口；增量规格 +4 域（sql-secondary-indexes / alter-table-column-evolution / truncate-table / sql-views）+ update-index-maintenance 扩展，语料 52 → 56 域；全量 1541 tests）
+> 最后更新：2026-10-02（**MS20 收尾——跨文件 DML 二期落地**：change `2026-10-02-ms20-cross-db-dml` 三 Iteration 全 accepted 收尾归档——附加库 DML 路由与每文件独立提交、INSERT SELECT 物化写入、Iteration 002 缺陷收口〔附加短名限定引用 R9 + 恢复重放按 WAL logical_id 收敛 R10〕；全量 1739 tests / 0 failures / 2 ignored；增量规格 +1 域 `cross-db-dml` + 5 处修改，语料 61 → 62 域。此前同日：plan 完整计划获批与两轮实施审计；2026-10-01：MS29/MS28 收尾归档、milestone-planner 重排）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,9 +12,9 @@
 
 ## 路线图结构
 
-28 个 Milestone：17 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 5 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，作独立 planned 任务行留存〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21 于 2026-09-30 完成）。★初版达成★。
+30 个 Milestone：18 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 6 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档））。★初版达成★。
 
-统一执行序（2026-09-24 用户裁定初版后工作完全重排——编号与执行序无关，沿用「批准执行序与编号无关」既定先例；编号只表规划先后，执行以本序为准）：**MS23 数据完整性约束执行面（正确性红线最优先）→ MS24 SQL 写面补全 → MS19 CLI 管理面小收口 → MS18 one-shot 路径性能收口 → MS25 SQL 读面补全 → MS20 ATTACH 式跨库交互 → MS21 DDL 演进与二级索引 → MS26 嵌入式运行形态 → MS27 存储演进批 → MS22 实测驱动性能批（量化定稿后转 ready）**。MS20 一期于 2026-09-29 完成〔T02 二期除外〕，MS21 于 2026-09-30 完成，下一个建议序为 **MS26 嵌入式运行形态**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据：正确性红线先于新功能（MS15/MS16 纪律）；同代码面相邻减少返工（MS23→MS24 唯一索引与约束语义、MS18→MS26 checkpoint 策略面、MS23→MS21 索引基建、MS26→MS27 存储后端覆盖）；小项批紧随正确性带；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）等留 improvements 域未排期。
+统一执行序（2026-10-01 用户裁定重排——功能补齐前置、性能优化殿后独立成批；沿用「批准执行序与编号无关」既定先例，编号只表规划先后，执行以本序为准）：**MS28 CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint）→ MS29 输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验）→ MS20-T02 跨文件 DML 二期 → MS27 存储演进批（超页溢出 + 完整性校验）→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据（2026-10-01）：外部评审实证的自动化使用摩擦先行收口——并发硬失败 exit 4 → 可配置等待是多 agent 并发使用的语义前提，也是 MS22 持锁窗口治理的前置；输入通道与声明语义同代码面相邻（lifecycle.rs import + ddl_dml.rs 建表/类型面）；存储格式演进体量最大放功能带末尾；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DETACH（I076）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）、WAL fsync 组提交（I049——串行单写者模型下无效，MS22 量化时剔除）等留 improvements 域未排期。
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
 ## Milestone Roadmap
 
@@ -61,9 +61,9 @@
 - **Split signals**: 错误分类牵动 PG 协议层大改时拆出；delete 交互设计膨胀时裁剪为最小语义
 - **Related changes**: `openspec/changes/archive/2026-09-26-ms19-cli-admin-hardening/`（2026-09-26 收尾归档）
 
-### MS20：ATTACH 式跨库交互 — planned（一期已完成，T02 除外）
+### MS20：ATTACH 式跨库交互 — completed
 
-- **Status**: planned（一期 T01 于 2026-09-29 完成——change `2026-09-29-ms20-attach-cross-db` 三 Iteration 全 accepted 收尾并归档：ATTACH 注册面 + 限定名路由只读跨查 + 附加库只读边界 + CTAS 主库物化；增量规格合并 +3 域（`sql-attach-session` / `cross-db-namespace-query` / `create-table-as-select`），语料 49 → 52 域；全量 1458 tests。**残留**：T02 二期跨文件 DML 未实施，待后续 change）
+- **Status**: completed（一期 T01 于 2026-09-29 完成——change `2026-09-29-ms20-attach-cross-db` 三 Iteration 全 accepted 收尾并归档：ATTACH 注册面 + 限定名路由只读跨查 + 附加库只读边界 + CTAS 主库物化；全量 1458 tests。二期 T02 于 2026-10-02 完成——change `2026-10-02-ms20-cross-db-dml` 三 Iteration 全 accepted 收尾并归档：Iteration 000 附加库普通写入与生命周期（T1 目标事务/metadata/WAL/缓冲池/回滚按目标库路由、本地表名一致；T2 全部退出路径统一关闭附加库——成功/SQL 错误/输出错误/信号取消，关闭失败在原执行成功时 exit 1 点名、已有错误保留退出码，已提交数据不因关闭或自动 checkpoint 失败撤销；T3 显式主库事务 0A000 源求值前拒绝、只读 25006 优先、DDL/CTAS 附加目标既有拒绝保持、目标库 WAL 恢复两态一致）；Iteration 001 查询结果写入与完整使用说明（T4 INSERT SELECT 查询计划/源表注册/目标列映射/新计划节点穷尽消费面；T5 源完整物化原生 Value 行→单隐式事务写入→失败还原本语句全部行与索引、冲突动作复用、主库显式事务复用事务、空源 affected_rows=0、同表只消费物化前源行；T6 README 双语与 rtsql-docs 使用面同步）；Iteration 002 缺陷收口（T7 两段附加 FROM 项隐式短名关联名——全子句面可达、显式别名优先、字面含点不误登记；T8 恢复重放按 WAL logical_id 强制落位收敛、dense-assignment 硬失败删除、K05 收窄为物理落位失败）；新增 `tests/cross_db_dml_test.rs` 17 + `tests/insert_select_test.rs` 10 + `tests/recovery_replay_convergence_test.rs` 3 + cross_db_query_test 扩展与 planner/slotted_page 单测；全量 1739 tests / 0 failures / 2 ignored；增量规格 +1 域（`cross-db-dml`）+ 5 处修改，语料 61 → 62 域）
 - **Dependencies**: None（建议序在 MS18 后——one-shot 收敛对多库 CLI 场景有益，非硬前置）
 - **Outcome**: 多 `.db` 文件经 `ATTACH` 关联检索与物化可用（I059，用户点名方向）——一期：attach 注册表 + 「别名.表」命名空间解析（I039 落地的表名消费点扩展）+ 只读跨查 + `CREATE TABLE AS SELECT` 物化（`new`+attach+CTAS 组合覆盖「数据库视作表」全场景）；二期：跨文件 DML（每文件独立提交，非原子 v1 语义文档化）
 - **Rationale**: 用户方向登记（2026-09-24）：两个及以上 db 文件关联检索、跨库增删查改、跨库视图物化；嵌入式正统设计（SQLite ATTACH 同型，PostgreSQL 单连接锁死单库为反例）；一期完成即有独立项目价值（跨库查询/抽取/合并/分析），二期依赖一期 attach 基础设施——同一阶段成果「跨文件关联检索与物化」分两期推进
@@ -80,7 +80,7 @@
 - **Verification boundary**: attach/命名空间/跨查/CTAS/跨文件 DML 独立测试 + 文件锁冲突场景 + 全量零回归
 - **Diagnostic boundary**: `src/database.rs` attach 注册面 + planner 表名解析（`object_name_to_table_name` 消费点扩展）+ pipeline 执行器路由
 - **Split signals**: 二期跨文件 DML 语义或锁交互超预期时拆出独立 MS，一期独立收口
-- **Related changes**: `openspec/changes/archive/2026-09-29-ms20-attach-cross-db/`（一期 T01，2026-09-29 收尾归档；T02 尚未创建）
+- **Related changes**: 一期 `openspec/changes/archive/2026-09-29-ms20-attach-cross-db/`（2026-09-29 收尾归档）；二期 `openspec/changes/archive/2026-10-02-ms20-cross-db-dml/`（2026-10-02 收尾归档）
 
 ### MS21：DDL 演进——ALTER TABLE 与二级索引 — completed
 
@@ -106,9 +106,9 @@
 
 ### MS22：实测驱动性能优化（第一批） — planned（范围量化定稿后转 ready）
 
-- **Status**: planned（候选范围经 profile/bench 定稿后转 ready——沿用 MS08「先量化再决定」纪律）
-- **Dependencies**: None 硬前置（建议序在 MS18 后——I062 先收 close/checkpoint 路径，避免与 I026/I049 同面冲突）
-- **Outcome**: 经量化证实的性能积压按收益排序清收（第一批）。候选池：I049 WAL fsync 合并（组提交）/ I021 INSERT 多值批量 / I026 脏页 writev 批量写回 / I050 RowLockTable DashMap 化 / I024 Varint Key 变长编码 / I038 GC 无键行盲区 / I020 clone 消除 / I066 分配器评估（jemalloc/mimalloc）/ import 逐行 auto-commit 吞吐（无 Ixx——2026-09-30 实测 ≈4.1 ms/行、2000 行 8.246s、30000 行 ≈123s，逐行提交含 `sync_all`；量化来源 change `2026-09-30-catalog-durability-and-cli-surface` Iteration 000 Act 实测）——每项先 bench/profile，达标立项，不达标退还 improvements 并留量化记录
+- **Status**: planned（候选范围经 profile/bench 定稿后转 ready——沿用 MS08「先量化再决定」纪律；2026-10-01 重排定位殿后独立成批，功能补齐带完成后启动）
+- **Dependencies**: None 硬前置（建议序殿后——MS28 busy-timeout 等待语义先行，持锁窗口治理在其上才有意义；I062 已随 MS18 收口）
+- **Outcome**: 经量化证实的性能积压按收益排序清收（第一批）。候选池：I049 WAL fsync 合并（组提交）/ I021 INSERT 多值批量 / I026 脏页 writev 批量写回 / I050 RowLockTable DashMap 化 / I024 Varint Key 变长编码 / I038 GC 无键行盲区 / I020 clone 消除 / I066 分配器评估（jemalloc/mimalloc）/ import 逐行 auto-commit 吞吐（I077-② 持锁窗口治理侧——攒批提交压缩最长持锁尾，与 MS28 busy-timeout 等待语义配套；2026-09-30 实测 ≈4.1 ms/行、2000 行 8.246s、30000 行 ≈123s，逐行提交含 `sync_all`；量化来源 change `2026-09-30-catalog-durability-and-cli-surface` Iteration 000 Act 实测）——每项先 bench/profile，达标立项，不达标退还 improvements 并留量化记录。**避坑注记（2026-10-01 重排）**：I049 组提交在串行单写者模型（one-shot + MS28 busy-timeout）下无效——单写者无并发提交可攒，量化定稿时剔除，除非 I071 serve 扩容路径启动
 - **Rationale**: MS08 实测驱动批处理先例的复活（2026-09-14 剥离时各项「先量化再决定」纪律随条目保留）；各项独立故障域但共享同一验收主题「实测证实的性能收益」，每项独立 change 独立验收，单项失败不阻塞其余
 - **Scope**: 候选池见 Outcome；定稿范围以量化数据为准（规模：小-中 change × N）
 - **Non-goals**: 撕裂树运行期根修（I031 中-大，量化后另行评估）、代价模型（I016）、扫描流式化（I065）、B+Tree 节点级锁（I025）、io_uring（I028）、瘦内部节点（I029）、合并 Tag byte（I030）——全部留 improvements 域
@@ -143,7 +143,7 @@
 
 ### MS24：SQL 写面补全（子集 INSERT 与 UPSERT） — completed（T04 除外）
 
-- **Status**: completed（2026-09-26——change `2026-09-25-ms24-write-surface-completion` 双 Iteration 全 accepted 收尾并归档；T01/T02/T03 已交付，增量规格合并 `openspec/specs/sql-write-surface/` 等四处。**残留**：T04 声明期 DEFAULT 类型校验未实施，随后续 change 收口，保留为本 MS 下独立 planned 任务行）
+- **Status**: completed（2026-09-26——change `2026-09-25-ms24-write-surface-completion` 双 Iteration 全 accepted 收尾并归档；T01/T02/T03 已交付，增量规格合并 `openspec/specs/sql-write-surface/` 等四处。**残留**：T04 声明期 DEFAULT 类型校验未实施——2026-10-01 重排并入 MS29-T02）
 - **Dependencies**: None（建议序在 MS23 后——T02 冲突检测面与 MS23-T01 唯一索引同面；T01 缺省语义消费 MS23 的 NOT NULL 语义）
 - **Outcome**: `INSERT INTO t (col, ...) VALUES ...` 子集列清单可达——缺省列取 DEFAULT，无 DEFAULT 取 NULL、NOT NULL 列拒绝；`INSERT ... ON CONFLICT (cols) DO NOTHING | DO UPDATE SET ...` SQLite 子集语义可达（PK 与唯一索引冲突目标）；非键列写入值与列声明类型一致（ISS04）——类型不匹配值在任何写入前点名拒绝，消除「静默写坏」残余面；建表声明的 DEFAULT 字面量在计划期与列类型校验/归一（MS24-T04）——不存在「建表成功但应用默认值的 INSERT 必然失败」的声明/写入分裂形态
 - **Rationale**: 同上调查——MS16 后 INSERT 列清单必须「恰为表列排列」（数量不符即拒），DEFAULT 解析持久化（`src/storage/data/table_manager.rs:28`）但无任何消费点、永不触发；UPSERT（ON CONFLICT / OR REPLACE）planner 全无匹配。两者是 agent 生成 SQL 的高频写入形态，与约束面同域相邻故紧随其后；ISS04（2026-09-25 MS23 Review 登记，R29）——MS16/MS23 已分别收口 PK 键列与唯一列的类型边缘，非键列写入面残余「静默写坏」，修复面（`build_update`/`extract_insert_values` 计划期门或执行器前置 + 两执行器）与本 MS 诊断边界完全同面，按同代码面相邻原则顺带收口；MS24-T04（2026-09-25 路线补充）——Iteration 000 Review 发现声明面零校验：Bool 列 `DEFAULT 1` 建表被接受（Iteration 000 D1 通道持久化任意字面量变体）、应用默认值的 INSERT 必然被 T03 写入类型门点名拒绝，声明期校验与写入门同规则面同文件（`ddl_dml.rs` DEFAULT 声明面），按 ISS04 并入先例顺带收口，补全 DEFAULT 闭环（解析→持久化→应用→渲染→声明期校验）最后一环
@@ -154,7 +154,7 @@
 | MS24-T01 | 子集列清单 INSERT + DEFAULT 应用（无 DEFAULT 列的缺省语义随调查定稿） | Explorer 2026-09-24：default_value 仅 catalog 持久化（`table_manager.rs:28`），insert 路径无消费 |
 | MS24-T02 | UPSERT：ON CONFLICT DO NOTHING / DO UPDATE SET（冲突目标 PK/唯一索引） | Explorer 2026-09-24：`grep on_conflict\|or_replace` 零匹配 |
 | MS24-T03 | ISS04：非键列写入值类型门——INSERT/UPDATE 值与列声明类型不一致在任何写入前点名拒绝（计划期 `build_update`/`extract_insert_values` 或执行器写入前置随调查定稿）；dump/restore/import 通道类型面是否纳入随调查裁定；可与 T01/T02 任一 change 顺带 | Issue ISS04（2026-09-25 MS23 Review 登记，R29） |
-| MS24-T04（**未实施，planned**） | 声明期 DEFAULT 类型校验：CREATE TABLE 计划期校验/归一声明 DEFAULT 字面量与列声明类型一致（规则与写入类型门对齐——NULL 豁免、FLOAT 列 Int 升格、日期族 String 强制解析、其余跨类型建表点名拒绝零副作用），消除「建表成功但应用默认值的 INSERT 必然失败」分裂；可随 MS24 收口顺带或独立小 change（并入当前活跃 change 需用户批准扩围） | MS24 Iteration 000 Review finding（000-initial.md Follow-up Decision 2，2026-09-25；Bool 列 `DEFAULT 1` 写入期才拒绝） |
+| MS24-T04（**未实施，planned → 2026-10-01 重排并入 MS29-T02**） | 声明期 DEFAULT 类型校验：CREATE TABLE 计划期校验/归一声明 DEFAULT 字面量与列声明类型一致（规则与写入类型门对齐——NULL 豁免、FLOAT 列 Int 升格、日期族 String 强制解析、其余跨类型建表点名拒绝零副作用），消除「建表成功但应用默认值的 INSERT 必然失败」分裂 | MS24 Iteration 000 Review finding（000-initial.md Follow-up Decision 2，2026-09-25；Bool 列 `DEFAULT 1` 写入期才拒绝） |
 
 - **Non-goals**: 多值 INSERT 批量执行性能（I021——MS22 性能批候选）；REPLACE INTO 等价语法（随调查裁定）；部分索引/表达式索引冲突目标
 - **Workload**: 2-4 change（T03/T04 均可顺带或独立小 change；T04 并入当前活跃 change 需用户批准扩围）
@@ -238,6 +238,48 @@
 - **Split signals**: 溢出页牵动 MVCC 版本链/GC 全链路改造超预期时先收 T02，T01 另行评估
 - **Related changes**: None
 
+### MS28：CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint） — completed
+
+- **Status**: completed（2026-10-01——change `2026-10-01-ms28-cli-concurrency-checkpoint` 两 Iteration 全 accepted 收尾并归档。T1-T4 锁等待预算策略化：`try_lock_with_backoff` 改 deadline 循环（`LOCK_VISIBILITY_FLOOR` ≈8ms 下限恒存 + `DEFAULT_LOCK_WAIT` 5000ms）+ `FileStorage::open_with_lock`/`open_readonly_with_lock` 新核心（既有 open 家族委托壳零变化）+ `Database::open_with_lock_wait`（FileStorage 构造段专用线程 + oneshot 回传——锁等待期间 open future 让出、信号分支零改动即时中断）+ CLI `--busy-timeout` global flag/env `RTSQL_BUSY_TIMEOUT`（clap 校验 exit 2、flag 优先、`:memory:` 接受忽略、`delete` 探测不适用）单点解析穿线全部开库命令与 ATTACH + 存量锁用例显式短预算 D8 校准（断言语义零变化）。T5：`rtsql checkpoint <db>` 子命令（`resolve_existing_db` 缺失 exit 1 → rw 独占开库锁冲突经预算 exit 4 → 零工作谓词 checkpoint() 前取样 → 确认行两形态〔no pending work / wal truncated〕、`--readonly`/`:memory:` exit 2 守卫自动、对钥 exit 0/错钥 exit 5）。T6：SKILL.md 命令面与 README 双语逐条同步（含只读句 DETACH 不实声明移除——Plan Review finding）。新增 `tests/busy_timeout_test.rs` 18 例 + `tests/checkpoint_command_test.rs` 6 例；全量 1657 tests / 0 failures / 2 ignored；增量规格合并 3 域修改，域数 61 不变）
+- **Dependencies**: None
+- **Outcome**: 并发 one-shot 调用从「立即拒绝 exit 4」变为「可配置等待、逐个原子完成」（I077-①——`--busy-timeout`/env/lib 三通道，复用 `try_lock_with_backoff` 改策略，超时维持 `DatabaseLocked` exit 4 错误面，读共享锁与写独占锁两侧统一生效）；用户可主动落盘（I079——`rtsql checkpoint <db>` 子命令，外部备份/接管文件前有显式同步点）
+- **Rationale**: 多 agent 并发使用是 one-shot 形态最常触发的场景，硬失败语义与 `--format json/csv/tsv` 的自动化定位对立（2026-10-01 外部评审 #1/#3 实证）；两项同属「库生命周期与并发的 CLI 面」，共享 `src/cli/` 子命令面与错误面验证边界，按 MS19「CLI 管理面小收口」先例聚合；MS22 的持锁窗口治理以本阶段等待语义为前提，故列功能带首项
+- **Scope**:
+
+| Task | 目标 | 依据 |
+|---|---|---|
+| MS28-T01 | I077-①：锁等待策略可配置——`--busy-timeout` / env / lib 三通道（沿用 `RTSQL_KEY`/`RTSQL_WAL_CHECKPOINT_BYTES` 通道先例），超时后维持既有 `DatabaseLocked` exit 4 错误面；读共享锁与写独占锁两侧统一生效 | improvements I077（2026-10-01 用户方向 + 外部评审 #1） |
+| MS28-T02 | I079：`rtsql checkpoint <db>` 子命令（复用 `resolve_existing_db` + 开库 + `checkpoint()`；`--readonly`/`:memory:` 组合 exit 2） | improvements I079（2026-10-01 外部评审 #3 转登记） |
+
+- **Non-goals**: FIFO 票据队列（flock 非 FIFO，公平性诉求留给 I071 serve 扩容路径）；跨进程多写者；`rtsql serve` 复活（I071，定位为串行模型达天花板后的扩容路径）；import 攒批提交（→MS22，持锁窗口治理侧）
+- **Workload**: 1-2 个小 change
+- **Stable baseline**: 并发 one-shot 调用全部接受、逐个原子完成（每次调用全程持锁、重叠结构性不可能）；外部备份前有显式落盘命令；全量测试零回归
+- **Verification boundary**: 锁矩阵测试（等待/超时/错误面/读写两侧）+ checkpoint 命令 e2e（WAL 截断/位点推进/零工作早退语义保持）+ 全量零回归
+- **Diagnostic boundary**: `src/storage/file_storage.rs` 锁面 + `src/cli/` 子命令面 + `src/database.rs` checkpoint 接线
+- **Split signals**: busy-timeout 牵动锁恢复语义重设计时拆出独立收口
+- **Related changes**: `openspec/changes/archive/2026-10-01-ms28-cli-concurrency-checkpoint/`（2026-10-01 收尾归档）
+
+### MS29：输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验） — planned
+
+- **Status**: completed（2026-10-01——change `2026-10-01-ms29-import-input-and-default-declaration` 两 Iteration 全 accepted 收尾并归档。Iteration 000：T1 import stdin `-` 通道（`csv::Reader::from_reader` stdin 臂、records 预收集/RFC4180/逐条 auto-commit/输出语义零变化）+ T2 免建表导入（`get_table` Err 臂自动建表：`csv_field_guess` 逐字段猜测〔空→Null、i64→Int、f64→Float、其余 String〕→ `infer_ctas_column_types` pub(crate) 复用推导 → 冲突 General exit 1 点名零副作用 → DDL 经 `quote_ident` 常规建表通道（保留名/重复列名守卫自然生效）→ 恒等列映射复用既有插入循环；首列隐式主键语义——首 Cycle T2 两场景 Gate 5 阻塞（Plan 错误 ×2：误判引擎支持无主键建表、误判重复列名守卫已存在）经 Plan Review replan 修订为「沿用引擎未声明 PK → 首列隐式主键」+ T8 守卫增入）+ T3 `:memory:` import 豁免（`lifecycle_db_target` Import 放行 + `--key` × `:memory:` Usage exit 2 + memory 路由跳过 resolve/exists）+ T8 planner 重复列名计划期守卫（`build_create_table` 归一后同名 `InvalidQuery` 点名——「重复列名表静默建成且不可 dump 往返」既有缺陷闭环，Issue 候选随闭环未落账）。Iteration 001：T4 `validate_default_value` 单点（NULL 豁免、FLOAT×Int 升格归一、日期族 `coerce_datetime_write` 验证、异型 `DefaultTypeMismatch` 点名）消费于 `build_create_table`（T8 守卫后）与 `build_alter_table` AddColumn + T5 `extract_default_value` TypedString 臂（Date/Timestamp 验证后 String 目录形态——日期族 DEFAULT dump→restore 往返修复，修复前 RED＝restore 报 `Unsupported value type`）+ 新 `PlanError::DefaultTypeMismatch`（58000）+ T6 ALTER 同款规则 + T7 SKILL.md/README 双语同步。新增 `tests/import_input_surface_test.rs` 12 例 + `tests/default_declaration_test.rs` 14 例 + planner_test +6（T8 3 + T4 3）；全量 1689 tests / 0 failures / 2 ignored；增量规格合并 2 域（`cli-noninteractive-shell` import MODIFIED、`sql-write-surface` +2 Requirement 现 7），域数 61 不变）
+- **Dependencies**: None
+- **Outcome**: 外部数据进入通道补齐（I078——import 收 stdin `-`、目标表不存在时按 CSV 表头建表〔类型推导复用 MS20 CTAS 矩阵〕、`:memory:` 导入豁免面，「echo CSV | rtsql :memory: import -」类 Unix 组合可达）；写面声明语义闭环（MS24-T04——CREATE TABLE/ALTER ADD COLUMN 计划期校验声明 DEFAULT 字面量与列类型一致，消除「建表成功但应用默认值的 INSERT 必然失败」分裂形态）；顺带闭环既有缺陷两项——日期族 DEFAULT 的 dump→restore 往返断裂（TypedString 解析缺失）与重复列名表静默建成（planner 守卫，replan 增入）
+- **Rationale**: 输出侧 `--format json/csv/tsv` 管道友好而输入侧结构性残缺（外部评审 #7 实证——`:memory:` 拒绝生命周期子命令、import 需已存在表且不收 stdin）；T04 与 I078 共享 `src/cli/lifecycle.rs` import 面 + `src/parser/planner/ddl_dml.rs` 建表/类型面诊断边界，且 T04 单独成 milestone 过薄（只改一个校验门），按同代码面相邻原则并入
+- **Scope**:
+
+| Task | 目标 | 依据 |
+|---|---|---|
+| MS29-T01 | I078：import 收 `-` stdin（对齐 restore 先例）+ 目标表不存在时按 CSV 表头建表（类型推导复用 `infer_ctas_column_types` 矩阵先例）+ `:memory:` 豁免面（与「主命令缺库显式拒绝、创建通道收敛 `rtsql new`」既有语义协调） | improvements I078（2026-10-01 外部评审 #7 转登记） |
+| MS29-T02 | MS24-T04：声明期 DEFAULT 类型校验（规则与写入类型门对齐——NULL 豁免、FLOAT 列 Int 升格、日期族 String 强制解析、其余跨类型建表点名拒绝零副作用） | MS24 Iteration 000 Review finding（2026-09-25），2026-10-01 重排并入 |
+
+- **Non-goals**: 列改名/改类型等 schema 演进扩展；JSON/BLOB 承载（I069）；export 通道变更；CSV 之外的输入格式
+- **Workload**: 1-2 个小 change
+- **Stable baseline**: stdin/内存库导入组合端到端可达（形态随调查定稿）；「建表成功但应用默认值必然失败」分裂形态消除；dump/restore/import 保真不回归；全量零回归
+- **Verification boundary**: stdin/建表导入矩阵（类型推导/表头失配/`:memory:`/缺库拒绝边界）+ DEFAULT 声明期拒绝矩阵 + dump/restore 保真 + 全量零回归
+- **Diagnostic boundary**: `src/cli/lifecycle.rs` import 面 + `src/parser/planner/ddl_dml.rs` DEFAULT 声明面
+- **Split signals**: CSV 表头建表的类型推导需改造 CTAS 矩阵时拆出独立收口
+- **Related changes**: `openspec/changes/archive/2026-10-01-ms29-import-input-and-default-declaration/`（2026-10-01 收尾归档）
+
 ## D-candidates（不归入当前 MS，待后续决定）
 
 | 标题 | 不建议做的原因 | 何时重评 |
@@ -256,19 +298,20 @@
 
 ## 依赖关系图
 
-初版后统一路线（2026-09-24 两批规划并完全重排执行序，均无硬前置，编号与执行序无关）：
+初版后统一路线（2026-09-24 规划、2026-10-01 用户批准重排：功能补齐前置、性能殿后独立，均无硬前置，编号与执行序无关）：
 
 ```
 MS23 约束面 ──(唯一索引/约束语义)──→ MS24 写面
 MS23 ──(索引基建)──→ MS21 DDL/二级索引
 MS18 one-shot 性能 ──(checkpoint 策略面)──→ MS26 运行形态 ──(存储后端)──→ MS27 存储演进
 MS25 SQL 读面 · MS20 ATTACH 跨库（独立，序自由）
-全部殿后 ──→ MS22 实测驱动性能批（量化定稿后转 ready）
+MS28 并发等待语义 ──(持锁窗口治理前提)──→ MS22 import 攒批（性能批候选）
+全部功能带（MS28/MS29/MS20-T02/MS27）──→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）
 ```
 
-建议执行序：**MS23 → MS24 → MS19 → MS18 → MS25 ✓ → MS20 → MS21 → MS26 ✓ → MS27 → MS22**（截至 2026-09-30 前八项已完成〔MS20 一期完成、T02 二期除外〕，下一项 MS27）
+建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 → MS22**（截至 2026-10-02 前十一项已完成，下一项 MS27 存储演进批）
 
-无环；所有依赖均已满足。初版后工作（MS18-MS27）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
+无环；所有依赖均已满足。初版后工作（MS18-MS29）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
 
 ## 进行中
 
@@ -283,6 +326,12 @@ MS25 SQL 读面 · MS20 ATTACH 跨库（独立，序自由）
 - （无）
 
 ## 最近完成
+
+- **MS20 二期跨文件 DML（附加库写入 + INSERT SELECT + 缺陷收口）**（2026-10-02）：change `2026-10-02-ms20-cross-db-dml` 三 Iteration 全 accepted——Iteration 000 附加库普通写入与生命周期：T1 目标事务/metadata/WAL/缓冲池/回滚路由（abort 表键用 metadata 本地名，四写执行器经既有路由取目标库资源）；T2 全部退出路径统一关闭附加库（AttachSession 所有权移 `execute_command_inner_mode` 编排器、select 外持有；关闭失败原执行成功时 exit 1 点名、已有错误/信号保留退出码）；T3 显式事务 0A000（源求值与 begin 前点名、主库目标+附加源不误拒）、只读 25006 优先、DDL/CTAS 附加目标拒绝保持、目标库恢复两态一致。Iteration 001 查询结果写入与文档：T4 `PhysicalPlan::InsertSelect` 节点 + `build_insert` 可变借用房 `build_query` 源编译、源表注册进 `extract_all_table_names`、目标列映射/全宽 DEFAULT/NULL 填充、新节点不进 plan cache；T5 源完整物化原生 Value 行（不经 JSON/SQL 往返）→ 单隐式事务写入、失败回滚本语句全部行与索引、ON CONFLICT/REPLACE 复用、主库显式事务复用事务、空源 affected_rows=0；T6 README 双语 + rtsql-docs 使用面。Iteration 002 缺陷收口：T7 两段附加 FROM 项隐式短名关联名（尾段经既有 `register_table_alias` 登记、`qualifier_matches_declared` 全子句面匹配接线、显式别名优先、字面含点不误登记）；T8 恢复重放按 WAL logical_id 强制落位（`SlottedPage::add_slot_with_logical_id` 恢复面专用、dense-assignment 硬失败删除、K05 收窄为页满/IO、运行期零变化）；新增 `tests/cross_db_dml_test.rs` 17 + `tests/insert_select_test.rs` 10 + `tests/recovery_replay_convergence_test.rs` 3 + cross_db_query_test +4 与 planner/slotted_page 单测；全量 1739 tests / 0 failures / 2 ignored；增量规格 +1 域 `cross-db-dml` + 5 处修改（`cross-db-namespace-query` 附加库只读边界收窄、`readonly-open-mode` R5、`sql-write-surface` +INSERT SELECT、`sql-table-alias-resolution` R1、`wal-recovery-replay-integrity` R1），语料 61 → 62 域。
+
+- **MS29 输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验）**（2026-10-01）：change `2026-10-01-ms29-import-input-and-default-declaration` 两 Iteration 全 accepted——Iteration 000 import 输入面：T1 stdin `-` 通道（对齐 restore 先例、records 预收集/逐条 auto-commit 零变化）；T2 目标表缺失按 CSV 表头自动建表（`csv_field_guess` 猜测 → `infer_ctas_column_types` pub(crate) 复用推导、冲突 General exit 1 点名零副作用、常规建表通道守卫自然生效、首列隐式主键语义〔INT 首列重复 DuplicateKey fail-fast、FLOAT/STRING 重复合法〕——首 Cycle T2 两场景 Gate 5 阻塞经 replan 修订〔Plan 错误 ×2：引擎无表级无主键、重复列名守卫不存在〕）；T3 `:memory:` import 豁免（`--key` exit 2、其余子命令维持拒绝）；T8 planner 重复列名计划期守卫（replan 增入，既有「静默建成且不可 dump 往返」缺陷闭环）；Iteration 001：T4 `validate_default_value` 单点建表校验/归一（NULL 豁免/FLOAT 升格/日期族解析验证/异型 `DefaultTypeMismatch` 点名）+ T5 TypedString 臂（日期族 DEFAULT dump→restore 往返修复）+ T6 ALTER ADD COLUMN 同款 + T7 SKILL.md/README 双语同步；新增 `tests/import_input_surface_test.rs` 12 例 + `tests/default_declaration_test.rs` 14 例 + planner_test +6；全量 1689 tests / 0 failures / 2 ignored；增量规格合并 2 域（`cli-noninteractive-shell` import MODIFIED、`sql-write-surface` +2 Requirement 现 7），域数 61 不变。
+
+- **MS28 CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint）**（2026-10-01）：change `2026-10-01-ms28-cli-concurrency-checkpoint` 两 Iteration 全 accepted——T1-T4 锁等待预算策略化（storage `open_with_lock`/`open_readonly_with_lock` deadline 循环 + lib `open_with_lock_wait` 专用线程让出、信号即时中断 + CLI `--busy-timeout`/env 三通道穿线全部开库命令与 ATTACH、默认 5000ms/显式 0 仅下限、存量锁用例 D8 校准断言零变化）；T5 `rtsql checkpoint <db>` 显式落盘（零工作明示两形态、缺库 exit 1、锁冲突经预算 exit 4、`--readonly`/`:memory:` exit 2、加密对钥 exit 0/错钥 exit 5）；T6 SKILL.md/README 双语命令面同步（含只读句 DETACH 不实声明移除）；新增 `tests/busy_timeout_test.rs` 18 例 + `tests/checkpoint_command_test.rs` 6 例；全量 1657 tests / 0 failures / 2 ignored；增量规格合并 3 域修改（`cli-noninteractive-shell` +2 Requirement、`database-file-lock` R1、`readonly-open-mode` R1 + Purpose 同步），语料域数 61 不变。
 
 - **MS26 嵌入式运行形态（只读并发 + `:memory:` + WAL 水位 + 派生投影收口）**（2026-09-30）：change `2026-09-30-ms26-embedded-runtime` 四 Iteration 全 accepted——T1/T2 只读打开模式（共享锁多读单写 + WAL 未决拒绝 + 零写入会话 + 13 写变体 25006 + CLI `--readonly` + ATTACH 只读传递）；T3/T4 `:memory:` 库形态（`MemoryStorage` + `open_in_memory()` + CLI 特判与拒绝面、零文件退出即弃）；T8 派生基座外层投影收口（FROM 子查询/CTE/视图三通道裁剪行+表头、未知列 42703，2026-09-30 用户指令 Issue 候选本 change 解决）+ T9/T10/T7 收尾批（组合拒绝用例 / clippy 清零 / 孤儿移除 / 文档三处）；T5/T6 WAL 字节水位（提交边界 `maybe_auto_checkpoint` 单点、16 MiB 默认 + env/lib 双通道、0 禁用、顺延、失败传播且 CTAS 表存活、死接口删除）；增量规格 +3 域 + 3 处修改，语料 56 → 59 域；全量 1590 tests / 0 failures。
 

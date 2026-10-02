@@ -140,6 +140,7 @@ impl PlanBuilder {
             PhysicalPlan::SingleRow => Vec::new(),
             PhysicalPlan::Insert(_)
             | PhysicalPlan::Upsert(_)
+            | PhysicalPlan::InsertSelect(_)
             | PhysicalPlan::Update(_)
             | PhysicalPlan::Delete(_) => Vec::new(),
             PhysicalPlan::CreateTable(_)
@@ -177,7 +178,7 @@ impl PlanBuilder {
                 if let Some(layout) = join_layout {
                     // MS25 T8：布局上唯一命中才认定为列名键；多命中点名为
                     // AmbiguousColumn；无命中交回下方别名/位置既有语义。
-                    if let Some(idx) = resolve_layout_index(layout, None, &name)? {
+                    if let Some(idx) = resolve_layout_index(self, layout, None, &name)? {
                         return Ok(GroupKey {
                             name: name.clone(),
                             column: Some(name),
@@ -223,7 +224,9 @@ impl PlanBuilder {
                 if let Some(layout) = join_layout {
                     // MS25 T8：限定名在布局上精确解析；in-scope 限定符下列
                     // 不在该表沿用既有 NonAggregatedColumn 点名。
-                    if let Some(idx) = resolve_layout_index(layout, Some(&parts[0].value), &name)? {
+                    if let Some(idx) =
+                        resolve_layout_index(self, layout, Some(&parts[0].value), &name)?
+                    {
                         return Ok(GroupKey {
                             name: name.clone(),
                             column: Some(name),
@@ -370,7 +373,12 @@ impl PlanBuilder {
                                     self.register_table_alias(&a.name.value, &table_name);
                                     a.name.value.to_lowercase()
                                 }
-                                None => table_name.clone(),
+                                None => {
+                                    // Iteration 002 T7（R9）：两段附加 FROM 项无显式
+                                    // 别名 → 尾段隐式关联名（附加标记为条件）。
+                                    self.register_implicit_attached_short_name(&table_name);
+                                    table_name.clone()
+                                }
                             };
                             let base_columns =
                                 self.tables.get(&table_name).cloned().unwrap_or_default();
@@ -484,8 +492,13 @@ impl PlanBuilder {
                         self.validate_table(&right_table)?;
                         // design D4：JOIN 右臂基表别名登记，与 FROM 基表臂
                         // 同款（CTE / 视图右臂同上，别名即 effective 键）。
-                        if let Some(a) = table_factor_alias(&join.relation) {
-                            self.register_table_alias(&a.name.value, &right_table);
+                        match table_factor_alias(&join.relation) {
+                            Some(a) => self.register_table_alias(&a.name.value, &right_table),
+                            None => {
+                                // Iteration 002 T7（R9）：右臂两段附加项无显式
+                                // 别名 → 尾段隐式关联名（附加标记为条件）。
+                                self.register_implicit_attached_short_name(&right_table);
+                            }
                         }
                         let columns = self.tables.get(&right_table).cloned().unwrap_or_default();
                         let plan = PhysicalPlan::Scan(ScanNode {
@@ -582,7 +595,10 @@ impl PlanBuilder {
                         .filter(|(col, qualifier)| {
                             col.column.to_lowercase() == qual_col.to_lowercase()
                                 && match qual_table {
-                                    Some(table) => qualifier.eq_ignore_ascii_case(table),
+                                    // T7（R9）：原文相等或归一化命中（隐式短名）。
+                                    Some(table) => {
+                                        self.qualifier_matches_declared(table, qualifier)
+                                    }
                                     None => true,
                                 }
                         })
@@ -606,8 +622,9 @@ impl PlanBuilder {
                     let selected = qualified_columns.iter().any(|(qual_table, qual_col)| {
                         col.column.to_lowercase() == qual_col.to_lowercase()
                             && match qual_table {
-                                // Qualified column: qualifier.col
-                                Some(table) => qualifier.eq_ignore_ascii_case(table),
+                                // Qualified column: qualifier.col（T7：原文相等
+                                // 或归一化命中——隐式短名 `u` ↔ 声明 `o.u`）。
+                                Some(table) => self.qualifier_matches_declared(table, &qualifier),
                                 None => true,
                             }
                     });
@@ -1672,6 +1689,7 @@ impl PlanBuilder {
                 let predicate = compiled?;
 
                 let select_indices = resolve_join_projection_indices(
+                    self,
                     combined,
                     &combined_qualifiers,
                     &qualified_columns,
@@ -2082,12 +2100,11 @@ impl PlanBuilder {
                 .map(|arg| match arg {
                     None => Ok(None),
                     Some(Expr::Identifier(ident)) => match &join_layout {
-                        Some(layout) => {
-                            resolve_layout_index(layout, None, &ident.value).and_then(|idx| {
+                        Some(layout) => resolve_layout_index(self, layout, None, &ident.value)
+                            .and_then(|idx| {
                                 idx.map(Some)
                                     .ok_or_else(|| PlanError::ColumnNotFound(ident.value.clone()))
-                            })
-                        }
+                            }),
                         None => column_indices
                             .get(&ident.value.to_lowercase())
                             .copied()
@@ -2103,6 +2120,7 @@ impl PlanBuilder {
                         } else {
                             match &join_layout {
                                 Some(layout) => resolve_layout_index(
+                                    self,
                                     layout,
                                     Some(&parts[0].value),
                                     &parts[1].value,
@@ -2850,6 +2868,7 @@ fn join_row_layout(columns: &[OutputColumn], qualifiers: &[String]) -> Vec<(Stri
 /// 无命中返回 `None`（交回调用方的既有名字语义）。与 `build_expression` 的布局解析臂
 /// 同款判定，零新文案。
 fn resolve_layout_index(
+    builder: &PlanBuilder,
     layout: &[(String, Vec<String>)],
     table: Option<&str>,
     column: &str,
@@ -2858,7 +2877,10 @@ fn resolve_layout_index(
     let mut offset = 0usize;
     let mut bare_hits: Vec<usize> = Vec::new();
     for (alias, seg) in layout {
-        let alias_matches = table.map(|t| t.to_lowercase() == alias.to_lowercase());
+        // T7（R9）：限定名与布局段键的匹配——原文相等或书写限定符归一化
+        // 命中（隐式短名 `u` ↔ 声明段键 `o.u`）；显式别名段键即别名文本，
+        // 原文相等分支先行命中，既有行为零变化。
+        let alias_matches = table.map(|t| builder.qualifier_matches_declared(t, alias));
         for (pos, seg_col) in seg.iter().enumerate() {
             if seg_col.to_lowercase() == col && alias_matches.unwrap_or(true) {
                 if alias_matches.is_some() {
@@ -2919,6 +2941,7 @@ fn select_list_is_pure_column_list(
 /// （MS19 T5 同款模型：不静默产出与 SELECT 清单不符的行形状）。
 /// design D4：`qualifiers` 与 `combined` 同序同长（声明限定符）。
 fn resolve_join_projection_indices(
+    builder: &PlanBuilder,
     combined: &[OutputColumn],
     qualifiers: &[String],
     qualified_columns: &[(Option<String>, String)],
@@ -2928,10 +2951,10 @@ fn resolve_join_projection_indices(
         qualified_columns.iter().any(|(qual_table, qual_col)| {
             col.column.to_lowercase() == qual_col.to_lowercase()
                 && match qual_table {
+                    // T7（R9）：原文相等或归一化命中（隐式短名）。
                     Some(table) => qualifiers
                         .get(idx)
-                        .map(|q| q.eq_ignore_ascii_case(table))
-                        .unwrap_or(false),
+                        .is_some_and(|q| builder.qualifier_matches_declared(table, q)),
                     None => true,
                 }
         })
@@ -2949,8 +2972,7 @@ fn resolve_join_projection_indices(
                         && match qual_table {
                             Some(table) => qualifiers
                                 .get(*idx)
-                                .map(|q| q.eq_ignore_ascii_case(table))
-                                .unwrap_or(false),
+                                .is_some_and(|q| builder.qualifier_matches_declared(table, q)),
                             None => true,
                         }
                 })

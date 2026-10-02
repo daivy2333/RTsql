@@ -5,7 +5,7 @@ TBD - created by archiving change 2026-09-06-ms10-t02-file-lock-graceful-shutdow
 ## Requirements
 ### Requirement: 重放位置寻址且幂等
 
-崩溃恢复的 redo SHALL 按记录携带的原始位置（`row_id`）重放数据变更，而非从 tail 盲目追加：目标槽位已存在时 SHALL 跳过，不存在时 SHALL 精确落在记录位置（页间切换按记录序列重建页链 next 指针与内存 tail）。在任何驱逐/刷盘状态下，重放结果 SHALL 与原运行提交状态一致；重放重复执行（crash-during-recovery 后重开）SHALL 收敛到同一状态。重放无法落位时 SHALL 显式报错（K05 语义不变）。
+崩溃恢复的 redo SHALL 按记录携带的原始位置（`row_id`，含页与 logical_id）重放数据变更，而非从 tail 盲目追加：目标槽位已存在时 SHALL 跳过；不存在时 SHALL 以记录携带的 logical_id 精确落位——页内分配计数器不足以自然产出该 id 时 SHALL 按记录 id 落位并推进计数器（页间切换按记录序列重建页链 next 指针与内存 tail）。运行期「语句部分写入回滚 → 后续写入 → 崩溃」序列（页内逻辑 id 已被中止事务消耗）SHALL NOT 因重放分配序列与运行期失配而 RedoFailed 拒绝打开；恢复结果 SHALL 与原运行提交状态一致（行集、PK/唯一/二级索引、版本链）。在任何驱逐/刷盘状态下，重放结果 SHALL 与原运行提交状态一致；重放重复执行（crash-during-recovery 后重开）SHALL 收敛到同一状态。重放无法物理落位（页满、IO 错误）时 SHALL 仍显式报错（K05 语义不变）。
 
 #### Scenario: 驱逐规模大 WAL 恢复数据精确
 
@@ -24,6 +24,12 @@ TBD - created by archiving change 2026-09-06-ms10-t02-file-lock-graceful-shutdow
 - **GIVEN** 恢复完成后无新写入、未 checkpoint，进程再次崩溃后重开
 - **WHEN** 恢复再次执行
 - **THEN** 行数与内容与首次恢复完全一致
+
+#### Scenario: 中止后重插的崩溃恢复收敛
+
+- **GIVEN** 表含 NOT NULL/UNIQUE 约束与二级索引，checkpoint 后依次提交写入（含 UPSERT 与主键 rekey），随后多行语句前行已写、后行约束失败回滚（页内逻辑 id 已被中止事务消耗），重插同键行并提交，崩溃（WAL 未 checkpoint、drop 不 close）
+- **WHEN** `Database::open` 执行崩溃恢复
+- **THEN** 恢复成功（无 RedoFailed）；行集、PK 点查、唯一占用与二级索引查询与运行期提交终态一致；无 abort 与 abort 后不重插两个对照序列行为不变
 
 ### Requirement: 重放保持 DML 语义
 

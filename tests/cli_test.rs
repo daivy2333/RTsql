@@ -673,7 +673,11 @@ fn test_lock_precedes_header_validation_exit_4() {
     let holder = std::fs::File::open(&db).unwrap();
     holder.try_lock().expect("test process acquires flock");
 
-    let out = run_cli(dir.path(), &[db.to_str().unwrap(), "SELECT 1"]);
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_BUSY_TIMEOUT", "0")],
+        &[db.to_str().unwrap(), "SELECT 1"],
+    );
     assert_eq!(
         out.code,
         Some(4),
@@ -702,7 +706,11 @@ fn test_lock_conflict_exit_4() {
     let holder = std::fs::File::open(&db_file).unwrap();
     holder.try_lock().expect("test process acquires flock");
 
-    let out = run_cli(dir.path(), &["app", "SELECT id FROM users"]);
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_BUSY_TIMEOUT", "0")],
+        &["app", "SELECT id FROM users"],
+    );
     assert_eq!(
         out.code,
         Some(4),
@@ -1733,8 +1741,9 @@ fn test_import_header_mismatch_rejected() {
     assert_eq!(parsed["rows"], serde_json::json!([[0]]));
 }
 
-/// R-import-S7：目标表不存在 / 目标库不存在 → exit 1（库缺失文案含
-/// `does not exist`）。
+/// R-import-S7：目标库不存在 → exit 1（文案含 `does not exist`，零文件
+/// 创建）。MS29 T2 校准：库存在而目标表缺失的形态不再拒绝——由自动建表
+/// 语义承接（矩阵详见 tests/import_input_surface_test.rs）。
 #[test]
 fn test_import_missing_table_or_db() {
     let dir = fixture();
@@ -1743,16 +1752,22 @@ fn test_import_missing_table_or_db() {
 
     std::fs::write(dir.path().join("data.csv"), "id\n1\n").unwrap();
 
-    // 表不存在
+    // 表不存在：按表头自动建表导入（MS29 T2）
     let out = run_cli(dir.path(), &["import", "app", "t", "data.csv", "--csv"]);
     assert_eq!(
         out.code,
-        Some(1),
-        "stdout: {:?} stderr: {:?}",
+        Some(0),
+        "auto-create import failed: stdout: {:?} stderr: {:?}",
         out.stdout,
         out.stderr
     );
-    assert!(!out.stderr.is_empty(), "missing table must go to stderr");
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["affected_rows"],
+        serde_json::json!(1),
+        "{:?}",
+        out.stdout
+    );
 
     // 库不存在
     let out = run_cli(dir.path(), &["import", "missing", "t", "data.csv", "--csv"]);

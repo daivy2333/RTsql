@@ -2,7 +2,7 @@
 
 ## Purpose
 
-约束 ATTACH 会话内两段限定表名的跨库路由与只读边界：`alias.table` 在全部表名消费点先查注册表（命中→附加库、未命中→扁平名回落零回归）；SELECT 全形态跨库组合与三段列引用；附加库 DML/DDL 计划期点名拒绝（一期只读）。来源：MS20 一期（change `2026-09-29-ms20-attach-cross-db`，I059 用户方向；跨文件 DML 属 MS20 二期不在本域）。
+约束 ATTACH 会话内两段限定表名的跨库路由与读写边界：`alias.table` 在全部表名消费点先查注册表（命中→附加库、未命中→扁平名回落零回归）；SELECT 全形态跨库组合与三段列引用；附加库写入按 `cross-db-dml` 路由（MS20-T02 二期起），附加库 DDL/CTAS 附加目标继续计划期点名拒绝。来源：MS20 一期（change `2026-09-29-ms20-attach-cross-db`，I059 用户方向）；附加库写入边界收窄来源 MS20-T02 二期（change `2026-10-02-ms20-cross-db-dml`）。
 
 ## Requirements
 
@@ -57,15 +57,27 @@ SELECT 全形态（JOIN、WHERE、子查询、聚合、ORDER BY、DISTINCT、CTE
 
 ### Requirement: 附加库只读边界
 
-对附加库表的 INSERT/UPDATE/DELETE 与一切 DDL（含 `CREATE TABLE alias.t ...`、`DROP TABLE alias.t`）SHALL 计划期点名拒绝（错误按 MS19 错误面携带能力名），SHALL 零副作用。`CREATE TABLE AS SELECT` 目标表限主库（见 `create-table-as-select`）。
+附加库写入边界 SHALL 按语句种类及会话打开模式判定：可写会话的 INSERT/UPSERT/REPLACE、UPDATE、DELETE SHALL 按 `cross-db-dml` 路由独立提交；只读会话 SHALL 按 `readonly-open-mode` 拒绝写入。一切附加库 DDL（含 CREATE/DROP TABLE、ALTER、TRUNCATE、INDEX 与 VIEW）SHALL 继续计划期点名拒绝且零副作用。CREATE TABLE AS SELECT 目标表仍限主库。名称解析和跨库 SELECT 组合 SHALL 保持既有语义。
+
+#### Scenario: 可写会话允许附加库 DML
+
+- **GIVEN** 可写会话已 ATTACH 附加库 o
+- **WHEN** 对 o.u 执行已支持的 INSERT/UPDATE/DELETE
+- **THEN** 按 cross-db-dml 执行于附加库，不误写主库同名表
 
 #### Scenario: 附加库 DML 拒绝
 
-- **GIVEN** 会话已 `ATTACH ... AS o`
-- **WHEN** `INSERT INTO o.u VALUES (1)` / `UPDATE o.u SET ...` / `DELETE FROM o.u`
-- **THEN** 计划期点名拒绝（附加库只读），附加库无任何写入
+- **GIVEN** 会话以只读模式打开并已注册附加库 o，或主库显式事务处于活跃状态
+- **WHEN** 对 o.u 执行 INSERT/UPDATE/DELETE
+- **THEN** 只读会话按 25006 拒绝；可写的显式事务按 0A000 附加目标限制拒绝；附加库不变
 
 #### Scenario: 附加库 DDL 拒绝
 
-- **WHEN** `CREATE TABLE o.newt (a INT)` / `DROP TABLE o.u`
-- **THEN** 计划期点名拒绝（附加库只读）
+- **GIVEN** 会话已 ATTACH 附加库 o
+- **WHEN** 执行 CREATE TABLE o.newt 或 DROP TABLE o.u（ALTER/TRUNCATE/INDEX/VIEW 同边界）
+- **THEN** 计划期点名拒绝，附加库 schema 与数据不变
+
+#### Scenario: CTAS 附加目标继续拒绝
+
+- **WHEN** 执行 CREATE TABLE o.newt AS SELECT ...
+- **THEN** 沿用 create-table-as-select 的主库目标限制，附加库不建表

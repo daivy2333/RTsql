@@ -6,11 +6,13 @@
 //! per-module imports are introduced.
 
 use super::PlanBuilder;
+use crate::executor::datetime::coerce_datetime_write;
 use crate::executor::{
     AlterTableNode, AlterTableOp, ColumnConstraint, ColumnDef, ColumnType, ConflictAction,
     ConflictArbiter, CreateIndexNode, CreateTableAsSelectNode, CreateTableNode, CreateViewNode,
-    DeleteNode, DropIndexNode, DropTableNode, DropViewNode, InsertNode, JoinCondition,
-    PhysicalPlan, TruncateNode, UpdateNode, UpsertAssignment, UpsertNode, UpsertValueExpr, Value,
+    DeleteNode, DropIndexNode, DropTableNode, DropViewNode, InsertNode, InsertSelectNode,
+    JoinCondition, PhysicalPlan, TruncateNode, UpdateNode, UpsertAssignment, UpsertNode,
+    UpsertValueExpr, Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -24,6 +26,77 @@ use sqlparser::ast::{
 /// 拒绝（不达 `add_slot` 的执行期 PageFull）。具体边界值为非实质实现细节，
 /// 契约是「超长 → 计划期拒绝零副作用」。
 const MAX_VIEW_SQL_BYTES: usize = 3000;
+
+/// 列类型大写名（声明期 DEFAULT 错误面用，与执行器 column_type_name 同形态）。
+fn column_type_name(ct: &ColumnType) -> &'static str {
+    match ct {
+        ColumnType::Int => "INT",
+        ColumnType::String => "STRING",
+        ColumnType::Float => "FLOAT",
+        ColumnType::Bool => "BOOL",
+        ColumnType::Date => "DATE",
+        ColumnType::Timestamp => "TIMESTAMP",
+    }
+}
+
+/// 值类型大写名（声明期 DEFAULT 错误面「实际值类型」侧）。
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_) => "INT",
+        Value::String(_) => "STRING",
+        Value::Float(_) => "FLOAT",
+        Value::Bool(_) => "BOOL",
+        Value::Date(_) => "DATE",
+        Value::Timestamp(_) => "TIMESTAMP",
+        Value::Null => "NULL",
+    }
+}
+
+/// MS29 T4 (D6)：声明期 DEFAULT 字面量与列类型的校验/归一单点——CREATE
+/// TABLE 与 ALTER ADD COLUMN 共用，规则与写入值类型一致门对齐。`Ok(None)`
+/// = 原样接受；`Ok(Some(v))` = 归一后载荷（FLOAT 列整数字面量无损升格）；
+/// `Err` = 计划期点名拒绝（列名/期望/实际），零副作用。
+pub(crate) fn validate_default_value(
+    col_name: &str,
+    col_type: &ColumnType,
+    value: &Value,
+) -> Result<Option<Value>, PlanError> {
+    use crate::storage::page_format::ColumnType as StorageColumnType;
+    match (col_type, value) {
+        // NULL 豁免——NULL 性由 NOT NULL 门裁决
+        (_, Value::Null) => Ok(None),
+        // FLOAT 列整数字面量无损升格归一持久化
+        (ColumnType::Float, Value::Int(n)) => Ok(Some(Value::Float(*n as f64))),
+        // 日期族：String（含 TypedString 归一同态）经写入边界同源强制解析验证
+        (ColumnType::Date | ColumnType::Timestamp, _) => {
+            let storage_type = match col_type {
+                ColumnType::Date => StorageColumnType::Date,
+                _ => StorageColumnType::Timestamp,
+            };
+            match coerce_datetime_write(value, &storage_type) {
+                Ok(_) => Ok(None),
+                Err(_) => Err(PlanError::DefaultTypeMismatch(format!(
+                    "column '{}': DEFAULT {} is not a valid {} value",
+                    col_name,
+                    value,
+                    column_type_name(col_type)
+                ))),
+            }
+        }
+        // 同型放行
+        (ColumnType::Int, Value::Int(_))
+        | (ColumnType::String, Value::String(_))
+        | (ColumnType::Float, Value::Float(_))
+        | (ColumnType::Bool, Value::Bool(_)) => Ok(None),
+        // 其余异型点名拒绝
+        (col_type, value) => Err(PlanError::DefaultTypeMismatch(format!(
+            "column '{}': expected {}, got {}",
+            col_name,
+            column_type_name(col_type),
+            value_type_name(value)
+        ))),
+    }
+}
 
 /// MS09-T02: structural column-reference probe for the ON classifier (design
 /// D5a) — a bare `Identifier` or 2-part `CompoundIdentifier` only.
@@ -157,8 +230,13 @@ impl PlanBuilder {
     /// either planned as `PhysicalPlan::Upsert` or named-rejected, closing the
     /// "clause written but never in effect" silent surface. A statement with
     /// neither keeps the existing `PhysicalPlan::Insert` path byte for byte.
+    ///
+    /// MS20-T02 Iter001 (D4): a SELECT source takes the `InsertSelect` arm —
+    /// the source compiles as a top-level query and its rows are materialized
+    /// at execution time (T5). A VALUES source (or a missing source, which
+    /// keeps the `MissingField("VALUES")` face) runs the unchanged path below.
     pub(crate) fn build_insert(
-        &self,
+        &mut self,
         table_name: &sqlparser::ast::ObjectName,
         columns: &[sqlparser::ast::Ident],
         source: &Option<Box<sqlparser::ast::Query>>,
@@ -172,12 +250,31 @@ impl PlanBuilder {
         // 误导性的 42P01）。
         self.reject_view_write(&table_name_str)?;
         self.validate_table(&table_name_str)?;
-        // MS20 T3: 附加库一期只读——目标为附加库引用即点名拒绝（不落到
-        // 主库同名表，也不进入执行器层）。
-        self.reject_attached_write(&table_name_str)?;
+        // MS20-T02: 附加库引用不再在计划期拒绝——DML 目标由 pipeline 的
+        // 执行根按路由表选定目标库（design D1）；DDL/CTAS/view 的附加拒绝面
+        // 保持（`build_create_table`/`build_alter_table` 等仍调用
+        // `reject_attached_write`）。
 
         // Extract column names
         let columns: Vec<String> = columns.iter().map(|c| c.value.to_lowercase()).collect();
+
+        let select_source = match source.as_deref() {
+            // Missing source → existing `MissingField("VALUES")` face below.
+            None => None,
+            Some(q) => match q.body.as_ref() {
+                sqlparser::ast::SetExpr::Values(_) => None,
+                _ => Some(q),
+            },
+        };
+        if let Some(source_query) = select_source {
+            return self.build_insert_select(
+                &table_name_str,
+                columns,
+                source_query,
+                on,
+                replace_into,
+            );
+        }
 
         // Extract values from source
         let values = self.extract_insert_values(source)?;
@@ -201,6 +298,87 @@ impl PlanBuilder {
                 values,
             })),
         }
+    }
+
+    /// MS20-T02 Iter001 (design D4): plan `INSERT INTO <existing> SELECT ...`.
+    ///
+    /// The source compiles as a **top-level** query (`build_query` — WITH /
+    /// DISTINCT / JOIN / views / set operations fully consumed, never the
+    /// `building_subquery` suppression). Column-list validation shares the
+    /// VALUES semantics: unknown names → `ColumnNotFound`, duplicates named,
+    /// and the source width must match the list (or the table width when no
+    /// list is given) — an empty source is still structurally validated here
+    /// because the width comes from the plan, not from rows. Conflict clauses
+    /// reuse `build_upsert_action` (`REPLACE INTO ... SELECT` included).
+    fn build_insert_select(
+        &mut self,
+        table_name: &str,
+        columns: Vec<String>,
+        source: &sqlparser::ast::Query,
+        on: &Option<OnInsert>,
+        replace_into: bool,
+    ) -> Result<PhysicalPlan, PlanError> {
+        let source_plan = self.build_query(source)?;
+        let source_width = self.get_plan_output_columns(&source_plan).len();
+
+        let table_name_lower = table_name.to_lowercase();
+        let table_columns = self.tables.get(&table_name_lower).ok_or_else(|| {
+            PlanError::ParseError(format!("Table '{}' does not exist", table_name))
+        })?;
+        let defaults = self
+            .table_defaults
+            .get(&table_name_lower)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        // 清单→表列位置映射与 VALUES 通道共享语义（未知 / 重复列同文案）。
+        // 未写清单 = 恒等映射（全列按位接收）。
+        let target_positions: Vec<usize> = if columns.is_empty() {
+            (0..table_columns.len()).collect()
+        } else {
+            let mut positions = Vec::with_capacity(columns.len());
+            for name in &columns {
+                let pos = table_columns
+                    .iter()
+                    .position(|c| c.to_lowercase() == *name)
+                    .ok_or_else(|| PlanError::ColumnNotFound(name.clone()))?;
+                if positions.contains(&pos) {
+                    return Err(PlanError::ParseError(format!(
+                        "Duplicate column '{}' in INSERT column list",
+                        name
+                    )));
+                }
+                positions.push(pos);
+            }
+            positions
+        };
+
+        // 源宽度必须在计划期对齐接收面（空源同样成立——结构验证不依赖行）。
+        let expected = if columns.is_empty() {
+            table_columns.len()
+        } else {
+            columns.len()
+        };
+        if source_width != expected {
+            return Err(insert_count_error(table_name, expected, source_width));
+        }
+
+        // 全宽填充：省略位落声明 DEFAULT 或 NULL（与 map_insert_values 的
+        // fill 语义一致）；未写清单时恒等映射覆盖全部位置，fill 不被消费。
+        let fill = (0..table_columns.len())
+            .map(|i| defaults.get(i).cloned().flatten().unwrap_or(Value::Null))
+            .collect();
+
+        let upsert = self.build_upsert_action(table_name, on, replace_into)?;
+        Ok(PhysicalPlan::InsertSelect(InsertSelectNode {
+            table_name: table_name.to_string(),
+            columns,
+            source: Box::new(source_plan),
+            source_width,
+            target_positions,
+            fill,
+            upsert,
+        }))
     }
 
     /// MS24 Iteration 001 (D4): resolve the upsert clause into
@@ -745,6 +923,25 @@ impl PlanBuilder {
                     Err(PlanError::UnsupportedValue)
                 }
             }
+            // MS29 T5: 类型字面量（TypedString，如 `DATE '2026-01-02'`）——
+            // 日期族经写入边界同源强制解析验证后以 String 目录形态返回（与
+            // 手写 String 声明同态，dump→restore 往返修复）；其余类型维持
+            // 既有 UnsupportedValue。
+            Expr::TypedString { data_type, value } => {
+                use crate::storage::page_format::ColumnType as StorageColumnType;
+                use sqlparser::ast::{DataType, TimezoneInfo};
+                let storage_type = match data_type {
+                    DataType::Date => StorageColumnType::Date,
+                    DataType::Timestamp(_, TimezoneInfo::None) => StorageColumnType::Timestamp,
+                    _ => return Err(PlanError::UnsupportedValue),
+                };
+                match coerce_datetime_write(&Value::String(value.clone()), &storage_type) {
+                    Ok(_) => Ok(Value::String(value.clone())),
+                    Err(_) => Err(PlanError::DefaultTypeMismatch(format!(
+                        "invalid {data_type} literal '{value}'"
+                    ))),
+                }
+            }
             _ => Err(PlanError::UnsupportedValue),
         }
     }
@@ -866,6 +1063,32 @@ impl PlanBuilder {
                 })
             })
             .collect::<Result<Vec<_>, PlanError>>()?;
+
+        // MS29 T8: 重复列名计划期拒绝（列名已小写归一，同名与大小写变体同面）。
+        // 该形态静默建成会使 dump→restore 必触发 MultiplePrimaryKey。
+        for (index, col) in column_defs.iter().enumerate() {
+            if column_defs[..index].iter().any(|c| c.name == col.name) {
+                return Err(PlanError::InvalidQuery(format!(
+                    "duplicate column name '{}'",
+                    col.name
+                )));
+            }
+        }
+
+        // MS29 T4: 声明期 DEFAULT 类型校验/归一——NULL 豁免、FLOAT 列整数
+        // 升格、日期族强制解析，其余跨类型点名拒绝（与写入值类型一致门同规
+        // 则，消除「建表成功但应用默认值的 INSERT 必然失败」分裂）。
+        for col in column_defs.iter_mut() {
+            for constraint in col.constraints.iter_mut() {
+                if let ColumnConstraint::DefaultValue(value) = constraint {
+                    if let Some(normalized) =
+                        validate_default_value(&col.name, &col.data_type, value)?
+                    {
+                        *value = normalized;
+                    }
+                }
+            }
+        }
 
         // Extract primary key
         let primary_key = self.extract_primary_key(columns, constraints)?;
@@ -1095,6 +1318,14 @@ impl PlanBuilder {
                             }
                         }
                         _ => {}
+                    }
+                }
+                // MS29 T6: ADD COLUMN 声明 DEFAULT 适用同款校验/归一（与
+                // CREATE TABLE 同一单点，D6 规则一致）。
+                if let Some(v) = &default_value {
+                    if let Some(normalized) = validate_default_value(&column_name, &column_type, v)?
+                    {
+                        default_value = Some(normalized);
                     }
                 }
                 // NOT NULL 无 DEFAULT 且表非空 → 计划期点名拒绝（存量行无法
@@ -1601,8 +1832,7 @@ impl PlanBuilder {
         // MS21 Iter005 (T5-c/D12)：视图只读（先于 validate_table，同 INSERT）。
         self.reject_view_write(&table_name)?;
         self.validate_table(&table_name)?;
-        // MS20 T3: 附加库一期只读。
-        self.reject_attached_write(&table_name)?;
+        // MS20-T02: 附加库目标不再计划期拒绝（见 `build_insert`）。
 
         // Extract primary key from WHERE clause
         let where_expr = selection
@@ -1693,8 +1923,7 @@ impl PlanBuilder {
         // MS21 Iter005 (T5-c/D12)：视图只读（先于 validate_table，同 INSERT）。
         self.reject_view_write(&table_name)?;
         self.validate_table(&table_name)?;
-        // MS20 T3: 附加库一期只读。
-        self.reject_attached_write(&table_name)?;
+        // MS20-T02: 附加库目标不再计划期拒绝（见 `build_insert`）。
 
         // Extract primary key from WHERE clause
         let where_expr = selection
@@ -1831,6 +2060,209 @@ mod tests {
                 );
             }
             _ => panic!("Expected Insert plan"),
+        }
+    }
+
+    // ---- MS20-T02 Iter001 (T4): INSERT ... SELECT 计划面 ----
+
+    /// 无清单 INSERT SELECT：源以顶层上下文编译为子树，节点携带源宽度、
+    /// 恒等位置映射与全宽 NULL 填充（无声明 DEFAULT）。
+    #[test]
+    fn test_insert_select_plan_shape() {
+        use crate::executor::InsertSelectNode;
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("src", vec!["a".into(), "b".into()], "a");
+
+        let sql = "INSERT INTO users SELECT a, b FROM src";
+        let stmts = parse_sql(sql).unwrap();
+        let plan = builder.build_plan(&stmts[0]).unwrap();
+
+        match plan {
+            PhysicalPlan::InsertSelect(node) => {
+                let InsertSelectNode {
+                    table_name,
+                    columns,
+                    source,
+                    source_width,
+                    target_positions,
+                    fill,
+                    upsert,
+                } = node;
+                assert_eq!(table_name, "users");
+                assert!(columns.is_empty(), "no list → identity mapping");
+                assert_eq!(source_width, 2);
+                assert_eq!(target_positions, vec![0, 1]);
+                assert_eq!(fill, vec![Value::Null, Value::Null]);
+                assert!(upsert.is_none());
+                // 源子树是完整 SELECT 计划（DataScan/Scan 形态），非空。
+                assert!(matches!(
+                    source.as_ref(),
+                    PhysicalPlan::DataScan(_) | PhysicalPlan::Scan(_) | PhysicalPlan::Filter(_)
+                ));
+            }
+            other => panic!("Expected InsertSelect plan, got {other:?}"),
+        }
+    }
+
+    /// 子集重排列清单：位置映射按清单→表列（name→1，id→0）；省略位填充
+    /// 落声明 DEFAULT。
+    #[test]
+    fn test_insert_select_column_mapping_subset_reorder() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("src", vec!["a".into(), "b".into()], "a");
+
+        let sql = "INSERT INTO users (name, id) SELECT b, a FROM src";
+        let stmts = parse_sql(sql).unwrap();
+        let plan = builder.build_plan(&stmts[0]).unwrap();
+
+        match plan {
+            PhysicalPlan::InsertSelect(node) => {
+                assert_eq!(node.columns, vec!["name".to_string(), "id".to_string()]);
+                assert_eq!(node.target_positions, vec![1, 0]);
+                assert_eq!(node.source_width, 2);
+                // 省略位无（全列清单）——fill 仍为表宽全 NULL。
+                assert_eq!(node.fill, vec![Value::Null, Value::Null]);
+            }
+            other => panic!("Expected InsertSelect plan, got {other:?}"),
+        }
+    }
+
+    /// 带声明 DEFAULT 的省略位：fill 按表列声明（x DEFAULT 7 → Int(7)）。
+    #[test]
+    fn test_insert_select_fill_uses_declared_defaults() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("d", vec!["id".into(), "x".into()], "id");
+        builder.set_table_defaults("d", vec![None, Some(Value::Int(7))]);
+        builder.register_table("src", vec!["a".into()], "a");
+
+        let sql = "INSERT INTO d (id) SELECT a FROM src";
+        let stmts = parse_sql(sql).unwrap();
+        let plan = builder.build_plan(&stmts[0]).unwrap();
+
+        match plan {
+            PhysicalPlan::InsertSelect(node) => {
+                assert_eq!(node.target_positions, vec![0]);
+                assert_eq!(node.source_width, 1);
+                assert_eq!(node.fill, vec![Value::Null, Value::Int(7)]);
+            }
+            other => panic!("Expected InsertSelect plan, got {other:?}"),
+        }
+    }
+
+    /// 宽度不符计划期拒绝：清单数与源宽度、表宽与源宽度两形态（空源同样
+    /// 成立——宽度来自计划而非行）。
+    #[test]
+    fn test_insert_select_width_mismatch_rejected() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("src", vec!["a".into(), "b".into()], "a");
+
+        // 清单 1 列 vs 源 2 列。
+        let stmts = parse_sql("INSERT INTO users (id) SELECT a, b FROM src").unwrap();
+        let err = builder.build_plan(&stmts[0]).unwrap_err().to_string();
+        assert!(
+            err.contains("expects 1 values, got 2"),
+            "list-vs-source width mismatch must be named, got: {err}"
+        );
+
+        // 无清单：表 2 列 vs 源 1 列。
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("src", vec!["a".into()], "a");
+        let stmts = parse_sql("INSERT INTO users SELECT a FROM src").unwrap();
+        let err = builder.build_plan(&stmts[0]).unwrap_err().to_string();
+        assert!(
+            err.contains("expects 2 values, got 1"),
+            "table-vs-source width mismatch must be named, got: {err}"
+        );
+    }
+
+    /// 未知目标列计划期拒绝（ColumnNotFound，与 VALUES 通道同面）。
+    #[test]
+    fn test_insert_select_unknown_column_rejected() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("src", vec!["a".into()], "a");
+
+        let stmts = parse_sql("INSERT INTO users (nope) SELECT a FROM src").unwrap();
+        let err = builder.build_plan(&stmts[0]).unwrap_err().to_string();
+        assert!(
+            err.contains("Column not found: nope"),
+            "unknown list column must be named, got: {err}"
+        );
+    }
+
+    /// 重复目标列计划期拒绝（与 VALUES 通道同文案）。
+    #[test]
+    fn test_insert_select_duplicate_column_rejected() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("src", vec!["a".into(), "b".into()], "a");
+
+        let stmts = parse_sql("INSERT INTO users (id, id) SELECT a, b FROM src").unwrap();
+        let err = builder.build_plan(&stmts[0]).unwrap_err().to_string();
+        assert!(
+            err.contains("Duplicate column 'id' in INSERT column list"),
+            "duplicate list column must be named, got: {err}"
+        );
+    }
+
+    /// 空源结构合法：LIMIT 0 源计划期通过（宽度来自计划，零行是运行期形态）。
+    #[test]
+    fn test_insert_select_empty_source_structurally_valid() {
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.register_table("src", vec!["a".into(), "b".into()], "a");
+
+        let sql = "INSERT INTO users SELECT a, b FROM src LIMIT 0";
+        let stmts = parse_sql(sql).unwrap();
+        let plan = builder.build_plan(&stmts[0]).unwrap();
+        match plan {
+            PhysicalPlan::InsertSelect(node) => {
+                assert_eq!(node.source_width, 2);
+                assert_eq!(node.target_positions, vec![0, 1]);
+            }
+            other => panic!("Expected InsertSelect plan, got {other:?}"),
+        }
+    }
+
+    /// REPLACE INTO ... SELECT 与 ON CONFLICT ... SELECT 复用既有仲裁/动作
+    /// 解析（build_upsert_action）。
+    #[test]
+    fn test_insert_select_replace_and_conflict_arbiter() {
+        use crate::executor::{ConflictAction, ConflictArbiter, InsertSelectNode};
+        use crate::storage::page_format::ColumnType;
+        let mut builder = PlanBuilder::new();
+        builder.register_table("users", vec!["id".into(), "name".into()], "id");
+        builder.set_pk_column_type("users", ColumnType::Int);
+        builder.register_table("src", vec!["a".into(), "b".into()], "a");
+
+        let sql = "REPLACE INTO users SELECT a, b FROM src";
+        let stmts = parse_sql(sql).unwrap();
+        match builder.build_plan(&stmts[0]).unwrap() {
+            PhysicalPlan::InsertSelect(InsertSelectNode {
+                upsert: Some((arbiter, action)),
+                ..
+            }) => {
+                assert!(matches!(arbiter, ConflictArbiter::All));
+                assert!(matches!(action, ConflictAction::Replace));
+            }
+            other => panic!("Expected InsertSelect with Replace, got {other:?}"),
+        }
+
+        let sql = "INSERT INTO users SELECT a, b FROM src ON CONFLICT (id) DO NOTHING";
+        let stmts = parse_sql(sql).unwrap();
+        match builder.build_plan(&stmts[0]).unwrap() {
+            PhysicalPlan::InsertSelect(InsertSelectNode {
+                upsert: Some((arbiter, action)),
+                ..
+            }) => {
+                assert!(matches!(arbiter, ConflictArbiter::Column(0)));
+                assert!(matches!(action, ConflictAction::DoNothing));
+            }
+            other => panic!("Expected InsertSelect with DO NOTHING, got {other:?}"),
         }
     }
 }

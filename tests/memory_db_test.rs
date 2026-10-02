@@ -670,7 +670,10 @@ fn t4_cli_memory_rejects_readonly() {
     assert_dir_empty(dir.path(), "after the rejected readonly combination");
 }
 
-/// R3-S3: 六生命周期子命令对 `:memory:` 实参点名拒绝 exit 2，零文件。
+/// R3-S3: 五生命周期子命令对 `:memory:` 实参点名拒绝 exit 2，零文件。
+/// MS29 T3：import 已豁免 `:memory:`（免建表导入可达），移出本拒绝矩阵——
+/// 其接受面见 `import_input_surface_test::memory_import_stdin_and_file`，
+/// `--key` 拒绝面见 `memory_import_key_rejected_and_others_still_guarded`。
 #[test]
 fn t4_cli_lifecycle_subcommands_reject_memory_target() {
     let dir = tempdir().unwrap();
@@ -679,7 +682,6 @@ fn t4_cli_lifecycle_subcommands_reject_memory_target() {
         vec!["schema", ":memory:"],
         vec!["dump", ":memory:"],
         vec!["restore", ":memory:", "-"],
-        vec!["import", ":memory:", "t", "data.csv", "--csv"],
         vec!["delete", ":memory:"],
     ];
     for args in invocations {

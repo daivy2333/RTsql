@@ -1,13 +1,13 @@
 # readonly-open-mode Specification
 
 ## Purpose
-约束只读打开模式：lib `Database::open_readonly[_with_key]` 与 CLI `--readonly` 经 advisory 共享锁实现多读单写（读读并发、读写互斥、冲突立即拒绝不等待）；只读会话零写入（不运行恢复、不 checkpoint、不产生伴生文件），WAL 未决时点名拒绝；DML/DDL 在计划期以 SQLSTATE 25006 点名拒绝；ATTACH 附加库随会话只读。来源：MS26 T1/T2（change `2026-09-30-ms26-embedded-runtime`，SQLite 嵌入式多读单写模型）。
+约束只读打开模式：lib `Database::open_readonly[_with_key]` 与 CLI `--readonly` 经 advisory 共享锁实现多读单写（读读并发、读写互斥、冲突按 `database-file-lock` 域锁等待预算等待后拒绝）；只读会话零写入（不运行恢复、不 checkpoint、不产生伴生文件），WAL 未决时点名拒绝；DML/DDL 在计划期以 SQLSTATE 25006 点名拒绝；ATTACH 附加库随会话只读。来源：MS26 T1/T2（change `2026-09-30-ms26-embedded-runtime`，SQLite 嵌入式多读单写模型）；共享锁等待预算随 MS28 修改（change `2026-10-01-ms28-cli-concurrency-checkpoint`）。
 
 ## Requirements
 
 ### Requirement: 只读打开入口与共享锁
 
-系统 SHALL 提供只读打开模式：lib 经 `Database::open_readonly(path)` 与 `Database::open_readonly_with_key(path, key)`；CLI 主命令经 `--readonly` flag。只读打开 SHALL 对主数据库文件获取 advisory 共享锁（`try_lock_shared`），共享锁之间 SHALL 互不排斥（多个只读会话可同时打开同一数据库）。共享锁被其他持有者的独占锁排除（`WouldBlock`）SHALL 返回既有 `StorageError::DatabaseLocked`（CLI exit 4），SHALL NOT 等待或重试。只读打开对不存在的数据库文件 SHALL 报错拒绝，SHALL NOT 创建文件。加密库只读打开 SHALL 按提供的密钥正常解密读取（错误密钥沿既有 `InvalidKey` 拒绝）。共享锁 SHALL 与文件描述符同生命周期（drop/进程退出自动释放），与既有独占锁的生命周期语义同型。
+系统 SHALL 提供只读打开模式：lib 经 `Database::open_readonly(path)` 与 `Database::open_readonly_with_key(path, key)`；CLI 主命令经 `--readonly` flag。只读打开 SHALL 对主数据库文件获取 advisory 共享锁（`try_lock_shared`），共享锁之间 SHALL 互不排斥（多个只读会话可同时打开同一数据库）。共享锁被其他持有者的独占锁排除（`WouldBlock`）时 SHALL 按 `database-file-lock` 域定义的锁等待预算周期性重试（默认 5000ms，可经 `--busy-timeout`/`RTSQL_BUSY_TIMEOUT`/lib 通道配置；内部 ~8ms 可见性窗口下限恒存），预算内锁释放 SHALL 打开成功，预算耗尽 SHALL 返回既有 `StorageError::DatabaseLocked`（CLI exit 4）。只读打开对不存在的数据库文件 SHALL 报错拒绝，SHALL NOT 创建文件。加密库只读打开 SHALL 按提供的密钥正常解密读取（错误密钥沿既有 `InvalidKey` 拒绝）。共享锁 SHALL 与文件描述符同生命周期（drop/进程退出自动释放），与既有独占锁的生命周期语义同型。
 
 #### Scenario: 两只读会话并发打开与查询
 
@@ -17,15 +17,21 @@
 
 #### Scenario: 写者持独占锁时只读者被拒
 
-- **GIVEN** 某持有者已以读写模式打开 `x.db`（独占锁在持）
+- **GIVEN** 某持有者已以读写模式打开 `x.db`（独占锁在持，且持有跨越等待预算）
 - **WHEN** 只读模式打开 `x.db`
-- **THEN** 打开失败返回 `StorageError::DatabaseLocked`，主文件与伴生文件未被触碰
+- **THEN** 打开失败返回 `StorageError::DatabaseLocked`，主文件与伴生文件未被触碰（拒绝发生在等待预算耗尽之后；预算内释放则打开成功）
+
+#### Scenario: 写者在预算内释放时只读者等待后可达
+
+- **GIVEN** 某持有者以读写模式打开 `x.db` 并将在等待预算内 close
+- **WHEN** 只读模式打开 `x.db`
+- **THEN** 共享锁等待至独占锁释放后打开成功，查询行为与无争用打开一致
 
 #### Scenario: 只读者持共享锁时写者被拒
 
 - **GIVEN** 某持有者已以只读模式打开 `x.db`
 - **WHEN** 读写模式打开 `x.db`
-- **THEN** 打开失败返回 `StorageError::DatabaseLocked`（写写互斥语义同样排除写者）
+- **THEN** 打开失败返回 `StorageError::DatabaseLocked`（写写互斥语义同样排除写者，拒绝发生在写侧等待预算耗尽之后）
 
 #### Scenario: 只读打开缺失文件不创建
 
@@ -107,19 +113,25 @@
 
 ### Requirement: 只读会话 ATTACH 附加库只读
 
-只读会话中的 `ATTACH '<path>' AS <alias>` SHALL 以只读模式打开附加库（共享锁 + WAL 未决拒绝，同主库语义）；会话内对附加库的写操作引用 SHALL 按 MS20 只读边界与本域只读拒绝面点名拒绝。锁冲突与 WAL 未决的附加库 SHALL 使 ATTACH 语句失败且零副作用（同 MS20 ATTACH 失败收口语义）。
+只读会话中的 ATTACH SHALL 以只读模式打开附加库（共享锁、WAL 未决拒绝、现有锁预算与主库同型）。附加库 INSERT VALUES/INSERT SELECT/UPSERT/REPLACE、UPDATE、DELETE SHALL 在任何源求值或写入前按本域只读拒绝语义以 SQLSTATE 25006、CLI exit 3 点名拒绝。锁冲突与 WAL 未决 SHALL 使 ATTACH 失败，注册零副作用。只读跨库 SELECT 保持可用。
 
 #### Scenario: 只读会话跨库只读分析
 
-- **GIVEN** 只读会话已打开主库 `a.db`，另一进程正以读写模式打开 `b.db` 并持有写锁
-- **WHEN** 在只读会话中 `ATTACH 'b.db' AS b` 后查询 `b.t`
-- **THEN** ATTACH 失败（`DatabaseLocked`）——附加库被写者独占；写者 close 后重新 ATTACH 成功，跨库只读查询可用
+- **GIVEN** 两库 checkpoint-clean，附加库当前被写者持锁
+- **WHEN** 只读会话 ATTACH 后执行 SELECT
+- **THEN** 按预算等待；超时 DatabaseLocked，写者预算内关闭则注册成功并可读取
 
 #### Scenario: 附加库 WAL 未决拒绝
 
-- **GIVEN** 只读会话，附加库 `b.db` 处于 WAL 未决态
-- **WHEN** `ATTACH 'b.db' AS b`
-- **THEN** ATTACH 失败并点名附加库未决 WAL，主库会话状态不变
+- **GIVEN** 附加库有未决 WAL
+- **WHEN** 在只读会话 ATTACH
+- **THEN** 点名拒绝，注册表与附加库文件不改变
+
+#### Scenario: 附加库写入拒绝
+
+- **GIVEN** 只读会话已注册附加库
+- **WHEN** 执行附加目标 VALUES、INSERT SELECT、UPSERT/REPLACE、UPDATE 或 DELETE（含 BEGIN 内）
+- **THEN** SQLSTATE 25006、exit 3 点名拒绝，源不求值、数据与文件不变
 
 ### Requirement: 既有打开语义零回归
 

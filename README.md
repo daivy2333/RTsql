@@ -104,7 +104,7 @@ Copying `<db>.db` alone is equivalent to a full backup **only after the writer c
 | Move the pair to another directory, names unchanged | Complete (938 rows) |
 | Rename the main file only, leaving the WAL behind | **Incomplete: 1 of 938 rows**, and the orphaned `<db>.wal` is ignored |
 
-Companion names are derived from the main file name, so any rename or move must carry `<db>.wal` and `<db>.checkpoint` along under the same base name. A file-level copy taken while a writer is active should include `<db>.wal`; otherwise close the writer first and verify with `rtsql <db> "SELECT count(*) FROM t"` on the copy.
+Companion names are derived from the main file name, so any rename or move must carry `<db>.wal` and `<db>.checkpoint` along under the same base name. A file-level copy taken while a writer is active should include `<db>.wal`; otherwise close the writer first — or run `rtsql checkpoint <db>` to fold the WAL into the main file — and verify with `rtsql <db> "SELECT count(*) FROM t"` on the copy.
 
 `rtsql delete <db>` removes one database family; `./install.sh --uninstall --purge-data` wipes the whole data directory during uninstall. Neither is recoverable through RTsql.
 
@@ -174,8 +174,9 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql schema <db>` | Print user-table DDL |
 | `rtsql dump <db>` | Export DDL and rows as SQL text |
 | `rtsql restore <db> <file>` | Restore a dump into an empty database; `-` reads stdin |
-| `rtsql import <db> <table> <file> --csv` | Import CSV with a matching header row |
+| `rtsql import <db> <table> <file\|-> --csv` | Import CSV with a matching header row, or auto-create the table from the header; `-` reads stdin; `:memory:` targets are accepted |
 | `rtsql delete <db> [--dry-run]` | Delete a database and its `.wal` / `.checkpoint` companions; `--dry-run` only lists them |
+| `rtsql checkpoint <db>` | Flush committed data into the main file (truncate WAL, advance the checkpoint site); the clean sync point before a file-level backup or handoff |
 | `rtsql stats <db> <table>` | Summarize count, null rate, distinct values, ranges, and numeric percentiles |
 | `rtsql sample <db> <table> [n]` | reservoir-sample rows; default `n` is 10 |
 | `rtsql profile <db> <table> [--top n]` | Profile columns and frequent String values; default top count is 5, maximum 20 |
@@ -185,7 +186,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 
 `rtsql --readonly <db> <sql>` opens the database with an advisory shared lock instead of the default exclusive lock, so many readers can observe one file at the same time while a writer still runs alone.
 
-- **Many readers, one writer:** read-only sessions share the lock with each other; a read-write session excludes readers and other writers, and a read-only session excludes a read-write one. A conflict is reported immediately as exit code `4` — RTsql never waits for a lock.
+- **Many readers, one writer:** read-only sessions share the lock with each other; a read-write session excludes readers and other writers, and a read-only session excludes a read-write one. A conflict waits out a configurable budget — `--busy-timeout <ms>` or `RTSQL_BUSY_TIMEOUT`, default 5000 ms; `0` waits only for an internal ~8 ms visibility floor — and exit code `4` is reported only when the budget is exhausted. The budget applies to every command that opens a database, for the exclusive and the shared lock alike; `:memory:` accepts and ignores it, and the `delete` lock probe never waits.
 - **No pending WAL:** a read-only session runs no recovery, so an open is refused when the `.wal` still holds unreplayed records. The message names the read-write path that performs the recovery; the exit code is `1`.
 - **No writes at all:** recovery and checkpoint are skipped, and `INSERT` / `UPDATE` / `DELETE` / `UPSERT` / `REPLACE` and every DDL statement are refused at plan time with SQLSTATE `25006` (exit code `3`). `SELECT`, `ATTACH`, `DETACH`, and transaction statements are unaffected.
 - **Cross-database:** `ATTACH` inside a read-only session opens the attached database read-only as well.
@@ -198,11 +199,28 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 
 Lifecycle subcommands, `--key`, and `--readonly` are usage errors for `:memory:` (exit code `2`).
 
+### Cross-database sessions
+
+One CLI session can register additional database files with `ATTACH '<path>' AS <alias>` and address them through qualified names (`alias.table`); bare names keep pointing at the main database. The session holds each attached file's advisory lock for its lifetime, and the `--busy-timeout` budget applies to those locks exactly as it does to the main file.
+
+```bash
+rtsql app "ATTACH 'orders' AS o; \
+  INSERT INTO o.recent SELECT id, name FROM t WHERE id > 100; \
+  SELECT COUNT(*) FROM o.recent"
+```
+
+- **Writes route to the attached file:** `INSERT`, `UPDATE`, `DELETE`, and the upsert forms on `alias.table` run against that file with its own transaction, WAL, and buffer pool. Every file commits independently: when a statement fails, the statements before it stay committed — including the ones that touched other files.
+- **No cross-file transactions:** a write to an attached database inside `BEGIN` is refused with SQLSTATE `0A000` (exit code `3`) before any row is touched. Main-database writes keep the full `BEGIN` / `COMMIT` / `ROLLBACK` semantics, and an explicit main-database transaction can read attached databases.
+- **DDL stays local:** attached databases take queries and DML only — `CREATE TABLE`, `DROP TABLE`, `CREATE TABLE AS SELECT`, and other DDL on an attached target are refused at plan time.
+- **`INSERT ... SELECT`:** `INSERT INTO <existing table> SELECT ...` fully materializes the source rows, then writes them through the regular insert path. The source can join tables across databases, write back into its own target table (it consumes only the rows read before the statement began), and carry `ON CONFLICT DO NOTHING` / `DO UPDATE` or `REPLACE INTO`. An explicit column list maps by position, and omitted columns take their declared `DEFAULT` or `NULL`; a source that fails leaves the target untouched, and an empty source reports `affected_rows: 0`.
+- **Read-only sessions** open attached databases read-only, and every write is refused with SQLSTATE `25006` as usual.
+
 ### Automatic checkpoint by WAL size
 
 A read-write session checkpoints the WAL automatically once the bytes appended since the last checkpoint reach a threshold, so a long-running session keeps its `.wal` file bounded. The check happens at each commit boundary (after an auto-commit statement, and after an explicit `COMMIT`), and it is deferred while another transaction of the same session is still active.
 
 - **Default:** 16 MiB. Ordinary sessions stay far below it and keep the existing behavior, where only `close()` and an explicit checkpoint truncate the WAL.
+- **Explicit:** `rtsql checkpoint <db>` runs the same truncation on demand and prints one confirmation line — a clean database reports `no pending work` and still exits `0`. Use it as the sync point before an external backup or file handoff.
 - **Environment variable:** `RTSQL_WAL_CHECKPOINT_BYTES=<bytes>` overrides the threshold; the same value is reachable from the library through `Database::set_checkpoint_bytes_threshold`. A value of `0` disables the automatic checkpoint — the WAL keeps growing and `close()` still performs a full checkpoint.
 - **Invalid values:** a non-numeric, negative, or overflowing value is refused before the database is opened, with a message naming the variable and the rejected value (exit code `2`); no file is created.
 - **Failures:** if the automatic checkpoint fails, the statement that triggered it reports the error and names the checkpoint failure (exit code `3`). The data it committed stays durable — the commit is fsynced before the checkpoint runs, and a later commit retries.
@@ -220,7 +238,7 @@ A read-write session checkpoints the WAL automatically once the bytes appended s
 | 1 | General I/O, storage, or format error |
 | 2 | CLI usage error |
 | 3 | SQL parse or execution error |
-| 4 | Database is locked by another process |
+| 4 | Database is locked by another process (after the `--busy-timeout` budget) |
 | 5 | Encryption-key error |
 | 130 / 143 | Terminated by SIGINT / SIGTERM |
 
@@ -256,6 +274,7 @@ Every constraint a `CREATE TABLE` statement accepts is either enforced or reject
 
 - **Column list:** `INSERT INTO t (col, ...) VALUES ...` accepts any subset of the table's columns in any order. Omitted columns take their declared `DEFAULT`, or `NULL` when no default is declared; a `NOT NULL` column filled that way is rejected by name. `DEFAULT` inside `VALUES` is equivalent to omitting that column. Declared defaults are persisted in the catalog, apply after restart, and are rendered by `rtsql dump` and `rtsql schema`.
 - **Value types:** a written value must match the column's declared type. `NULL` is exempt, date columns accept their typed literals, a `FLOAT` column accepts integer values (stored as the equivalent float), and any other cross-type write is rejected with `column '<name>' expects <TYPE>, got <type>`. The `dump` / `restore` / `import` paths run through the same rule.
+- **Declared defaults:** a `DEFAULT` literal in `CREATE TABLE` or `ALTER TABLE ADD COLUMN` is validated against the column type at plan time under the same rule — `NULL` is exempt, a `FLOAT` column upgrades an integer literal (persisted as the float), a `DATE`/`TIMESTAMP` column parses the string (an invalid date is refused), and other cross-type declarations are rejected with `DEFAULT type mismatch: column '<name>': expected <TYPE>, got <type>` before the table exists. Typed date literals such as `DEFAULT DATE '2026-01-02'` are accepted, so `dump` → `restore` round-trips tables with date defaults.
 - **`ON CONFLICT DO NOTHING`:** conflicting rows are skipped and are not counted in the affected-row count.
 - **`ON CONFLICT (col) DO UPDATE SET ...`:** the conflicting row is updated in place. The right-hand side accepts a literal, `DEFAULT`, `excluded.<column>` (the row being inserted) or a bare column name (the conflicting row's old value), and several columns may be assigned at once. Only the assigned columns change.
 - **Conflict target:** omitting the target arbitrates the primary key and every unique index (primary key first, then unique columns in declaration order). An explicit target must be a single column that carries uniqueness — an `INT` primary key or a `UNIQUE` column.
@@ -276,6 +295,8 @@ The main entry points are:
 - `Database::open(path)` — open or create with Repeatable Read.
 - `Database::open_with_isolation(path, level)` — select Repeatable Read or Read Committed.
 - `Database::open_with_key(path, isolation, key)` — open plaintext or encrypted storage.
+- `Database::open_with_lock_wait(path, isolation, key, lock_wait)` — open with a configurable lock wait budget (`None` = the 5000 ms default).
+- `Database::open_readonly_with_lock_wait(path, key, lock_wait)` — read-only open with the same budget.
 - `Database::execute_sql(sql)` — execute SQL.
 - `Database::execute_in_tx(...)` — execute inside an explicit library transaction.
 - `Database::checkpoint()` — flush a checkpoint.
