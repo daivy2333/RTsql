@@ -25,8 +25,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::storage::page_format::{
-    ColumnType, SlottedPage, SlottedPageRef, TAG_BOOL, TAG_DATE, TAG_FLOAT, TAG_INT, TAG_NULL,
-    TAG_STRING, TAG_TIMESTAMP,
+    ColumnType, SlottedPage, SlottedPageRef, TAG_BOOL, TAG_DATE, TAG_FLOAT, TAG_INT,
+    TAG_LONG_STRING, TAG_NULL, TAG_STRING, TAG_TIMESTAMP,
 };
 use crate::storage::{AsyncStorage, BufferPool, Page, PageId, Result, StorageError};
 
@@ -1231,8 +1231,17 @@ pub(crate) fn serialize_catalog_column_row(row: &CatalogColumnRow) -> Vec<u8> {
                 buf.extend_from_slice(&n.to_le_bytes());
             }
             crate::executor::Value::String(s) => {
-                buf.push(TAG_STRING);
-                buf.extend_from_slice(&(s.len() as u16).to_le_bytes());
+                // MS27 Iter001 (T12/D11): >65535B literals switch to the tuple
+                // format's long-string tag (`[0x08][u32 len]`) — the legacy
+                // `u16` prefix silently wrapped above 65535. Byte layout at
+                // ≤65535 is untouched (existing files open with zero migration).
+                if s.len() > u16::MAX as usize {
+                    buf.push(TAG_LONG_STRING);
+                    buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                } else {
+                    buf.push(TAG_STRING);
+                    buf.extend_from_slice(&(s.len() as u16).to_le_bytes());
+                }
                 buf.extend_from_slice(s.as_bytes());
             }
             crate::executor::Value::Null => {
@@ -1380,6 +1389,30 @@ pub(crate) fn deserialize_catalog_column_row(data: &[u8]) -> Result<CatalogColum
                     }
                     let len = u16::from_le_bytes([data[p], data[p + 1]]) as usize;
                     p += 2;
+                    if data.len() < p + len {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    let s = std::str::from_utf8(&data[p..p + len])
+                        .map_err(|e| {
+                            StorageError::Internal(format!("invalid utf8 default value: {e}"))
+                        })?
+                        .to_string();
+                    crate::executor::Value::String(s)
+                }
+                TAG_LONG_STRING => {
+                    // MS27 Iter001 (T12/D11): long-string arm mirroring the
+                    // tuple format's 0x08 representation — truncated payloads
+                    // and invalid UTF-8 are named errors, never silent cuts.
+                    if data.len() < p + 4 {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    let len = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+                        as usize;
+                    p += 4;
                     if data.len() < p + len {
                         return Err(StorageError::Internal(
                             "catalog column row truncated (default payload)".into(),
@@ -2396,6 +2429,106 @@ mod tests {
         assert_eq!(
             row.default_value, None,
             "has_default=0 must read default None"
+        );
+    }
+
+    // ===========================================================================
+    // MS27 Iteration 001 (T12/D11): DEFAULT 段长字符串表示（0x08）
+    // ===========================================================================
+
+    /// DEFAULT 段 String 臂的 value-tag 起始偏移（sample_col 形态：表 users、
+    /// 列名 1 字节、String 类型带 u16 max_len、双 flag 关、has_default=1）。
+    fn default_string_tag_offset() -> usize {
+        2 + 5 + 4 + 2 + 1 + 1 + 2 + 1 + 1 + 1
+    }
+
+    /// 切换点内侧 65535：段字节布局与既有完全一致（首 tag 0x02 + u16 长度）。
+    #[test]
+    fn default_string_65535_keeps_legacy_layout() {
+        let mut col = sample_col("c", 1, ColumnType::String(65535));
+        col.default_value = Some(crate::executor::Value::String("x".repeat(65535)));
+        let bytes = serialize_catalog_column_row(&col);
+
+        let tag_pos = default_string_tag_offset();
+        assert_eq!(bytes[tag_pos], TAG_STRING, "65535 stays TAG_STRING (0x02)");
+        let len = u16::from_le_bytes([bytes[tag_pos + 1], bytes[tag_pos + 2]]);
+        assert_eq!(len, 65535, "u16 length prefix unchanged at the boundary");
+
+        let back = deserialize_catalog_column_row(&bytes).unwrap();
+        assert_eq!(back.default_value, col.default_value);
+    }
+
+    /// 切换点外侧 65536：段切换为 `[0x08][u32 len]`（既有 u16 布局对
+    /// >65535B 值长度前缀回绕——修复面）。
+    #[test]
+    fn default_string_65536_switches_to_long_tag() {
+        let mut col = sample_col("c", 1, ColumnType::String(65535));
+        col.default_value = Some(crate::executor::Value::String("y".repeat(65536)));
+        let bytes = serialize_catalog_column_row(&col);
+
+        let tag_pos = default_string_tag_offset();
+        assert_eq!(
+            bytes[tag_pos], TAG_LONG_STRING,
+            "65536 must switch to TAG_LONG_STRING (0x08)"
+        );
+        let len = u32::from_le_bytes([
+            bytes[tag_pos + 1],
+            bytes[tag_pos + 2],
+            bytes[tag_pos + 3],
+            bytes[tag_pos + 4],
+        ]);
+        assert_eq!(len, 65536, "u32 length prefix carries the true value");
+
+        let back = deserialize_catalog_column_row(&bytes).unwrap();
+        assert_eq!(
+            back.default_value, col.default_value,
+            "long default must roundtrip without truncation"
+        );
+    }
+
+    /// 远超切换点的长 DEFAULT 行级往返等价（仿
+    /// `column_row_with_default_roundtrip_all_variants` 形态）。
+    #[test]
+    fn long_default_row_roundtrip() {
+        let mut col = sample_col("c", 2, ColumnType::String(65535));
+        col.default_value = Some(crate::executor::Value::String("z".repeat(70_000)));
+        let bytes = serialize_catalog_column_row(&col);
+        let back = deserialize_catalog_column_row(&bytes).unwrap();
+        assert_eq!(col, back, "full row roundtrip must be equivalent");
+        assert_eq!(back.default_value, col.default_value);
+    }
+
+    /// 0x08 段诚实拒绝：payload 截断与坏 UTF-8 均点名错误（不静默截断）。
+    #[test]
+    fn long_default_rejects_truncated_and_bad_utf8() {
+        // 截断：u32 声明 100 字节 payload，实际只给 4 字节
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(&(5u16).to_le_bytes());
+        truncated.extend_from_slice(b"users");
+        truncated.extend_from_slice(&0u32.to_le_bytes());
+        truncated.extend_from_slice(&(1u16).to_le_bytes());
+        truncated.extend_from_slice(b"c");
+        truncated.push(COL_TAG_INT);
+        truncated.push(0);
+        truncated.push(0);
+        truncated.push(1); // has_default
+        truncated.push(TAG_LONG_STRING);
+        truncated.extend_from_slice(&100u32.to_le_bytes());
+        truncated.extend_from_slice(b"ab12");
+        let err = deserialize_catalog_column_row(&truncated).unwrap_err();
+        assert!(
+            err.to_string().contains("default payload"),
+            "truncated long default must name the default payload, got {err}"
+        );
+
+        // 坏 UTF-8：长度声明与字节数一致但内容非法
+        let mut bad_utf8 = truncated[..truncated.len() - 4 - 4].to_vec();
+        bad_utf8.extend_from_slice(&4u32.to_le_bytes());
+        bad_utf8.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0xFC]);
+        let err = deserialize_catalog_column_row(&bad_utf8).unwrap_err();
+        assert!(
+            err.to_string().contains("utf8"),
+            "bad utf8 long default must be named, got {err}"
         );
     }
 }

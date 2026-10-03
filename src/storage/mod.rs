@@ -8,6 +8,7 @@ mod data_page;
 mod error;
 mod file_header;
 mod file_storage;
+pub mod integrity;
 mod memory_storage;
 mod page;
 pub mod page_format;

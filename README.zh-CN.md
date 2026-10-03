@@ -177,6 +177,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql import <db> <table> <file\|-> --csv` | 按表头列名导入 CSV，或按表头自动建表；`-` 表示 stdin；接受 `:memory:` 目标 |
 | `rtsql delete <db> [--dry-run]` | 删除数据库及其 `.wal` / `.checkpoint` 伴生文件；`--dry-run` 只列出 |
 | `rtsql checkpoint <db>` | 将已提交数据刷入主文件（截断 WAL、推进 checkpoint 位点）；文件级备份或交接前的干净同步点 |
+| `rtsql check <db>` | 只读结构完整性扫描（页 census、catalog、数据链/溢出链、索引树）；损坏按行报告页位置与损坏语义，干净库输出单行确认。退出码：干净 `0`、存在 error 级 finding `1`（info 级不改退出码）、锁冲突 `4`、密钥错误 `5`；`:memory:` 与 `--readonly` 组合为用法错误（`2`）。不修复、不修改文件；存在未决 WAL 的库须先以读写会话打开完成恢复后再检查 |
 | `rtsql stats <db> <table>` | 汇总行数、空值率、去重值、范围和数值分位数 |
 | `rtsql sample <db> <table> [n]` | 使用蓄水池抽样；默认 `n` 为 10 |
 | `rtsql profile <db> <table> [--top n]` | 输出列画像和 String 高频值；默认 top 为 5，最大 20 |
@@ -255,6 +256,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **事务：** 显式库 API 事务，以及 CLI `BEGIN` / `COMMIT` / `ROLLBACK` 会话。
 - **MVCC：** 默认 Repeatable Read，也可通过 `Database::open_with_isolation` 选择 Read Committed。
 - **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。
+- **长值存储：** 超过单页内联容量（约 4KB）的行值自动经溢出页链存取，无人为长度上限。溢出对 SQL 层透明：`INSERT`/`UPDATE`/`SELECT`、`dump`/`restore`/`import`、崩溃恢复、GC 与 `DROP TABLE`/`TRUNCATE` 释放、加密库、`:memory:` 与只读会话同等可用（此前超过页容量的行以 `No enough space in page` 失败，该失败形态已终止）。
 - **运行形态：** 共享锁上的只读会话（多个并发读者、零写入），以及全程驻留内存的 `:memory:` 数据库。
 
 引擎使用显式类型检查和三值谓词逻辑，不会隐式转换不兼容的 SQL 类型。
@@ -274,7 +276,7 @@ rtsql app "ATTACH 'orders' AS o; \
 
 - **列清单：** `INSERT INTO t (col, ...) VALUES ...` 接受表列的任意子集且顺序任意。省略列取声明 `DEFAULT`，无声明则取 `NULL`；NOT NULL 列这样被填入 `NULL` 时点名拒绝。`VALUES` 中的 `DEFAULT` 等价于省略该列。声明默认值经 catalog 持久化、重启后生效，并由 `rtsql dump` 与 `rtsql schema` 渲染。
 - **值类型：** 写入值必须与列声明类型一致。`NULL` 豁免，日期列接受其类型化字面量，`FLOAT` 列接受整数值（以等价浮点存储），其余跨类型写入以 `column '<列名>' expects <类型>, got <类型>` 拒绝。`dump` / `restore` / `import` 通道经同一规则。
-- **声明默认值：** `CREATE TABLE` 或 `ALTER TABLE ADD COLUMN` 声明的 `DEFAULT` 字面量在计划期按同一规则与列类型校验——`NULL` 豁免，`FLOAT` 列整数字面量升格（以浮点持久化），`DATE`/`TIMESTAMP` 列解析字符串（非法日期拒绝），其余跨类型声明以 `DEFAULT type mismatch: column '<列名>': expected <类型>, got <类型>` 在建表前拒绝、零副作用。类型化日期字面量（如 `DEFAULT DATE '2026-01-02'`）可接受，含日期默认值的表 `dump` → `restore` 往返保真。
+- **声明默认值：** `CREATE TABLE` 或 `ALTER TABLE ADD COLUMN` 声明的 `DEFAULT` 字面量在计划期按同一规则与列类型校验——`NULL` 豁免，`FLOAT` 列整数字面量升格（以浮点持久化），`DATE`/`TIMESTAMP` 列解析字符串（非法日期拒绝），其余跨类型声明以 `DEFAULT type mismatch: column '<列名>': expected <类型>, got <类型>` 在建表前拒绝、零副作用。类型化日期字面量（如 `DEFAULT DATE '2026-01-02'`）可接受，含日期默认值的表 `dump` → `restore` 往返保真。`DEFAULT` 字面量长度另受 catalog 列行页内容量约束（约 4KB 量级）：超长默认值在建表时按既有页满错误点名拒绝、零副作用；写入值本身不受此限制（超页行走溢出页链）。
 - **`ON CONFLICT DO NOTHING`：** 冲突行被跳过，不计入受影响行数。
 - **`ON CONFLICT (col) DO UPDATE SET ...`：** 冲突行原位更新。右值接受字面量、`DEFAULT`、`excluded.<列名>`（待插行值）或裸列名（冲突行旧值），可一次赋值多列。仅被赋值列发生变化。
 - **冲突目标：** 省略目标时仲裁主键与全部唯一索引（先主键，再按声明序的唯一列）。显式目标必须是承载唯一性的单列——`INT` 主键列或 `UNIQUE` 列。

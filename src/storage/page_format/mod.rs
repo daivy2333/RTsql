@@ -1,4 +1,5 @@
 mod key;
+pub mod overflow;
 mod row_id;
 mod slotted_page;
 mod tuple;
@@ -11,5 +12,5 @@ pub use tuple::{
     deserialize_value_refs, overlay_row_defaults, serialize_tuple, ColumnType,
 };
 pub(crate) use tuple::{
-    TAG_BOOL, TAG_DATE, TAG_FLOAT, TAG_INT, TAG_NULL, TAG_STRING, TAG_TIMESTAMP,
+    TAG_BOOL, TAG_DATE, TAG_FLOAT, TAG_INT, TAG_LONG_STRING, TAG_NULL, TAG_STRING, TAG_TIMESTAMP,
 };

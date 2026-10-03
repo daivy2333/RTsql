@@ -20,7 +20,7 @@
 
 use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, PredicateRef, Value};
-use crate::storage::page_format::{deserialize_row, ColumnType, RowId, SlottedPageRef};
+use crate::storage::page_format::{deserialize_row, overflow, ColumnType, RowId, SlottedPageRef};
 use crate::storage::PageId;
 use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
 use crate::transaction::{Snapshot, TransactionManager, VersionHeader};
@@ -40,6 +40,10 @@ type VersionLink = (RowId, u64, RowId);
 enum PageAction {
     /// Yield this row and continue from the next slot on the next call.
     YieldValue(Vec<Value>),
+    /// MS27 T4: the visible slot carries an overflow locator — assemble the
+    /// payload from the chain outside the page lock, then process it exactly
+    /// like `YieldValue`. The slot is already consumed.
+    YieldOverflow { total_len: u32, first_page: u32 },
     /// Slot produces nothing for this scan: tombstone, malformed, invisible
     /// to the snapshot, or — decided outside the closure — superseded by a
     /// suppressing newer version (R-T0b-R6).
@@ -497,6 +501,21 @@ impl Executor for DataScanExecutor {
 
                     // Visible (or no snapshot) — deserialize and yield.
                     // MS21 Iter003 (T3-a/D9): width-aware + DEFAULT overlay.
+                    // MS27 T4: an overflow locator is resolved outside the
+                    // page lock (assembly requires further BufferPool reads).
+                    if overflow::is_overflow_ref(tuple_bytes) {
+                        let (total_len, first_page) = overflow::decode_locator(tuple_bytes)
+                            .ok_or_else(|| {
+                                crate::storage::StorageError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "malformed overflow locator",
+                                ))
+                            })?;
+                        return Ok(PageAction::YieldOverflow {
+                            total_len,
+                            first_page,
+                        });
+                    }
                     let values = deserialize_row(tuple_bytes, &schema, &defaults)?;
                     Ok(PageAction::YieldValue(values))
                 })
@@ -533,6 +552,23 @@ impl Executor for DataScanExecutor {
                 }
             }
 
+            // MS27 T4: an overflow yield is resolved outside the page lock —
+            // assemble the payload from the chain, then process it exactly
+            // like an inline row (filter → projection → cap).
+            let action = match action {
+                PageAction::YieldOverflow {
+                    total_len,
+                    first_page,
+                } => {
+                    let bytes =
+                        overflow::read_overflow_chain(&self.buffer_pool, first_page, total_len)
+                            .await?;
+                    let values = deserialize_row(&bytes, &schema, &defaults)?;
+                    PageAction::YieldValue(values)
+                }
+                other => other,
+            };
+
             match action {
                 PageAction::YieldValue(values) => {
                     match Self::filter_row(self.predicate.as_ref(), values)? {
@@ -556,6 +592,11 @@ impl Executor for DataScanExecutor {
                 PageAction::Done => {
                     self.current_page_id = None;
                     return Ok(None);
+                }
+                // Normalized above: an overflow yield is assembled outside the
+                // page lock and re-enters as YieldValue.
+                PageAction::YieldOverflow { .. } => {
+                    unreachable!("YieldOverflow is normalized before this match")
                 }
             }
         }
