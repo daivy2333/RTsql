@@ -94,16 +94,16 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 24ae134（主批次：MS20-T02 跨文件 DML 二期 + MS28/MS29 实施面统一入库；其后 docs 回填提交 81c8e6f 为当前 HEAD）
-- **ahead of origin**: 13（`git log origin/master..master` 实数，81c8e6f 后无新提交）
-- **工作区**: 未提交（MS27 存储演进批收尾批次——15 修改 + 5 新增〔`integrity.rs`、`overflow.rs`、两测试文件、归档 carrier〕——加 recovery-tail-persistence 修复实施面〔`recovery.rs`/`table_manager.rs`/新测试文件/check_command_test 校准/归档 carrier〕与两批语料、状态文档，待保存提交）
+- **提交基线**: 4354102（主批次：MS27 存储演进批收尾 + 恢复 tail 收敛修复统一入库；上一主批次 24ae134〔MS20-T02〕及其 docs 回填 81c8e6f 已于 2026-10-02 推送 origin）
+- **ahead of origin**: 2（本 docs 回填提交后；主批次 4354102 提交后实测 1——origin/master 已于 2026-10-02 推送至 81c8e6f，前值 13 系推送前历史数，`git log origin/master..master` 实数核对）
+- **工作区**: 干净（本批收尾提交入库：MS27 存储演进批收尾批次 + recovery-tail-persistence 修复实施面、两批语料、状态文档与两归档 carrier）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 1802 tests pass, 0 failures, 2 ignored（2026-10-03 recovery-tail-persistence Act Response M19 全量 112 集成目标 + lib/bins 分批串行，Plan Review 001-rework accepted 采信；1797 MS27 基线 + 本 change 净增 5——recovery_tail_persistence_test 4 + stale_tail_heals_on_write 1）
 - **OpenSpec**: 64 specs（域数不变；`wal-recovery-replay-integrity` +3 Requirement 现 5——恢复收尾 tail 写回 / 写路径自愈 / 观测面零回归）；**活跃 change**：无（最新归档 `archive/2026-10-03-recovery-tail-persistence/`，accepted；上一归档 `archive/2026-10-02-ms27-overflow-integrity/`；下一里程碑 MS22 实测驱动性能批——候选范围量化定稿后转 ready）注：`validate --all` 对 MS06–MS10 时代 spec 的占位 Purpose 产生 WARNING——既有状态，非本轮引入（`wal-recovery-replay-integrity` 的 Purpose 已随本 change 收尾补写）
 
 ## 同步状态
 
-- `current` — 文档与代码一致；**恢复 tail 收敛修复落地收尾**（恢复收尾按 catalog 表清单写回 `data_page_tail` + 写路径陈旧 tail 自愈——恢复后库 check 干净/dump 不误告警/存量库无链断风险；`wal-recovery-replay-integrity` 现 5 Requirement；1802 tests 采信；无活跃 change；工作区待保存提交：MS27 收尾批次 + 本修复批次）
+- `current` — 文档与代码一致；**恢复 tail 收敛修复落地收尾**（恢复收尾按 catalog 表清单写回 `data_page_tail` + 写路径陈旧 tail 自愈——恢复后库 check 干净/dump 不误告警/存量库无链断风险；`wal-recovery-replay-integrity` 现 5 Requirement；1802 tests 采信；无活跃 change；工作区已提交清空）
 
 ## 权威文档
 
