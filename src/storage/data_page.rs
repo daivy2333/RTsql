@@ -1,6 +1,6 @@
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::data::TableMeta;
-use crate::storage::page_format::{RowId, SlottedPage, SlottedPageRef};
+use crate::storage::page_format::{overflow, RowId, SlottedPage, SlottedPageRef};
 use crate::storage::{PageId, Result, StorageError};
 use crate::transaction::VersionHeader;
 use std::sync::Arc;
@@ -8,6 +8,13 @@ use std::sync::Arc;
 /// Write a tuple with MVCC version header into a data page.
 /// Auto-allocates a new page if the current tail page is full.
 /// Returns RowId pointing to the stored slot.
+///
+/// MS27 T3 (D4): slot_data longer than `overflow::INLINE_SLOT_MAX` (4074B)
+/// no longer fails with PageFull — the tuple bytes go to a freshly allocated
+/// overflow chain and the data page slot carries a 31B locator
+/// (`[VersionHeader][0xFF][total_len][first_overflow_page]`). The locator is
+/// placed last: a crash before placement leaves the chain unreferenced, never
+/// dangling. Any failure frees the chain pages allocated by this call.
 pub async fn write_tuple_to_data_page(
     buffer_pool: &Arc<BufferPool>,
     table_meta: &Arc<TableMeta>,
@@ -16,6 +23,18 @@ pub async fn write_tuple_to_data_page(
 ) -> Result<RowId> {
     let mut slot_data = version_header.to_bytes();
     slot_data.extend_from_slice(tuple_bytes);
+
+    // MS27 T3: oversized rows divert to the overflow chain before any data
+    // page is touched; the ≤4074 path below is byte-identical to legacy.
+    let mut overflow_first_page: Option<u32> = None;
+    if slot_data.len() > overflow::INLINE_SLOT_MAX {
+        let first = overflow::write_overflow_chain(buffer_pool, tuple_bytes).await?;
+        let locator = overflow::encode_locator(tuple_bytes.len() as u32, first);
+        let mut locator_slot = version_header.to_bytes();
+        locator_slot.extend_from_slice(&locator);
+        slot_data = locator_slot;
+        overflow_first_page = Some(first);
+    }
 
     let tail_id = *table_meta.data_page_tail.lock().unwrap();
 
@@ -46,12 +65,24 @@ pub async fn write_tuple_to_data_page(
                 page.data[5..9].copy_from_slice(&next_id.to_le_bytes());
             });
 
-            let (logical_id, _slot_index): (u16, usize) = new_guard
-                .modify_page(|page| {
-                    let mut slotted = SlottedPage::new(page);
-                    slotted.add_slot(&slot_data)
-                })
-                .map_err(|_| StorageError::PageFull)?;
+            let placement = new_guard.modify_page(|page| {
+                let mut slotted = SlottedPage::new(page);
+                slotted.add_slot(&slot_data)
+            });
+
+            let (logical_id, _slot_index): (u16, usize) = match placement {
+                Ok(v) => v,
+                Err(_) => {
+                    // MS27 T3 (R4): the locator never made it onto a data
+                    // page — free the chain this call allocated so the
+                    // failed write leaks nothing. The free is best-effort;
+                    // the original PageFull error surfaces either way.
+                    if let Some(first) = overflow_first_page {
+                        let _ = overflow::free_overflow_chain(buffer_pool, first).await;
+                    }
+                    return Err(StorageError::PageFull);
+                }
+            };
 
             *table_meta.data_page_tail.lock().unwrap() = new_page_id;
 
@@ -70,6 +101,11 @@ pub async fn write_tuple_to_data_page(
 ///
 /// Callers that need owned bytes (e.g. write paths, WAL) can call
 /// `bytes.to_vec()` inside the closure.
+///
+/// MS27 T4: for an overflow row the slot carries a locator instead of tuple
+/// bytes — the locator is read inside the page lock, the payload is assembled
+/// from the overflow chain outside it, and the closure then consumes the
+/// assembled bytes. Inline rows keep the zero-copy path untouched.
 pub async fn read_tuple_from_data_page<F, R>(
     buffer_pool: &BufferPool,
     row_id: RowId,
@@ -78,9 +114,22 @@ pub async fn read_tuple_from_data_page<F, R>(
 where
     F: FnOnce(VersionHeader, &[u8]) -> Result<R>,
 {
+    enum SlotRead<R> {
+        /// Closure already consumed inside the page lock (zero-copy inline row).
+        Inline(R),
+        /// Locator read; the closure is still pending and runs after assembly.
+        Overflow {
+            vh: VersionHeader,
+            total_len: u32,
+            first_page: u32,
+        },
+    }
+
     let page_id = PageId(row_id.page_id as u64);
-    buffer_pool
-        .with_page_data(page_id, |data| -> Result<R> {
+    let mut f_opt = Some(f);
+
+    let read = buffer_pool
+        .with_page_data(page_id, |data| -> Result<SlotRead<R>> {
             let slotted = SlottedPageRef::new(data);
             let (slot, _) = slotted
                 .get_slot_by_logical_id(row_id.slot_id)
@@ -94,9 +143,39 @@ where
                     ))
                 })?;
             let tuple_bytes = &slot_data[VersionHeader::SIZE..];
-            f(version_header, tuple_bytes)
+
+            if overflow::is_overflow_ref(tuple_bytes) {
+                let (total_len, first_page) =
+                    overflow::decode_locator(tuple_bytes).ok_or_else(|| {
+                        StorageError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "malformed overflow locator",
+                        ))
+                    })?;
+                return Ok(SlotRead::Overflow {
+                    vh: version_header,
+                    total_len,
+                    first_page,
+                });
+            }
+
+            let f = f_opt.take().expect("closure should be available");
+            f(version_header, tuple_bytes).map(SlotRead::Inline)
         })
-        .await
+        .await?;
+
+    match read {
+        SlotRead::Inline(result) => Ok(result),
+        SlotRead::Overflow {
+            vh,
+            total_len,
+            first_page,
+        } => {
+            let bytes = overflow::read_overflow_chain(buffer_pool, first_page, total_len).await?;
+            let f = f_opt.take().expect("closure should be available");
+            f(vh, &bytes)
+        }
+    }
 }
 
 /// Update only the version header in a data page slot (M10)
@@ -129,10 +208,32 @@ pub async fn update_version_header_in_data_page(
 
 /// Delete a tuple from a data page by marking its slot as deleted (M10 GC)
 /// This is used for garbage collection to remove old committed versions.
+///
+/// MS27 T6 (design D5): an overflow version's slot carries a locator — the
+/// slot is removed first, then the chain pages are freed (a reader that
+/// misses the slot already treats the row as gone; freeing first would leave
+/// the locator pointing at recycled pages). Chain free is best-effort, same
+/// policy as drop_table's physical release.
 pub async fn delete_tuple_from_data_page(buffer_pool: &BufferPool, row_id: RowId) -> Result<()> {
     let page_id = PageId(row_id.page_id as u64);
 
     let page_guard = buffer_pool.get_page(page_id).await?;
+
+    // Peek the slot before removal: is its tuple segment an overflow locator?
+    let overflow_first: Option<u32> = {
+        let probe: std::result::Result<Option<u32>, ()> = page_guard.modify_page(|page| {
+            let slotted = SlottedPageRef::new(&page.data[..]);
+            let Some((slot, _)) = slotted.get_slot_by_logical_id(row_id.slot_id) else {
+                return Err(());
+            };
+            let slot_data = slotted.get_slot_data(&slot);
+            if slot_data.len() < VersionHeader::SIZE {
+                return Ok(None);
+            }
+            Ok(overflow::decode_locator(&slot_data[VersionHeader::SIZE..]).map(|(_, first)| first))
+        });
+        probe.map_err(|_| StorageError::SlotNotFound(row_id))?
+    };
 
     let result: std::result::Result<(), String> = page_guard.modify_page(|page| {
         let mut slotted = SlottedPage::new(page);
@@ -140,8 +241,18 @@ pub async fn delete_tuple_from_data_page(buffer_pool: &BufferPool, row_id: RowId
     });
 
     result.map_err(|_| StorageError::SlotNotFound(row_id))?;
+    drop(page_guard);
     // M21: Clear page visibility summary after DELETE
     buffer_pool.clear_all_visible(page_id);
+    // MS27 T6: the slot is gone — free the now-unreferenced chain.
+    if let Some(first) = overflow_first {
+        if let Err(e) = overflow::free_overflow_chain(buffer_pool, first).await {
+            eprintln!(
+                "[delete_tuple_from_data_page] free_overflow_chain({first}) failed: {}",
+                e
+            );
+        }
+    }
     Ok(())
 }
 

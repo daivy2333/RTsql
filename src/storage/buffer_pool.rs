@@ -4,7 +4,7 @@ use tokio::sync::{RwLock, Semaphore};
 use dashmap::DashMap;
 
 use crate::storage::{
-    page_format::SlottedPageRef,
+    page_format::{overflow, SlottedPageRef},
     page_frame::{PageFrame, PageGuard},
     AsyncStorage, Page, PageId, PageVisibilityInfo, Result, RowId, StorageError,
     MIN_CREATE_UNKNOWN,
@@ -292,6 +292,13 @@ impl BufferPool {
         // type out of the loop.
         enum VisibilityResult<R> {
             Visible(R),
+            /// MS27 T4: the visible slot carries an overflow locator — the
+            /// payload is assembled outside the page lock, then the closure
+            /// consumes the assembled bytes.
+            VisibleOverflow {
+                total_len: u32,
+                first_page: u32,
+            },
             NotVisible(Option<RowId>),
             NotFound,
         }
@@ -306,23 +313,54 @@ impl BufferPool {
         if let Some(vis_info) = self.get_visibility(PageId(row_id.page_id as u64)) {
             if vis_info.all_visible {
                 // All rows on this page are committed — skip per-row visibility checks.
-                return self
+                // MS27 T4: overflow slots exit the page lock with their locator
+                // and are assembled afterwards (same as the main loop below).
+                enum FastPath<R> {
+                    Done(Option<R>),
+                    Overflow { total_len: u32, first_page: u32 },
+                }
+                let fast = self
                     .with_page_data(PageId(row_id.page_id as u64), |data| {
                         let slotted = SlottedPageRef::new(data);
                         let (slot, _) = match slotted.get_slot_by_logical_id(row_id.slot_id) {
                             Some(s) => s,
-                            None => return Ok(None),
+                            None => return Ok(FastPath::Done(None)),
                         };
                         let slot_data = slotted.get_slot_data(&slot);
                         if slot_data.len() < VersionHeader::SIZE {
-                            return Ok(None);
+                            return Ok(FastPath::Done(None));
                         }
                         let tuple_bytes = &slot_data[VersionHeader::SIZE..];
+                        if overflow::is_overflow_ref(tuple_bytes) {
+                            let (total_len, first_page) = overflow::decode_locator(tuple_bytes)
+                                .ok_or_else(|| {
+                                    StorageError::Io(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "malformed overflow locator",
+                                    ))
+                                })?;
+                            return Ok(FastPath::Overflow {
+                                total_len,
+                                first_page,
+                            });
+                        }
                         let f = f_opt.take().expect("closure should be available");
                         let result = f(tuple_bytes)?;
-                        Ok(Some(result))
+                        Ok(FastPath::Done(Some(result)))
                     })
-                    .await;
+                    .await?;
+                return match fast {
+                    FastPath::Done(result) => Ok(result),
+                    FastPath::Overflow {
+                        total_len,
+                        first_page,
+                    } => {
+                        let bytes =
+                            overflow::read_overflow_chain(self, first_page, total_len).await?;
+                        let f = f_opt.take().expect("closure should be available");
+                        Ok(Some(f(&bytes)?))
+                    }
+                };
             }
 
             if vis_info.all_invisible_for(snapshot.high_water()) {
@@ -352,6 +390,22 @@ impl BufferPool {
                         || snapshot.is_visible_self(create_tx, commit_tx);
 
                     if visible {
+                        // MS27 T4: overflow slots exit the page lock with
+                        // their locator; the closure is consumed after the
+                        // payload is assembled (below).
+                        if overflow::is_overflow_ref(tuple_bytes) {
+                            let (total_len, first_page) = overflow::decode_locator(tuple_bytes)
+                                .ok_or_else(|| {
+                                    StorageError::Io(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "malformed overflow locator",
+                                    ))
+                                })?;
+                            return Ok(VisibilityResult::VisibleOverflow {
+                                total_len,
+                                first_page,
+                            });
+                        }
                         // f_opt.take() consumes f exactly once across all iterations.
                         // f returns Result<R> so deserialize errors propagate via `?`.
                         let f = f_opt.take().expect("closure should be available");
@@ -365,6 +419,14 @@ impl BufferPool {
 
             match visibility_result {
                 VisibilityResult::Visible(result) => return Ok(Some(result)),
+                VisibilityResult::VisibleOverflow {
+                    total_len,
+                    first_page,
+                } => {
+                    let bytes = overflow::read_overflow_chain(self, first_page, total_len).await?;
+                    let f = f_opt.take().expect("closure should be available");
+                    return Ok(Some(f(&bytes)?));
+                }
                 VisibilityResult::NotVisible(next) => current_row_id = next,
                 VisibilityResult::NotFound => return Ok(None),
             }

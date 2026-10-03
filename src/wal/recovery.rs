@@ -5,7 +5,7 @@
 use super::{WalError, WalReader, WalRecord};
 use crate::storage::data::{SecondaryIndexMeta, TableMeta};
 use crate::storage::page_format::{
-    deserialize_row, ColumnType, RowId, SlottedPage, SlottedPageRef,
+    deserialize_row, overflow, ColumnType, RowId, SlottedPage, SlottedPageRef,
 };
 use crate::storage::{
     update_version_header_in_data_page, write_tuple_to_data_page, BufferPool, CatalogKind,
@@ -85,22 +85,17 @@ fn insert_row_id_sorted(candidates: &mut Vec<RowId>, rid: RowId) {
 }
 
 /// 页扫描闭包产出：`data_page.rs` 页遍历共用形态（build_pk_version_maps）。
-/// slot 键：可键控 slot 携带 PK 键；无键 slot 携带 tuple 原始字节（T8-R2
-/// keyless 桶的桶键）。
-type PreScanPage = crate::storage::Result<(u32, Vec<(PrescanSlotKey, RowId)>)>;
-/// 页扫描闭包产出（rebuild_pk_indexes）：(rid, header, PK key, 唯一列键,
-/// 二级列键)。唯一列键向量与该表 qualifying UNIQUE 列序号表逐位对齐
-/// （MS23 Iter001）；二级列键向量与 catalog 登记段逐位对齐（MS21 Iter002）。
-type RebuildScanPage = crate::storage::Result<(
-    u32,
-    Vec<(
-        RowId,
-        VersionHeader,
-        Option<Vec<u8>>,
-        Vec<Option<Vec<u8>>>,
-        Vec<Option<Vec<u8>>>,
-    )>,
-)>;
+/// MS27 T5：闭包内只做 header 解析与 locator 判定，tuple 段以
+/// `overflow::TupleRef` 带出（内联为持有副本，溢出为 locator 字段），键
+/// 派生在闭包外装配后进行。
+type PreScanPage = crate::storage::Result<(u32, Vec<(overflow::TupleRef, RowId)>)>;
+/// 页扫描闭包产出（rebuild_pk_indexes）：(rid, header, tuple 段引用)。
+/// MS27 T5：闭包内只做 header 解析与 locator 判定；PK/唯一/二级键在闭包外
+/// 装配 tuple 后经 `extract_index_keys` 派生（唯一列键向量与该表 qualifying
+/// UNIQUE 列序号表逐位对齐 MS23 Iter001；二级列键向量与 catalog 登记段逐位
+/// 对齐 MS21 Iter002）。
+type RebuildScanPage =
+    crate::storage::Result<(u32, Vec<(RowId, VersionHeader, overflow::TupleRef)>)>;
 /// 重建扫描 slot 表：rid → (header, PK 键, 唯一列键, 二级列键)。
 type RebuildSlots = HashMap<
     RowId,
@@ -133,6 +128,13 @@ enum PrescanSlotKey {
 ///   5. 页链更新：若 ctx 中上次目标页 != 当前目标页，置 prev.next = current。
 ///   6. 内存 `data_page_tail` 跟随到当前目标页。
 ///   7. M21 镜像：`clear_all_visible` + `update_visibility_on_insert`。
+///
+/// MS27 T5（三段式，溢出感知）：超页 slot_data 无法内联落位，重排为
+/// ① 页读闭包（init + 幂等检查）→ ② 闭包外溢出链写（>4074 才走，链先于
+/// locator——失败自清理，无 dangling locator）→ ③ 落位闭包（31B locator
+/// slot 或内联 slot_data 强制落位）。幂等命中在链写之前判定：重复恢复不
+/// 重复分配链页。链写/落位失败均 `RedoFailed`（K05 物理落位失败类）；
+/// 落位失败时本次已写链页 best-effort 释放（对齐运行期写路径 T3 语义）。
 async fn redo_tuple_at_row_id(
     buffer_pool: &Arc<BufferPool>,
     table_meta: &Arc<TableMeta>,
@@ -144,46 +146,73 @@ async fn redo_tuple_at_row_id(
     let page_id = PageId(row_id.page_id as u64);
     let table_name = table_meta.name.clone();
 
-    // 1. 拼装 slot_data
-    let mut slot_data = version_header.to_bytes();
-    slot_data.extend_from_slice(tuple_bytes);
+    // ① 读闭包：未初始化页 init 为数据页 + 幂等检查（不在此落位——超页
+    //    行的链写必须在页锁闭包之外进行）。
+    let already_present: bool = {
+        let guard = buffer_pool.get_page(page_id).await.map_err(|e| {
+            WalError::RedoFailed(format!("get_page for row_id {:?} failed: {}", row_id, e))
+        })?;
+        guard.modify_page(|page| {
+            if page.data[0] == 0 {
+                let _ = SlottedPage::init(page, 0x03);
+            }
+            let slotted = SlottedPage::new(page);
+            slotted.get_slot_by_logical_id(row_id.slot_id).is_some()
+        })
+    };
 
-    // 2. 获取页 + 写入
-    let guard = buffer_pool.get_page(page_id).await.map_err(|e| {
-        WalError::RedoFailed(format!("get_page for row_id {:?} failed: {}", row_id, e))
-    })?;
+    // ② 闭包外拼装落位数据：内联 slot_data，或溢出链 + 31B locator slot。
+    //    幂等命中短路在链写之前（重复恢复不重复分配链页）。
+    let mut overflow_first_page: Option<u32> = None;
+    let slot_data: Vec<u8> = if already_present {
+        Vec::new()
+    } else if VersionHeader::SIZE + tuple_bytes.len() > overflow::INLINE_SLOT_MAX {
+        let first = overflow::write_overflow_chain(buffer_pool, tuple_bytes)
+            .await
+            .map_err(|e| {
+                WalError::RedoFailed(format!(
+                    "redo_tuple_at_row_id for row_id {:?} overflow chain write failed: {}",
+                    row_id, e
+                ))
+            })?;
+        let mut locator_slot = version_header.to_bytes();
+        locator_slot.extend_from_slice(&overflow::encode_locator(tuple_bytes.len() as u32, first));
+        overflow_first_page = Some(first);
+        locator_slot
+    } else {
+        let mut sd = version_header.to_bytes();
+        sd.extend_from_slice(tuple_bytes);
+        sd
+    };
 
-    let write_result: std::result::Result<(), String> = guard.modify_page(|page| {
-        // 2a. 未初始化则 init 为数据页
-        if page.data[0] == 0 {
-            let _ = SlottedPage::init(page, 0x03);
+    // ③ 落位闭包：按 WAL 记录的 logical_id 强制收敛（Iteration 002 T8/R10）。
+    //    运行期页内 logical_id 单调分配且永不回收 → (page, logical_id)
+    //    唯一对应一个版本；重放按记录 id 落位即收敛，不再依赖「重放分配
+    //    序列 == 运行期分配序列」假设——中止事务的数据记录不重放（redo
+    //    只重放已提交事务）而其运行期 id 已消耗、后续已提交记录引用更大
+    //    id 的形态（abort → 重插）即此前 dense 校验的失配源。
+    if !already_present {
+        let guard = buffer_pool.get_page(page_id).await.map_err(|e| {
+            WalError::RedoFailed(format!("get_page for row_id {:?} failed: {}", row_id, e))
+        })?;
+        let write_result: std::result::Result<(), String> = guard.modify_page(|page| {
+            let mut slotted = SlottedPage::new(page);
+            slotted
+                .add_slot_with_logical_id(&slot_data, row_id.slot_id)
+                .map(|_| ())
+                .map_err(|e| format!("add_slot failed: {}", e))
+        });
+        if let Err(e) = write_result {
+            // locator 未落位——本次已写链页 best-effort 释放（无 dangling）。
+            if let Some(first) = overflow_first_page {
+                let _ = overflow::free_overflow_chain(buffer_pool, first).await;
+            }
+            return Err(WalError::RedoFailed(format!(
+                "redo_tuple_at_row_id for row_id {:?} failed: {}",
+                row_id, e
+            )));
         }
-
-        let mut slotted = SlottedPage::new(page);
-
-        // 2b. 幂等：slot 已存在则直接成功返回
-        if slotted.get_slot_by_logical_id(row_id.slot_id).is_some() {
-            return Ok(());
-        }
-
-        // 2c. 落位：按 WAL 记录的 logical_id 强制收敛（Iteration 002 T8/R10）。
-        //     运行期页内 logical_id 单调分配且永不回收 → (page, logical_id)
-        //     唯一对应一个版本；重放按记录 id 落位即收敛，不再依赖「重放分配
-        //     序列 == 运行期分配序列」假设——中止事务的数据记录不重放（redo
-        //     只重放已提交事务）而其运行期 id 已消耗、后续已提交记录引用更大
-        //     id 的形态（abort → 重插）即此前 dense 校验的失配源。
-        let _slot_index = slotted
-            .add_slot_with_logical_id(&slot_data, row_id.slot_id)
-            .map_err(|e| format!("add_slot failed: {}", e))?;
-        Ok(())
-    });
-
-    write_result.map_err(|e| {
-        WalError::RedoFailed(format!(
-            "redo_tuple_at_row_id for row_id {:?} failed: {}",
-            row_id, e
-        ))
-    })?;
+    }
 
     // 3. 链更新：跨页时把 prev.next 置为 current
     if let Some(&prev) = ctx.table_last_page.get(&table_name) {
@@ -343,13 +372,10 @@ async fn build_pk_version_maps(
                         if VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE]).is_none() {
                             continue;
                         }
-                        let slot_tuple = &slot_data[VersionHeader::SIZE..];
-                        // T8-R2: 无键 slot 按 tuple 原始字节入 keyless 桶
-                        let slot_key = match extract_pk_key(&meta, slot_tuple) {
-                            Some(key) => PrescanSlotKey::Keyed(key),
-                            None => PrescanSlotKey::Keyless(slot_tuple.to_vec()),
-                        };
-                        entries.push((slot_key, RowId::new(pid.0 as u32, slot.logical_id)));
+                        // MS27 T5：locator 判定在闭包内，装配在闭包外
+                        let tuple_ref =
+                            overflow::TupleRef::from_slot_tuple(&slot_data[VersionHeader::SIZE..]);
+                        entries.push((tuple_ref, RowId::new(pid.0 as u32, slot.logical_id)));
                     }
                     Ok((slotted.header().next_page_id, entries))
                 })
@@ -361,7 +387,18 @@ async fn build_pk_version_maps(
                     ))
                 })?;
 
-            for (slot_key, rid) in entries {
+            for (tuple_ref, rid) in entries {
+                let slot_tuple = tuple_ref.resolve(buffer_pool).await.map_err(|e| {
+                    WalError::RedoFailed(format!(
+                        "recovery pre-scan of table '{}' row {:?} tuple assembly failed: {}",
+                        meta.name, rid, e
+                    ))
+                })?;
+                // T8-R2: 无键 slot 按 tuple 原始字节入 keyless 桶
+                let slot_key = match extract_pk_key(&meta, &slot_tuple) {
+                    Some(key) => PrescanSlotKey::Keyed(key),
+                    None => PrescanSlotKey::Keyless(slot_tuple),
+                };
                 let bucket = match slot_key {
                     PrescanSlotKey::Keyed(key) => keyed_map.entry(key).or_default(),
                     PrescanSlotKey::Keyless(tuple) => keyless_map.entry(tuple).or_default(),
@@ -406,10 +443,12 @@ async fn derive_old_row_id(
     }
     let old_row_id = candidates[pos - 1];
 
-    let slot_tuple = buffer_pool
+    // MS27 T5 两相：页闭包内只取 header 与 tuple 段分类（locator 字段或
+    // 内联副本），溢出 payload 出闭包后装配，再与 WAL old_tuple 比较。
+    let tuple_ref = buffer_pool
         .with_page_data(
             PageId(old_row_id.page_id as u64),
-            |data| -> crate::storage::Result<Vec<u8>> {
+            |data| -> crate::storage::Result<overflow::TupleRef> {
                 let slotted = SlottedPageRef::new(data);
                 let Some((slot, _)) = slotted.get_slot_by_logical_id(old_row_id.slot_id) else {
                     return Err(crate::storage::StorageError::SlotNotFound(old_row_id));
@@ -421,7 +460,9 @@ async fn derive_old_row_id(
                         old_row_id
                     )));
                 }
-                Ok(slot_data[VersionHeader::SIZE..].to_vec())
+                Ok(overflow::TupleRef::from_slot_tuple(
+                    &slot_data[VersionHeader::SIZE..],
+                ))
             },
         )
         .await
@@ -431,6 +472,13 @@ async fn derive_old_row_id(
                 table_name, old_row_id, e
             ))
         })?;
+
+    let slot_tuple = tuple_ref.resolve(buffer_pool).await.map_err(|e| {
+        WalError::RedoFailed(format!(
+            "update redo: table '{}' derived slot {:?} tuple assembly failed: {}",
+            table_name, old_row_id, e
+        ))
+    })?;
 
     if slot_tuple != old_tuple {
         return Err(WalError::RedoFailed(format!(
@@ -578,6 +626,12 @@ impl RecoveryManager {
             }
         }
 
+        // change 2026-10-03-recovery-tail-persistence T1-R1：重放推进的内存
+        // tail 写回 catalog（redo 循环后、mark_uncommitted_aborted 前）。
+        if redo_count > 0 {
+            Self::persist_replayed_tails(&table_manager).await?;
+        }
+
         // Step 3: Mark uncommitted tuples as aborted
         Self::mark_uncommitted_aborted(&uncommitted_tx_ids, &buffer_pool, &table_manager).await?;
 
@@ -594,6 +648,48 @@ impl RecoveryManager {
             redo_count,
             checkpoint_tx_watermark,
         })
+    }
+
+    /// change 2026-10-03-recovery-tail-persistence T1-R1：恢复收尾把重放推进
+    /// 的内存 `data_page_tail` 写回 catalog。
+    ///
+    /// 写回集合来源 = catalog 表清单 + 内存/持久 tail 差异比较，不依赖
+    /// 「重放臂经过某函数」的结构断言——任意写入臂（含直调
+    /// `write_tuple_to_data_page` 的 Delete 墓碑臂）推进过内存 tail 的表，
+    /// 内存值即与打开时装载的持久值分叉而被覆盖；未发生新页分配的表二者
+    /// 相等，差异比较自然跳过。失败显式 `RedoFailed`（K05 语义不变）。
+    async fn persist_replayed_tails(table_manager: &Arc<TableManager>) -> Result<(), WalError> {
+        let rows = table_manager.catalog().scan_tables().await.map_err(|e| {
+            WalError::RedoFailed(format!("persist data_page_tail: scan_tables failed: {e}"))
+        })?;
+        for row in rows {
+            if row.kind != CatalogKind::Table {
+                continue;
+            }
+            let meta = table_manager
+                .get_table(&row.table_name)
+                .await
+                .map_err(|e| {
+                    WalError::RedoFailed(format!(
+                        "persist data_page_tail of table '{}': get_table failed: {e}",
+                        row.table_name
+                    ))
+                })?;
+            let mem_tail = meta.data_page_tail.lock().unwrap().0 as u32;
+            if mem_tail != row.data_page_tail {
+                table_manager
+                    .catalog()
+                    .update_table_tail(&row.table_name, mem_tail)
+                    .await
+                    .map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "persist data_page_tail of table '{}' after redo: {e}",
+                            row.table_name
+                        ))
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     /// 重放单条 WAL 记录
@@ -1039,7 +1135,7 @@ impl RecoveryManager {
                 });
             }
 
-            // 2. 扫描最终数据页（同一反序列化兼提 PK 键、唯一列键与二级列键）
+            // 2. 扫描最终数据页（装配后在闭包外一次派生 PK/唯一/二级键）
             let mut slots: RebuildSlots = HashMap::new();
             let mut pointed: HashSet<RowId> = HashSet::new();
             let mut page_id = Some(meta.data_page_head);
@@ -1061,21 +1157,16 @@ impl RecoveryManager {
                             else {
                                 continue;
                             };
-                            let (key, ukeys, skeys) = extract_index_keys(
-                                &meta,
-                                &unique_cols,
-                                &secondary_cols,
-                                &slot_data[VersionHeader::SIZE..],
-                            );
                             if let Some(target) = vh.next_version() {
                                 pointed.insert(target);
                             }
+                            let tuple_ref = overflow::TupleRef::from_slot_tuple(
+                                &slot_data[VersionHeader::SIZE..],
+                            );
                             page_slots.push((
                                 RowId::new(pid.0 as u32, slot.logical_id),
                                 vh,
-                                key,
-                                ukeys,
-                                skeys,
+                                tuple_ref,
                             ));
                         }
                         Ok((slotted.header().next_page_id, page_slots))
@@ -1088,7 +1179,15 @@ impl RecoveryManager {
                         ))
                     })?;
 
-                for (rid, vh, key, ukeys, skeys) in page_slots {
+                for (rid, vh, tuple_ref) in page_slots {
+                    let tuple_bytes = tuple_ref.resolve(buffer_pool).await.map_err(|e| {
+                        WalError::RedoFailed(format!(
+                            "index rebuild scan of '{}' row {:?} tuple assembly failed: {}",
+                            table_name, rid, e
+                        ))
+                    })?;
+                    let (key, ukeys, skeys) =
+                        extract_index_keys(&meta, &unique_cols, &secondary_cols, &tuple_bytes);
                     slots.insert(rid, (vh, key, ukeys, skeys));
                 }
                 page_id = if next_page == 0 {

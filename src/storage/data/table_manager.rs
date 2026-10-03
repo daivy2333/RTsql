@@ -9,7 +9,7 @@ use crate::storage::catalog::{
     TABLES_SYSTEM_NAME,
 };
 use crate::storage::data_page::write_tuple_to_data_page;
-use crate::storage::page_format::{ColumnType, SlottedPage, SlottedPageRef};
+use crate::storage::page_format::{overflow, ColumnType, SlottedPage, SlottedPageRef};
 use crate::storage::page_id::PageId;
 use crate::storage::{
     read_tuple_from_data_page, AsyncStorage, BufferPool, Result, RowId, StorageError,
@@ -1341,7 +1341,17 @@ impl TableManager {
         }
         let data_pages = self.collect_data_pages(table_meta.data_page_head).await;
 
-        for page in index_pages.into_iter().chain(data_pages) {
+        // MS27 T6 (design D5): overflow chain pages referenced by slot
+        // locators die with the table — collect them from the data pages
+        // (header-only slot reads; chains never join the data chain) and
+        // free them with everything else, best-effort.
+        let overflow_pages = self.collect_overflow_chain_pages(&data_pages).await;
+
+        for page in index_pages
+            .into_iter()
+            .chain(overflow_pages)
+            .chain(data_pages)
+        {
             if let Err(e) = self.buffer_pool.free_page(page).await {
                 eprintln!("[drop_table] free_page({}) failed: {}", page.0, e);
             }
@@ -1378,6 +1388,70 @@ impl TableManager {
             };
         }
 
+        pages
+    }
+
+    /// MS27 T6 (design D5): scan the given data pages' slots for overflow
+    /// locators and collect every referenced chain page id (header-only slot
+    /// reads — chains are independent pages, never in `next_page_id` links).
+    ///
+    /// Best-effort, same policy as `collect_data_pages`: a data page read or
+    /// a chain walk error warns and skips that page/chain, returning what was
+    /// collected so far.
+    async fn collect_overflow_chain_pages(&self, data_pages: &[PageId]) -> Vec<PageId> {
+        let mut chain_heads: Vec<u32> = Vec::new();
+        for &pid in data_pages {
+            let heads: Vec<u32> = match self
+                .buffer_pool
+                .with_page_data(pid, |data| {
+                    let slotted = SlottedPageRef::new(data);
+                    let mut heads = Vec::new();
+                    for index in 0..slotted.slot_count() {
+                        let Some(slot) = slotted.get_slot(index) else {
+                            continue;
+                        };
+                        let slot_data = slotted.get_slot_data(&slot);
+                        if slot_data.len() < VersionHeader::SIZE {
+                            continue;
+                        }
+                        if let Some((_, first)) =
+                            overflow::decode_locator(&slot_data[VersionHeader::SIZE..])
+                        {
+                            if first != 0 {
+                                heads.push(first);
+                            }
+                        }
+                    }
+                    Ok(heads)
+                })
+                .await
+            {
+                Ok(heads) => heads,
+                Err(e) => {
+                    eprintln!(
+                        "[overflow-release] scan data page {:?} for locators failed: {}",
+                        pid, e
+                    );
+                    continue;
+                }
+            };
+            chain_heads.extend(heads);
+        }
+
+        let mut pages = Vec::new();
+        for first in chain_heads {
+            match overflow::collect_overflow_pages(&self.buffer_pool, first).await {
+                Ok(chain) => {
+                    pages.extend(chain.into_iter().map(|raw| PageId(raw as u64)));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[overflow-release] collect chain from page {first} failed: {}",
+                        e
+                    );
+                }
+            }
+        }
         pages
     }
 
@@ -1418,7 +1492,18 @@ impl TableManager {
         let head = table_meta.data_page_head;
 
         // 1. Free every data page after the head; reset the head in place.
+        //    MS27 T6 (design D5): overflow chain pages referenced by any
+        //    slot (head included) are collected first and freed before the
+        //    data pages go — best-effort, same policy as the page frees.
         let data_pages = self.collect_data_pages(head).await;
+        for page in self.collect_overflow_chain_pages(&data_pages).await {
+            if let Err(e) = self.buffer_pool.free_page(page).await {
+                eprintln!(
+                    "[truncate_table] free overflow page({}) failed: {}",
+                    page.0, e
+                );
+            }
+        }
         for page in data_pages.into_iter().skip(1) {
             if let Err(e) = self.buffer_pool.free_page(page).await {
                 eprintln!("[truncate_table] free_page({}) failed: {}", page.0, e);
@@ -1556,7 +1641,10 @@ impl TableManager {
         version_header: &VersionHeader,
         tuple_bytes: &[u8],
     ) -> Result<crate::storage::page_format::RowId> {
-        let old_tail = *table_meta.data_page_tail.lock().unwrap();
+        let tail = *table_meta.data_page_tail.lock().unwrap();
+        // change 2026-10-03-recovery-tail-persistence T2：内存 tail 陈旧
+        // （落后链 terminal）时先自愈再追加。
+        let old_tail = self.heal_stale_tail(table_meta, tail).await?;
         let row_id =
             write_tuple_to_data_page(&self.buffer_pool, table_meta, version_header, tuple_bytes)
                 .await?;
@@ -1568,6 +1656,48 @@ impl TableManager {
                 .await?;
         }
         Ok(row_id)
+    }
+
+    /// change 2026-10-03-recovery-tail-persistence (T2/R2)：写路径陈旧 tail
+    /// 自愈。tail 页 `next != 0` = tail 落后链 terminal（存量库恢复期形态）：
+    /// 沿链前进到 terminal，同步内存与持久 tail 后以 terminal 为追加目标——
+    /// 链中既有 `next` 指针不被覆写，已恢复页行保持可达。健康库（`next == 0`）
+    /// 单次 header 探测即返回，无链行走查；异常（页越界、环）按既有
+    /// `StorageError` 面显式传播，不静默。不得进入恢复面复用的
+    /// `write_tuple_to_data_page`（重放期 `next != 0` 是链重建中间态）。
+    async fn heal_stale_tail(&self, table_meta: &Arc<TableMeta>, tail: PageId) -> Result<PageId> {
+        let page_count = self.buffer_pool.storage().page_count();
+        let mut visited: HashSet<PageId> = HashSet::new();
+        let mut current = tail;
+        let terminal = loop {
+            if current.0 >= page_count {
+                return Err(StorageError::InvalidPageId(current.0));
+            }
+            if !visited.insert(current) {
+                return Err(StorageError::Internal(format!(
+                    "data page chain cycle while healing stale tail of table '{}'",
+                    table_meta.name
+                )));
+            }
+            let next = self
+                .buffer_pool
+                .with_page_data(current, |data| {
+                    Ok(SlottedPageRef::new(data).header().next_page_id)
+                })
+                .await?;
+            if next == 0 {
+                break current;
+            }
+            current = PageId(next as u64);
+        };
+        if terminal == tail {
+            return Ok(tail);
+        }
+        *table_meta.data_page_tail.lock().unwrap() = terminal;
+        self.catalog
+            .update_table_tail(&table_meta.name, terminal.0 as u32)
+            .await?;
+        Ok(terminal)
     }
 }
 
@@ -2040,5 +2170,101 @@ mod tests {
         let meta3 = tm3.get_table("t").await.unwrap();
         assert_eq!(meta3.secondary_indexes.len(), 1);
         assert_eq!(meta3.secondary_indexes[0].name, "idx_city");
+    }
+
+    // ===========================================================================
+    // change 2026-10-03-recovery-tail-persistence (T2/R2): 写路径陈旧 tail 自愈
+    // ===========================================================================
+
+    /// 沿链统计存活行（VersionHeader 未携带删除标记），用于全链可达断言。
+    async fn count_live_rows(tm: &TableManager, meta: &Arc<TableMeta>) -> usize {
+        let mut visited: HashSet<PageId> = HashSet::new();
+        let mut current = Some(meta.data_page_head);
+        let mut count = 0usize;
+        while let Some(pid) = current {
+            assert!(visited.insert(pid), "chain cycle during row count");
+            let (next, live) = tm
+                .buffer_pool
+                .with_page_data(pid, |data| {
+                    let sp = SlottedPageRef::new(data);
+                    let mut live = 0usize;
+                    for i in 0..sp.slot_count() {
+                        if let Some(slot) = sp.get_slot(i) {
+                            if let Some(vh) = VersionHeader::from_bytes(sp.get_slot_data(&slot)) {
+                                if !vh.is_deleted() {
+                                    live += 1;
+                                }
+                            }
+                        }
+                    }
+                    Ok((sp.header().next_page_id, live))
+                })
+                .await
+                .unwrap();
+            count += live;
+            current = if next == 0 {
+                None
+            } else {
+                Some(PageId(next as u64))
+            };
+        }
+        count
+    }
+
+    /// (T2/R2)：内存/持久 tail 陈旧（落后链 terminal）时，write_tuple 先沿链
+    /// 自愈到 terminal 并持久化修正值再照常追加——存量库首次写入不再覆写链中
+    /// next 指针，陈旧 tail 与 terminal 之间已恢复页的行保持可达。
+    #[tokio::test]
+    async fn stale_tail_heals_on_write() {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+        let pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+        let tm = TableManager::new(pool, storage).await.unwrap();
+
+        tm.create_table("t", vec![("id".to_string(), ColumnType::Int)], "id")
+            .await
+            .unwrap();
+        let meta = tm.get_table("t").await.unwrap();
+
+        // 跨页写入：tuple = 9B INT + 4033B STRING = 4042B、slot_data = 22 +
+        // 4042 = 4064B → 每页恰一行（数据区 4080B），3 行后链跨 3 页。
+        let vh = VersionHeader::new(1, None);
+        let payload = vec![0x61u8; 4030];
+        for _ in 0..3 {
+            tm.write_tuple(&meta, &vh, &payload).await.unwrap();
+        }
+        let head = meta.data_page_head;
+        assert!(
+            meta.data_page_tail.lock().unwrap().0 >= head.0 + 2,
+            "fixture must span >= 3 data pages"
+        );
+
+        // 模拟存量陈旧形态：内存与 catalog tail 一并回拨到 head（head.next ≠ 0）。
+        *meta.data_page_tail.lock().unwrap() = head;
+        tm.catalog()
+            .update_table_tail("t", head.0 as u32)
+            .await
+            .unwrap();
+
+        // 单次 write_tuple：自愈至 terminal 后照常追加，已恢复页行不丢失。
+        tm.write_tuple(&meta, &vh, &payload).await.unwrap();
+
+        let status = tm.data_chain_status("t").await.unwrap();
+        let mem_tail = *meta.data_page_tail.lock().unwrap();
+        assert_eq!(
+            mem_tail,
+            status.terminal.unwrap(),
+            "memory tail must equal the chain terminal after heal"
+        );
+        let catalog_tail = tm.catalog().scan_tables().await.unwrap()[0].data_page_tail;
+        assert_eq!(
+            mem_tail.0 as u32, catalog_tail,
+            "catalog tail must be healed to the chain terminal"
+        );
+        assert_eq!(
+            count_live_rows(&tm, &meta).await,
+            4,
+            "rows on healed pages plus the new row must all be reachable"
+        );
     }
 }

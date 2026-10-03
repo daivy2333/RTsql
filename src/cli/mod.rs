@@ -159,6 +159,12 @@ enum Command {
         /// 裸名或含 `/` 的文件路径
         db: String,
     },
+    /// 只读结构完整性扫描：页 census + catalog/数据链/溢出链/索引树遍历，
+    /// 损坏逐行报告（页位置 + 损坏语义），不修复不修改文件
+    Check {
+        /// 裸名或含 `/` 的文件路径
+        db: String,
+    },
     /// 输出每列统计摘要（行数/null率/distinct/min/max/分位数）
     Stats {
         /// 裸名或含 `/` 的文件路径
@@ -298,6 +304,9 @@ async fn execute_command(args: &CliArgs) -> ExitStatus {
         Some(Command::Checkpoint { db }) => {
             lifecycle::checkpoint_db(db, args.key.as_deref(), lock_wait).await
         }
+        Some(Command::Check { db }) => {
+            lifecycle::check_db(db, args.key.as_deref(), lock_wait).await
+        }
         Some(Command::Stats { db, table }) => {
             lifecycle::stats(db, table, args.format, args.key.as_deref(), lock_wait).await
         }
@@ -355,7 +364,8 @@ fn lifecycle_db_target(command: &Command) -> Option<&str> {
         | Command::Dump { db }
         | Command::Restore { db, .. }
         | Command::Delete { db, .. }
-        | Command::Checkpoint { db } => Some(db.as_str()),
+        | Command::Checkpoint { db }
+        | Command::Check { db } => Some(db.as_str()),
         Command::Import { .. }
         | Command::List
         | Command::Stats { .. }

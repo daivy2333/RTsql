@@ -3,6 +3,7 @@
 //! Binary format per column:
 //!   Int       = [0x01][8 bytes i64 LE]
 //!   String    = [0x02][2 bytes len LE][N bytes UTF-8]
+//!   LongStr   = [0x08][4 bytes len LE][N bytes UTF-8] (len > 65535 only, MS27 T1)
 //!   Null      = [0x03]
 //!   Float     = [0x04][8 bytes f64 LE]
 //!   Bool      = [0x05][1 byte 0/1]
@@ -27,6 +28,13 @@ pub(crate) const TAG_BOOL: u8 = 0x05;
 pub(crate) const TAG_DATE: u8 = 0x06;
 /// MS13: Timestamp tag (payload 8 bytes LE).
 pub(crate) const TAG_TIMESTAMP: u8 = 0x07;
+/// MS27 T1: long-string tag (payload `[u32 len LE][bytes]`). Used only when
+/// the value exceeds the u16 length prefix of TAG_STRING; ≤65535 keeps the
+/// legacy byte layout.
+pub(crate) const TAG_LONG_STRING: u8 = 0x08;
+
+/// Values at or below this length use the legacy `[0x02][u16 len]` layout.
+const STRING_U16_MAX: usize = u16::MAX as usize;
 
 /// Column type descriptor used as the schema for serialization / deserialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +61,13 @@ pub fn compute_tuple_size(values: &[Value], schema: &[ColumnType]) -> usize {
         .iter()
         .map(|value| match value {
             Value::Int(_) => 1 + 8,
-            Value::String(s) => 1 + 2 + s.len(),
+            Value::String(s) => {
+                if s.len() > STRING_U16_MAX {
+                    1 + 4 + s.len()
+                } else {
+                    1 + 2 + s.len()
+                }
+            }
             Value::Null => 1,
             Value::Float(_) => 1 + 8,
             Value::Bool(_) => 1 + 1,
@@ -87,14 +101,26 @@ pub fn serialize_tuple(values: &[Value], schema: &[ColumnType], buf: &mut [u8]) 
             }
             Value::String(s) => {
                 let bytes = s.as_bytes();
-                let len = bytes.len() as u16;
-                if pos + 3 + bytes.len() > buf.len() {
-                    return Err(err_too_small());
+                if bytes.len() > STRING_U16_MAX {
+                    // MS27 T1: u32 length prefix — the `as u16` cast would
+                    // silently wrap and the tail bytes were lost on decode.
+                    if pos + 5 + bytes.len() > buf.len() {
+                        return Err(err_too_small());
+                    }
+                    buf[pos] = TAG_LONG_STRING;
+                    buf[pos + 1..pos + 5].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf[pos + 5..pos + 5 + bytes.len()].copy_from_slice(bytes);
+                    pos += 5 + bytes.len();
+                } else {
+                    let len = bytes.len() as u16;
+                    if pos + 3 + bytes.len() > buf.len() {
+                        return Err(err_too_small());
+                    }
+                    buf[pos] = TAG_STRING;
+                    buf[pos + 1..pos + 3].copy_from_slice(&len.to_le_bytes());
+                    buf[pos + 3..pos + 3 + bytes.len()].copy_from_slice(bytes);
+                    pos += 3 + bytes.len();
                 }
-                buf[pos] = TAG_STRING;
-                buf[pos + 1..pos + 3].copy_from_slice(&len.to_le_bytes());
-                buf[pos + 3..pos + 3 + bytes.len()].copy_from_slice(bytes);
-                pos += 3 + bytes.len();
             }
             Value::Null => {
                 if pos + 1 > buf.len() {
@@ -231,6 +257,22 @@ pub fn deserialize_tuple_width(data: &[u8], schema: &[ColumnType]) -> Result<(Ve
             }
             TAG_NULL => {
                 values.push(Value::Null);
+            }
+            TAG_LONG_STRING => {
+                if pos + 4 > data.len() {
+                    return Err(eof("expected 4 bytes for long string length"));
+                }
+                let len =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
+                pos += 4;
+                if pos + len > data.len() {
+                    return Err(eof("expected long string payload"));
+                }
+                let s = String::from_utf8(data[pos..pos + len].to_vec())
+                    .map_err(|e| StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+                values.push(Value::String(s));
+                pos += len;
             }
             TAG_FLOAT => {
                 if pos + 8 > data.len() {
@@ -379,6 +421,22 @@ pub fn deserialize_value_refs<'a>(
             }
             TAG_NULL => {
                 values.push(ValueRef::Null);
+            }
+            TAG_LONG_STRING => {
+                if pos + 4 > data.len() {
+                    return Err(eof("expected 4 bytes for long string length"));
+                }
+                let len =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
+                pos += 4;
+                if pos + len > data.len() {
+                    return Err(eof("expected long string payload"));
+                }
+                let s = std::str::from_utf8(&data[pos..pos + len])
+                    .map_err(|e| StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+                values.push(ValueRef::Text(s));
+                pos += len;
             }
             TAG_FLOAT => {
                 if pos + 8 > data.len() {
@@ -778,9 +836,103 @@ mod tests {
 
     #[test]
     fn deserialize_unknown_tag_rejected() {
-        let data = [0x08, 0, 0, 0];
+        // MS27 T1: 0x08 is now TAG_LONG_STRING; the unknown-tag probe moved
+        // to an unused byte (0x7F). Assertion semantics unchanged.
+        let data = [0x7F, 0, 0, 0];
         assert!(deserialize_tuple(&data, &[ColumnType::Int]).is_err());
         assert!(deserialize_value_refs(&data, &[ColumnType::Int]).is_err());
+    }
+
+    // ===========================================================================
+    // MS27 Iteration 000 (T1): long-string representation (TAG_LONG_STRING 0x08)
+    // ===========================================================================
+
+    /// Strings above 65535B roundtrip through all decode entries; the value is
+    /// no longer silently truncated by the `as u16` length cast (old behavior
+    /// wrote a wrapped 2-byte length and dropped the tail bytes on decode).
+    #[test]
+    fn long_string_over_65535_roundtrip_all_entries() {
+        let big = "x".repeat(70_000);
+        let value = Value::String(big.clone());
+        let schema = [ColumnType::String(u16::MAX)];
+
+        let size = compute_tuple_size(std::slice::from_ref(&value), &schema);
+        assert_eq!(size, 1 + 4 + big.len(), "u32 length prefix layout");
+        let mut buf = vec![0u8; size];
+        let written = serialize_tuple(std::slice::from_ref(&value), &schema, &mut buf).unwrap();
+        assert_eq!(written, size);
+
+        let (values, actual) = deserialize_tuple_width(&buf[..written], &schema).unwrap();
+        assert_eq!(actual, 1);
+        assert_eq!(values[0], value);
+
+        let refs = deserialize_value_refs(&buf[..written], &schema).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].to_value(), value);
+    }
+
+    /// Tag switch point: exactly 65535 bytes stays on the legacy
+    /// `[0x02][u16 len]` layout byte-for-byte; 65536 bytes switches to
+    /// `[0x08][u32 len]`.
+    #[test]
+    fn tag_switch_at_65535_65536_boundary() {
+        let schema = [ColumnType::String(u16::MAX)];
+
+        let s65535 = Value::String("a".repeat(65_535));
+        let size = compute_tuple_size(std::slice::from_ref(&s65535), &schema);
+        assert_eq!(size, 1 + 2 + 65_535, "legacy u16 layout size at 65535");
+        let mut buf = vec![0u8; size];
+        serialize_tuple(std::slice::from_ref(&s65535), &schema, &mut buf).unwrap();
+        assert_eq!(buf[0], TAG_STRING, "65535 stays on TAG_STRING");
+        assert_eq!(
+            deserialize_tuple(&buf, &schema).unwrap(),
+            vec![s65535],
+            "65535 roundtrips byte-identical"
+        );
+
+        let s65536 = Value::String("b".repeat(65_536));
+        let size = compute_tuple_size(std::slice::from_ref(&s65536), &schema);
+        assert_eq!(size, 1 + 4 + 65_536, "u32 layout size at 65536");
+        let mut buf = vec![0u8; size];
+        serialize_tuple(std::slice::from_ref(&s65536), &schema, &mut buf).unwrap();
+        assert_eq!(buf[0], TAG_LONG_STRING, "65536 switches to TAG_LONG_STRING");
+        assert_eq!(
+            u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]),
+            65_536,
+            "u32 length prefix carries the full length"
+        );
+        assert_eq!(deserialize_tuple(&buf, &schema).unwrap(), vec![s65536]);
+    }
+
+    /// Mixed tuple: a long-string column coexists with other columns and
+    /// decodes positionally through the width-aware entry.
+    #[test]
+    fn long_string_mixed_tuple_roundtrip() {
+        let long = "z".repeat(65_600);
+        let values = vec![
+            Value::Int(7),
+            Value::String(long.clone()),
+            Value::Null,
+            Value::String("short".into()),
+        ];
+        let schema = [
+            ColumnType::Int,
+            ColumnType::String(u16::MAX),
+            ColumnType::Int,
+            ColumnType::String(100),
+        ];
+
+        let size = compute_tuple_size(&values, &schema);
+        let mut buf = vec![0u8; size];
+        let written = serialize_tuple(&values, &schema, &mut buf).unwrap();
+        assert_eq!(written, size);
+
+        let decoded = deserialize_tuple(&buf[..written], &schema).unwrap();
+        assert_eq!(decoded, values);
+
+        let refs = deserialize_value_refs(&buf[..written], &schema).unwrap();
+        let owned: Vec<Value> = refs.iter().map(|r| r.to_value()).collect();
+        assert_eq!(owned, values);
     }
 
     #[test]

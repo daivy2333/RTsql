@@ -14,7 +14,7 @@
 use crate::database::Database;
 use crate::executor::{ExecResult, Executor, PhysicalPlan};
 use crate::storage::btree::IndexManager;
-use crate::storage::page_format::{deserialize_row, ColumnType, SlottedPageRef};
+use crate::storage::page_format::{deserialize_row, overflow, ColumnType, SlottedPageRef};
 use crate::storage::{BufferPool, Result, RowId};
 use crate::transaction::VersionHeader;
 use std::collections::{HashMap, HashSet};
@@ -38,8 +38,10 @@ impl CreateIndexExecutor {
     }
 }
 
-/// 数据页链扫描的单页产出：(rid, 链尾标志, 索引列键)。
-type BackfillPage = (u32, Vec<(RowId, bool, Option<Vec<u8>>)>);
+/// 数据页链扫描的单页产出：(rid, 链尾标志, tuple 段引用)。
+/// MS27 T5 两相装配：页闭包内只做 header 解析与 locator 判定，索引列键在
+/// 闭包外装配 tuple 后派生（locator slot 携带 9B 引用而非 tuple 字节）。
+type BackfillPage = (u32, Vec<(RowId, bool, overflow::TupleRef)>);
 
 #[async_trait::async_trait]
 impl Executor for CreateIndexExecutor {
@@ -113,7 +115,7 @@ async fn backfill_tree(
         .collect();
 
     let mut pointed: HashSet<RowId> = HashSet::new();
-    let mut page_slots: Vec<(RowId, bool, Option<Vec<u8>>)> = Vec::new();
+    let mut page_slots: Vec<(RowId, bool, overflow::TupleRef)> = Vec::new();
     let mut page_id = Some(table_meta.data_page_head);
     while let Some(pid) = page_id {
         let (next_page, slots) = buffer_pool
@@ -135,27 +137,12 @@ async fn backfill_tree(
                     if let Some(target) = vh.next_version() {
                         pointed.insert(target);
                     }
-                    // 索引列键在此单趟页读内派生（tuple 字节随 header 同页）。
-                    let key = if vh.is_deleted() {
-                        None
-                    } else {
-                        // MS21 Iter003 (T3-a/D9): width-aware + DEFAULT
-                        // overlay —— ADD COLUMN 后对尾列建索引时，窄行按
-                        // 声明 DEFAULT 入索引（与扫描读回同源）。
-                        let values = deserialize_row(
-                            &slot_data[VersionHeader::SIZE..],
-                            &schema,
-                            &table_meta.defaults,
-                        )?;
-                        values
-                            .get(column_index)
-                            .and_then(|v| v.to_key())
-                            .map(|k| k.as_bytes().to_vec())
-                    };
+                    let tuple_ref =
+                        overflow::TupleRef::from_slot_tuple(&slot_data[VersionHeader::SIZE..]);
                     slots.push((
                         RowId::new(pid.0 as u32, slot.logical_id),
                         !vh.is_deleted(),
-                        key,
+                        tuple_ref,
                     ));
                 }
                 Ok((slotted.header().next_page_id, slots))
@@ -170,13 +157,23 @@ async fn backfill_tree(
     }
 
     let mut seen: HashMap<RowId, ()> = HashMap::new();
-    for (rid, is_live, key) in page_slots {
+    for (rid, is_live, tuple_ref) in page_slots {
         if seen.insert(rid, ()).is_some() {
             continue; // 防御：同页链重复 slot id
         }
         // 链尾且非墓碑 → 无条件建条目（含活跃未提交版本）
         if !pointed.contains(&rid) && is_live {
-            if let Some(key) = key {
+            // MS21 Iter003 (T3-a/D9): width-aware + DEFAULT overlay —— ADD
+            // COLUMN 后对尾列建索引时，窄行按声明 DEFAULT 入索引（与扫描读
+            // 回同源）。MS27 T5：超页行出页闭包装配后派生（键与运行期写路径
+            // 一致）。
+            let tuple_bytes = tuple_ref.resolve(buffer_pool).await?;
+            let values = deserialize_row(&tuple_bytes, &schema, &table_meta.defaults)?;
+            if let Some(key) = values
+                .get(column_index)
+                .and_then(|v| v.to_key())
+                .map(|k| k.as_bytes().to_vec())
+            {
                 tree.insert(&key, rid).await?;
             }
         }

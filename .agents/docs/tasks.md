@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-10-02（**MS20 收尾——跨文件 DML 二期落地**：change `2026-10-02-ms20-cross-db-dml` 三 Iteration 全 accepted 收尾归档——附加库 DML 路由与每文件独立提交、INSERT SELECT 物化写入、Iteration 002 缺陷收口〔附加短名限定引用 R9 + 恢复重放按 WAL logical_id 收敛 R10〕；全量 1739 tests / 0 failures / 2 ignored；增量规格 +1 域 `cross-db-dml` + 5 处修改，语料 61 → 62 域。此前同日：plan 完整计划获批与两轮实施审计；2026-10-01：MS29/MS28 收尾归档、milestone-planner 重排）
+> 最后更新：2026-10-03（**恢复 tail 收敛修复落地**：change `2026-10-03-recovery-tail-persistence` 单 Iteration 双 Cycle 全 accepted 收尾归档——恢复收尾按 catalog 表清单写回 `data_page_tail`〔任意重放臂覆盖〕+ 写路径陈旧 tail 自愈；全量 1802 tests / 0 failures / 2 ignored；增量规格 `wal-recovery-replay-integrity` +3 Requirement 现 5，域数 64 不变；即 MS27 Plan Review 报告的 Issue 候选之处置。同日：MS27 存储演进批收尾归档〔超页元组溢出页链 + `rtsql check`，全量 1797，语料 62 → 64 域〕）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-30 个 Milestone：18 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 6 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档））。★初版达成★。
+30 个 Milestone：19 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 5 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档））。★初版达成★。
 
 统一执行序（2026-10-01 用户裁定重排——功能补齐前置、性能优化殿后独立成批；沿用「批准执行序与编号无关」既定先例，编号只表规划先后，执行以本序为准）：**MS28 CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint）→ MS29 输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验）→ MS20-T02 跨文件 DML 二期 → MS27 存储演进批（超页溢出 + 完整性校验）→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据（2026-10-01）：外部评审实证的自动化使用摩擦先行收口——并发硬失败 exit 4 → 可配置等待是多 agent 并发使用的语义前提，也是 MS22 持锁窗口治理的前置；输入通道与声明语义同代码面相邻（lifecycle.rs import + ddl_dml.rs 建表/类型面）；存储格式演进体量最大放功能带末尾；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DETACH（I076）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）、WAL fsync 组提交（I049——串行单写者模型下无效，MS22 量化时剔除）等留 improvements 域未排期。
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
@@ -217,9 +217,9 @@
 - **Split signals**: 只读模式牵动 MVCC 快照跨进程水位语义时拆出独立评估
 - **Related changes**: None
 
-### MS27：存储演进批（超页溢出与完整性校验） — planned
+### MS27：存储演进批（超页溢出与完整性校验） — completed
 
-- **Status**: planned
+- **Status**: completed（2026-10-03——change `2026-10-02-ms27-overflow-integrity` 三 Iteration 全 accepted 收尾并归档。T01 超页溢出页链：长字符串增量 tag 0x08〔u32 长度前缀，消除 u16 回绕；catalog DEFAULT 段同语义 T12 用户指令 replan 并入〕+ 溢出页格式 page_type 0x04 与链原语模块 `src/storage/page_format/overflow.rs`〔locator 0xFF、chunk ≤4080B、防环收集/释放〕+ 写路径 >4074B 溢出分支〔先链后 locator 末步落位、失败清理零泄漏、≤4074 逐字节不变〕+ 读路径两相装配〔DataScan `YieldOverflow` 出页闭包装配 / `find_visible_version` 出锁装配、内联零拷贝保持〕+ 恢复重放链页重分配与 locator 幂等〔CREATE INDEX 回填遗漏同轮修复〕+ GC/drop/TRUNCATE 释放 + 全写通道/加密/`:memory:`/只读 e2e + ~1MB 基线含恢复〔跨库 INSERT SELECT 走子进程——ATTACH 为 CLI 会话专属〕+ README 双语/rtsql-docs 文档；T02 完整性校验：方案定稿「仅 rtsql check」（design D7）——lib `src/storage/integrity.rs` 只读结构扫描〔页 census 0x00–0x04 分类、catalog 解析、逐表数据链 walk、bounds-checked slot 迭代、溢出链逐链校验、三类索引树遍历、损坏输入零 panic〕+ CLI `rtsql check <db>`〔error 级 exit 1 / info 级不改退出码〔未引用溢出链、恢复后 tail 良性领先〕、锁 4/钥 5/`:memory:`·`--readonly` exit 2/pending WAL exit 1、全程不修改文件〕+ README 双语/SKILL.md 文档。新增 `tests/overflow_page_test.rs` 27 + `tests/check_command_test.rs` 8 + integrity 单测 6；全量 1797 tests / 0 failures / 2 ignored；增量规格合并 +2 域（`overflow-page-storage` 5 Requirement / `data-integrity-verification` 2 Requirement），语料 62 → 64 域；范围外 Issue 候选一项〔WAL 恢复重放不持久化 data_page_tail，Plan Review 002 独立核实确认，待用户裁定〕）
 - **Dependencies**: None（建议序在 MS26 后——T01 溢出页需同时覆盖 file/memory 两存储后端；T02 校验位与加密头 flag 同机制）
 - **Outcome**: 超 ~4KB 元组经溢出页链存取可达（TEXT 长文档/JSON 场景；加密 4124B 步长联动、恢复两态一致）；数据完整性校验面可用——页校验和（格式头 flag 演进）或 `rtsql check` 全页结构扫描，方案随调查定稿（二选一或组合）
 - **Rationale**: 同上调查——超页元组直接失败 `"No enough space in page"`（`src/storage/page_format/slotted_page.rs:212`）且无溢出页，agent 存长 JSON/文档为高频场景（I069 只覆盖 BLOB/DECIMAL 类型、不含此存储面）；WAL 帧有 CRC 但数据页无校验、无完整性校验命令——与 I072 备份边界同主题。两项同为存储格式演进域故聚合
@@ -236,7 +236,7 @@
 - **Verification boundary**: 超页往返 e2e（明文+加密）+ 恢复两态 + 损坏注入检出测试 + 全量零回归
 - **Diagnostic boundary**: `src/storage/page_format/` + tuple 序列化 + `src/storage/file_header.rs` flag 面 + `src/wal/recovery.rs` 重放
 - **Split signals**: 溢出页牵动 MVCC 版本链/GC 全链路改造超预期时先收 T02，T01 另行评估
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-10-02-ms27-overflow-integrity/`（2026-10-03 收尾归档）
 
 ### MS28：CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint） — completed
 
@@ -309,7 +309,7 @@ MS28 并发等待语义 ──(持锁窗口治理前提)──→ MS22 import �
 全部功能带（MS28/MS29/MS20-T02/MS27）──→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）
 ```
 
-建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 → MS22**（截至 2026-10-02 前十一项已完成，下一项 MS27 存储演进批）
+建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS22**（截至 2026-10-03 前十二项已完成，下一项 MS22 实测驱动性能批——候选范围量化定稿后转 ready）
 
 无环；所有依赖均已满足。初版后工作（MS18-MS29）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
 
@@ -326,6 +326,10 @@ MS28 并发等待语义 ──(持锁窗口治理前提)──→ MS22 import �
 - （无）
 
 ## 最近完成
+
+- **WAL 恢复重放 tail 收敛修复（恢复收尾写回 + 写路径自愈）**（2026-10-03）：change `2026-10-03-recovery-tail-persistence` 单 Iteration 双 Cycle 全 accepted——父 Cycle `000-initial` Act 阶段 T1 契约核读触发 Stop-when 阻塞返 Plan（Plan「三臂全经 `redo_tuple_at_row_id`」断言失实：Delete 墓碑臂直调 `write_tuple_to_data_page` 绕行，原 `table_last_page` 写回集合对该类表欠覆盖且计划内 INSERT 驱动测试不可见），Plan Review `rework-required`；rework Cycle `001-rework` 修复：T1-R1 写回集合改为 catalog 表清单 + 内存/持久 tail 差异比较（结构性覆盖任意重放臂，失败 `RedoFailed` 点名表、`redo_count == 0` 零变化）+ T1-R2 DELETE-only 重放见证（28B 墓碑 footprint 几何 + 夹具自检防失准，对旧机制必失败的直接 gap 见证）；T2 写路径 `heal_stale_tail` 自愈（内存 tail 页 `next ≠ 0` 沿链至 terminal、内存/持久双写回、健康路径单次探测零行走查、恢复面共享原语隔离保持）；T3 `check_command_test` 恢复后形态断言白名单校准（info 行 → 干净单行 exit 0）。新增 `tests/recovery_tail_persistence_test.rs` 4 用例 + `stale_tail_heals_on_write` 单元测试；全量 1802 tests / 0 failures / 2 ignored（1797 基线 + 净增 5）；增量规格 `wal-recovery-replay-integrity` +3 Requirement 现 5（域数 64 不变）；来源：MS27 Plan Review 002 确认的 Issue 候选（用户裁定立 change 解决，集中决策 A 双层修复）。
+
+- **MS27 存储演进批（超页溢出页链 + rtsql check 完整性校验）**（2026-10-03）：change `2026-10-02-ms27-overflow-integrity` 三 Iteration 全 accepted——Iteration 000 溢出表示与存储原语：T1 长字符串 tag 0x08（serialize/deserialize 三入口 + compute_tuple_size + 65535/65536 切换点）；T2 `overflow.rs` 溢出页格式（page_type 0x04）与链原语（locator 编解码/chunk 分解/链装配读/收集释放）；T3 写路径 >4074B 溢出分支（先链后 locator、失败清理零泄漏）；T4 读路径两相装配（`read_tuple_from_data_page` Overflow 装配 + DataScan `YieldOverflow` + `find_visible_version` 出锁装配、内联零拷贝保持）。Iteration 001 生命周期、恢复与全通道：T5 恢复重放链页重分配 + locator 末步落位幂等 + `build_pk_version_maps`/`rebuild_pk_indexes`/`derive_old_row_id` 四消费点两相装配（CREATE INDEX 回填遗漏同轮修复）；T6 GC/drop/TRUNCATE 溢出链释放（delete 单点 + `collect_overflow_chain_pages` 接线）；T7 全通道与形态 e2e + ~1MB 基线（矩阵/tag 切换点/CTAS/跨库/加密/`:memory:`/只读/dump-restore/import）；T8 README 双语 + SKILL.md 长值边界（含 DEFAULT 字面量 ~4KB catalog 页内容量约束）；T12 catalog DEFAULT 段长形式（`[0x08][u32 len]`，>65535B；2026-10-02 用户指令 replan 并入、design D11 表示一致性硬化）。Iteration 002 rtsql check：T9 lib `integrity.rs` 只读结构扫描（页 census/catalog/数据链 walk/bounds-checked slot/溢出链/三类索引树、损坏零 panic、自实现 walk 替代 tolerant 收集器）；T10 CLI `check` 子命令（readonly 编排、error/info 分级——恢复后 tail 良性领先 info 不改退出码、退出码 0/1/4/5/2 矩阵、主库文件全字节不变）；T11 README 双语命令表 + SKILL.md Lifecycle/Behavioral notes。新增 `tests/overflow_page_test.rs` 27 + `tests/check_command_test.rs` 8 + integrity 单测 6；全量 1797 tests / 0 failures / 2 ignored；增量规格 +2 域（`overflow-page-storage` / `data-integrity-verification`），语料 62 → 64 域；Plan Review 002 三项 Minor finding 记录不返工；范围外 Issue 候选一项（WAL 恢复重放不持久化 data_page_tail）待用户裁定。
 
 - **MS20 二期跨文件 DML（附加库写入 + INSERT SELECT + 缺陷收口）**（2026-10-02）：change `2026-10-02-ms20-cross-db-dml` 三 Iteration 全 accepted——Iteration 000 附加库普通写入与生命周期：T1 目标事务/metadata/WAL/缓冲池/回滚路由（abort 表键用 metadata 本地名，四写执行器经既有路由取目标库资源）；T2 全部退出路径统一关闭附加库（AttachSession 所有权移 `execute_command_inner_mode` 编排器、select 外持有；关闭失败原执行成功时 exit 1 点名、已有错误/信号保留退出码）；T3 显式事务 0A000（源求值与 begin 前点名、主库目标+附加源不误拒）、只读 25006 优先、DDL/CTAS 附加目标拒绝保持、目标库恢复两态一致。Iteration 001 查询结果写入与文档：T4 `PhysicalPlan::InsertSelect` 节点 + `build_insert` 可变借用房 `build_query` 源编译、源表注册进 `extract_all_table_names`、目标列映射/全宽 DEFAULT/NULL 填充、新节点不进 plan cache；T5 源完整物化原生 Value 行（不经 JSON/SQL 往返）→ 单隐式事务写入、失败回滚本语句全部行与索引、ON CONFLICT/REPLACE 复用、主库显式事务复用事务、空源 affected_rows=0；T6 README 双语 + rtsql-docs 使用面。Iteration 002 缺陷收口：T7 两段附加 FROM 项隐式短名关联名（尾段经既有 `register_table_alias` 登记、`qualifier_matches_declared` 全子句面匹配接线、显式别名优先、字面含点不误登记）；T8 恢复重放按 WAL logical_id 强制落位（`SlottedPage::add_slot_with_logical_id` 恢复面专用、dense-assignment 硬失败删除、K05 收窄为页满/IO、运行期零变化）；新增 `tests/cross_db_dml_test.rs` 17 + `tests/insert_select_test.rs` 10 + `tests/recovery_replay_convergence_test.rs` 3 + cross_db_query_test +4 与 planner/slotted_page 单测；全量 1739 tests / 0 failures / 2 ignored；增量规格 +1 域 `cross-db-dml` + 5 处修改（`cross-db-namespace-query` 附加库只读边界收窄、`readonly-open-mode` R5、`sql-write-surface` +INSERT SELECT、`sql-table-alias-resolution` R1、`wal-recovery-replay-integrity` R1），语料 61 → 62 域。
 

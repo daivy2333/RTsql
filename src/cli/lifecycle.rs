@@ -12,6 +12,7 @@ use crate::network::protocol::Response;
 use crate::parser::PlanError;
 use crate::pipeline::{execute_stage, infer_ctas_column_types, parse_stage, plan_stage};
 use crate::storage::catalog::{CatalogColumnRow, CatalogKind, CatalogRow};
+use crate::storage::integrity::{check_integrity, FindingSeverity};
 use crate::storage::page_format::ColumnType;
 use std::path::Path;
 use std::time::Duration;
@@ -243,6 +244,79 @@ pub(super) async fn checkpoint_db(
                 match emit_stdout(line) {
                     Ok(()) => ExitStatus::Success,
                     Err(e) => ExitStatus::General(e),
+                }
+            })
+        },
+        sigint_future,
+        sigterm_future,
+    )
+    .await
+}
+
+/// `check <db>`：只读结构完整性扫描——页 census + catalog/数据链/溢出链/
+/// 索引树遍历，损坏逐行报告（页位置 + 损坏语义），干净库 stdout 恰一行确认。
+/// 全程 readonly 打开（共享锁 + 锁等待预算）；WAL 未决经既有开库拒绝面
+/// exit 1——不为校验改用读写打开触发恢复写。退出码：干净 0、error 级
+/// finding 1（info 级不改退出码）、锁 4、钥 5；`--readonly`/`:memory:` 组合
+/// 由全局守卫前置 exit 2，不可达本函数。
+pub(super) async fn check_db(
+    db: &str,
+    key: Option<&str>,
+    lock_wait: Option<Duration>,
+) -> ExitStatus {
+    let db_path = match resolve_existing_db(db) {
+        Ok(p) => p,
+        Err(status) => return status,
+    };
+    super::execute_command_inner_mode(
+        &db_path,
+        key,
+        true,
+        false,
+        lock_wait,
+        move |db, _attach_session| {
+            Box::pin(async move {
+                let report = match check_integrity(&db.buffer_pool, &db.table_manager).await {
+                    Ok(report) => report,
+                    Err(e) => return ExitStatus::General(format!("check failed: {e}")),
+                };
+                let mut lines: Vec<String> = Vec::new();
+                for finding in &report.findings {
+                    let tag = match finding.severity {
+                        FindingSeverity::Error => "error",
+                        FindingSeverity::Info => "info",
+                    };
+                    match finding.page {
+                        Some(page) => {
+                            lines.push(format!("{tag}: page {page}: {}", finding.message))
+                        }
+                        None => lines.push(format!("{tag}: {}", finding.message)),
+                    }
+                }
+                // 干净库恰一行确认；有 finding 时末行为汇总计数。
+                lines.push(if report.findings.is_empty() {
+                    format!(
+                        "check ok: {} pages scanned, no corruption found",
+                        report.total_pages
+                    )
+                } else {
+                    format!(
+                        "check: {} pages scanned, {} error(s), {} info",
+                        report.total_pages,
+                        report.error_count(),
+                        report.info_count()
+                    )
+                });
+                if let Err(e) = emit_stdout(&lines.join("\n")) {
+                    return ExitStatus::General(e);
+                }
+                if report.error_count() > 0 {
+                    ExitStatus::General(format!(
+                        "check found {} error finding(s)",
+                        report.error_count()
+                    ))
+                } else {
+                    ExitStatus::Success
                 }
             })
         },
