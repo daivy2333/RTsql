@@ -458,23 +458,53 @@ fn cross_type_comparison_rejected() {
 /// 非 Int 键列 DataScan 回退可达（无静默漏行）。
 ///
 /// 回归锚点（MS16 路由 2026-09-13 已落地，本用例锁定其覆盖日期键列）。
-#[test]
-fn date_pk_equality_routing_fallback() {
+/// change 2026-10-03-practical-core-gaps T2 语义校准：DATE 显式 PK 新建
+/// DDL 已被计划期拒绝，夹具改经 lib 直建（存量 catalog 形态）——路由
+/// 回退行为本身不变。
+#[tokio::test]
+async fn date_pk_equality_routing_fallback() {
     let dir = TempDir::new().unwrap();
     new_db(dir.path(), "ev");
 
-    run_cli(
-        dir.path(),
-        &["ev", "CREATE TABLE ev (d DATE PRIMARY KEY, v INT)"],
-    );
-    run_cli(
-        dir.path(),
-        &["ev", "INSERT INTO ev VALUES (DATE '2024-01-15', 10)"],
-    );
-    run_cli(
-        dir.path(),
-        &["ev", "INSERT INTO ev VALUES (DATE '2024-02-20', 20)"],
-    );
+    // lib 直建绕过 planner 拒绝面——模拟 T2 修复前已存在的 DATE PK 表
+    //（裸名 `ev` → `$RTSQL_HOME/db/ev.db`）。
+    {
+        let db = rtsql::database::Database::open(&dir.path().join("db/ev.db"))
+            .await
+            .unwrap();
+        db.table_manager
+            .create_table_with_constraints(
+                "ev",
+                vec![
+                    (
+                        "d".to_string(),
+                        rtsql::storage::page_format::ColumnType::Date,
+                        false,
+                        false,
+                        None,
+                    ),
+                    (
+                        "v".to_string(),
+                        rtsql::storage::page_format::ColumnType::Int,
+                        false,
+                        false,
+                        None,
+                    ),
+                ],
+                "d",
+            )
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+    }
+
+    for sql in [
+        "INSERT INTO ev VALUES (DATE '2024-01-15', 10)",
+        "INSERT INTO ev VALUES (DATE '2024-02-20', 20)",
+    ] {
+        let out = run_cli(dir.path(), &["ev", sql]);
+        assert_eq!(out.code, Some(0), "seed failed: {out:?}");
+    }
 
     let sel = run_cli(
         dir.path(),

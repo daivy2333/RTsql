@@ -457,20 +457,29 @@ async fn aggregate_mixed_with_scalar_function_rejected() {
     );
 }
 
-/// R5/S4：HAVING 中标量函数保持既有不支持拒绝（build_having_expression
-/// 只认聚合名，注册标量名不改变该路径）。
+/// R5/S4：HAVING 标量函数腿可达。
+///
+/// change 2026-10-03-practical-core-gaps T5 校准（原用例
+/// `having_scalar_function_rejected` 的语义翻转见证）：原「build_having_expression
+/// 只认聚合名，标量函数在 HAVING 保持既有不支持拒绝」边界随本 change 的
+/// HAVING 完整表达式编译终止——标量函数作为 HAVING 条件腿在聚合输出行上
+/// 求值（delta `sql-aggregate-extensions` R2）。测试改名承载校准连续性。
 #[tokio::test]
-async fn having_scalar_function_rejected() {
+async fn having_scalar_function_reachable() {
     let (db, _dir) = open_db().await;
-    exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
-    exec_ok(&db, "INSERT INTO t VALUES (1)").await;
-    let msg = error_message(
-        db.execute_sql("SELECT id, count(*) FROM t GROUP BY id HAVING upper(id) = 'X'")
+    exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY, name STRING)").await;
+    exec_ok(&db, "INSERT INTO t VALUES (1, 'a')").await;
+    exec_ok(&db, "INSERT INTO t VALUES (2, 'B')").await;
+    // upper 作用于分组键 name（HAVING 腿只能引用输出行上的列/聚合——
+    // 既有 HavingNonAggregatedReference/ColumnNotFound 通道保持）。
+    let rows = query_rows(
+        db.execute_sql("SELECT name, count(*) FROM t GROUP BY name HAVING upper(name) = 'A'")
             .await,
     );
-    assert!(
-        msg.contains("Unsupported expression type"),
-        "unexpected message: {msg}"
+    assert_eq!(
+        rows,
+        vec![vec![serde_json::json!("a"), serde_json::json!(1)]],
+        "HAVING 标量函数腿必须按聚合输出行求值过滤"
     );
 }
 

@@ -9,7 +9,7 @@ use crate::storage::page_format::{
 };
 use crate::storage::{
     update_version_header_in_data_page, write_tuple_to_data_page, BufferPool, CatalogKind,
-    IndexManager, PageId, TableManager,
+    IndexManager, PageId, StorageError, TableManager,
 };
 use crate::transaction::VersionHeader;
 use std::collections::{HashMap, HashSet};
@@ -706,6 +706,24 @@ impl RecoveryManager {
     /// 自由——Update 的 `old_row_id` 由磁盘版本多映射派生，判重与索引
     /// 维护移至重放后的 PK 索引重建（R-T0b-R8）；`redo_count == 0` 的
     /// 打开维持既有磁盘树路径不变。
+    /// change 2026-10-03-practical-core-gaps T11（R6）：redo 目标表 lookup
+    /// 失败的错误面分类——`StorageError::TableNotFound`（WAL 已提交记录引用
+    /// 的表在 catalog 中缺失；最可能原因为上次关闭未经 checkpoint：lib 句柄
+    /// 未 `close()` 即 drop、未持久化 DDL 随脏页丢失）输出定向指因文案并
+    /// 明示打开拒绝；其余错误维持既有归并文案逐字节不变。仍走
+    /// `WalError::RedoFailed`（失败类别不变：redo 中止、打开拒绝、不跳过
+    /// 不丢弃不可重放记录——K05）。
+    fn redo_table_lookup_error(table_name: &str, err: StorageError) -> WalError {
+        match err {
+            StorageError::TableNotFound(_) => WalError::RedoFailed(format!(
+                "table '{table_name}' referenced by committed WAL records is missing from the catalog; the most likely cause is that the last session closed without a checkpoint (e.g. a lib handle dropped without close(), losing un-persisted DDL with its dirty pages); the database cannot be opened and no records were skipped"
+            )),
+            other => WalError::RedoFailed(format!(
+                "table '{table_name}' lookup failed during redo: {other}"
+            )),
+        }
+    }
+
     async fn redo_record(
         record: &WalRecord,
         buffer_pool: &Arc<BufferPool>,
@@ -719,12 +737,10 @@ impl RecoveryManager {
                 tuple_data,
                 tx_id,
             } => {
-                let table_meta = table_manager.get_table(table_name).await.map_err(|e| {
-                    WalError::RedoFailed(format!(
-                        "table '{}' lookup failed during redo: {}",
-                        table_name, e
-                    ))
-                })?;
+                let table_meta = table_manager
+                    .get_table(table_name)
+                    .await
+                    .map_err(|e| Self::redo_table_lookup_error(table_name, e))?;
 
                 // 1. 位置寻址写入。header 用已提交编码（create == commit ==
                 // tx）：redo 只重放已提交事务，与运行期 commit 传播语义一致；
@@ -817,12 +833,10 @@ impl RecoveryManager {
                 tx_id,
                 ..
             } => {
-                let table_meta = table_manager.get_table(table_name).await.map_err(|e| {
-                    WalError::RedoFailed(format!(
-                        "table '{}' lookup failed during redo: {}",
-                        table_name, e
-                    ))
-                })?;
+                let table_meta = table_manager
+                    .get_table(table_name)
+                    .await
+                    .map_err(|e| Self::redo_table_lookup_error(table_name, e))?;
 
                 // 1. 从 old_tuple 解 PK → 派生 old_row_id。
                 //    D10 (R-T0b-R7)：重放形态下经多映射派生（max rid <
@@ -944,12 +958,10 @@ impl RecoveryManager {
                 tx_id,
                 ..
             } => {
-                let table_meta = table_manager.get_table(table_name).await.map_err(|e| {
-                    WalError::RedoFailed(format!(
-                        "table '{}' lookup failed during redo: {}",
-                        table_name, e
-                    ))
-                })?;
+                let table_meta = table_manager
+                    .get_table(table_name)
+                    .await
+                    .map_err(|e| Self::redo_table_lookup_error(table_name, e))?;
 
                 // 1. 索引清理：find_key_by_row_id → delete。
                 //    D10 (R-T0b-R7)：重放形态下 B-Tree 自由（索引由重建统一

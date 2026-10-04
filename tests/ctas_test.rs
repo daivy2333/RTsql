@@ -386,9 +386,11 @@ fn ctas_infers_column_types_from_output_values() {
         r#"CREATE TABLE "m_null" ("k" INT PRIMARY KEY, "v" STRING)"#,
         "all-null → STRING",
     );
+    // change 2026-10-03-practical-core-gaps T3：非 INT 隐式首列不渲染
+    // PRIMARY KEY（声明从未被强制，输出与语义一致）。
     assert_ddl_contains(
         &ddl,
-        r#"CREATE TABLE "m_mix" ("v" FLOAT PRIMARY KEY)"#,
+        r#"CREATE TABLE "m_mix" ("v" FLOAT)"#,
         "int/float mix → FLOAT",
     );
     assert_ddl_contains(
@@ -438,9 +440,11 @@ fn ctas_empty_source_creates_empty_string_typed_table() {
     );
 
     let ddl = schema_ddl(dir.path(), "app");
+    // change 2026-10-03-practical-core-gaps T3：非 INT 隐式首列不渲染
+    // PRIMARY KEY（声明从未被强制，输出与语义一致）。
     assert_ddl_contains(
         &ddl,
-        r#"CREATE TABLE "m" ("k" STRING PRIMARY KEY, "name" STRING)"#,
+        r#"CREATE TABLE "m" ("k" STRING, "name" STRING)"#,
         "empty source shape",
     );
     let out = run_cli(dir.path(), &["app", "SELECT * FROM m"]);

@@ -651,3 +651,115 @@ async fn update_set_int_unique_column_to_non_int_rejected_keeps_old_value() {
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
+
+// ===========================================================================
+// change 2026-10-03-practical-core-gaps T2（R4）— 非 INTEGER PRIMARY KEY
+// 计划期拒绝（诚实化面：显式声明被接受但永不强制的一致性缺口收口）
+// ===========================================================================
+
+/// 显式非 INTEGER PK：五类型 × 列级/表级计划期点名拒绝、零副作用
+/// （被拒表名随后可查「不存在」）；INTEGER 声明形态与隐式主键语义保持。
+#[tokio::test]
+async fn create_table_non_integer_pk_rejected_side_effect_free() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+
+    for (i, ddl) in [
+        "CREATE TABLE s1 (name TEXT PRIMARY KEY, v INT)",
+        "CREATE TABLE s2 (name TEXT, v INT, PRIMARY KEY(name))",
+        "CREATE TABLE s3 (f FLOAT PRIMARY KEY, v INT)",
+        "CREATE TABLE s4 (b BOOLEAN PRIMARY KEY, v INT)",
+        "CREATE TABLE s5 (d DATE PRIMARY KEY, v INT)",
+        "CREATE TABLE s6 (ts TIMESTAMP PRIMARY KEY, v INT)",
+    ]
+    .iter()
+    .enumerate()
+    {
+        expect_error(&db, ddl, "NON-INTEGER PRIMARY KEY").await;
+        // 零副作用：被拒表不存在（Table not found 点名表名）。
+        let probe = format!("SELECT COUNT(*) FROM s{}", i + 1);
+        expect_error(&db, &probe, "not found").await;
+    }
+
+    // INTEGER 声明全形态保持可达且强制生效（含表级形态、INT 别名拼写）。
+    db.execute_sql("CREATE TABLE ok_col (id INT PRIMARY KEY, v INT)")
+        .await;
+    db.execute_sql("CREATE TABLE ok_alias (id INTEGER PRIMARY KEY, v INT)")
+        .await;
+    db.execute_sql("CREATE TABLE ok_tbl (id INT, v INT, PRIMARY KEY(id))")
+        .await;
+    for t in ["ok_col", "ok_alias", "ok_tbl"] {
+        expect_affected(&db, &format!("INSERT INTO {t} VALUES (1, 10)"), 1).await;
+        expect_error(
+            &db,
+            &format!("INSERT INTO {t} VALUES (1, 11)"),
+            "Duplicate key",
+        )
+        .await;
+        expect_count(&db, t, 1).await;
+    }
+
+    // 隐式主键（无 PK 声明）不受检查波及：INT 首列仍强制重复拒绝。
+    db.execute_sql("CREATE TABLE imp (id INT, v INT)").await;
+    expect_affected(&db, "INSERT INTO imp VALUES (1, 10)", 1).await;
+    expect_error(&db, "INSERT INTO imp VALUES (1, 11)", "Duplicate key").await;
+    // 非 INT 首列的隐式主键 = 无键行语义（重复合法，逐字节保持）。
+    db.execute_sql("CREATE TABLE imp_txt (name TEXT, v INT)")
+        .await;
+    expect_affected(&db, "INSERT INTO imp_txt VALUES ('a', 1)", 1).await;
+    expect_affected(&db, "INSERT INTO imp_txt VALUES ('a', 2)", 1).await;
+    expect_count(&db, "imp_txt", 2).await;
+
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// 存量非 INT PK 表（修复前遗留 catalog 形态，lib 直建夹具）打开/读写/
+/// 删除正常——拒绝面仅作用于新 DDL 计划期，不触碰既有表。
+#[tokio::test]
+async fn legacy_non_integer_pk_table_still_usable() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    // lib 直建绕过 planner——模拟 T2 修复前已存在的 TEXT PK catalog 行。
+    {
+        let db = Database::open(&path).await.unwrap();
+        db.table_manager
+            .create_table_with_constraints(
+                "s",
+                vec![
+                    (
+                        "name".into(),
+                        rtsql::storage::ColumnType::String(20),
+                        false,
+                        false,
+                        None,
+                    ),
+                    (
+                        "v".into(),
+                        rtsql::storage::ColumnType::Int,
+                        false,
+                        false,
+                        None,
+                    ),
+                ],
+                "name",
+            )
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+    }
+
+    // 重开：读面/写面/重复 TEXT PK 值（keyless 语义）全部正常。
+    let db = Database::open(&path).await.unwrap();
+    expect_affected(&db, "INSERT INTO s VALUES ('a', 1)", 1).await;
+    expect_affected(&db, "INSERT INTO s VALUES ('a', 2)", 1).await;
+    expect_count(&db, "s", 2).await;
+    match db.execute_sql("SELECT v FROM s WHERE name = 'a'").await {
+        Response::QueryResult { rows } => {
+            assert_eq!(rows.len(), 2, "两行均在：{rows:?}");
+        }
+        other => panic!("Expected QueryResult, got {:?}", other),
+    }
+    db.execute_sql("DROP TABLE s").await;
+    expect_error(&db, "SELECT COUNT(*) FROM s", "not found").await;
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}

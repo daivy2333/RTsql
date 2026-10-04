@@ -1574,6 +1574,137 @@ fn test_restore_stdin_pipe() {
     );
 }
 
+// ---- change 2026-10-03-practical-core-gaps T3（R5）：dump PK 渲染适配 ----
+
+/// R5/S20：dump 的 PRIMARY KEY 渲染仅在 PK 列声明类型为 INTEGER 时输出。
+/// 存量非 INT 显式 PK 表（修复前遗留 catalog 形态，lib 直建夹具）的 DDL
+/// 不含 PRIMARY KEY，dump→new→restore 往返可达；INTEGER PK 渲染逐字节
+/// 不变。
+#[tokio::test]
+async fn test_dump_pk_rendering_matches_enforced_semantics() {
+    let dir = fixture();
+    // lib 直建绕过 planner 拒绝面——模拟 T2 修复前已存在的 catalog 形态。
+    let legacy = dir.path().join("legacy.db");
+    {
+        let db = Database::open(&legacy).await.unwrap();
+        db.table_manager
+            .create_table_with_constraints(
+                "s",
+                vec![
+                    (
+                        "name".to_string(),
+                        ColumnType::String(20),
+                        false,
+                        false,
+                        None,
+                    ),
+                    ("v".to_string(), ColumnType::Int, false, false, None),
+                ],
+                "name",
+            )
+            .await
+            .unwrap();
+        db.table_manager
+            .create_table_with_constraints(
+                "ok",
+                vec![
+                    ("id".to_string(), ColumnType::Int, false, false, None),
+                    ("v".to_string(), ColumnType::Int, false, false, None),
+                ],
+                "id",
+            )
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+    }
+    // 存量行（TEXT PK 列重复值 = keyless 语义，修复前即合法）。
+    let out = run_cli(
+        dir.path(),
+        &[
+            legacy.to_str().unwrap(),
+            "INSERT INTO s VALUES ('a', 1), ('a', 2)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[legacy.to_str().unwrap(), "INSERT INTO ok VALUES (1, 10)"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+
+    let dump = run_cli(dir.path(), &["dump", legacy.to_str().unwrap()]);
+    assert_eq!(dump.code, Some(0), "stderr: {}", dump.stderr);
+
+    // INTEGER PK 渲染逐字节不变。
+    assert!(
+        dump.stdout
+            .contains("CREATE TABLE \"ok\" (\"id\" INT PRIMARY KEY, \"v\" INT);"),
+        "INTEGER PK DDL must stay byte-identical: {:?}",
+        dump.stdout
+    );
+    // 非 INT PK 渲染不含 PRIMARY KEY——声明从未被强制，输出与语义一致
+    // （隐式 PK 非 INT 首列表在 catalog 中同型，同断言覆盖）。
+    assert!(
+        dump.stdout
+            .contains("CREATE TABLE \"s\" (\"name\" STRING, \"v\" INT);"),
+        "non-INTEGER PK DDL must not carry PRIMARY KEY: {:?}",
+        dump.stdout
+    );
+
+    // 往返：dump → new → restore → 行集一致。
+    let dump_file = dir.path().join("dump.sql");
+    std::fs::write(&dump_file, &dump.stdout).unwrap();
+    let r = dir.path().join("r.db");
+    let out = run_cli(dir.path(), &["new", r.to_str().unwrap()]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["restore", r.to_str().unwrap(), dump_file.to_str().unwrap()],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {}",
+        out.stdout,
+        out.stderr
+    );
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            r.to_str().unwrap(),
+            "SELECT COUNT(*) FROM s",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[2]]),
+        "s rows: {:?}",
+        out.stdout
+    );
+    let out = run_cli(
+        dir.path(),
+        &[
+            r.to_str().unwrap(),
+            "SELECT COUNT(*) FROM ok",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1]]),
+        "ok rows: {:?}",
+        out.stdout
+    );
+}
+
 // ---- T05 Iteration 001：import --csv（R-import） ----
 
 /// R-import-S1/S2：基本导入 + 乱序表头按列名映射；成功输出 affected_rows；
@@ -3558,21 +3689,32 @@ fn unique_table_dump_restore_enforcement_roundtrip() {
     assert_eq!(out.code, Some(0), "distinct insert failed: {}", out.stderr);
 }
 
-/// D6 消费裁定：自家 dump 的 `pk BOOL PRIMARY KEY NOT NULL UNIQUE` 形态
-/// restore 可达（PK 列 UNIQUE 消费为 PK 既有唯一性）
-#[test]
-fn pk_bool_unique_dump_form_restores() {
+/// D6 消费裁定（change 2026-10-03-practical-core-gaps T2/T3 语义校准）：
+/// 存量非 INT PK 表——修复前 `pk BOOL PRIMARY KEY NOT NULL UNIQUE` 建出的
+/// catalog 形态（UNIQUE 被 PK 消费不落独立标志，lib 直建夹具模拟）——dump
+/// 产物不含 PRIMARY KEY（声明从未被强制，输出与语义一致），NOT NULL 渲染
+/// 保持，restore 可达。该表的新建 DDL 形态已被 T2 计划期拒绝。
+#[tokio::test]
+async fn legacy_bool_pk_dump_form_restores() {
     let dir = fixture();
-    // T10 机械校准：主命令不再隐式建库，先经 new 通道创建（断言语义不变）。
-    run_cli(dir.path(), &["new", "app"]);
-    let out = run_cli(
-        dir.path(),
-        &[
-            "app",
-            "CREATE TABLE flagged (pk BOOL PRIMARY KEY NOT NULL UNIQUE, v INT)",
-        ],
-    );
-    assert_eq!(out.code, Some(0), "create failed: {}", out.stderr);
+    // lib 直建绕过 planner 拒绝面——模拟 T2 修复前已存在的 catalog 形态。
+    // 裸名 `app` → `$RTSQL_HOME/db/app.db`。
+    let app = dir.path().join("db/app.db");
+    {
+        let db = Database::open(&app).await.unwrap();
+        db.table_manager
+            .create_table_with_constraints(
+                "flagged",
+                vec![
+                    ("pk".to_string(), ColumnType::Bool, true, false, None),
+                    ("v".to_string(), ColumnType::Int, false, false, None),
+                ],
+                "pk",
+            )
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+    }
     let out = run_cli(dir.path(), &["app", "INSERT INTO flagged VALUES (TRUE, 1)"]);
     assert_eq!(out.code, Some(0), "seed failed: {}", out.stderr);
 
@@ -3581,8 +3723,8 @@ fn pk_bool_unique_dump_form_restores() {
     assert!(
         dump_out
             .stdout
-            .contains("\"pk\" BOOL PRIMARY KEY NOT NULL UNIQUE"),
-        "dump must render the pk-unique form: {:?}",
+            .contains("CREATE TABLE \"flagged\" (\"pk\" BOOL NOT NULL, \"v\" INT);"),
+        "dump must drop the never-enforced PRIMARY KEY marker, keep NOT NULL: {:?}",
         dump_out.stdout
     );
 
@@ -3594,7 +3736,7 @@ fn pk_bool_unique_dump_form_restores() {
     assert_eq!(
         out.code,
         Some(0),
-        "restore of pk-unique dump form failed: {} {}",
+        "restore of legacy bool-pk dump form failed: {} {}",
         out.stdout,
         out.stderr
     );

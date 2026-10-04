@@ -1477,8 +1477,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     db.buffer_pool.clone(),
                     db.transaction_manager.clone(),
                     node.key.as_bytes().to_vec(),
-                    node.column,
-                    node.new_value,
+                    node.assignments,
                     tx_id.expect("DML Update requires a transaction id"),
                     db.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)

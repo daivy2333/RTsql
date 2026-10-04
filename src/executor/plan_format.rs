@@ -13,7 +13,7 @@ use crate::executor::aggregate::AggregateFunc;
 use crate::executor::plan::{
     ConflictAction, JoinCondition, NestedLoopJoinType, OrderByColumn, PhysicalPlan, SetOpKind,
 };
-use crate::executor::{AlterTableOp, UpsertValueExpr};
+use crate::executor::{AlterTableOp, UpdateValue, UpsertValueExpr};
 use crate::storage::page_format::Key;
 
 /// 渲染整棵计划树：首行恒为 `EXPLAIN` 根标识，其后每行对应一个计划节点。
@@ -180,12 +180,25 @@ fn describe(plan: &PhysicalPlan) -> String {
             }
             format!("InsertSelect {} ({})", node.table_name, params.join(", "))
         }
-        PhysicalPlan::Update(node) => format!(
-            "Update {} (key={}, column={})",
-            node.table_name,
-            key_hex(&node.key),
-            node.column
-        ),
+        PhysicalPlan::Update(node) => {
+            // change 2026-10-03-practical-core-gaps T8：多列赋值渲染——字面量
+            // 显示 SQL 形态，表达式显示其 Debug 形态。
+            let sets = node
+                .assignments
+                .iter()
+                .map(|a| match &a.value {
+                    UpdateValue::Literal(v) => format!("{}={:?}", a.column, v),
+                    UpdateValue::Expression(e) => format!("{}={:?}", a.column, e),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Update {} (key={}, set {})",
+                node.table_name,
+                key_hex(&node.key),
+                sets
+            )
+        }
         PhysicalPlan::Delete(node) => {
             format!("Delete {} (key={})", node.table_name, key_hex(&node.key))
         }

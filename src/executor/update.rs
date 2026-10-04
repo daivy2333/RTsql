@@ -1,6 +1,6 @@
 //! Update executor - MVCC-aware row update
 
-use crate::executor::{ExecResult, Executor, Value};
+use crate::executor::{ExecResult, Executor, UpdateAssignment, UpdateValue, Value};
 use crate::storage::page_format::{
     compute_tuple_size, deserialize_row, serialize_tuple, ColumnType,
 };
@@ -45,8 +45,9 @@ pub struct UpdateExecutor {
     buffer_pool: Arc<BufferPool>,
     tx_manager: Arc<TransactionManager>,
     key: Vec<u8>,
-    column_name: String,
-    new_value: Value,
+    /// 赋值清单（change 2026-10-03-practical-core-gaps T9：多列化——语句序，
+    /// 字面量臂与表达式臂按同一旧行快照消费）
+    assignments: Vec<UpdateAssignment>,
     tx_id: u64,
     schema: Vec<ColumnType>,
     executed: bool,
@@ -60,8 +61,7 @@ impl UpdateExecutor {
         buffer_pool: Arc<BufferPool>,
         tx_manager: Arc<TransactionManager>,
         key: Vec<u8>,
-        column_name: String,
-        new_value: Value,
+        assignments: Vec<UpdateAssignment>,
         tx_id: u64,
         wal_buffer: Option<Arc<WALBuffer>>,
     ) -> Self {
@@ -75,8 +75,7 @@ impl UpdateExecutor {
             buffer_pool,
             tx_manager,
             key,
-            column_name,
-            new_value,
+            assignments,
             tx_id,
             schema,
             executed: false,
@@ -100,86 +99,97 @@ impl Executor for UpdateExecutor {
             None => return Err(StorageError::KeyNotFound),
         };
 
-        // MS23-T02: SET 目标列为 NOT NULL 时拒绝置 NULL——Step 1 之后
-        // （KeyNotFound 保持优先）、任何写入之前，原行保持。未知列不在此
-        // 拦截，维持 Step 3 既有 ColumnNotFound。
-        if matches!(self.new_value, Value::Null) {
-            if let Some(idx) = self
-                .table_meta
-                .columns
-                .iter()
-                .position(|(name, _)| name == &self.column_name)
-            {
-                if self.table_meta.not_null[idx] {
-                    return Err(StorageError::NullConstraintViolation {
-                        column: self.column_name.clone(),
-                    });
-                }
-            }
-        }
-
-        // MS16 Iteration 000 (design D3): SET 目标列为键列时，新值类型必须与
-        // 键列声明类型同族——Int 键列只接受 Int/NULL。校验位于 Step 1 之后
-        // （目标行不存在仍报 KeyNotFound）且先于任何写入（Step 6 数据页/
-        // WAL/版本链）；NULL 放行走既有 I037 删旧键分支。
-        if self.column_name == self.table_meta.pk_column {
-            let pk_declared_int = self.table_meta.columns.iter().any(|(name, ct)| {
-                name == &self.table_meta.pk_column && matches!(ct, ColumnType::Int)
-            });
-            if pk_declared_int && !matches!(self.new_value, Value::Int(_) | Value::Null) {
-                return Err(StorageError::KeyTypeMismatch {
-                    column: self.table_meta.pk_column.clone(),
-                    expected: "INT".to_string(),
-                    actual: key_value_type_name(&self.new_value).to_string(),
-                });
-            }
-
-            // MS16 Iteration 001 (design D4): rekey 碰撞预检——新值可键控且
-            // 新键与旧键字节不同时，任何写入之前以新键查索引，命中即拒绝
-            // （与 INSERT 先查后写同一模式，拒绝零副作用）。同键字节相等走
-            // 既有 update 路径，不做预检。
-            if let Some(new_key) = self.new_value.to_key() {
-                if new_key.as_bytes() != self.key.as_slice()
-                    && self
-                        .table_meta
-                        .index_manager
-                        .search(new_key.as_bytes())
-                        .await?
-                        .is_some()
-                {
-                    return Err(StorageError::DuplicateKey);
-                }
-            }
-        }
-
-        // MS13 T4（决策 2）：SET 目标列为日期族时强制解析/拒绝（同族值/Null
-        // 原样、String 强制解析、其余 InvalidDateTime）。先于 Step 2 读与
-        // Step 6 写，非法值零副作用；未知列维持 Step 3 既有 ColumnNotFound。
-        // mut：MS24 一般类型门对 FLOAT 列 Int 值就地升格改写。
-        let mut new_value = match self
-            .table_meta
-            .columns
-            .iter()
-            .find(|(name, _)| name == &self.column_name)
-            .map(|(_, ct)| ct.clone())
-        {
-            Some(ct) => crate::executor::datetime::coerce_datetime_write(&self.new_value, &ct)?,
-            None => self.new_value.clone(),
-        };
-
-        // Step 2: Read old tuple from data page (M20 closure form, .to_vec() for WAL ownership)
+        // Step 2 (T9 前移): Read old tuple from data page (M20 closure form,
+        // .to_vec() for WAL ownership)。表达式右值对旧行快照求值的输入——
+        // 读取前移到求值之前；既有门序的相对顺序（NOT NULL → 键列门 →
+        // coerce → 唯一碰撞预检 → 类型门）逐字节保持。
+        // MS21 Iter003 (T3-a/D9): width-aware read-back + DEFAULT overlay —
+        // ADD COLUMN 前的窄行读回全宽后自愈（写新版本恒全宽）。
         let (_version_header, old_tuple_bytes) =
             read_tuple_from_data_page(&self.buffer_pool, old_row_id, |vh, bytes| {
                 Ok((vh, bytes.to_vec()))
             })
             .await?;
-        // MS21 Iter003 (T3-a/D9): width-aware read-back + DEFAULT overlay —
-        // ADD COLUMN 前的窄行读回全宽后自愈（写新版本恒全宽）。
         let mut values =
             deserialize_row(&old_tuple_bytes, &self.schema, &self.table_meta.defaults)?;
 
-        // MS23 Iteration 001 (2.6/D7): 唯一列旧值快照——Step 3 改值前捕获，
-        // 供碰撞预检与四分支维护使用（无唯一列的表零开销，不快照）。
+        // Step 3 (T9): 解析赋值列位并求值全部右值（语句序，同一旧行快照——
+        // S14 标准 SQL 语义）。字面量臂直取；表达式臂逐行求值（求值错误
+        // 沿 ProjectionExecutor 同款 `ExecutionError` 映射）。
+        let mut resolved: Vec<(usize, Value)> = Vec::with_capacity(self.assignments.len());
+        for assignment in &self.assignments {
+            let col_idx = self
+                .table_meta
+                .columns
+                .iter()
+                .position(|(name, _)| name == &assignment.column)
+                .ok_or_else(|| StorageError::ColumnNotFound(assignment.column.clone()))?;
+            let raw = match &assignment.value {
+                UpdateValue::Literal(v) => v.clone(),
+                UpdateValue::Expression(e) => e.evaluate(&values).map_err(|err| {
+                    StorageError::ExecutionError(format!("Expression evaluation error: {err}"))
+                })?,
+            };
+            resolved.push((col_idx, raw));
+        }
+
+        // Step 4 (T9): per-assignment 门序（语句序）——NOT NULL → 键列类型门
+        // （含 rekey 碰撞预检）→ 日期族 coerce。既有单列门序与错误面文本
+        // 逐字节承载；任何写入前（预检类失败零副作用）。
+        for (col_idx, raw) in resolved.iter_mut() {
+            let column_name = self.table_meta.columns[*col_idx].0.clone();
+
+            // MS23-T02: SET 目标列为 NOT NULL 时拒绝置 NULL——先于键列门
+            // （既有顺序）；表达式臂对求值结果强制。
+            if matches!(*raw, Value::Null) && self.table_meta.not_null[*col_idx] {
+                return Err(StorageError::NullConstraintViolation {
+                    column: column_name,
+                });
+            }
+
+            // MS16 Iteration 000 (design D3): SET 目标列为键列时，新值类型必须
+            // 与键列声明类型同族——Int 键列只接受 Int/NULL。NULL 放行走既有
+            // I037 删旧键分支。
+            if column_name == self.table_meta.pk_column {
+                let pk_declared_int =
+                    matches!(self.table_meta.columns[*col_idx].1, ColumnType::Int);
+                if pk_declared_int && !matches!(*raw, Value::Int(_) | Value::Null) {
+                    return Err(StorageError::KeyTypeMismatch {
+                        column: self.table_meta.pk_column.clone(),
+                        expected: "INT".to_string(),
+                        actual: key_value_type_name(raw).to_string(),
+                    });
+                }
+
+                // MS16 Iteration 001 (design D4): rekey 碰撞预检——新值可键控且
+                // 新键与旧键字节不同时，任何写入之前以新键查索引，命中即拒绝
+                // （与 INSERT 先查后写同一模式，拒绝零副作用）。同键字节相等
+                // 走既有 update 路径，不做预检。
+                if let Some(new_key) = raw.to_key() {
+                    if new_key.as_bytes() != self.key.as_slice()
+                        && self
+                            .table_meta
+                            .index_manager
+                            .search(new_key.as_bytes())
+                            .await?
+                            .is_some()
+                    {
+                        return Err(StorageError::DuplicateKey);
+                    }
+                }
+            }
+
+            // MS13 T4（决策 2）：SET 目标列为日期族时强制解析/拒绝（同族值/
+            // Null 原样、String 强制解析、其余 InvalidDateTime）。既有顺序：
+            // 键列门之后、唯一碰撞预检之前。
+            *raw = crate::executor::datetime::coerce_datetime_write(
+                raw,
+                &self.table_meta.columns[*col_idx].1,
+            )?;
+        }
+
+        // MS23 Iteration 001 (2.6/D7): 唯一列旧值快照——改值前捕获，供碰撞
+        // 预检与四分支维护使用（无唯一列的表零开销，不快照）。
         let unique_old_values: Vec<Value> = self
             .table_meta
             .unique_indexes
@@ -196,14 +206,14 @@ impl Executor for UpdateExecutor {
             .map(|s| values[s.column_index].clone())
             .collect();
 
-        // Step 3: Find column index and modify the target column
-        let col_idx = self
-            .table_meta
-            .columns
-            .iter()
-            .position(|(name, _)| name == &self.column_name)
-            .ok_or_else(|| StorageError::ColumnNotFound(self.column_name.clone()))?;
-        values[col_idx] = new_value.clone();
+        // Step 5 (T9): 赋值落位（语句序；同列重复赋值后写胜出）。
+        let mut assigned_cols: Vec<usize> = Vec::with_capacity(resolved.len());
+        for (col_idx, raw) in resolved {
+            values[col_idx] = raw;
+            if !assigned_cols.contains(&col_idx) {
+                assigned_cols.push(col_idx);
+            }
+        }
 
         // MS23 Iteration 001 (2.6/D7): UNIQUE 碰撞预检——改值分支（新值非
         // NULL 且异于旧值）以新键查专属索引，命中即 DuplicateKey。位于任何
@@ -235,27 +245,28 @@ impl Executor for UpdateExecutor {
         // MS24 Iteration 000 (1.3/D3)：SET 赋值列一般类型门——UNIQUE 碰撞
         // 预检之后、serialize 之前（既有 NOT NULL / PK 键位 / F1 守卫 /
         // 碰撞预检门先行，文本与优先级保持）。FLOAT 列整数值无损升格（就地
-        // 改写赋值行与 `new_value`，Step 7 键位维护派生自升格后值）；其余
-        // 跨类型组合零副作用点名拒绝（原行保持）。
-        match (&values[col_idx], &self.schema[col_idx]) {
-            (Value::Int(n), ColumnType::Float) => {
-                let upgraded = Value::Float(*n as f64);
-                values[col_idx] = upgraded.clone();
-                new_value = upgraded;
-            }
-            (Value::Null, _)
-            | (Value::Int(_), ColumnType::Int)
-            | (Value::String(_), ColumnType::String(_))
-            | (Value::Float(_), ColumnType::Float)
-            | (Value::Bool(_), ColumnType::Bool)
-            | (Value::Date(_), ColumnType::Date)
-            | (Value::Timestamp(_), ColumnType::Timestamp) => {}
-            (v, ct) => {
-                return Err(StorageError::ColumnTypeMismatch {
-                    column: self.column_name.clone(),
-                    expected: column_type_name(ct).to_string(),
-                    actual: key_value_type_name(v).to_string(),
-                });
+        // 改写赋值行，Step 7 键位维护派生自升格后值）；其余跨类型组合零副
+        // 作用点名拒绝（原行保持）。T9：多列按语句序逐列消费同一门序。
+        for &col_idx in &assigned_cols {
+            match (&values[col_idx], &self.schema[col_idx]) {
+                (Value::Int(n), ColumnType::Float) => {
+                    let upgraded = Value::Float(*n as f64);
+                    values[col_idx] = upgraded;
+                }
+                (Value::Null, _)
+                | (Value::Int(_), ColumnType::Int)
+                | (Value::String(_), ColumnType::String(_))
+                | (Value::Float(_), ColumnType::Float)
+                | (Value::Bool(_), ColumnType::Bool)
+                | (Value::Date(_), ColumnType::Date)
+                | (Value::Timestamp(_), ColumnType::Timestamp) => {}
+                (v, ct) => {
+                    return Err(StorageError::ColumnTypeMismatch {
+                        column: self.table_meta.columns[col_idx].0.clone(),
+                        expected: column_type_name(ct).to_string(),
+                        actual: key_value_type_name(v).to_string(),
+                    });
+                }
             }
         }
 
@@ -297,7 +308,8 @@ impl Executor for UpdateExecutor {
             .await;
 
         // Step 7: Maintain the PK index (MS16 Iteration 001, design D4, three
-        // branches):
+        // branches; T9: 新键派生自落位后值数组——PK 列未被赋值时条目随行指向
+        // 新版本，被赋值时按升格/coerce 后终值走三分支):
         // - non-key column: the entry stays under the old key (unchanged);
         // - key column set to a value with no B-Tree key (NULL / non-Int):
         //   delete the old entry so runtime state matches the recovery-side
@@ -308,13 +320,19 @@ impl Executor for UpdateExecutor {
         //   entry first, then insert the new key. delete() resolves the
         //   row_to_key reverse mapping via search, so updating the old entry
         //   first would make that delete clear the new row's mapping.
-        let new_key = new_value.to_key();
-        if self.column_name != self.table_meta.pk_column {
+        let pk_col_idx = self
+            .table_meta
+            .columns
+            .iter()
+            .position(|(name, _)| name == &self.table_meta.pk_column);
+        let pk_assigned = pk_col_idx.is_some_and(|idx| assigned_cols.contains(&idx));
+        if !pk_assigned {
             self.table_meta
                 .index_manager
                 .update(&self.key, new_row_id)
                 .await?;
         } else {
+            let new_key = values[pk_col_idx.unwrap()].to_key();
             match new_key {
                 None => self.table_meta.index_manager.delete(&self.key).await?,
                 Some(k) if k.as_bytes() == self.key.as_slice() => {

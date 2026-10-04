@@ -404,6 +404,240 @@ async fn test_check_lock_conflict_exit_4() {
     );
 }
 
+// ===== change 2026-10-03-practical-core-gaps T1（R1）：建表首数据页初始化 =====
+// 修复前 `create_table_with_constraints` 分配 head 页后从不写它（page type
+// 0x00），零行表 check 报 error exit 1（探针复现）；修复后全部建表通道经
+// 单点初始化，零行表新建即 check 干净。ATTACH 目标库建表在附加库 DDL 计划
+// 期拒绝面下不可经会话直达，其建表只可能经该库自身会话（同一
+// `create_table_with_constraints` 入口，design D1 调查结论），已由裸 CREATE
+// 用例覆盖同一机制。
+
+/// 整页写零：存量旧库夹具构造（T1 修复前 head 页从未被写入 = 全页 0x00）。
+fn zero_page_range(path: &Path, page: u32) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(page_file_offset(page, 0))).unwrap();
+    f.write_all(&vec![0u8; Page::PAGE_SIZE]).unwrap();
+}
+
+/// S1+S3：裸建表（零行）→ check exit 0 恰一行确认、文件全字节不变；
+/// 再次独立打开重查仍干净（页初始化随 close 持久）。
+#[tokio::test]
+async fn test_check_empty_created_table_is_clean_and_reopen() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    let new = run_cli(dir.path(), &["new", path.to_str().unwrap()], &[]);
+    assert_eq!(new.code, Some(0), "new: {:?}", new.stderr);
+    let create = run_cli(
+        dir.path(),
+        &[
+            path.to_str().unwrap(),
+            "CREATE TABLE t (id INT PRIMARY KEY, v STRING(2000))",
+        ],
+        &[],
+    );
+    assert_eq!(create.code, Some(0), "create: {:?}", create.stderr);
+
+    let before = read_file(&path);
+    let out = run_cli(dir.path(), &["check", path.to_str().unwrap()], &[]);
+    assert_eq!(out.code, Some(0), "stdout: {:?}", out.stdout);
+    assert_eq!(
+        out.stdout.lines().count(),
+        1,
+        "empty-table db must print exactly one confirmation line: {:?}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("check ok"), "stdout: {:?}", out.stdout);
+    assert_eq!(
+        read_file(&path),
+        before,
+        "check must not modify the database file"
+    );
+
+    // S3：close 重开两态——第二次独立打开再查仍干净（初始化已持久）。
+    let again = run_cli(dir.path(), &["check", path.to_str().unwrap()], &[]);
+    assert_eq!(again.code, Some(0), "stdout: {:?}", again.stdout);
+    assert_eq!(
+        again.stdout.lines().count(),
+        1,
+        "reopened db must stay clean: {:?}",
+        again.stdout
+    );
+}
+
+/// S2 通道矩阵：CTAS 空源 / import 仅表头自动建表（主库 m）与
+/// restore 空表 dump（目标库 r）——全部通道收敛于
+/// `create_table_with_constraints` 单点，建出的零行表 check 均 exit 0。
+#[tokio::test]
+async fn test_check_empty_table_creation_channels_matrix() {
+    let dir = TempDir::new().unwrap();
+
+    // 主库 m：CTAS 空源通道 + import 自动建表通道。
+    let m = dir.path().join("m.db");
+    let new = run_cli(dir.path(), &["new", m.to_str().unwrap()], &[]);
+    assert_eq!(new.code, Some(0), "new m: {:?}", new.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            m.to_str().unwrap(),
+            "CREATE TABLE src (id INT PRIMARY KEY, v STRING(20))",
+        ],
+        &[],
+    );
+    assert_eq!(out.code, Some(0), "create src: {:?}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[m.to_str().unwrap(), "INSERT INTO src VALUES (1, 'a')"],
+        &[],
+    );
+    assert_eq!(out.code, Some(0), "seed src: {:?}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            m.to_str().unwrap(),
+            "CREATE TABLE t_ctas AS SELECT id, v FROM src WHERE 1 = 0",
+        ],
+        &[],
+    );
+    assert_eq!(out.code, Some(0), "ctas empty source: {:?}", out.stderr);
+
+    // import 仅表头（零数据行）：类型推导零行退化 → 自动建表零行。
+    let csv = dir.path().join("h.csv");
+    std::fs::write(&csv, "id,name\n").unwrap();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "import",
+            m.to_str().unwrap(),
+            "t_imp",
+            csv.to_str().unwrap(),
+            "--csv",
+        ],
+        &[],
+    );
+    assert_eq!(out.code, Some(0), "import header-only: {:?}", out.stderr);
+
+    let out = run_cli(dir.path(), &["check", m.to_str().unwrap()], &[]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "m (CTAS + import channels): {:?}",
+        out.stdout
+    );
+    assert_eq!(
+        out.stdout.lines().count(),
+        1,
+        "m must check clean in one line: {:?}",
+        out.stdout
+    );
+
+    // restore 通道：dump m（含零行表 DDL）→ new r → restore r → check r。
+    let dump = run_cli(dir.path(), &["dump", m.to_str().unwrap()], &[]);
+    assert_eq!(dump.code, Some(0), "dump m: {:?}", dump.stderr);
+    let r = dir.path().join("r.db");
+    let new = run_cli(dir.path(), &["new", r.to_str().unwrap()], &[]);
+    assert_eq!(new.code, Some(0), "new r: {:?}", new.stderr);
+    let dump_file = dir.path().join("dump.sql");
+    std::fs::write(&dump_file, &dump.stdout).unwrap();
+    let out = run_cli(
+        dir.path(),
+        &["restore", r.to_str().unwrap(), dump_file.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "restore r: {:?} {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    let out = run_cli(dir.path(), &["check", r.to_str().unwrap()], &[]);
+    assert_eq!(out.code, Some(0), "r (restore channel): {:?}", out.stdout);
+    assert_eq!(
+        out.stdout.lines().count(),
+        1,
+        "r must check clean in one line: {:?}",
+        out.stdout
+    );
+}
+
+/// S5：存量 0x00 head 夹具（模拟 T1 修复前旧库）——打开路径不自愈
+/// （check 维持既有 error 报告），首次 INSERT 与 TRUNCATE 后转绿
+/// （写路径对未初始化页自带 init / head 原地重置先例，零新代码）。
+#[tokio::test]
+async fn test_check_legacy_zero_head_table_heals_on_first_write() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    let new = run_cli(dir.path(), &["new", path.to_str().unwrap()], &[]);
+    assert_eq!(new.code, Some(0), "new: {:?}", new.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            path.to_str().unwrap(),
+            "CREATE TABLE t (id INT PRIMARY KEY, v STRING(20))",
+        ],
+        &[],
+    );
+    assert_eq!(out.code, Some(0), "create: {:?}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[path.to_str().unwrap(), "INSERT INTO t VALUES (1, 'a')"],
+        &[],
+    );
+    assert_eq!(out.code, Some(0), "seed: {:?}", out.stderr);
+
+    // 模拟旧库：head 页整页归零（修复前建表从不写 head 页的存量形态）。
+    let head = data_head_page(&path).await;
+    zero_page_range(&path, head);
+
+    // open 不自愈——check 维持既有 error 分级（fso 越界 + page type 0x00）。
+    let out = run_cli(dir.path(), &["check", path.to_str().unwrap()], &[]);
+    assert_eq!(
+        out.code,
+        Some(1),
+        "legacy zero-head table must keep failing check before any write: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("free space offset"),
+        "fso finding must be reported: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("page type 0x00"),
+        "page-type finding must be reported: {:?}",
+        out.stdout
+    );
+
+    // 首次 INSERT：写路径自带 init → 转绿。
+    let out = run_cli(
+        dir.path(),
+        &[path.to_str().unwrap(), "INSERT INTO t VALUES (2, 'b')"],
+        &[],
+    );
+    assert_eq!(out.code, Some(0), "insert: {:?}", out.stderr);
+    let out = run_cli(dir.path(), &["check", path.to_str().unwrap()], &[]);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "check after first insert: {:?}",
+        out.stdout
+    );
+    assert_eq!(out.stdout.lines().count(), 1, "stdout: {:?}", out.stdout);
+
+    // TRUNCATE：head 原地重置先例 → 转绿。
+    let out = run_cli(
+        dir.path(),
+        &[path.to_str().unwrap(), "TRUNCATE TABLE t"],
+        &[],
+    );
+    assert_eq!(out.code, Some(0), "truncate: {:?}", out.stderr);
+    let out = run_cli(dir.path(), &["check", path.to_str().unwrap()], &[]);
+    assert_eq!(out.code, Some(0), "check after truncate: {:?}", out.stdout);
+    assert_eq!(out.stdout.lines().count(), 1, "stdout: {:?}", out.stdout);
+}
+
 /// 未引用溢出链以 info 级报告且不改退出码（error/info 分级交接口径）。
 #[tokio::test]
 async fn test_check_unreferenced_overflow_is_info_exit_0() {

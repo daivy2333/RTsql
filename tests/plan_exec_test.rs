@@ -177,8 +177,10 @@ async fn test_insert_update_scan_flow() -> Result<()> {
         buffer_pool.clone(),
         tx_manager,
         key_bytes.to_vec(),
-        "id".to_string(),
-        new_value,
+        vec![rtsql::executor::UpdateAssignment {
+            column: "id".to_string(),
+            value: rtsql::executor::UpdateValue::Literal(new_value),
+        }],
         0,
         None,
     );

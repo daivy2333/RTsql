@@ -271,17 +271,45 @@ pub struct InsertSelectNode {
     pub upsert: Option<(ConflictArbiter, ConflictAction)>,
 }
 
-/// 更新节点（单行单列更新）
+/// UPDATE SET 右值形态（change 2026-10-03-practical-core-gaps T8）
+#[derive(Debug, Clone)]
+pub enum UpdateValue {
+    /// 字面量（既有语义逐字节：含 TypedString 日期解析与 NULL 标识符）
+    Literal(Value),
+    /// 值表达式（列引用 / 算术 / CAST / CASE / COALESCE / 标量函数——执行器
+    /// 对命中行旧行快照求值，见 `UpdateExecutor`）
+    Expression(ExpressionRef),
+}
+
+/// 字面量按值相等；表达式臂不可比较（计划期形状断言用 `matches!`）。
+impl PartialEq for UpdateValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (UpdateValue::Literal(a), UpdateValue::Literal(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// UPDATE 的单列赋值（change 2026-10-03-practical-core-gaps T8）
+#[derive(Debug, Clone)]
+pub struct UpdateAssignment {
+    /// 目标列名（小写归一）
+    pub column: String,
+    /// 右值形态
+    pub value: UpdateValue,
+}
+
+/// 更新节点（change 2026-10-03-practical-core-gaps T8：多列赋值 + 值表达式
+/// 右值；定位行语义不变——主键等值 WHERE）
 #[derive(Debug, Clone)]
 pub struct UpdateNode {
     /// 表名
     pub table_name: String,
     /// 主键（定位行）
     pub key: Key,
-    /// 更新列名
-    pub column: String,
-    /// 新值
-    pub new_value: Value,
+    /// 赋值清单（语句序）
+    pub assignments: Vec<UpdateAssignment>,
 }
 
 /// 删除节点

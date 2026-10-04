@@ -969,7 +969,12 @@ pub(crate) fn create_table_sql(table: &CatalogRow, columns: &[CatalogColumnRow])
                 quote_ident(&col.column_name),
                 column_type_sql(&col.column_type)
             );
-            if col.column_name == table.pk_column {
+            // change 2026-10-03-practical-core-gaps T3 (R5/D3): render
+            // PRIMARY KEY only for INTEGER pk columns — a non-INTEGER pk
+            // declaration was never enforced (keyless-row semantics), so
+            // emitting it would produce DDL that the plan-time honest-
+            // constraint face (T2) rejects. INTEGER pk output unchanged.
+            if col.column_name == table.pk_column && matches!(col.column_type, ColumnType::Int) {
                 part.push_str(" PRIMARY KEY");
             }
             if col.not_null {
@@ -1537,13 +1542,15 @@ mod tests {
 
     #[test]
     fn ddl_generator_quotes_and_orders_constraints() {
+        // change 2026-10-03-practical-core-gaps T3：PRIMARY KEY 仅对 INTEGER
+        // pk 列渲染——夹具 pk 列保持 INT（本测试面为引号转义与约束序）。
         let t = table("we\"ird", "pk");
-        let columns = vec![column(0, "pk", ColumnType::Bool, true, true)];
+        let columns = vec![column(0, "pk", ColumnType::Int, true, true)];
 
         let ddl = create_table_sql(&t, &columns);
         assert_eq!(
             ddl,
-            "CREATE TABLE \"we\"\"ird\" (\"pk\" BOOL PRIMARY KEY NOT NULL UNIQUE);"
+            "CREATE TABLE \"we\"\"ird\" (\"pk\" INT PRIMARY KEY NOT NULL UNIQUE);"
         );
     }
 

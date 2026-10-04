@@ -84,8 +84,8 @@ pub use plan::{
     FilterNode, HavingNode, IndexScanAllNode, IndexScanNode, InsertNode, InsertSelectNode,
     JoinCondition, JoinNode, LimitNode, NestedLoopJoinNode, NestedLoopJoinType, OrderByColumn,
     OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode, ScanNode, SemiJoinNode, SetOpKind,
-    SetOperationNode, SortNode, SubqueryEvalNode, TruncateNode, UpdateNode, UpsertAssignment,
-    UpsertNode, UpsertValueExpr,
+    SetOperationNode, SortNode, SubqueryEvalNode, TruncateNode, UpdateAssignment, UpdateNode,
+    UpdateValue, UpsertAssignment, UpsertNode, UpsertValueExpr,
 };
 pub use predicate::{
     ArithOp, BinaryArithExpression, CaseExpression, CastExpression, CastType, CoalesceExpression,

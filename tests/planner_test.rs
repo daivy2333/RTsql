@@ -71,7 +71,14 @@ fn test_update() {
     match plan {
         PhysicalPlan::Update(node) => {
             assert_eq!(node.table_name, "users");
-            assert_eq!(node.column, "name");
+            // change 2026-10-03-practical-core-gaps T8：节点多列化校准——
+            // 单字面量赋值语义逐字节（Literal 臂承载）。
+            assert_eq!(node.assignments.len(), 1);
+            assert_eq!(node.assignments[0].column, "name");
+            assert_eq!(
+                node.assignments[0].value,
+                rtsql::executor::UpdateValue::Literal(rtsql::Value::String("Bob".to_string()))
+            );
         }
         _ => panic!("Expected Update, got {:?}", plan),
     }
@@ -163,6 +170,62 @@ fn test_build_create_table() {
             ));
         }
         _ => panic!("Expected CreateTable, got {:?}", plan),
+    }
+}
+
+/// change 2026-10-03-practical-core-gaps T2（R4）：显式 PRIMARY KEY 仅接受
+/// INTEGER 声明类型——五类型 × 列级/表级矩阵计划期点名拒绝（错误携带能力
+/// 名 "NON-INTEGER PRIMARY KEY"）；INT/INTEGER 声明形态与隐式主键（无
+/// 声明）不受检查波及。
+#[test]
+fn test_create_table_non_integer_primary_key_rejected() {
+    // 五类型 × 两形态（列级 / 表级）拒绝矩阵。
+    for ty in ["FLOAT", "TEXT", "BOOLEAN", "DATE", "TIMESTAMP"] {
+        let column_level = format!("CREATE TABLE s (name {ty} PRIMARY KEY, v INT)");
+        let stmts = parse_sql(&column_level).unwrap();
+        let mut builder = PlanBuilder::new();
+        let err = builder.build_plan(&stmts[0]).unwrap_err();
+        assert!(
+            err.to_string().contains("NON-INTEGER PRIMARY KEY"),
+            "column-level {ty} must be rejected, got: {err}"
+        );
+
+        let table_level = format!("CREATE TABLE s (name {ty}, v INT, PRIMARY KEY(name))");
+        let stmts = parse_sql(&table_level).unwrap();
+        let mut builder = PlanBuilder::new();
+        let err = builder.build_plan(&stmts[0]).unwrap_err();
+        assert!(
+            err.to_string().contains("NON-INTEGER PRIMARY KEY"),
+            "table-level {ty} must be rejected, got: {err}"
+        );
+    }
+
+    // INTEGER 声明全形态保持可达（含 INT 别名拼写，经 convert_data_type 归一）。
+    for ddl in [
+        "CREATE TABLE s (id INT PRIMARY KEY, v INT)",
+        "CREATE TABLE s (id INTEGER PRIMARY KEY, v INT)",
+        "CREATE TABLE s (id INT, v INT, PRIMARY KEY(id))",
+    ] {
+        let stmts = parse_sql(ddl).unwrap();
+        let mut builder = PlanBuilder::new();
+        let plan = builder.build_plan(&stmts[0]).unwrap();
+        match plan {
+            PhysicalPlan::CreateTable(node) => {
+                assert_eq!(node.primary_key, Some("id".to_string()), "{ddl}");
+            }
+            other => panic!("Expected CreateTable for {ddl}, got {other:?}"),
+        }
+    }
+
+    // 隐式主键（无 PK 声明）不受检查波及。
+    let stmts = parse_sql("CREATE TABLE s (name TEXT, v INT)").unwrap();
+    let mut builder = PlanBuilder::new();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+    match plan {
+        PhysicalPlan::CreateTable(node) => {
+            assert_eq!(node.primary_key, None);
+        }
+        other => panic!("Expected CreateTable, got {other:?}"),
     }
 }
 
@@ -2137,5 +2200,239 @@ fn qualified_wildcard_capability_named() {
             }
             Ok(plan) => panic!("Expected rejection for {sql}, got {:?}", plan),
         }
+    }
+}
+
+// ===========================================================================
+// change 2026-10-03-practical-core-gaps Iteration 001（T4）：聚合嵌入表达式项
+// 的计划形状——表达式项经条件 Projection 包装在聚合输出行上求值。
+// ===========================================================================
+
+#[test]
+fn aggregate_embedded_expression_uses_projection_wrap() {
+    let sql = "SELECT MAX(id)+1 FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Projection(node) => {
+            assert_eq!(
+                node.items.len(),
+                1,
+                "包装 Projection 须按 SELECT 清单出 1 项"
+            );
+            assert_eq!(
+                node.items[0].name, "MAX(id) + 1",
+                "输出名 = 表达式 Display 文本"
+            );
+            match node.input.as_ref() {
+                PhysicalPlan::Aggregate(agg) => {
+                    assert_eq!(agg.aggregates.len(), 1, "MAX(id) 注册为聚合输出列");
+                    assert_eq!(agg.output_columns, vec!["max_id".to_string()]);
+                }
+                other => panic!("Expected Aggregate under wrap Projection, got {:?}", other),
+            }
+        }
+        other => panic!(
+            "Expected Projection wrap for embedded aggregate, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn aggregate_constant_mixing_plan_shape() {
+    let sql = "SELECT MAX(id), 1 FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Projection(node) => {
+            let names: Vec<&str> = node.items.iter().map(|i| i.name.as_str()).collect();
+            assert_eq!(names, vec!["max_id", "1"], "输出名 = 聚合结果名 + 常量文本");
+        }
+        other => panic!(
+            "Expected Projection wrap for constant mixing, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn aggregate_embedded_expression_alias_names_output() {
+    let sql = "SELECT MAX(id)+1 AS next_id FROM users";
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = setup_builder();
+    let plan = builder.build_plan(&stmts[0]).unwrap();
+
+    match plan {
+        PhysicalPlan::Projection(node) => {
+            assert_eq!(node.items[0].name, "next_id", "输出名 = 别名优先");
+        }
+        other => panic!("Expected Projection wrap, got {:?}", other),
+    }
+}
+
+// ===========================================================================
+// change 2026-10-03-practical-core-gaps T8：UPDATE SET 多列赋值与值表达式
+// 右值——计划面路由：字面量 Literal 语义逐字节保留；列引用 / 算术 / CAST /
+// CASE / 标量函数经既有值表达式内核编译为 Expression（执行器对旧行快照求
+// 值）；子查询与聚合计划期点名拒绝。
+// ===========================================================================
+
+fn update_expr_builder() -> PlanBuilder {
+    let mut builder = PlanBuilder::new();
+    builder.register_table("t", vec!["id".into(), "v".into(), "name".into()], "id");
+    builder
+}
+
+fn build_update_plan(sql: &str) -> rtsql::executor::PhysicalPlan {
+    let stmts = parse_sql(sql).unwrap();
+    let mut builder = update_expr_builder();
+    builder.build_plan(&stmts[0]).unwrap()
+}
+
+use rtsql::executor::{UpdateNode, UpdateValue};
+
+/// 多列赋值计划面可达（修复前：MULTI-COLUMN UPDATE 拒绝）。
+#[test]
+fn update_multi_column_assignments_plan() {
+    let plan = build_update_plan("UPDATE t SET v = 5, name = 'bob' WHERE id = 1");
+    match plan {
+        PhysicalPlan::Update(node) => {
+            assert_eq!(node.table_name, "t");
+            assert_eq!(node.assignments.len(), 2);
+            assert_eq!(node.assignments[0].column, "v");
+            assert_eq!(
+                node.assignments[0].value,
+                UpdateValue::Literal(rtsql::Value::Int(5))
+            );
+            assert_eq!(node.assignments[1].column, "name");
+            assert_eq!(
+                node.assignments[1].value,
+                UpdateValue::Literal(rtsql::Value::String("bob".to_string()))
+            );
+        }
+        other => panic!("Expected Update plan, got {:?}", other),
+    }
+}
+
+/// 列引用右值编译为表达式（对旧行快照求值；修复前：Unsupported value type）。
+#[test]
+fn update_column_reference_expression_plan() {
+    let plan = build_update_plan("UPDATE t SET v = v + 1 WHERE id = 1");
+    match plan {
+        PhysicalPlan::Update(node) => {
+            assert_eq!(node.assignments.len(), 1);
+            assert_eq!(node.assignments[0].column, "v");
+            assert!(matches!(
+                node.assignments[0].value,
+                UpdateValue::Expression(_)
+            ));
+        }
+        other => panic!("Expected Update plan, got {:?}", other),
+    }
+}
+
+/// 算术 / CAST / CASE / 标量函数右值经既有值表达式内核编译。
+#[test]
+fn update_expression_forms_plan() {
+    for sql in [
+        "UPDATE t SET v = 1 + 2 WHERE id = 1",
+        "UPDATE t SET v = CAST('42' AS INTEGER) WHERE id = 1",
+        "UPDATE t SET v = CASE WHEN v = 1 THEN 2 ELSE 3 END WHERE id = 1",
+        "UPDATE t SET name = upper('ada') WHERE id = 1",
+        "UPDATE t SET v = COALESCE(v, 0) WHERE id = 1",
+    ] {
+        let plan = build_update_plan(sql);
+        match plan {
+            PhysicalPlan::Update(node) => {
+                assert_eq!(node.assignments.len(), 1, "{sql}");
+                assert!(
+                    matches!(node.assignments[0].value, UpdateValue::Expression(_)),
+                    "{sql} 右值必须编译为表达式"
+                );
+            }
+            other => panic!("{sql}: expected Update plan, got {:?}", other),
+        }
+    }
+}
+
+/// 右值表达式中的未知列计划期 `ColumnNotFound` 点名。
+#[test]
+fn update_unknown_column_in_expression_rejected() {
+    let stmts = parse_sql("UPDATE t SET v = nosuch + 1 WHERE id = 1").unwrap();
+    let mut builder = update_expr_builder();
+    let err = builder.build_plan(&stmts[0]).unwrap_err();
+    assert!(
+        err.to_string().contains("nosuch"),
+        "未知列必须点名，实际: {err}"
+    );
+}
+
+/// 子查询右值计划期点名拒绝（UPDATE 无子查询边界保持，错误携能力名）。
+#[test]
+fn update_subquery_rejected() {
+    let stmts = parse_sql("UPDATE t SET v = (SELECT MAX(id) FROM t) WHERE id = 1").unwrap();
+    let mut builder = update_expr_builder();
+    let err = builder.build_plan(&stmts[0]).unwrap_err();
+    assert!(
+        err.to_string().contains("UPDATE SUBQUERY"),
+        "子查询右值必须点名拒绝，实际: {err}"
+    );
+}
+
+/// 聚合右值计划期点名拒绝（与 WHERE 聚合同通道，错误携能力名）。
+#[test]
+fn update_aggregate_rejected() {
+    let stmts = parse_sql("UPDATE t SET v = MAX(v) WHERE id = 1").unwrap();
+    let mut builder = update_expr_builder();
+    let err = builder.build_plan(&stmts[0]).unwrap_err();
+    assert!(
+        err.to_string().contains("MAX"),
+        "聚合右值必须点名拒绝，实际: {err}"
+    );
+}
+
+/// 字面量臂语义逐字节保留：Value / TypedString 日期解析 / NULL 标识符。
+#[test]
+fn update_literal_semantics_preserved() {
+    let plan = build_update_plan("UPDATE t SET v = 5 WHERE id = 1");
+    match plan {
+        PhysicalPlan::Update(UpdateNode { assignments, .. }) => {
+            assert_eq!(assignments.len(), 1);
+            assert_eq!(
+                assignments[0].value,
+                UpdateValue::Literal(rtsql::Value::Int(5))
+            );
+        }
+        other => panic!("Expected Update plan, got {:?}", other),
+    }
+
+    let plan = build_update_plan("UPDATE t SET v = DATE '2024-01-01' WHERE id = 1");
+    match plan {
+        PhysicalPlan::Update(UpdateNode { assignments, .. }) => {
+            assert!(
+                matches!(
+                    assignments[0].value,
+                    UpdateValue::Literal(rtsql::Value::Date(_))
+                ),
+                "TypedString 日期字面量必须在计划期解析为 Date 字面量"
+            );
+        }
+        other => panic!("Expected Update plan, got {:?}", other),
+    }
+
+    let plan = build_update_plan("UPDATE t SET v = NULL WHERE id = 1");
+    match plan {
+        PhysicalPlan::Update(UpdateNode { assignments, .. }) => {
+            assert_eq!(
+                assignments[0].value,
+                UpdateValue::Literal(rtsql::Value::Null)
+            );
+        }
+        other => panic!("Expected Update plan, got {:?}", other),
     }
 }
