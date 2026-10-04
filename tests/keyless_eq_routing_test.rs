@@ -124,7 +124,32 @@ async fn text_primary_key_equality_reaches_keyless_rows() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    exec_ok(&db, "CREATE TABLE t3 (s TEXT PRIMARY KEY, n INT)").await;
+    // change 2026-10-03-practical-core-gaps T2 语义校准：TEXT 显式 PK 新建
+    // DDL 已被计划期拒绝，夹具改经 lib 直建（存量 catalog 形态）——声明
+    // 键列的 String 等值命中无键行行为本身不变。
+    db.table_manager
+        .create_table_with_constraints(
+            "t3",
+            vec![
+                (
+                    "s".into(),
+                    rtsql::storage::page_format::ColumnType::String(255),
+                    false,
+                    false,
+                    None,
+                ),
+                (
+                    "n".into(),
+                    rtsql::storage::page_format::ColumnType::Int,
+                    false,
+                    false,
+                    None,
+                ),
+            ],
+            "s",
+        )
+        .await
+        .unwrap();
     exec_ok(&db, "INSERT INTO t3 VALUES ('x', 1)").await;
 
     let rows = query_rows(db.execute_sql("SELECT * FROM t3 WHERE s = 'x'").await);

@@ -80,8 +80,10 @@ async fn test_version_chain_traversal() -> Result<()> {
         buffer_pool.clone(),
         tx_manager.clone(),
         key.to_vec(),
-        "id".to_string(),
-        Value::Int(20),
+        vec![rtsql::executor::UpdateAssignment {
+            column: "id".to_string(),
+            value: rtsql::executor::UpdateValue::Literal(Value::Int(20)),
+        }],
         tx2_id,
         None,
     );
@@ -125,8 +127,10 @@ async fn test_version_chain_traversal() -> Result<()> {
         buffer_pool.clone(),
         tx_manager.clone(),
         key.to_vec(),
-        "id".to_string(),
-        Value::Int(30),
+        vec![rtsql::executor::UpdateAssignment {
+            column: "id".to_string(),
+            value: rtsql::executor::UpdateValue::Literal(Value::Int(30)),
+        }],
         tx3_id,
         None,
     );
@@ -285,8 +289,10 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
         buffer_pool.clone(),
         tx_manager.clone(),
         key.to_vec(),
-        "id".to_string(),
-        Value::Int(200),
+        vec![rtsql::executor::UpdateAssignment {
+            column: "id".to_string(),
+            value: rtsql::executor::UpdateValue::Literal(Value::Int(200)),
+        }],
         tx2_id,
         None,
     );
@@ -304,8 +310,10 @@ async fn test_version_chain_skips_invisible() -> Result<()> {
         buffer_pool.clone(),
         tx_manager.clone(),
         key.to_vec(),
-        "id".to_string(),
-        Value::Int(300),
+        vec![rtsql::executor::UpdateAssignment {
+            column: "id".to_string(),
+            value: rtsql::executor::UpdateValue::Literal(Value::Int(300)),
+        }],
         tx3_id,
         None,
     );

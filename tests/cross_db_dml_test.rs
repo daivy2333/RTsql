@@ -1118,10 +1118,13 @@ fn update_delete_subquery_shapes_still_rejected() {
             "ATTACH 'o' AS o; UPDATE o.u SET tag = (SELECT tag FROM t) WHERE id = 1",
         ],
     );
+    // change 2026-10-03-practical-core-gaps T8：子查询右值拒绝面由泛化
+    // `Unsupported value type` 收敛为携能力名的 `UPDATE SUBQUERY`——拒绝
+    // 语义（计划期、exit 3、零副作用）不变，仅文案断言随能力名校准。
     assert_failure(
         &upd,
         3,
-        "Unsupported value type",
+        "UPDATE SUBQUERY",
         "UPDATE subquery assignment",
     );
 

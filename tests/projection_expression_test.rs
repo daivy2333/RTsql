@@ -271,8 +271,12 @@ async fn aggregate_expression_error_preserved() {
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
+    // change 2026-10-03-practical-core-gaps T4 校准：纯常量项（原用例的
+    // `CASE WHEN 1 = 1 THEN 'x' END` 不含列引用）现按 R2/S9 与聚合混排合法
+    // （见证见 aggregate_extension_test::constant_mixing_with_aggregate），
+    // 本用例改用含列引用的未分组表达式保持原拒绝语义。
     let message = error_message(
-        db.execute_sql("SELECT COUNT(*), CASE WHEN 1 = 1 THEN 'x' END FROM t")
+        db.execute_sql("SELECT COUNT(*), CASE WHEN id = 1 THEN 'x' END FROM t")
             .await,
     );
     // MS13 T8 校准（BH-1 同型）：混合投影解锁后，未分组表达式项仍显式拒绝，

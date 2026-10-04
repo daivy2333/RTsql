@@ -252,6 +252,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **日期时间：** `DATE`、`TIMESTAMP`、`now`、`date`、`year`、`month`、`day`、`hour`、`minute`、`second`、`date_trunc`、`datediff` 和 `INTERVAL` 算术。
 - **子查询：** 标量子查询、`IN`、`EXISTS`、派生表和关联子查询；相同关联参数可复用语句级结果。
 - **分组：** 可按列、别名、表达式文本或序号执行 `GROUP BY`。
+- **聚合表达式：** 聚合可嵌套于 SELECT 值表达式（`SELECT MAX(id) + 1`）、`HAVING` 条件（`HAVING MAX(id) + 1 > 2`）与聚合查询 `ORDER BY` 键（`ORDER BY MAX(v)`）；选择清单可与纯常量混排（`SELECT MAX(id), 1`）；同一聚合调用多次出现共享一个输出列。`WHERE`/`JOIN ... ON` 内聚合、聚合嵌套、无 `GROUP BY` 的非聚合列引用在计划期点名拒绝。
 - **常量查询：** 支持 `SELECT 1 + 1` 等无 `FROM` 表达式。
 - **事务：** 显式库 API 事务，以及 CLI `BEGIN` / `COMMIT` / `ROLLBACK` 会话。
 - **MVCC：** 默认 Repeatable Read，也可通过 `Database::open_with_isolation` 选择 Read Committed。
@@ -267,8 +268,9 @@ rtsql app "ATTACH 'orders' AS o; \
 
 - **NOT NULL** 在 `INSERT` 与 `UPDATE` 强制。违反的写入以 `NOT NULL constraint violation: column '<列名>'` 失败，零副作用。
 - **UNIQUE** 对 `INT` 列强制（主键列除外），经专属内部唯一索引实现；重复值以 `Duplicate key` 拒绝，`NULL` 豁免，且重启与崩溃恢复后强制保持。声明在主键列上的 `UNIQUE` 由主键既有唯一性消费，不建第二索引。
-- **计划期点名拒绝（表不创建）：** `CHECK`、`FOREIGN KEY`、方言特定列选项、非 `INT` 列的 `UNIQUE`、组合（多列）`UNIQUE`。
-- **存量兼容：** 旧版本创建的、含非 `INT` `UNIQUE` 列的数据库可正常打开（这些列不被强制）；但把这类表 dump 后 restore 进新库会被上述计划期规则拒绝。在 `NOT NULL` 强制落地前写入的、「NOT NULL 列含 NULL」的存量行同样会在 restore 时被拒。请先调整 schema（把非 `INT` `UNIQUE` 改为 `INT` 或去掉声明）并清理或回填此类数据，再执行 restore。
+- **PRIMARY KEY** 必须声明在 `INTEGER` 列上——这是引擎强制的唯一形态。显式非整数 `PRIMARY KEY` 计划期点名拒绝；未声明主键的表沿用首列隐式主键既有语义，零变化。
+- **计划期点名拒绝（表不创建）：** `CHECK`、`FOREIGN KEY`、方言特定列选项、显式非 `INTEGER` `PRIMARY KEY`、非 `INT` 列的 `UNIQUE`、组合（多列）`UNIQUE`。
+- **存量兼容：** 旧版本创建的、含非 `INT` `UNIQUE` 列的数据库可正常打开（这些列不被强制）；但把这类表 dump 后 restore 进新库会被上述计划期规则拒绝。 以非整数 `PRIMARY KEY` 声明的存量表同样可正常打开、读取与 dump，且 dump DDL 不渲染 `PRIMARY KEY`（`dump` → `restore` 往返可达）；旧版本生成的、内嵌非整数 `... PRIMARY KEY` DDL 的 dump 在新库 restore 失败（该声明从未被强制）。在 `NOT NULL` 强制落地前写入的、「NOT NULL 列含 NULL」的存量行同样会在 restore 时被拒。请先调整 schema（把非 `INT` `UNIQUE` 改为 `INT` 或去掉声明）并清理或回填此类数据，再执行 restore。
 
 ### 写面
 
@@ -277,6 +279,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **列清单：** `INSERT INTO t (col, ...) VALUES ...` 接受表列的任意子集且顺序任意。省略列取声明 `DEFAULT`，无声明则取 `NULL`；NOT NULL 列这样被填入 `NULL` 时点名拒绝。`VALUES` 中的 `DEFAULT` 等价于省略该列。声明默认值经 catalog 持久化、重启后生效，并由 `rtsql dump` 与 `rtsql schema` 渲染。
 - **值类型：** 写入值必须与列声明类型一致。`NULL` 豁免，日期列接受其类型化字面量，`FLOAT` 列接受整数值（以等价浮点存储），其余跨类型写入以 `column '<列名>' expects <类型>, got <类型>` 拒绝。`dump` / `restore` / `import` 通道经同一规则。
 - **声明默认值：** `CREATE TABLE` 或 `ALTER TABLE ADD COLUMN` 声明的 `DEFAULT` 字面量在计划期按同一规则与列类型校验——`NULL` 豁免，`FLOAT` 列整数字面量升格（以浮点持久化），`DATE`/`TIMESTAMP` 列解析字符串（非法日期拒绝），其余跨类型声明以 `DEFAULT type mismatch: column '<列名>': expected <类型>, got <类型>` 在建表前拒绝、零副作用。类型化日期字面量（如 `DEFAULT DATE '2026-01-02'`）可接受，含日期默认值的表 `dump` → `restore` 往返保真。`DEFAULT` 字面量长度另受 catalog 列行页内容量约束（约 4KB 量级）：超长默认值在建表时按既有页满错误点名拒绝、零副作用；写入值本身不受此限制（超页行走溢出页链）。
+- **`UPDATE ... SET` 表达式：** 可一次赋值多列，右值接受完整值表达式——列引用按旧行值同快照求值（`SET a = a + 1, b = a` 中 `b` 读旧 `a`），另支持算术、`CAST`、`CASE`、`COALESCE` 与标量函数。写入类型门、`NOT NULL`、键列类型门、碰撞预检、rekey 与唯一/次级索引维护全部作用于求值结果；任一赋值失败整行保持原状。右值为聚合调用或子查询时计划期点名拒绝。
 - **`ON CONFLICT DO NOTHING`：** 冲突行被跳过，不计入受影响行数。
 - **`ON CONFLICT (col) DO UPDATE SET ...`：** 冲突行原位更新。右值接受字面量、`DEFAULT`、`excluded.<列名>`（待插行值）或裸列名（冲突行旧值），可一次赋值多列。仅被赋值列发生变化。
 - **冲突目标：** 省略目标时仲裁主键与全部唯一索引（先主键，再按声明序的唯一列）。显式目标必须是承载唯一性的单列——`INT` 主键列或 `UNIQUE` 列。

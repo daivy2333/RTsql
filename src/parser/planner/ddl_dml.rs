@@ -11,8 +11,8 @@ use crate::executor::{
     AlterTableNode, AlterTableOp, ColumnConstraint, ColumnDef, ColumnType, ConflictAction,
     ConflictArbiter, CreateIndexNode, CreateTableAsSelectNode, CreateTableNode, CreateViewNode,
     DeleteNode, DropIndexNode, DropTableNode, DropViewNode, InsertNode, InsertSelectNode,
-    JoinCondition, PhysicalPlan, TruncateNode, UpdateNode, UpsertAssignment, UpsertNode,
-    UpsertValueExpr, Value,
+    JoinCondition, PhysicalPlan, TruncateNode, UpdateAssignment, UpdateNode, UpdateValue,
+    UpsertAssignment, UpsertNode, UpsertValueExpr, Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -1093,6 +1093,20 @@ impl PlanBuilder {
         // Extract primary key
         let primary_key = self.extract_primary_key(columns, constraints)?;
 
+        // change 2026-10-03-practical-core-gaps T2 (R4/D2): an explicit
+        // PRIMARY KEY declaration must be INTEGER — non-INTEGER explicit PKs
+        // were accepted but never enforced (keyless-row semantics), violating
+        // the honest-constraint face. Rejected at plan time via the existing
+        // UnsupportedConstraint channel. Implicit first-column PK (no
+        // declaration) and every pre-existing table are untouched.
+        if let Some(pk_col) = primary_key.as_deref() {
+            if let Some(pk_def) = column_defs.iter().find(|c| c.name == pk_col) {
+                if pk_def.data_type != ColumnType::Int {
+                    return Err(PlanError::UnsupportedConstraint("NON-INTEGER PRIMARY KEY"));
+                }
+            }
+        }
+
         // MS23-T02: 表级 CHECK/FOREIGN KEY/Index 类点名拒绝——PRIMARY KEY 继续
         // 由 extract_primary_key 消费，表级 UNIQUE 属 MS23 Iteration 001。
         for constraint in constraints {
@@ -1845,64 +1859,83 @@ impl PlanBuilder {
             })?;
 
         // Only support single column update
-        if assignments.len() != 1 {
-            return Err(PlanError::UnsupportedStatement(
-                "MULTI-COLUMN UPDATE".into(),
-            ));
-        }
+        // change 2026-10-03-practical-core-gaps T8：单赋值限制解除——逐赋值
+        // 右值路由为 Literal（既有语义逐字节）或 Expression（既有值表达式
+        // 内核编译，执行器对旧行快照求值）；子查询显式点名拒绝，聚合经内核
+        // 既有未注册函数通道点名拒绝。
+        let mut parsed_assignments = Vec::with_capacity(assignments.len());
+        for assignment in assignments {
+            // Extract column name
+            if assignment.id.len() != 1 {
+                return Err(PlanError::UnsupportedStatement(
+                    "COMPOUND ASSIGNMENT TARGET".into(),
+                ));
+            }
+            let column = assignment.id[0].value.to_lowercase();
 
-        let assignment = &assignments[0];
-
-        // Extract column name
-        if assignment.id.len() != 1 {
-            return Err(PlanError::UnsupportedStatement(
-                "COMPOUND ASSIGNMENT TARGET".into(),
-            ));
-        }
-        let column = assignment.id[0].value.to_lowercase();
-
-        // Extract new value
-        let new_value = match &assignment.value {
-            Expr::Value(v) => value_from_sqlparser(v)?,
-            // MS13 T4: 类型字面量 plan 期解析（决策 2）；裸字符串的强制解析
-            // 在 UpdateExecutor 按目标列类型进行。
-            Expr::TypedString { data_type, value } => {
-                use sqlparser::ast::{DataType, TimezoneInfo};
-                match data_type {
-                    DataType::Date => crate::executor::datetime::parse_date(value)
-                        .map(Value::Date)
-                        .ok_or_else(|| {
-                            PlanError::ParseError(format!(
-                                "invalid DATE/TIMESTAMP literal: '{value}'"
-                            ))
-                        })?,
-                    DataType::Datetime(_) | DataType::Timestamp(_, TimezoneInfo::None) => {
-                        crate::executor::datetime::parse_timestamp(value)
-                            .map(Value::Timestamp)
-                            .ok_or_else(|| {
-                                PlanError::ParseError(format!(
-                                    "invalid DATE/TIMESTAMP literal: '{value}'"
-                                ))
-                            })?
+            // Extract new value
+            let value = match &assignment.value {
+                Expr::Value(v) => UpdateValue::Literal(value_from_sqlparser(v)?),
+                // MS13 T4: 类型字面量 plan 期解析（决策 2）；裸字符串的强制解析
+                // 在 UpdateExecutor 按目标列类型进行。
+                Expr::TypedString { data_type, value } => {
+                    use sqlparser::ast::{DataType, TimezoneInfo};
+                    match data_type {
+                        DataType::Date => UpdateValue::Literal(
+                            crate::executor::datetime::parse_date(value)
+                                .map(Value::Date)
+                                .ok_or_else(|| {
+                                    PlanError::ParseError(format!(
+                                        "invalid DATE/TIMESTAMP literal: '{value}'"
+                                    ))
+                                })?,
+                        ),
+                        DataType::Datetime(_) | DataType::Timestamp(_, TimezoneInfo::None) => {
+                            UpdateValue::Literal(
+                                crate::executor::datetime::parse_timestamp(value)
+                                    .map(Value::Timestamp)
+                                    .ok_or_else(|| {
+                                        PlanError::ParseError(format!(
+                                            "invalid DATE/TIMESTAMP literal: '{value}'"
+                                        ))
+                                    })?,
+                            )
+                        }
+                        _ => return Err(PlanError::UnsupportedValue),
                     }
-                    _ => return Err(PlanError::UnsupportedValue),
                 }
-            }
-            Expr::Identifier(ident) => {
-                if ident.value.to_uppercase() == "NULL" {
-                    Value::Null
-                } else {
-                    return Err(PlanError::UnsupportedValue);
+                Expr::Identifier(ident) => {
+                    if ident.value.to_uppercase() == "NULL" {
+                        UpdateValue::Literal(Value::Null)
+                    } else {
+                        // T8：列引用右值——经既有值表达式内核编译（未知列
+                        // `ColumnNotFound`，索引按注册表列序），执行器对旧行
+                        // 快照求值。
+                        UpdateValue::Expression(
+                            self.build_expression(&table_name, &assignment.value)?,
+                        )
+                    }
                 }
-            }
-            _ => return Err(PlanError::UnsupportedValue),
-        };
+                // T8：UPDATE 无子查询能力边界保持——显式点名而非落入表达式
+                // 内核的泛化兜底。
+                Expr::Subquery(_) | Expr::InSubquery { .. } | Expr::Exists { .. } => {
+                    return Err(PlanError::UnsupportedStatement("UPDATE SUBQUERY".into()))
+                }
+                // T8：其余形态（算术 / CAST / CASE / COALESCE / 标量函数等）
+                // 经既有值表达式内核编译——聚合调用不在标量注册表，由内核
+                // 既有 `UnsupportedExpression(函数名)` 通道点名拒绝（与 WHERE
+                // 聚合同源）。
+                _ => {
+                    UpdateValue::Expression(self.build_expression(&table_name, &assignment.value)?)
+                }
+            };
+            parsed_assignments.push(UpdateAssignment { column, value });
+        }
 
         Ok(PhysicalPlan::Update(UpdateNode {
             table_name,
             key,
-            column,
-            new_value,
+            assignments: parsed_assignments,
         }))
     }
 
@@ -1973,7 +2006,7 @@ fn alter_operation_name(op: &sqlparser::ast::AlterTableOperation) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::PlanBuilder;
-    use crate::executor::{PhysicalPlan, Value};
+    use crate::executor::{PhysicalPlan, UpdateValue, Value};
     use crate::parser::ast::parse_sql;
 
     #[test]
@@ -2010,8 +2043,13 @@ mod tests {
         match plan {
             PhysicalPlan::Update(node) => {
                 assert_eq!(node.table_name, "users");
-                assert_eq!(node.column, "name");
-                assert_eq!(node.new_value, Value::String("Bob".to_string()));
+                // change 2026-10-03-practical-core-gaps T8：节点多列化校准。
+                assert_eq!(node.assignments.len(), 1);
+                assert_eq!(node.assignments[0].column, "name");
+                assert_eq!(
+                    node.assignments[0].value,
+                    UpdateValue::Literal(Value::String("Bob".to_string()))
+                );
                 let expected_key = Value::Int(1).to_key().unwrap();
                 assert_eq!(node.key, expected_key);
             }

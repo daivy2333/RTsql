@@ -4,7 +4,10 @@
 //! bodies are moved verbatim; only `impl PlanBuilder` block boundary and
 //! per-module imports are introduced.
 
-use super::aggregate::{extract_aggregate_func, is_aggregate_expr};
+use super::aggregate::{
+    contains_aggregate_expr, extract_aggregate_func, is_aggregate_expr, register_aggregate_calls,
+    AggRowExprMode,
+};
 use super::ddl_dml::is_pure_equi_join_on;
 use super::expression::expr_to_column_name;
 use super::{CteDef, PlanBuilder};
@@ -1348,7 +1351,15 @@ impl PlanBuilder {
         // 感知解析需要原始表达式才能按 (表, 列) 精确定位。
         let mut aggregate_args: Vec<Option<Expr>> = Vec::new();
         let mut non_agg_columns = Vec::new();
-        let mut agg_output_columns = Vec::new();
+        // change 2026-10-03-practical-core-gaps T4/T6：聚合输出行显示名（与
+        // `aggregates` 注册序平行）——SELECT 聚合项 = 别名优先否则
+        // result_column_name；表达式嵌入与 ORDER BY 键引入的额外聚合 =
+        // result_column_name。聚合节点输出列名 = 分组键名 ++ 本清单，与执行器
+        // 行布局（group keys ++ aggregates 注册序）严格对齐。
+        let mut aggregate_display_names: Vec<String> = Vec::new();
+        // T4：聚合嵌入表达式项与纯常量项的 SELECT 项索引——在聚合输出行上
+        // 求值（不经分组键绑定校验，wrap 阶段按本清单编译）。
+        let mut agg_row_expr_items: Vec<usize> = Vec::new();
         // MS11-T01 Iter001: SELECT 表达式项（非普通列引用的项）。此处只标记
         // 不报错——路由在下文统一裁决：非聚合 → 顶层 Projection；聚合 →
         // 保持聚合路径报错（design D4：检测循环裁决顺序不变）。
@@ -1357,8 +1368,10 @@ impl PlanBuilder {
         // 聚合装配的项），供混合投影校验、分组键归属与条件包装消费。
         #[derive(Clone)]
         enum SelectItemRole {
-            /// 聚合项（输出名 = result_column_name / 别名）
-            Aggregate(String),
+            /// 聚合项（输出名 = result_column_name / 别名）+ 其注册序号
+            /// （T12：重名显示名下名字 → 输出列不再是单射，注册序号才是
+            /// 该项到共享清单条目的精确映射）
+            Aggregate(String, usize),
             /// 纯列名项（列名，大小写保留）
             Column(String),
             /// 表达式项（输出名 = 别名 / 表达式文本）
@@ -1380,17 +1393,37 @@ impl PlanBuilder {
                             )
                         })?;
                         let name = func.result_column_name();
-                        agg_output_columns.push(name.clone());
-                        item_roles[item_idx] = Some(SelectItemRole::Aggregate(name));
+                        let reg_idx = aggregates.len();
+                        item_roles[item_idx] =
+                            Some(SelectItemRole::Aggregate(name.clone(), reg_idx));
                         aggregate_args.push(aggregate_arg_expr(expr).cloned());
                         aggregates.push(func);
+                        aggregate_display_names.push(name);
+                    } else if !building_subquery && contains_aggregate_expr(expr) {
+                        // change 2026-10-03-practical-core-gaps T4: 聚合嵌入
+                        // 表达式项——嵌套聚合调用注册进共享清单，项本体在聚合
+                        // 输出行上求值（wrap 阶段编译）。
+                        register_aggregate_calls(
+                            expr,
+                            &mut aggregates,
+                            &mut aggregate_args,
+                            &mut aggregate_display_names,
+                        )?;
+                        has_expression_items = true;
+                        agg_row_expr_items.push(item_idx);
+                        item_roles[item_idx] = Some(SelectItemRole::Expression(expr.to_string()));
                     } else if !building_subquery && !is_plain_column_expr(expr) {
                         has_expression_items = true;
+                        // T4: 无列引用的纯常量项在聚合查询中按常量混排合法
+                        // （聚合输出行求值）；非聚合查询经既有顶层 Projection
+                        // 通道，本标记不被消费、行为零变化。
+                        if is_pure_constant_expr(expr) {
+                            agg_row_expr_items.push(item_idx);
+                        }
                         item_roles[item_idx] = Some(SelectItemRole::Expression(expr.to_string()));
                     } else {
                         let col = expr_to_column_name(expr)?;
                         non_agg_columns.push(col.clone());
-                        agg_output_columns.push(col.clone());
                         item_roles[item_idx] = Some(SelectItemRole::Column(col));
                     }
                 }
@@ -1402,18 +1435,34 @@ impl PlanBuilder {
                             )
                         })?;
                         let name = alias.value.clone();
-                        agg_output_columns.push(name.clone());
-                        item_roles[item_idx] = Some(SelectItemRole::Aggregate(name));
+                        let reg_idx = aggregates.len();
+                        item_roles[item_idx] =
+                            Some(SelectItemRole::Aggregate(name.clone(), reg_idx));
                         aggregate_args.push(aggregate_arg_expr(expr).cloned());
                         aggregates.push(func);
+                        aggregate_display_names.push(name);
+                    } else if !building_subquery && contains_aggregate_expr(expr) {
+                        // T4: 聚合嵌入表达式项（同 UnnamedExpr 臂；输出名 = 别名）。
+                        register_aggregate_calls(
+                            expr,
+                            &mut aggregates,
+                            &mut aggregate_args,
+                            &mut aggregate_display_names,
+                        )?;
+                        has_expression_items = true;
+                        agg_row_expr_items.push(item_idx);
+                        item_roles[item_idx] =
+                            Some(SelectItemRole::Expression(alias.value.clone()));
                     } else if !building_subquery && !is_plain_column_expr(expr) {
                         has_expression_items = true;
+                        if is_pure_constant_expr(expr) {
+                            agg_row_expr_items.push(item_idx);
+                        }
                         item_roles[item_idx] =
                             Some(SelectItemRole::Expression(alias.value.clone()));
                     } else {
                         let col = expr_to_column_name(expr)?;
                         non_agg_columns.push(col.clone());
-                        agg_output_columns.push(alias.value.clone());
                         item_roles[item_idx] = Some(SelectItemRole::Column(col));
                     }
                 }
@@ -1422,6 +1471,23 @@ impl PlanBuilder {
         }
 
         let has_aggregates = !aggregates.is_empty();
+
+        // change 2026-10-03-practical-core-gaps T6：聚合查询的 ORDER BY 键
+        // 预扫描——键中的聚合调用（含 SELECT 未出现的新调用）须在 agg_plan
+        // 装配前进入共享清单，否则聚合输出行不含该结果列（装配顺序约束，
+        // design D4）。非聚合查询不预扫描（ORDER BY 行为零变化）。
+        if has_aggregates {
+            for ob in &query.order_by {
+                if contains_aggregate_expr(&ob.expr) {
+                    register_aggregate_calls(
+                        &ob.expr,
+                        &mut aggregates,
+                        &mut aggregate_args,
+                        &mut aggregate_display_names,
+                    )?;
+                }
+            }
+        }
 
         // === MS19 Iteration 002 (T4b): 纯非聚合查询的别名项路由 ===
         // `extract_columns` 把 `ExprWithAlias` 折叠为别名名，而角色分类把
@@ -1868,6 +1934,16 @@ impl PlanBuilder {
             }
         };
 
+        // change 2026-10-03-practical-core-gaps T6：聚合查询存在表达式排序键
+        // 时，Sort 须在聚合输出行上求值（键中的聚合调用不必出现在 SELECT
+        // 清单）——条件包装（若存在）移到 Sort 之上装配（deferred）；
+        // `agg_row_output_columns` 携带聚合输出行名集供表达式键编译。
+        let mut deferred_wrap: Option<(Vec<ProjectionItem>, Vec<String>)> = None;
+        let mut agg_row_output_columns: Option<Vec<String>> = None;
+        // T12：聚合输出行编译器（嵌入项 / HAVING / ORDER BY 表达式键）的规范名
+        // 快照——聚合分支装配前从 `aggregates` 采集（该清单随后移入
+        // AggregateNode），ORDER BY 编译点在分支之后仍可消费。
+        let mut aggregate_canonical_names: Vec<String> = Vec::new();
         // Build aggregate plan if needed
         let plan_with_aggregate = if has_aggregates {
             // Build column index mapping from input plan.
@@ -1925,8 +2001,14 @@ impl PlanBuilder {
 
             // MS13 T8 混合投影校验：每个表达式 SELECT 项必须被某分组键匹配
             //（别名/表达式文本/位置），否则 NonAggregatedColumn 点名。
+            // change 2026-10-03-practical-core-gaps T4: 聚合嵌入表达式项与纯
+            // 常量项在聚合输出行上求值，不受分组键绑定校验约束（嵌套非聚合
+            // 列引用在 wrap 编译期点名）。
             for (i, role) in item_roles.iter().enumerate() {
                 if let Some(SelectItemRole::Expression(name)) = role {
+                    if agg_row_expr_items.contains(&i) {
+                        continue;
+                    }
                     if !group_keys.iter().any(|k| k.expr_item == Some(i)) {
                         return Err(PlanError::NonAggregatedColumn(name.clone()));
                     }
@@ -1981,7 +2063,7 @@ impl PlanBuilder {
                             select_keys_first = false;
                         }
                     }
-                    SelectItemRole::Aggregate(_) => seen_aggregate = true,
+                    SelectItemRole::Aggregate(..) => seen_aggregate = true,
                     SelectItemRole::Expression(_) => select_keys_first = false,
                 }
             }
@@ -1998,40 +2080,50 @@ impl PlanBuilder {
                     .iter()
                     .zip(group_key_names.iter())
                     .all(|(c, k)| c.eq_ignore_ascii_case(k));
+            // change 2026-10-03-practical-core-gaps T6：聚合注册序显示名数
+            // ≠ SELECT 聚合角色数（ORDER BY 键引入的额外聚合，或同一聚合
+            // 调用去重共享）时强制走条件包装路径——执行器行含全部注册聚合，
+            // 直出形状会泄漏 SELECT 未选列，包装按 SELECT 清单裁剪。
+            let role_agg_count = item_roles
+                .iter()
+                .flatten()
+                .filter(|r| matches!(r, SelectItemRole::Aggregate(..)))
+                .count();
             let direct = !has_expression_items
+                && aggregate_display_names.len() == role_agg_count
                 && keys_all_column
                 && select_keys_first
                 && keys_selected_in_select_order;
 
             let key_count = group_keys.len();
-            let agg_names: Vec<String> = item_roles
+            // 输出列名（change 2026-10-03-practical-core-gaps T4/T6 统一公式）：
+            // 分组键名 ++ 注册序聚合显示名——与执行器行布局（group keys ++
+            // aggregates 注册序）严格对齐。无 T4/T6 项的直出形态与既有
+            // agg_output_columns（SELECT 序）逐字节一致（直出判定强制分组键 =
+            // SELECT 纯列项且键序一致，SELECT 聚合项注册序 = SELECT 序）；非
+            // 直出形态与既有「键名 ++ 聚合角色名」一致（无 T4 项时角色序 =
+            // 注册序）。
+            let node_output_columns = group_keys
                 .iter()
-                .flatten()
-                .filter_map(|r| match r {
-                    SelectItemRole::Aggregate(name) => Some(name.clone()),
-                    _ => None,
-                })
-                .collect();
-            // 输出列名：直出 = 既有 agg_output_columns（SELECT 序，逐字节
-            // 保持）；包装 = 行序（GROUP BY 键序 ++ 聚合序，供 HAVING 绑定
-            // 与聚合行形状一致）。
-            let node_output_columns = if direct {
-                agg_output_columns
-            } else {
-                group_keys
-                    .iter()
-                    .map(|k| k.name.clone())
-                    .chain(agg_names)
-                    .collect()
-            };
+                .map(|k| k.name.clone())
+                .chain(aggregate_display_names.iter().cloned())
+                .collect::<Vec<String>>();
+            // T6：表达式排序键在聚合输出行上编译所需的行名集。
+            agg_row_output_columns = Some(node_output_columns.clone());
+            // T12：各注册项的规范名（func 身份，与 display names 平行）——
+            // 聚合输出行编译器（嵌入项 / HAVING / ORDER BY 键）按规范名解析
+            // 聚合引用，显示名被别名遮蔽时不再首匹配取错列。
+            aggregate_canonical_names = aggregates.iter().map(|f| f.result_column_name()).collect();
 
             // 条件包装项（仅非直出形态）：SELECT 项 → 聚合行位置的
-            // ColumnExpression 重排，列名 = SELECT 名。
-            let wrap_projection = if direct {
+            // ColumnExpression 重排，列名 = SELECT 名；聚合嵌入表达式项与纯
+            // 常量项（T4）按编译后的聚合行表达式求值。
+            // T6：存在表达式排序键（非裸列键）时，包装移到 Sort 之上装配——
+            // Sort 直接落在（Having 包裹的）聚合输出行上。
+            let mut wrap_projection = if direct {
                 None
             } else {
                 let mut items = Vec::with_capacity(select.projection.len());
-                let mut agg_seen = 0usize;
                 for (i, role) in item_roles.iter().enumerate() {
                     match role {
                         None => {}
@@ -2053,27 +2145,55 @@ impl PlanBuilder {
                             });
                         }
                         Some(SelectItemRole::Expression(name)) => {
-                            let gpos = group_keys
-                                .iter()
-                                .position(|k| k.expr_item == Some(i))
-                                .expect("mixed projection validated above");
-                            items.push(ProjectionItem {
-                                expr: Arc::new(ColumnExpression {
-                                    column_name: name.to_lowercase(),
-                                    column_index: gpos,
-                                }),
-                                name: name.clone(),
-                            });
+                            if agg_row_expr_items.contains(&i) {
+                                // T4: 聚合嵌入表达式项 / 纯常量项——在聚合输出
+                                // 行上编译求值（嵌套非聚合列引用在此点名）。
+                                let e = match &select.projection[i] {
+                                    sqlparser::ast::SelectItem::UnnamedExpr(e) => e,
+                                    sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => expr,
+                                    _ => {
+                                        unreachable!(
+                                            "agg-row expression items are expression items"
+                                        )
+                                    }
+                                };
+                                let compiled = self.compile_aggregate_row_expr(
+                                    e,
+                                    &node_output_columns,
+                                    &aggregate_canonical_names,
+                                    AggRowExprMode::OutputRow,
+                                )?;
+                                items.push(ProjectionItem {
+                                    expr: compiled,
+                                    name: name.clone(),
+                                });
+                            } else {
+                                let gpos = group_keys
+                                    .iter()
+                                    .position(|k| k.expr_item == Some(i))
+                                    .expect("mixed projection validated above");
+                                items.push(ProjectionItem {
+                                    expr: Arc::new(ColumnExpression {
+                                        column_name: name.to_lowercase(),
+                                        column_index: gpos,
+                                    }),
+                                    name: name.clone(),
+                                });
+                            }
                         }
-                        Some(SelectItemRole::Aggregate(name)) => {
+                        Some(SelectItemRole::Aggregate(name, reg_idx)) => {
+                            // T4/T12: 聚合输出行索引 = 分类期记录的注册序号——
+                            // T4 嵌入聚合使角色序与注册序不再一致，重名显示名
+                            // 使名字 → 输出列不再是单射（按名首匹配静默取错
+                            // 列）；注册序号是该角色的精确映射，无 T4 项时与
+                            // 既有 key_count + 角色序逐值一致。
                             items.push(ProjectionItem {
                                 expr: Arc::new(ColumnExpression {
                                     column_name: name.to_lowercase(),
-                                    column_index: key_count + agg_seen,
+                                    column_index: key_count + reg_idx,
                                 }),
                                 name: name.clone(),
                             });
-                            agg_seen += 1;
                         }
                     }
                 }
@@ -2083,7 +2203,11 @@ impl PlanBuilder {
 
             // Build HAVING predicate BEFORE consuming node_output_columns
             let having_pred = if let Some(having_expr) = &select.having {
-                Some(self.build_having(having_expr, &node_output_columns)?)
+                Some(self.build_having(
+                    having_expr,
+                    &node_output_columns,
+                    &aggregate_canonical_names,
+                )?)
             } else {
                 None
             };
@@ -2167,6 +2291,15 @@ impl PlanBuilder {
                 agg_plan
             };
 
+            if wrap_projection.is_some()
+                && query
+                    .order_by
+                    .iter()
+                    .any(|o| extract_column_name(&o.expr).is_err())
+            {
+                deferred_wrap = wrap_projection.take();
+            }
+
             match wrap_projection {
                 Some((items, columns)) => PhysicalPlan::Projection(ProjectionNode {
                     input: Box::new(with_having),
@@ -2188,6 +2321,27 @@ impl PlanBuilder {
                 .order_by
                 .iter()
                 .map(|o| {
+                    // change 2026-10-03-practical-core-gaps T6：聚合查询的非
+                    // 裸列键经聚合输出行编译器产出表达式键（键中聚合调用与
+                    // 常量表达式在聚合输出行上求值）；裸列/限定列键维持既有
+                    // 路径。非聚合查询零变化。
+                    if let Some(agg_columns) = &agg_row_output_columns {
+                        if extract_column_name(&o.expr).is_err() {
+                            let compiled = self.compile_aggregate_row_expr(
+                                &o.expr,
+                                agg_columns,
+                                &aggregate_canonical_names,
+                                AggRowExprMode::OutputRow,
+                            )?;
+                            // sqlparser: asc field is Option<bool>
+                            // None or Some(true) = ASC, Some(false) = DESC
+                            return Ok(OrderByColumn {
+                                column: o.expr.to_string(),
+                                asc: o.asc.unwrap_or(true),
+                                expr: Some(compiled),
+                            });
+                        }
+                    }
                     let (qualifier, column) = extract_column_name(&o.expr)?;
                     // design D4：限定键先在 FROM 作用域内点名（别名归一后仍
                     // 不可达 → 42P01 携带限定符），再按末段列名进入既有键
@@ -2216,7 +2370,14 @@ impl PlanBuilder {
             // D10). Aggregate inputs keep their own output shape and are not
             // re-projected.
             let sort_columns = if has_aggregates {
-                projection_columns.clone()
+                if deferred_wrap.is_some() {
+                    // change 2026-10-03-practical-core-gaps T6：Sort 落在聚合
+                    // 输出行上（条件包装已移至 Sort 之上），列键按聚合行名集
+                    // 解析（该形态在旧路由下计划期报错，无既有行为）。
+                    agg_row_output_columns.clone().unwrap_or_default()
+                } else {
+                    projection_columns.clone()
+                }
             } else {
                 self.get_plan_output_columns(&plan_with_aggregate)
             };
@@ -2258,6 +2419,12 @@ impl PlanBuilder {
                 })
                 .collect();
             for ob in &order_by {
+                // change 2026-10-03-practical-core-gaps T6：表达式键豁免列集
+                // 校验（别名键先例同型——键值由 SortExecutor 的 decorate 表达
+                // 式求值承载，不按列名查位）。
+                if ob.expr.is_some() {
+                    continue;
+                }
                 let key = ob.column.to_lowercase();
                 let mut resolvable = sort_columns.iter().any(|c| c.to_lowercase() == key)
                     || alias_columns.contains(&key);
@@ -2319,13 +2486,24 @@ impl PlanBuilder {
                 compiled?;
             }
 
-            PhysicalPlan::Sort(SortNode {
+            let sort_plan = PhysicalPlan::Sort(SortNode {
                 input: Box::new(plan_with_aggregate),
                 order_by,
                 table_name: table_name.clone(),
                 columns: sort_columns,
                 projection: sort_projection,
-            })
+            });
+            // change 2026-10-03-practical-core-gaps T6：条件包装在 Sort 之上
+            // 装配（Sort 在聚合输出行上求值后再按 SELECT 清单出值）；无表达式
+            // 排序键时包装位置与形状逐字节不变（deferred 恒为 None）。
+            match deferred_wrap {
+                Some((items, columns)) => PhysicalPlan::Projection(ProjectionNode {
+                    input: Box::new(sort_plan),
+                    items,
+                    columns,
+                }),
+                None => sort_plan,
+            }
         } else {
             plan_with_aggregate
         };
@@ -2901,8 +3079,9 @@ fn resolve_layout_index(
 
 /// MS25 T8（design D9）：聚合函数读取的参数列表达式。`COUNT(*)` 无参 → `None`；
 /// 其余聚合（`SUM/AVG/MIN/MAX/GROUP_CONCAT/COUNT`）取首个普通实参表达式，与
-/// `extract_aggregate_func` 的同族语义一致。
-fn aggregate_arg_expr(func_expr: &Expr) -> Option<&Expr> {
+/// `extract_aggregate_func` 的同族语义一致。（change 2026-10-03-practical-core-gaps
+/// T4：`pub(crate)` 供 `aggregate.rs` 提取-注册遍历共享。）
+pub(crate) fn aggregate_arg_expr(func_expr: &Expr) -> Option<&Expr> {
     match func_expr {
         Expr::Function(f) => match f.args.first() {
             Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(e))) => Some(e),
@@ -3025,6 +3204,58 @@ fn is_plain_column_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Identifier(ident) => !ident.value.eq_ignore_ascii_case("NULL"),
         Expr::CompoundIdentifier(parts) => matches!(parts.len(), 2 | 3),
+        _ => false,
+    }
+}
+
+/// change 2026-10-03-practical-core-gaps T4：纯常量项判定——不含列引用
+/// （Identifier/CompoundIdentifier 出现即非纯常量）、子查询与 INTERVAL 的
+/// 表达式（聚合调用由分类循环先行分流，不可达本判定）。聚合查询中的纯常量
+/// 项与聚合混排合法（`Expr::TypedString` 日期字面量同为常量）；非聚合查询
+/// 中本判定不被消费，顶层 Projection 行为零变化。
+fn is_pure_constant_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => false,
+        Expr::Subquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } => false,
+        Expr::Interval(_) => false,
+        Expr::BinaryOp { left, right, .. } => {
+            is_pure_constant_expr(left) && is_pure_constant_expr(right)
+        }
+        Expr::UnaryOp { expr: inner, .. } => is_pure_constant_expr(inner),
+        Expr::Nested(inner) => is_pure_constant_expr(inner),
+        Expr::Cast { expr: inner, .. } => is_pure_constant_expr(inner),
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand.as_deref().is_none_or(is_pure_constant_expr)
+                && conditions.iter().all(is_pure_constant_expr)
+                && results.iter().all(is_pure_constant_expr)
+                && else_result.as_deref().is_none_or(is_pure_constant_expr)
+        }
+        Expr::Function(f) => f.args.iter().all(|arg| match arg {
+            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(e)) => {
+                is_pure_constant_expr(e)
+            }
+            _ => false,
+        }),
+        Expr::Trim {
+            expr: inner,
+            trim_what,
+            ..
+        } => {
+            is_pure_constant_expr(inner)
+                && trim_what
+                    .as_deref()
+                    .map(is_pure_constant_expr)
+                    .unwrap_or(true)
+        }
+        Expr::Ceil { expr: inner, .. } | Expr::Floor { expr: inner, .. } => {
+            is_pure_constant_expr(inner)
+        }
+        Expr::Value(_) | Expr::TypedString { .. } => true,
         _ => false,
     }
 }

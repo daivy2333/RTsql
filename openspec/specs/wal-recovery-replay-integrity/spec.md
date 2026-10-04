@@ -2,7 +2,7 @@
 
 ## Purpose
 
-WAL 崩溃恢复重放的完整性与收敛语义：redo 按记录位置寻址且幂等（logical_id 强制落位、页链与内存 tail 重建）、Update/Delete 重放复现运行期全部副作用（版本链重建、无键行回退推导 old_row_id、墓碑 + 索引清理）、恢复收尾把重放推进的 `data_page_tail` 写回 catalog 使恢复 → close → 重开两态一致、写路径对存量陈旧 tail 自愈防链断；K05 显式报错语义贯穿。来源：MS10-T02 落地；MS10-T05（无键行回退）、MS20-T02（logical_id 强制落位）、change `2026-10-03-recovery-tail-persistence`（tail 写回 + 自愈）历次修订。
+WAL 崩溃恢复重放的完整性与收敛语义：redo 按记录位置寻址且幂等（logical_id 强制落位、页链与内存 tail 重建）、Update/Delete 重放复现运行期全部副作用（版本链重建、无键行回退推导 old_row_id、墓碑 + 索引清理）、恢复收尾把重放推进的 `data_page_tail` 写回 catalog 使恢复 → close → 重开两态一致、写路径对存量陈旧 tail 自愈防链断、redo 目标表 catalog 缺失时定向指因（点名表名与「上次关闭未经 checkpoint」可能原因，打开拒绝不变）；K05 显式报错语义贯穿。来源：MS10-T02 落地；MS10-T05（无键行回退）、MS20-T02（logical_id 强制落位）、change `2026-10-03-recovery-tail-persistence`（tail 写回 + 自愈）、change `2026-10-03-practical-core-gaps`（恢复错误面指因）历次修订。
 
 ## Requirements
 
@@ -103,3 +103,21 @@ Update 与 Delete 的重放 SHALL 复现运行期全部副作用：Update 新版
 - **GIVEN** 既有恢复测试面（驱逐规模大 WAL、无键行 Update、中止后重插收敛、超页溢出行恢复）
 - **WHEN** 运行恢复套件与定向回归
 - **THEN** 全部通过，K05 错误面与索引/释放行为不变
+
+### Requirement: 恢复重放目标表缺失的错误面诚实
+
+恢复重放（`redo_record` 的 Insert/Update/Delete 三臂）遇「WAL 已提交记录引用的表在 catalog 中不存在」时，错误信息 SHALL 点名该表名、陈述「WAL 记录引用的表在 catalog 中缺失」的事实，并陈述最可能原因——数据库上次关闭未经 checkpoint（如 lib `Database` 句柄未调用 `close()` 即 drop，未持久化的 DDL 随 catalog 脏页丢失）。打开 SHALL 维持失败（既有 K05 显式报错语义不变）：恢复 SHALL NOT 跳过、静默丢弃或自动清理不可重放的已提交记录。
+
+其他 redo 失败类别（页 I/O、索引操作、PK 派生失败等）的既有错误文案 SHALL 零变化；打开失败的退出路径与错误传播方式 SHALL 零变化（本 Requirement 只改错误面指因，不改恢复行为与打开结果）。
+
+#### Scenario: 句柄 drop 不 close 后重开的错误指因
+
+- **GIVEN** lib 打开数据库，`CREATE TABLE` + 提交 `INSERT` 后句柄直接 drop（未 `close()`）——catalog 脏页丢失、WAL 留有已提交记录
+- **WHEN** 重新 open
+- **THEN** open 失败，错误信息含表名、catalog 缺失事实与「上次关闭未经 checkpoint（如句柄未 close 即 drop）」的可能原因（失败边界——修复前：`WAL redo failed: table 't' lookup failed during redo: table not found: t`，将 DDL 未持久化误诊为表缺失）
+
+#### Scenario: 正常关闭不触发定向错误面
+
+- **GIVEN** 同上序列但句柄经 `close()` 正常落盘
+- **WHEN** 重新 open 并查询该表
+- **THEN** open 成功、行可见（定向错误面只覆盖无 checkpoint 关闭形态，正常恢复路径不误伤）

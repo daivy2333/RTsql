@@ -423,6 +423,20 @@ impl TableManager {
         // --- allocate data page head ---
         let page_id = self.buffer_pool.storage().allocate_page().await?;
 
+        // change 2026-10-03-practical-core-gaps T1 (R1/D1): initialize the
+        // head as a legal empty data page. Previously the freshly allocated
+        // page was left all-zero (page type 0x00), so a brand-new zero-row
+        // table failed `rtsql check` until the first write lazily init'd the
+        // page. Mirrors the truncate_table head-reset precedent below
+        // (:1512-1517): init dirties the page and persists on close.
+        {
+            let guard = self.buffer_pool.get_page(page_id).await?;
+            guard.modify_page(|page| {
+                let _ = SlottedPage::init(page, 0x03);
+            });
+            drop(guard);
+        }
+
         // --- create per-table index ---
         // IndexManager::new is sync but internally calls block_on, so we
         // offload it to spawn_blocking to avoid blocking the async runtime.
