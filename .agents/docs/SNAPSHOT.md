@@ -94,9 +94,9 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 4354102（主批次：MS27 存储演进批收尾 + 恢复 tail 收敛修复统一入库；上一主批次 24ae134〔MS20-T02〕及其 docs 回填 81c8e6f 已于 2026-10-02 推送 origin）
-- **ahead of origin**: 2（本 docs 回填提交后；主批次 4354102 提交后实测 1——origin/master 已于 2026-10-02 推送至 81c8e6f，前值 13 系推送前历史数，`git log origin/master..master` 实数核对）
-- **工作区**: 本批收尾改动待提交（change `2026-10-03-practical-core-gaps` 实施面〔30 文件修改 + `tests/update_expression_test.rs`/`tests/recovery_error_surface_test.rs` 新增〕+ 6 域语料合并 + change 归档 carrier + tasks/SNAPSHOT 同步；上一主批次 4354102 后未产生新提交）
+- **提交基线**: 0551dd0（主批次：practical core 缺口批收尾统一入库；上一主批次 4354102〔MS27 存储演进批 + recovery-tail-persistence〕及其 docs 回填 9a103c0 尚未推送 origin）
+- **ahead of origin**: 3（本主批次提交后实测——origin/master 仍为 2026-10-02 推送位 81c8e6f；本 docs 回填提交后为 4，`git rev-list --count origin/master..master` 实数核对）
+- **工作区**: 干净（本批收尾提交入库：practical-core-gaps 实施面〔14 源文件 + 21 测试文件修改 + `tests/update_expression_test.rs`/`tests/recovery_error_surface_test.rs` 新增〕+ 6 域语料合并 + tasks/SNAPSHOT 同步与归档 carrier，52 files changed / +4622 −489）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 1862 tests pass, 0 failures, 2 ignored（2026-10-04 practical-core-gaps Iteration 002 Act Response M19 全量 114 集成目标 6 批 + lib + bins 分批串行，Plan Review accepted 采信；1802 基线 + 本 change 净增 60〔Iter000 +7 / Iter001 +24 / Iter002 +29——aggregate_extension +5、planner +7、update_expression +14、recovery_error_surface +3 等〕）
 - **OpenSpec**: 64 specs（域数不变；5 域各 +1 Requirement——`data-integrity-verification` 现 3 / `wal-recovery-replay-integrity` 现 6 / `sql-aggregate-extensions` 现 5 / `sql-constraint-enforcement` 现 7 / `sql-write-surface` 现 9——+ `cli-noninteractive-shell`「dump 与 restore」MODIFIED〔PK 渲染规则〕）；**活跃 change**：无（最新归档 `archive/2026-10-03-practical-core-gaps/`，accepted；上一归档 `archive/2026-10-03-recovery-tail-persistence/`；下一里程碑 MS22 实测驱动性能批——候选范围量化定稿后转 ready）注：`validate --all` 对 MS06–MS10 时代 spec 的占位 Purpose 产生 WARNING——既有状态，非本轮引入
