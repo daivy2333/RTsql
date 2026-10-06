@@ -40,7 +40,10 @@ pub enum ExitStatus {
     Success,
     General(String),
     Usage(String),
-    Sql(String),
+    /// SQL 失败。T7（change 2026-10-04-external-review-gaps）：第二载荷携带
+    /// PG SQLSTATE 分类（已知时）——渲染层用于行尾 suffix 与 JSON 错误对象
+    /// 字段；未知（parse/会话/ATTACH 失败等）为 `None`，两形态均省略。
+    Sql(String, Option<String>),
     Locked(String),
     InvalidKey(String),
     Signaled(i32),
@@ -52,9 +55,18 @@ impl ExitStatus {
             ExitStatus::Success | ExitStatus::Signaled(_) => None,
             ExitStatus::General(m)
             | ExitStatus::Usage(m)
-            | ExitStatus::Sql(m)
+            | ExitStatus::Sql(m, _)
             | ExitStatus::Locked(m)
             | ExitStatus::InvalidKey(m) => Some(m),
+        }
+    }
+
+    /// T7：SQLSTATE 分类载荷（仅 SQL 失败已知时非空）——渲染分叉消费，
+    /// 退出码分类不感知。
+    fn sqlstate(&self) -> Option<&str> {
+        match self {
+            ExitStatus::Sql(_, Some(code)) => Some(code),
+            _ => None,
         }
     }
 }
@@ -65,7 +77,7 @@ impl From<&ExitStatus> for ExitCode {
             ExitStatus::Success => 0,
             ExitStatus::General(_) => 1,
             ExitStatus::Usage(_) => 2,
-            ExitStatus::Sql(_) => 3,
+            ExitStatus::Sql(_, _) => 3,
             ExitStatus::Locked(_) => 4,
             ExitStatus::InvalidKey(_) => 5,
             ExitStatus::Signaled(signum) => 128 + signum,
@@ -224,10 +236,39 @@ enum FormatArg {
 pub async fn run() -> ExitCode {
     let args = CliArgs::parse();
     let status = execute_command(&args).await;
-    if let Some(message) = status.message() {
+    emit_error_status(args.format, &status);
+    ExitCode::from(&status)
+}
+
+/// T7（change 2026-10-04-external-review-gaps R7/S27–S29）：错误终态渲染分叉。
+/// JSON 模式（`kind(format)` 既有单点判定）以**单行 JSON 对象**发射 stderr
+/// ——`{"error":"<消息文本，不含 suffix>","sqlstate":"<code>"}`，sqlstate
+/// 未知时省略字段；其余模式（table/csv/tsv 与未指定）文本行尾追加
+/// ` [SQLSTATE xxxx]`（存在时）。消息文本与退出码矩阵零变化；非错误输出
+/// （含 Signaled 无消息形态）不经本函数；生命周期子命令的运行中报告
+/// （dump 告警 / check 报告 / delete 报告）不经本通道。
+fn emit_error_status(format: Option<FormatArg>, status: &ExitStatus) {
+    let Some(message) = status.message() else {
+        return;
+    };
+    if matches!(kind(format), OutputKind::Json) {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "error".to_string(),
+            serde_json::Value::String(message.to_string()),
+        );
+        if let Some(code) = status.sqlstate() {
+            obj.insert(
+                "sqlstate".to_string(),
+                serde_json::Value::String(code.to_string()),
+            );
+        }
+        emit_stderr(&serde_json::Value::Object(obj).to_string());
+    } else if let Some(code) = status.sqlstate() {
+        emit_stderr(&format!("{message} [SQLSTATE {code}]"));
+    } else {
         emit_stderr(message);
     }
-    ExitCode::from(&status)
 }
 
 async fn execute_command(args: &CliArgs) -> ExitStatus {
@@ -736,7 +777,8 @@ async fn run_sql(
 ) -> ExitStatus {
     let statements = match parse_stage(sql).await {
         Ok(statements) => statements,
-        Err(e) => return ExitStatus::Sql(e),
+        // parse 错误无 SQLSTATE 分类（文本自带行列定位）。
+        Err(e) => return ExitStatus::Sql(e, None),
     };
 
     // MS10-T04：分片逐条执行。每条语句独立 plan/execute，结果顺序渲染写
@@ -776,7 +818,8 @@ async fn run_sql(
                         let k = index + 1;
                         return match failure {
                             AttachFailure::Sql(text) => {
-                                sql_failure_status(k, total, &text, &statement_text, in_tx)
+                                // ATTACH 打开失败无 SQLSTATE 分类（既有文本面）。
+                                sql_failure_status(k, total, &text, &statement_text, in_tx, None)
                             }
                             AttachFailure::Locked(text) => ExitStatus::Locked(sql_failure_message(
                                 k,
@@ -800,6 +843,8 @@ async fn run_sql(
                     &e.to_string(),
                     &statement_text,
                     rollback_session(db, &mut session).await,
+                    // T7：ATTACH 分类错误携 SQLSTATE（PlanError 分类面）。
+                    Some(e.sqlstate().to_string()),
                 );
             }
         }
@@ -827,7 +872,9 @@ async fn run_sql(
                             total,
                             &message,
                             &statement_text,
+                            // 会话事务操作失败为纯文本，无 SQLSTATE 分类。
                             rollback_session(db, &mut session).await,
+                            None,
                         );
                     }
                 }
@@ -855,6 +902,8 @@ async fn run_sql(
                             &e.to_string(),
                             &statement_text,
                             rollback_session(db, &mut session).await,
+                            // T7：计划失败携 SQLSTATE（PlanFailure 分类面）。
+                            Some(e.sqlstate.to_string()),
                         );
                     }
                 };
@@ -881,13 +930,15 @@ async fn run_sql(
                             return ExitStatus::General(e);
                         }
                     }
-                    Response::Error { message, .. } => {
+                    Response::Error { message, sqlstate } => {
                         return sql_failure_status(
                             index + 1,
                             total,
                             &message,
                             &statement_text,
                             rollback_session(db, &mut session).await,
+                            // T7：响应错误透传 SQLSTATE（25006/42601/42P01 等）。
+                            sqlstate,
                         );
                     }
                     Response::Pong => {}
@@ -900,6 +951,8 @@ async fn run_sql(
                     &e.to_string(),
                     &statement_text,
                     rollback_session(db, &mut session).await,
+                    // T7：事务语句分类错误携 SQLSTATE（PlanError 分类面）。
+                    Some(e.sqlstate().to_string()),
                 );
             }
         }
@@ -941,14 +994,12 @@ fn sql_failure_status(
     error: &str,
     statement_text: &str,
     in_transaction: bool,
+    sqlstate: Option<String>,
 ) -> ExitStatus {
-    ExitStatus::Sql(sql_failure_message(
-        k,
-        n,
-        error,
-        statement_text,
-        in_transaction,
-    ))
+    ExitStatus::Sql(
+        sql_failure_message(k, n, error, statement_text, in_transaction),
+        sqlstate,
+    )
 }
 
 /// 逐条执行的失败文案（`sql_failure_status` 与 ATTACH 的锁/密钥失败类共用同一
@@ -1082,7 +1133,7 @@ mod tests {
             ExitStatus::Success => panic!("expected Signaled(2), got Success"),
             ExitStatus::General(m) => panic!("expected Signaled(2), got General: {m}"),
             ExitStatus::Usage(m) => panic!("expected Signaled(2), got Usage: {m}"),
-            ExitStatus::Sql(m) => panic!("expected Signaled(2), got Sql: {m}"),
+            ExitStatus::Sql(m, _) => panic!("expected Signaled(2), got Sql: {m}"),
             ExitStatus::Locked(m) => panic!("expected Signaled(2), got Locked: {m}"),
             ExitStatus::InvalidKey(m) => panic!("expected Signaled(2), got InvalidKey: {m}"),
         };
@@ -1123,7 +1174,7 @@ mod tests {
             ExitStatus::Success => panic!("expected Signaled(2), got Success"),
             ExitStatus::General(m) => panic!("expected Signaled(2), got General: {m}"),
             ExitStatus::Usage(m) => panic!("expected Signaled(2), got Usage: {m}"),
-            ExitStatus::Sql(m) => panic!("expected Signaled(2), got Sql: {m}"),
+            ExitStatus::Sql(m, _) => panic!("expected Signaled(2), got Sql: {m}"),
             ExitStatus::Locked(m) => panic!("expected Signaled(2), got Locked: {m}"),
             ExitStatus::InvalidKey(m) => panic!("expected Signaled(2), got InvalidKey: {m}"),
         }
@@ -1330,7 +1381,7 @@ mod tests {
 
         // 场景 2：已有 SQL/锁/密钥/信号状态保持原退出码，不被 close 失败改写。
         let originals = [
-            ExitStatus::Sql("original sql failure".to_string()),
+            ExitStatus::Sql("original sql failure".to_string(), None),
             ExitStatus::Locked("original lock failure".to_string()),
             ExitStatus::InvalidKey("original key failure".to_string()),
             ExitStatus::Signaled(2),
@@ -1378,7 +1429,7 @@ mod tests {
             .await;
 
             match status {
-                ExitStatus::Sql(m) => assert_eq!(m, "original sql failure"),
+                ExitStatus::Sql(m, _) => assert_eq!(m, "original sql failure"),
                 ExitStatus::Locked(m) => assert_eq!(m, "original lock failure"),
                 ExitStatus::InvalidKey(m) => assert_eq!(m, "original key failure"),
                 ExitStatus::Signaled(s) => assert_eq!(s, 2),

@@ -729,3 +729,88 @@ fn run_cli_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> CliOutput {
         }
     }
 }
+
+/// ---------------------------------------------------------------- R7 (T7)
+/// S27：文本格式错误行尾携带 ` [SQLSTATE xxxx]`——`--readonly` 下 INSERT 的
+/// 25006 拒绝（exit 3 与文案不变，stdout 纯净）。
+/// S28：`--format json` 时同一错误以单行 JSON 对象发射 stderr（`error` 值为
+/// 同一框架文本减 suffix，`sqlstate` 字段携带 25006）。
+#[tokio::test]
+async fn cli_error_output_carries_sqlstate() {
+    let dir = tempdir().unwrap();
+    let path = seed(&dir).await;
+    let p = path.to_str().unwrap();
+
+    // S27：文本格式（显式 table）——行尾 suffix，exit 3，错误不进 stdout。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "--readonly",
+            "--format",
+            "table",
+            p,
+            "INSERT INTO t VALUES (3, 30)",
+        ],
+    );
+    assert_eq!(
+        out.code,
+        Some(3),
+        "readonly insert must fail: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("read-only session"),
+        "message text preserved: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("[SQLSTATE 25006]"),
+        "text error must end with the SQLSTATE suffix: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "error must not enter stdout: {}",
+        out.stdout
+    );
+
+    // S28：--format json——单行 JSON 错误对象，含 sqlstate 字段、不含 suffix。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "--readonly",
+            "--format",
+            "json",
+            p,
+            "INSERT INTO t VALUES (3, 30)",
+        ],
+    );
+    assert_eq!(
+        out.code,
+        Some(3),
+        "readonly insert must fail: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(r#""sqlstate":"25006""#),
+        "json error must carry the sqlstate field: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(
+            r#""error":"statement 1 of 1 failed: cannot execute INSERT in a read-only session"#
+        ),
+        "json error value must be the framed message without suffix: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("[SQLSTATE 25006]"),
+        "json error value must not embed the text suffix: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "error must not enter stdout: {}",
+        out.stdout
+    );
+}

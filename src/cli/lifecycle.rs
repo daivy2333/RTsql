@@ -610,7 +610,7 @@ pub(super) async fn restore(
                 let statements = match parse_stage(&sql_text).await {
                     Ok(statements) => statements,
                     // parse 全串解析、零执行，错误文本自带行列定位（与主命令同语义）
-                    Err(e) => return ExitStatus::Sql(e),
+                    Err(e) => return ExitStatus::Sql(e, None),
                 };
                 let total = statements.len();
                 for (index, stmt) in statements.iter().enumerate() {
@@ -624,6 +624,7 @@ pub(super) async fn restore(
                                 &e.to_string(),
                                 &statement_text,
                                 false,
+                                None,
                             )
                         }
                     };
@@ -635,6 +636,7 @@ pub(super) async fn restore(
                                 &message,
                                 &statement_text,
                                 false,
+                                None,
                             )
                         }
                         // restore 不渲染：dump 文本面只有 CREATE/INSERT，
@@ -834,16 +836,19 @@ pub(super) async fn import_csv(
                     match db.execute_sql(&ddl).await {
                         Response::AffectedRows { .. } => {}
                         Response::Error { message, .. } => {
-                            return ExitStatus::Sql(format!(
-                                "failed to auto-create table {}: {}",
-                                table, message
-                            ))
+                            return ExitStatus::Sql(
+                                format!("failed to auto-create table {}: {}", table, message),
+                                None,
+                            )
                         }
                         other => {
-                            return ExitStatus::Sql(format!(
-                                "failed to auto-create table {}: unexpected response {:?}",
-                                table, other
-                            ))
+                            return ExitStatus::Sql(
+                                format!(
+                                    "failed to auto-create table {}: unexpected response {:?}",
+                                    table, other
+                                ),
+                                None,
+                            )
                         }
                     }
                     // 恒等列映射：插入转换直接消费推导结果，不重取 catalog
@@ -882,16 +887,19 @@ pub(super) async fn import_csv(
                     match db.execute_sql(&insert).await {
                         Response::AffectedRows { count } => imported += count,
                         Response::Error { message, .. } => {
-                            return ExitStatus::Sql(format!(
-                                "import row {} of {} failed: {}",
-                                row_no, total, message
-                            ))
+                            return ExitStatus::Sql(
+                                format!("import row {} of {} failed: {}", row_no, total, message),
+                                None,
+                            )
                         }
                         other => {
-                            return ExitStatus::Sql(format!(
-                                "import row {} of {} failed: unexpected response {:?}",
-                                row_no, total, other
-                            ))
+                            return ExitStatus::Sql(
+                                format!(
+                                    "import row {} of {} failed: unexpected response {:?}",
+                                    row_no, total, other
+                                ),
+                                None,
+                            )
                         }
                     }
                 }
@@ -1123,7 +1131,14 @@ pub(super) async fn stats(
                 let (columns, rows) = match fetch_table_rows(db, &table).await {
                     Ok(v) => v,
                     Err(e) => {
-                        return super::sql_failure_status(1, 1, &e, &select_all_sql(&table), false)
+                        return super::sql_failure_status(
+                            1,
+                            1,
+                            &e,
+                            &select_all_sql(&table),
+                            false,
+                            None,
+                        )
                     }
                 };
                 let out_rows = compute_stats_rows(&columns, &rows);
@@ -1346,7 +1361,14 @@ pub(super) async fn sample(
                 let (columns, rows) = match fetch_table_rows(db, &table).await {
                     Ok(v) => v,
                     Err(e) => {
-                        return super::sql_failure_status(1, 1, &e, &select_all_sql(&table), false)
+                        return super::sql_failure_status(
+                            1,
+                            1,
+                            &e,
+                            &select_all_sql(&table),
+                            false,
+                            None,
+                        )
                     }
                 };
                 let sampled = reservoir_sample(rows, n);
@@ -1416,7 +1438,14 @@ pub(super) async fn profile(
                 let (columns, rows) = match fetch_table_rows(db, &table).await {
                     Ok(v) => v,
                     Err(e) => {
-                        return super::sql_failure_status(1, 1, &e, &select_all_sql(&table), false)
+                        return super::sql_failure_status(
+                            1,
+                            1,
+                            &e,
+                            &select_all_sql(&table),
+                            false,
+                            None,
+                        )
                     }
                 };
                 let out_rows = compute_profile_rows(&columns, &rows, k);

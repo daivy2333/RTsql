@@ -68,7 +68,7 @@ async fn test_gc_removes_old_versions() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager.clone(),
-        key.to_vec(),
+        Some(key.to_vec()),
         vec![rtsql::executor::UpdateAssignment {
             column: "id".to_string(),
             value: rtsql::executor::UpdateValue::Literal(Value::Int(20)),
@@ -96,7 +96,7 @@ async fn test_gc_removes_old_versions() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager.clone(),
-        key.to_vec(),
+        Some(key.to_vec()),
         vec![rtsql::executor::UpdateAssignment {
             column: "id".to_string(),
             value: rtsql::executor::UpdateValue::Literal(Value::Int(30)),
@@ -215,7 +215,7 @@ async fn test_gc_preserves_uncommitted_versions() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager.clone(),
-        key.to_vec(),
+        Some(key.to_vec()),
         vec![rtsql::executor::UpdateAssignment {
             column: "id".to_string(),
             value: rtsql::executor::UpdateValue::Literal(Value::Int(200)),
@@ -324,7 +324,7 @@ async fn test_gc_multiple_keys() -> Result<()> {
             table_meta.clone(),
             buffer_pool.clone(),
             tx_manager.clone(),
-            key_bytes.to_vec(),
+            Some(key_bytes.to_vec()),
             vec![rtsql::executor::UpdateAssignment {
                 column: "id".to_string(),
                 value: rtsql::executor::UpdateValue::Literal(Value::Int(versions[i][1])),
@@ -342,7 +342,7 @@ async fn test_gc_multiple_keys() -> Result<()> {
             buffer_pool.clone(),
             tx_manager.clone(),
             // BH-3 校准：首次 UPDATE rekey 后行当前键为 versions[i][1]，按行当前键寻址
-            versions[i][1].to_be_bytes().to_vec(),
+            Some(versions[i][1].to_be_bytes().to_vec()),
             vec![rtsql::executor::UpdateAssignment {
                 column: "id".to_string(),
                 value: rtsql::executor::UpdateValue::Literal(Value::Int(versions[i][2])),

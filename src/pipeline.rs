@@ -1476,7 +1476,8 @@ pub(crate) fn create_executor_from_plan<'a>(
                     table_meta,
                     db.buffer_pool.clone(),
                     db.transaction_manager.clone(),
-                    node.key.as_bytes().to_vec(),
+                    // T6：`None` ＝ 无 WHERE 全表形态。
+                    node.key.as_ref().map(|k| k.as_bytes().to_vec()),
                     node.assignments,
                     tx_id.expect("DML Update requires a transaction id"),
                     db.wal_buffer.clone(),
@@ -1490,7 +1491,8 @@ pub(crate) fn create_executor_from_plan<'a>(
                     table_meta,
                     db.buffer_pool.clone(),
                     db.transaction_manager.clone(),
-                    node.key.as_bytes().to_vec(),
+                    // T6：`None` ＝ 无 WHERE 全表形态。
+                    node.key.as_ref().map(|k| k.as_bytes().to_vec()),
                     tx_id.expect("DML Delete requires a transaction id"),
                     db.wal_buffer.clone(),
                 )) as Box<dyn Executor + Send>)

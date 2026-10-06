@@ -1908,15 +1908,20 @@ impl PlanBuilder {
         self.validate_table(&table_name)?;
         // MS20-T02: 附加库目标不再计划期拒绝（见 `build_insert`）。
 
-        // Extract primary key from WHERE clause
-        let where_expr = selection
-            .as_ref()
-            .ok_or_else(|| PlanError::MissingField("WHERE clause for UPDATE".into()))?;
-        let key = self
-            .extract_pk_from_where(&table_name, where_expr)?
-            .ok_or_else(|| {
-                PlanError::ParseError("UPDATE requires primary key equality in WHERE clause".into())
-            })?;
+        // change 2026-10-04-external-review-gaps T6：无 WHERE → 全表形态
+        // （`key: None`，第一重门移除）；带 WHERE 维持既有 PK 等值提取链，
+        // 第二重门文案与语义逐字节（一般谓词维持点名拒绝）。
+        let key = match selection.as_ref() {
+            None => None,
+            Some(where_expr) => Some(
+                self.extract_pk_from_where(&table_name, where_expr)?
+                    .ok_or_else(|| {
+                        PlanError::ParseError(
+                            "UPDATE requires primary key equality in WHERE clause".into(),
+                        )
+                    })?,
+            ),
+        };
 
         // Only support single column update
         // change 2026-10-03-practical-core-gaps T8：单赋值限制解除——逐赋值
@@ -2018,15 +2023,20 @@ impl PlanBuilder {
         self.validate_table(&table_name)?;
         // MS20-T02: 附加库目标不再计划期拒绝（见 `build_insert`）。
 
-        // Extract primary key from WHERE clause
-        let where_expr = selection
-            .as_ref()
-            .ok_or_else(|| PlanError::MissingField("WHERE clause for DELETE".into()))?;
-        let key = self
-            .extract_pk_from_where(&table_name, where_expr)?
-            .ok_or_else(|| {
-                PlanError::ParseError("DELETE requires primary key equality in WHERE clause".into())
-            })?;
+        // change 2026-10-04-external-review-gaps T6：无 WHERE → 全表形态
+        // （`key: None`，第一重门移除）；带 WHERE 维持既有 PK 等值提取链，
+        // 第二重门文案与语义逐字节（一般谓词维持点名拒绝）。
+        let key = match selection.as_ref() {
+            None => None,
+            Some(where_expr) => Some(
+                self.extract_pk_from_where(&table_name, where_expr)?
+                    .ok_or_else(|| {
+                        PlanError::ParseError(
+                            "DELETE requires primary key equality in WHERE clause".into(),
+                        )
+                    })?,
+            ),
+        };
 
         Ok(PhysicalPlan::Delete(DeleteNode { table_name, key }))
     }
@@ -2111,7 +2121,8 @@ mod tests {
                     UpdateValue::Literal(Value::String("Bob".to_string()))
                 );
                 let expected_key = Value::Int(1).to_key().unwrap();
-                assert_eq!(node.key, expected_key);
+                // T6：key 为 Option（Some = 定位行形态）。
+                assert_eq!(node.key, Some(expected_key));
             }
             _ => panic!("Expected Update plan"),
         }
@@ -2130,7 +2141,8 @@ mod tests {
             PhysicalPlan::Delete(node) => {
                 assert_eq!(node.table_name, "users");
                 let expected_key = Value::Int(1).to_key().unwrap();
-                assert_eq!(node.key, expected_key);
+                // T6：key 为 Option（Some = 定位行形态）。
+                assert_eq!(node.key, Some(expected_key));
             }
             _ => panic!("Expected Delete plan"),
         }

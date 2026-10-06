@@ -20,12 +20,12 @@
 
 ## 3. 写面与 CLI 可观测批
 
-- [ ] 3.1 **T6〔代码〕** 无 WHERE 全表 UPDATE/DELETE——`UpdateNode/DeleteNode.key` 改 `Option<Key>`；第一重门移除、第二重门（PK 等值）保留；执行器全表臂（`IndexManager::scan_all` 枚举 + 逐行既有单行逻辑复用 + AffectedRows 汇总）；语句失败隐式事务回滚全部已写行；附加库路由继承；TRUNCATE/带 WHERE 形态零变化（design D6；R6，S22–S26）；依赖 None；以新 `tests/full_table_dml_test.rs`（全表 DELETE/UPDATE + 逐行碰撞回滚 + 显式事务回滚 + 附加库目标 + TRUNCATE 对照 + 子查询拒绝面）+ subquery_test 两处静默失败用例转真验证 + cross_db_dml_test 回归 RED→GREEN 验收。
-- [ ] 3.2 **T7〔代码〕** CLI 错误输出携带 SQLSTATE——文本格式错误行尾 ` [SQLSTATE xxxx]`（sqlstate 存在时）；JSON 错误对象增 `sqlstate` 字段（None 省略）；退出码与文案零变化；PG 面零变化（design D7；R7，S27–S29）；依赖 None；以 readonly_session_test/cli_test 错误面用例扩展（文本 + JSON + 无 sqlstate 省略）+ pg_integration_test 零回归 RED→GREEN 验收。
+- [x] 3.1 **T6〔代码〕** 无 WHERE 全表 UPDATE/DELETE——`UpdateNode/DeleteNode.key` 改 `Option<Key>`；第一重门移除、第二重门（PK 等值）保留；执行器全表臂（`IndexManager::scan_all` 枚举 + 逐行既有单行逻辑复用 + AffectedRows 汇总）；语句失败隐式事务回滚全部已写行；附加库路由继承；TRUNCATE/带 WHERE 形态零变化（design D6；R6，S22–S26）；依赖 None；以新 `tests/full_table_dml_test.rs`（全表 DELETE/UPDATE + 逐行碰撞回滚 + 显式事务回滚 + 附加库目标 + TRUNCATE 对照 + 子查询拒绝面）+ subquery_test 两处静默失败用例转真验证 + cross_db_dml_test 回归 RED→GREEN 验收。（Act 2026-10-06 完成：单行逻辑提取 `update_row`/`delete_row` 共享路径零复制、RED 10 failed/0 passed → GREEN 10 passed；plan_exec/executor/gc/mvcc_record/version_chain/planner_test 八处直构与断言机械适配；subquery_test 两静默用例转真删除后断言仍成立）
+- [x] 3.2 **T7〔代码〕** CLI 错误输出携带 SQLSTATE——文本格式错误行尾 ` [SQLSTATE xxxx]`（sqlstate 存在时）；`--format json` 错误对象增 `sqlstate` 字段（None 省略）；退出码与文案零变化；PG 面零变化（design D7；R7，S27–S29）；依赖 None；以 readonly_session_test/cli_test 错误面用例扩展（文本 + JSON + 无 sqlstate 省略）+ pg_integration_test 零回归 RED→GREEN 验收。（Act 2026-10-06 完成：`ExitStatus::Sql` 携带第二载荷 + `emit_error_status` 渲染分叉〔`kind(format)` 单点判定〕+ sql_failure_status 增参五透传点〔classify×2/plan/Response::Error 携带，parse/会话/ATTACH/lifecycle 为 None〕；cli_test 三处 `stderr.starts_with` 锁断言按 S28 定稿形状白名单校准为 contains）
 
 ## 4. 文档同步批
 
-- [ ] 4.1 **T8〔文档〕** 文档同步——README.md / README.zh-CN.md / rtsql-docs/SKILL.md 按 design D8 七项清单与定稿行为逐条对齐（ORDER BY 限定列、标量子查询边界、无 WHERE 语义声明、SQLSTATE 输出面、FROM 集合操作、恢复收敛话术）；不触碰 spec 语料（随 docs-maintainer 收尾合并）（R8，S30）；依赖 T1–T7 全部行为定稿；以逐条人工核对（对照实测命令输出）验收。
+- [x] 4.1 **T8〔文档〕** 文档同步——README.md / README.zh-CN.md / rtsql-docs/SKILL.md 按 design D8 七项清单与定稿行为逐条对齐（ORDER BY 限定列、标量子查询边界、无 WHERE 语义声明、SQLSTATE 输出面、FROM 集合操作、恢复收敛话术）；不触碰 spec 语料（随 docs-maintainer 收尾合并）（R8，S30）；依赖 T1–T7 全部行为定稿；以逐条人工核对（对照实测命令输出）验收。（Act 2026-10-06 完成）
 
 ## Iteration Plan
 

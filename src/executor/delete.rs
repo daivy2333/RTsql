@@ -15,7 +15,9 @@ pub struct DeleteExecutor {
     table_meta: Arc<TableMeta>,
     buffer_pool: Arc<BufferPool>,
     tx_manager: Arc<TransactionManager>,
-    key: Vec<u8>,
+    /// 定位键；`None` ＝ 无 WHERE 全表形态（change 2026-10-04-external-review-gaps
+    /// T6——`scan_all` 枚举 + 逐行复用既有单行逻辑）
+    key: Option<Vec<u8>>,
     tx_id: u64,
     executed: bool,
     wal_buffer: Option<Arc<WALBuffer>>,
@@ -26,7 +28,7 @@ impl DeleteExecutor {
         table_meta: Arc<TableMeta>,
         buffer_pool: Arc<BufferPool>,
         tx_manager: Arc<TransactionManager>,
-        key: Vec<u8>,
+        key: Option<Vec<u8>>,
         tx_id: u64,
         wal_buffer: Option<Arc<WALBuffer>>,
     ) -> Self {
@@ -103,15 +105,42 @@ impl Executor for DeleteExecutor {
 
         self.executed = true;
 
+        // change 2026-10-04-external-review-gaps T6：单行形态（Some）走既有
+        // 定位路径；全表形态（None）以 `scan_all()` 枚举**语句开始时点**的
+        // 全部索引键（与单行同源的可见性快照），逐行复用既有单行逻辑（含
+        // 未命中零副作用臂贡献 0），行数汇总为 affected_rows。语句中途失败
+        // 沿 DML 根事务包裹整体回滚。
+        match self.key.take() {
+            Some(key) => {
+                let affected = self.delete_row(&key).await?;
+                Ok(Some(ExecResult::AffectedRows(affected)))
+            }
+            None => {
+                let entries = self.table_meta.index_manager.scan_all().await?;
+                let mut affected = 0u64;
+                for (key, _rid) in entries {
+                    affected += self.delete_row(&key).await?;
+                }
+                Ok(Some(ExecResult::AffectedRows(affected)))
+            }
+        }
+    }
+}
+
+impl DeleteExecutor {
+    /// 既有单行删除路径逐字节承载（T6 提取共享——禁止复制墓碑/索引清理序）：
+    /// 定位、未命中零副作用早退、墓碑写、PK/唯一/二级条目清理、WAL 与版本
+    /// 记账。返回实际删除行数（命中 1 / 未命中 0）。
+    async fn delete_row(&mut self, key: &[u8]) -> Result<u64> {
         // Search for row_id before deleting
-        let row_id = self.table_meta.index_manager.search(&self.key).await?;
+        let row_id = self.table_meta.index_manager.search(key).await?;
 
         // 未命中键零副作用早退（MS21 Iter001 D16）：search 未命中时返回
         // affected 0，不触碰墓碑/唯一/PK 条目/WAL。此前无条件
         // `index_manager.delete` 会以「首个 ≥」插入位误删邻近条目；键大于
         // 全部键时上抛 KeyNotFound 误报。命中路径逐字节不变。
         if row_id.is_none() {
-            return Ok(Some(ExecResult::AffectedRows(0)));
+            return Ok(0);
         }
 
         // MS23 Iteration 001 (2.7/D7): 唯一列键值提取——写墓碑前从 rid 处
@@ -159,7 +188,7 @@ impl Executor for DeleteExecutor {
             }
         }
 
-        self.table_meta.index_manager.delete(&self.key).await?;
+        self.table_meta.index_manager.delete(key).await?;
 
         // MS23 Iteration 001 (2.7/D7): 删 PK 条目同区逐唯一列移除条目——
         // 不移除则残留条目使后续同值插入假阳性 DuplicateKey。
@@ -201,6 +230,6 @@ impl Executor for DeleteExecutor {
             }
         }
 
-        Ok(Some(ExecResult::AffectedRows(1)))
+        Ok(1)
     }
 }

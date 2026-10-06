@@ -109,7 +109,7 @@ async fn test_update_records_version() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager.clone(),
-        key.to_vec(),
+        Some(key.to_vec()),
         vec![rtsql::executor::UpdateAssignment {
             column: "name".to_string(),
             value: rtsql::executor::UpdateValue::Literal(Value::String("bob".to_string())),
