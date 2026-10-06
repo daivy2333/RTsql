@@ -44,7 +44,9 @@ pub struct UpdateExecutor {
     table_meta: Arc<TableMeta>,
     buffer_pool: Arc<BufferPool>,
     tx_manager: Arc<TransactionManager>,
-    key: Vec<u8>,
+    /// 定位键；`None` ＝ 无 WHERE 全表形态（change 2026-10-04-external-review-gaps
+    /// T6——`scan_all` 枚举 + 逐行复用既有单行逻辑）
+    key: Option<Vec<u8>>,
     /// 赋值清单（change 2026-10-03-practical-core-gaps T9：多列化——语句序，
     /// 字面量臂与表达式臂按同一旧行快照消费）
     assignments: Vec<UpdateAssignment>,
@@ -60,7 +62,7 @@ impl UpdateExecutor {
         table_meta: Arc<TableMeta>,
         buffer_pool: Arc<BufferPool>,
         tx_manager: Arc<TransactionManager>,
-        key: Vec<u8>,
+        key: Option<Vec<u8>>,
         assignments: Vec<UpdateAssignment>,
         tx_id: u64,
         wal_buffer: Option<Arc<WALBuffer>>,
@@ -93,8 +95,34 @@ impl Executor for UpdateExecutor {
 
         self.executed = true;
 
+        // change 2026-10-04-external-review-gaps T6：单行形态（Some）走既有
+        // 定位路径；全表形态（None）以 `scan_all()` 枚举**语句开始时点**的
+        // 全部索引键（与单行同源的可见性快照），逐行复用既有单行逻辑，行数
+        // 汇总为 affected_rows。语句中途失败沿 DML 根事务包裹整体回滚。
+        match self.key.take() {
+            Some(key) => {
+                let affected = self.update_row(&key).await?;
+                Ok(Some(ExecResult::AffectedRows(affected)))
+            }
+            None => {
+                let entries = self.table_meta.index_manager.scan_all().await?;
+                let mut affected = 0u64;
+                for (key, _rid) in entries {
+                    affected += self.update_row(&key).await?;
+                }
+                Ok(Some(ExecResult::AffectedRows(affected)))
+            }
+        }
+    }
+}
+
+impl UpdateExecutor {
+    /// 既有单行更新路径逐字节承载（T6 提取共享——禁止复制门序）：定位、
+    /// 旧行快照求值、per 赋值门序、版本写与唯一/二级索引维护、键位三分支。
+    /// 成功恒影响 1 行；定位未命中维持 `KeyNotFound`。
+    async fn update_row(&mut self, key: &[u8]) -> Result<u64> {
         // Step 1: Search index for key → get old RowId
-        let old_row_id = match self.table_meta.index_manager.search(&self.key).await? {
+        let old_row_id = match self.table_meta.index_manager.search(key).await? {
             Some(id) => id,
             None => return Err(StorageError::KeyNotFound),
         };
@@ -166,7 +194,7 @@ impl Executor for UpdateExecutor {
                 // （与 INSERT 先查后写同一模式，拒绝零副作用）。同键字节相等
                 // 走既有 update 路径，不做预检。
                 if let Some(new_key) = raw.to_key() {
-                    if new_key.as_bytes() != self.key.as_slice()
+                    if new_key.as_bytes() != key
                         && self
                             .table_meta
                             .index_manager
@@ -329,20 +357,20 @@ impl Executor for UpdateExecutor {
         if !pk_assigned {
             self.table_meta
                 .index_manager
-                .update(&self.key, new_row_id)
+                .update(key, new_row_id)
                 .await?;
         } else {
             let new_key = values[pk_col_idx.unwrap()].to_key();
             match new_key {
-                None => self.table_meta.index_manager.delete(&self.key).await?,
-                Some(k) if k.as_bytes() == self.key.as_slice() => {
+                None => self.table_meta.index_manager.delete(key).await?,
+                Some(k) if k.as_bytes() == key => {
                     self.table_meta
                         .index_manager
-                        .update(&self.key, new_row_id)
+                        .update(key, new_row_id)
                         .await?
                 }
                 Some(k) => {
-                    self.table_meta.index_manager.delete(&self.key).await?;
+                    self.table_meta.index_manager.delete(key).await?;
                     self.table_meta
                         .index_manager
                         .insert(k.as_bytes(), new_row_id)
@@ -411,6 +439,6 @@ impl Executor for UpdateExecutor {
             }
         }
 
-        Ok(Some(ExecResult::AffectedRows(1)))
+        Ok(1)
     }
 }

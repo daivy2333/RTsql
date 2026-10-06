@@ -56,7 +56,7 @@ async fn test_full_flow_insert_find_delete() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager.clone(),
-        key_bytes.to_vec(),
+        Some(key_bytes.to_vec()),
         0,
         None,
     );
@@ -176,7 +176,7 @@ async fn test_insert_update_scan_flow() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager,
-        key_bytes.to_vec(),
+        Some(key_bytes.to_vec()),
         vec![rtsql::executor::UpdateAssignment {
             column: "id".to_string(),
             value: rtsql::executor::UpdateValue::Literal(new_value),
@@ -251,7 +251,7 @@ async fn test_multiple_operations_sequence() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager.clone(),
-        key_2,
+        Some(key_2),
         0,
         None,
     );

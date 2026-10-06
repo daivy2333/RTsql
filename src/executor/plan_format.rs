@@ -203,12 +203,18 @@ fn describe(plan: &PhysicalPlan) -> String {
             format!(
                 "Update {} (key={}, set {})",
                 node.table_name,
-                key_hex(&node.key),
+                // T6：全表形态（无 WHERE）渲染 `key=-`。
+                node.key.as_ref().map(key_hex).as_deref().unwrap_or("-"),
                 sets
             )
         }
         PhysicalPlan::Delete(node) => {
-            format!("Delete {} (key={})", node.table_name, key_hex(&node.key))
+            format!(
+                "Delete {} (key={})",
+                node.table_name,
+                // T6：全表形态（无 WHERE）渲染 `key=-`。
+                node.key.as_ref().map(key_hex).as_deref().unwrap_or("-")
+            )
         }
         PhysicalPlan::CreateTable(node) => format!(
             "CreateTable {} (columns={}, primary_key={})",

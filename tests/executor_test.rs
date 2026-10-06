@@ -256,7 +256,7 @@ async fn test_update_executor() -> Result<()> {
         table_meta.clone(),
         buffer_pool,
         tx_manager,
-        key.to_vec(),
+        Some(key.to_vec()),
         vec![rtsql::executor::UpdateAssignment {
             column: "id".to_string(),
             value: rtsql::executor::UpdateValue::Literal(new_value),
@@ -307,7 +307,7 @@ async fn test_delete_executor() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager,
-        key.to_vec(),
+        Some(key.to_vec()),
         0,
         None,
     );
@@ -703,7 +703,7 @@ async fn test_update_creates_new_version() -> Result<()> {
         table_meta.clone(),
         buffer_pool.clone(),
         tx_manager,
-        key.to_vec(),
+        Some(key.to_vec()),
         vec![rtsql::executor::UpdateAssignment {
             column: "name".to_string(),
             value: rtsql::executor::UpdateValue::Literal(Value::String("bob".to_string())),

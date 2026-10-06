@@ -303,24 +303,25 @@ pub struct UpdateAssignment {
 }
 
 /// 更新节点（change 2026-10-03-practical-core-gaps T8：多列赋值 + 值表达式
-/// 右值；定位行语义不变——主键等值 WHERE）
+/// 右值；定位行语义不变——主键等值 WHERE。change 2026-10-04-external-review-gaps
+/// T6：`key` 为 `None` 时为无 WHERE 全表形态——执行器枚举全部索引键逐行应用）。
 #[derive(Debug, Clone)]
 pub struct UpdateNode {
     /// 表名
     pub table_name: String,
-    /// 主键（定位行）
-    pub key: Key,
+    /// 主键（定位行）；`None` ＝ 无 WHERE 全表形态
+    pub key: Option<Key>,
     /// 赋值清单（语句序）
     pub assignments: Vec<UpdateAssignment>,
 }
 
-/// 删除节点
+/// 删除节点（T6：`key` 为 `None` 时为无 WHERE 全表形态）
 #[derive(Debug, Clone)]
 pub struct DeleteNode {
     /// 表名
     pub table_name: String,
-    /// 主键（定位行）
-    pub key: Key,
+    /// 主键（定位行）；`None` ＝ 无 WHERE 全表形态
+    pub key: Option<Key>,
 }
 
 /// 列定义

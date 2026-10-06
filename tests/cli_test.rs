@@ -686,8 +686,10 @@ fn test_lock_precedes_header_validation_exit_4() {
         out.stderr
     );
     assert!(
-        out.stderr.starts_with("database is locked"),
-        "stderr must start with 'database is locked', got: {:?}",
+        // T7 定稿：JSON 模式（默认非 TTY）stderr 为单行 JSON 错误对象，
+        // 消息文本保留在 error 值内——断言意图（锁错误面出现于 stderr）不变。
+        out.stderr.contains("database is locked"),
+        "stderr must carry 'database is locked', got: {:?}",
         out.stderr
     );
 }
@@ -719,8 +721,10 @@ fn test_lock_conflict_exit_4() {
         out.stderr
     );
     assert!(
-        out.stderr.starts_with("database is locked"),
-        "stderr must start with 'database is locked', got: {:?}",
+        // T7 定稿：JSON 模式（默认非 TTY）stderr 为单行 JSON 错误对象，
+        // 消息文本保留在 error 值内——断言意图（锁错误面出现于 stderr）不变。
+        out.stderr.contains("database is locked"),
+        "stderr must carry 'database is locked', got: {:?}",
         out.stderr
     );
     assert!(out.stdout.is_empty(), "no SQL output on lock conflict");
@@ -4133,8 +4137,10 @@ fn test_delete_locked_rejects_without_deletion() {
         out.stderr
     );
     assert!(
-        out.stderr.starts_with("database is locked"),
-        "stderr must start with 'database is locked', got: {:?}",
+        // T7 定稿：JSON 模式（默认非 TTY）stderr 为单行 JSON 错误对象，
+        // 消息文本保留在 error 值内——断言意图（锁错误面出现于 stderr）不变。
+        out.stderr.contains("database is locked"),
+        "stderr must carry 'database is locked', got: {:?}",
         out.stderr
     );
     assert!(
@@ -4593,5 +4599,53 @@ fn test_new_then_main_command_works() {
         Some(0),
         "main command after new: {:?}",
         out.stderr
+    );
+}
+
+/// T7（change 2026-10-04-external-review-gaps R7/S28）：无 sqlstate 的
+/// General/Usage 错误——`--format json` 下单行 JSON 错误对象**省略**
+/// `sqlstate` 字段；文本模式不加 suffix；退出码矩阵零变化。
+#[test]
+fn cli_error_without_sqlstate_omits_field_and_suffix() {
+    let dir = TempDir::new().unwrap();
+
+    // General（缺库显式拒绝，exit 1）：JSON 对象无 sqlstate 字段。
+    let json = run_cli(dir.path(), &["--format", "json", "missing.db", "SELECT 1"]);
+    assert_eq!(json.code, Some(1), "missing db: {}", json.stderr);
+    assert!(
+        json.stderr.contains(r#""error""#),
+        "json error object emitted: {}",
+        json.stderr
+    );
+    assert!(
+        !json.stderr.contains("sqlstate"),
+        "sqlstate must be omitted when absent: {}",
+        json.stderr
+    );
+
+    // 文本模式（显式 table）：无 suffix，指引文案保持。
+    let text = run_cli(dir.path(), &["--format", "table", "missing.db", "SELECT 1"]);
+    assert_eq!(text.code, Some(1), "missing db: {}", text.stderr);
+    assert!(
+        text.stderr.contains("rtsql new"),
+        "guidance preserved: {}",
+        text.stderr
+    );
+    assert!(
+        !text.stderr.contains("SQLSTATE"),
+        "no suffix without sqlstate: {}",
+        text.stderr
+    );
+
+    // Usage（--readonly × 生命周期子命令，exit 2）：JSON 对象省略字段。
+    let usage = run_cli(
+        dir.path(),
+        &["--format", "json", "--readonly", "new", "x.db"],
+    );
+    assert_eq!(usage.code, Some(2), "usage: {}", usage.stderr);
+    assert!(
+        usage.stderr.contains(r#""error""#) && !usage.stderr.contains("sqlstate"),
+        "usage json omits sqlstate: {}",
+        usage.stderr
     );
 }

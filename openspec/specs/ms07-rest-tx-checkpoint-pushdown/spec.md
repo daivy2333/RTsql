@@ -118,7 +118,7 @@ planner 生成的扫描（DataScan / IndexScan / IndexScanAll）SHALL 能携带 
 
 ### Requirement: Checkpoint 零工作跳过
 
-当 WAL 自上次 checkpoint 以来无追加记录（未决记录为零）**且**缓冲池无脏页时，checkpoint SHALL 为整体无操作：SHALL NOT 刷脏页、SHALL NOT 写 checkpoint 位点、SHALL NOT 重写或截断 WAL。任一条件非空（WAL 有未决追加或缓冲池有脏页）时，checkpoint SHALL 保持既有全量行为（刷脏页 + 写位点 + WAL 重写截断）逐字节不变。跳过判定 SHALL 覆盖全部 checkpoint 触发路径（close 自动路径、显式 checkpoint 调用、open 恢复后路径），公开 API 签名 SHALL 不变。跳过与执行两种结果下，重开（含崩溃恢复）语义 SHALL 与既有行为等价；「close 即落盘」承诺 SHALL 不变——无未决工作时本无落盘工作，有未决工作时（含仅 DDL 产生的脏页）SHALL 照常落盘。
+当 WAL 自上次 checkpoint 以来无追加记录（未决记录为零）**且**缓冲池无脏页**且打开时 WAL 不含事务记录**时，checkpoint SHALL 为整体无操作：SHALL NOT 刷脏页、SHALL NOT 写 checkpoint 位点、SHALL NOT 重写或截断 WAL。「打开时 WAL 含事务记录」（任一非 Checkpoint 记录，无论恢复重放是否实际发生 redo）SHALL 视同未决工作参与判定——该形态（恢复会话含零 redo 形态）SHALL NOT 触发零工作跳过，详见 `wal-recovery-replay-integrity`「恢复会话 WAL 收敛（含零 redo 形态）」。任一其余条件非空（WAL 有未决追加或缓冲池有脏页）时，checkpoint SHALL 保持既有全量行为（刷脏页 + 写位点 + WAL 重写截断）逐字节不变。跳过判定 SHALL 覆盖全部 checkpoint 触发路径（close 自动路径、显式 checkpoint 调用、open 恢复后路径），公开 API 签名 SHALL 不变。跳过与执行两种结果下，重开（含崩溃恢复）语义 SHALL 与既有行为等价；「close 即落盘」承诺 SHALL 不变——无未决工作时本无落盘工作，有未决工作时（含仅 DDL 产生的脏页）SHALL 照常落盘。
 
 #### Scenario: 零写入会话 close 跳过 checkpoint
 
@@ -161,3 +161,15 @@ planner 生成的扫描（DataScan / IndexScan / IndexScanAll）SHALL 能携带 
 - **WHEN** 调用公开 `checkpoint()`
 - **THEN** 返回成功且不产生位点写入与 WAL 重写副作用
 - **AND** 后续恢复语义不受影响
+
+#### Scenario: 恢复会话（零 redo 形态）不触发零工作跳过
+
+- **GIVEN** 打开时 WAL 含未提交事务记录（恢复重放零 redo、零页写入）的数据库
+- **WHEN** 该会话未发生用户写入即 `close()` 或显式 checkpoint
+- **THEN** SHALL NOT 触发零工作早退，执行完整 checkpoint 截断 WAL（失败边界——修复前：跳过、WAL 滞留致 check 永久拒绝）
+
+#### Scenario: marker-only WAL 残留不跳过
+
+- **GIVEN** WAL 仅含空事务标记记录（Begin/Commit 无数据记录）的崩溃残留库
+- **WHEN** 纯读读写打开后 close
+- **THEN** 执行完整 checkpoint 截断 WAL（该形态 `redo_count=0` 但 WAL 曾含事务记录）

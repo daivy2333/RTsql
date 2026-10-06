@@ -177,7 +177,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql import <db> <table> <file\|-> --csv` | 按表头列名导入 CSV，或按表头自动建表；`-` 表示 stdin；接受 `:memory:` 目标 |
 | `rtsql delete <db> [--dry-run]` | 删除数据库及其 `.wal` / `.checkpoint` 伴生文件；`--dry-run` 只列出 |
 | `rtsql checkpoint <db>` | 将已提交数据刷入主文件（截断 WAL、推进 checkpoint 位点）；文件级备份或交接前的干净同步点 |
-| `rtsql check <db>` | 只读结构完整性扫描（页 census、catalog、数据链/溢出链、索引树）；损坏按行报告页位置与损坏语义，干净库输出单行确认。退出码：干净 `0`、存在 error 级 finding `1`（info 级不改退出码）、锁冲突 `4`、密钥错误 `5`；`:memory:` 与 `--readonly` 组合为用法错误（`2`）。不修复、不修改文件；存在未决 WAL 的库须先以读写会话打开完成恢复后再检查 |
+| `rtsql check <db>` | 只读结构完整性扫描（页 census、catalog、数据链/溢出链、索引树）；损坏按行报告页位置与损坏语义，干净库输出单行确认。退出码：干净 `0`、存在 error 级 finding `1`（info 级不改退出码）、锁冲突 `4`、密钥错误 `5`；`:memory:` 与 `--readonly` 组合为用法错误（`2`）。不修复、不修改文件；存在未决 WAL 的库须先以读写会话打开完成恢复后再检查（纯读会话即可——打开即重放，读写关闭会截断曾含事务记录的 WAL） |
 | `rtsql stats <db> <table>` | 汇总行数、空值率、去重值、范围和数值分位数 |
 | `rtsql sample <db> <table> [n]` | 使用蓄水池抽样；默认 `n` 为 10 |
 | `rtsql profile <db> <table> [--top n]` | 输出列画像和 String 高频值；默认 top 为 5，最大 20 |
@@ -189,7 +189,7 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 
 - **多读单写**：只读会话之间共享锁；读写会话排除只读者与其他写者，只读会话也排除读写会话。锁冲突按可配置预算等待——`--busy-timeout <毫秒>` 或 `RTSQL_BUSY_TIMEOUT`，默认 5000 ms；`0` 仅等待内部 ~8 ms 可见性下限窗口——预算耗尽后才以退出码 `4` 拒绝。该预算对全部开库命令生效，独占锁与只读共享锁同侧；`:memory:` 接受并忽略，`delete` 的锁探测永不等待。
 - **无未决 WAL**：只读会话不执行恢复，因此 `.wal` 中仍有未重放记录时拒绝打开，错误文案点名需以读写模式完成恢复，退出码为 `1`。
-- **零写入**：不运行恢复也不 checkpoint，`INSERT` / `UPDATE` / `DELETE` / `UPSERT` / `REPLACE` 与全部 DDL 在计划期以 SQLSTATE `25006` 拒绝（退出码 `3`）；`SELECT`、`ATTACH`、`DETACH` 与事务语句不受限。
+- **零写入**：不运行恢复也不 checkpoint，`INSERT` / `UPDATE` / `DELETE` / `UPSERT` / `REPLACE` 与全部 DDL 在计划期以 SQLSTATE `25006` 拒绝（退出码 `3`）；`SELECT`、`ATTACH`、`DETACH` 与事务语句不受限。CLI 输出会点名该代码：文本格式在 stderr 错误行尾附加 ` [SQLSTATE 25006]`，`--format json` 以 stderr 单行 JSON 对象报告错误并携带 `sqlstate` 字段（错误无分类时省略字段）。
 - **跨库**：只读会话内的 `ATTACH` 将附加库也以只读模式打开。
 - **加密库**：照常传入 `--key`；密钥错误仍为退出码 `5`。
 - **仅主命令**：`--readonly` 与生命周期或分析子命令组合是用法错误（退出码 `2`）——这些子命令维持读写打开。
@@ -250,7 +250,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **表达式：** `IN`、`BETWEEN`、`LIKE`、`IS NULL`、`NOT`、`CASE`、`COALESCE`、`CAST` 和算术运算符。
 - **标量函数：** `upper`、`lower`、`length`、`substr`、`replace`、`trim`、`abs`、`round`、`floor`、`ceil`。
 - **日期时间：** `DATE`、`TIMESTAMP`、`now`、`date`、`year`、`month`、`day`、`hour`、`minute`、`second`、`date_trunc`、`datediff` 和 `INTERVAL` 算术。
-- **子查询：** 标量子查询、`IN`、`EXISTS`、派生表和关联子查询；相同关联参数可复用语句级结果。
+- **子查询：** 标量子查询——可用于 `WHERE` 比较与选择清单，含关联子查询（相同关联参数复用语句级结果）——以及 `IN`、`EXISTS` 与派生表。标量子查询返回多行时点名拒绝（`Subquery returns multiple rows`）；空结果按 `NULL` 参与三值比较；`JOIN` 基座的 `WHERE` 中仍维持点名拒绝。
 - **分组：** 可按列、别名、表达式文本或序号执行 `GROUP BY`。
 - **聚合表达式：** 聚合可嵌套于 SELECT 值表达式（`SELECT MAX(id) + 1`）、`HAVING` 条件（`HAVING MAX(id) + 1 > 2`）与聚合查询 `ORDER BY` 键（`ORDER BY MAX(v)`）；选择清单可与纯常量混排（`SELECT MAX(id), 1`）；同一聚合调用多次出现共享一个输出列。`WHERE`/`JOIN ... ON` 内聚合、聚合嵌套、无 `GROUP BY` 的非聚合列引用在计划期点名拒绝。
 - **常量查询：** 支持 `SELECT 1 + 1` 等无 `FROM` 表达式。
@@ -280,6 +280,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **值类型：** 写入值必须与列声明类型一致。`NULL` 豁免，日期列接受其类型化字面量，`FLOAT` 列接受整数值（以等价浮点存储），其余跨类型写入以 `column '<列名>' expects <类型>, got <类型>` 拒绝。`dump` / `restore` / `import` 通道经同一规则。
 - **声明默认值：** `CREATE TABLE` 或 `ALTER TABLE ADD COLUMN` 声明的 `DEFAULT` 字面量在计划期按同一规则与列类型校验——`NULL` 豁免，`FLOAT` 列整数字面量升格（以浮点持久化），`DATE`/`TIMESTAMP` 列解析字符串（非法日期拒绝），其余跨类型声明以 `DEFAULT type mismatch: column '<列名>': expected <类型>, got <类型>` 在建表前拒绝、零副作用。类型化日期字面量（如 `DEFAULT DATE '2026-01-02'`）可接受，含日期默认值的表 `dump` → `restore` 往返保真。`DEFAULT` 字面量长度另受 catalog 列行页内容量约束（约 4KB 量级）：超长默认值在建表时按既有页满错误点名拒绝、零副作用；写入值本身不受此限制（超页行走溢出页链）。
 - **`UPDATE ... SET` 表达式：** 可一次赋值多列，右值接受完整值表达式——列引用按旧行值同快照求值（`SET a = a + 1, b = a` 中 `b` 读旧 `a`），另支持算术、`CAST`、`CASE`、`COALESCE` 与标量函数。写入类型门、`NOT NULL`、键列类型门、碰撞预检、rekey 与唯一/次级索引维护全部作用于求值结果；任一赋值失败整行保持原状。右值为聚合调用或子查询时计划期点名拒绝。
+- **全表 `UPDATE`/`DELETE`：** 省略 `WHERE` 时语句作用于全部行。行级语义逐行生效——写入类型门、`NOT NULL`、键列类型门、碰撞预检、rekey 与唯一/次级索引维护——语句中途失败回滚该语句已写入的全部行（隐式事务语义；`BEGIN` 内可用并可随事务 `ROLLBACK`）。`affected_rows` 为实际行数。`TRUNCATE TABLE` 仍是更快的物理释放替代。
 - **`ON CONFLICT DO NOTHING`：** 冲突行被跳过，不计入受影响行数。
 - **`ON CONFLICT (col) DO UPDATE SET ...`：** 冲突行原位更新。右值接受字面量、`DEFAULT`、`excluded.<列名>`（待插行值）或裸列名（冲突行旧值），可一次赋值多列。仅被赋值列发生变化。
 - **冲突目标：** 省略目标时仲裁主键与全部唯一索引（先主键，再按声明序的唯一列）。显式目标必须是承载唯一性的单列——`INT` 主键列或 `UNIQUE` 列。
