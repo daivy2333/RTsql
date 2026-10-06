@@ -479,16 +479,16 @@ async fn test_multi_level_correlated_error() {
 // observable here (no counter hooks by contract).
 
 /// Helper: collect (key, value) map from rows of the scalar-subquery select
-/// list shape. Pre-existing direct-execution shape for
-/// `SELECT col, (scalar...) AS alias FROM table`: the scalar is inserted at
-/// its select-list position (index 1) into the full outer row, so the outer
-/// column named first (e.g. emp.name / dept.name) lands at index 2 and the
-/// scalar at index 1. Witnesses assert against this reference shape.
+/// list shape. T4（change 2026-10-04-external-review-gaps）calibrated shape
+/// for `SELECT col, (scalar...) AS alias FROM table`: the SELECT list resolves
+/// its own projection, so the outer column lands at index 0 and the scalar at
+/// index 1 (pre-change reference shape was the leaked full row: name at 2).
+/// Witnesses assert against this reference shape.
 fn name_value_map(
     r: &[Vec<serde_json::Value>],
 ) -> std::collections::HashMap<String, serde_json::Value> {
     r.iter()
-        .map(|row| (row[2].as_str().unwrap().to_string(), row[1].clone()))
+        .map(|row| (row[0].as_str().unwrap().to_string(), row[1].clone()))
         .collect()
 }
 
@@ -586,13 +586,13 @@ async fn test_correlated_cache_equivalence_full_result() {
     // Byte-identical including row order and column shape.
     assert_eq!(r1, r2);
 
-    // Reference values (what per-row direct execution produces):
-    // name at index 2, scalar at index 1 (pre-existing select-list shape).
+    // Reference values (T4-calibrated select-list shape):
+    // name at index 0, scalar at index 1.
     let mut got: Vec<(String, String)> = r1
         .iter()
         .map(|row| {
             (
-                row[2].as_str().unwrap().to_string(),
+                row[0].as_str().unwrap().to_string(),
                 row[1].as_str().unwrap().to_string(),
             )
         })

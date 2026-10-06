@@ -81,6 +81,8 @@ pub enum PhysicalPlan {
     AntiJoin(AntiJoinNode),
     /// 标量子查询求值节点
     SubqueryEval(SubqueryEvalNode),
+    /// WHERE 比较腿标量子查询过滤节点（T4 — 不下推的占位谓词载体）
+    ScalarSubqueryFilter(ScalarSubqueryFilterNode),
     /// FROM 子查询（派生表）节点
     DerivedScan(DerivedScanNode),
     /// 投影表达式节点（MS11-T01 Iter001 — SELECT 派生列）
@@ -553,6 +555,18 @@ pub struct OutputColumn {
     pub column_index: usize,
 }
 
+/// 输出列的输入侧归属（T9 replan，design D9）——执行器输入项语境：`Left`
+/// = 从执行器左输入行取值，`Right` = 右输入行。与 `output_columns` 同序同
+/// 长；计划期装配（Hash 直用、NLJ RIGHT 交换反转），执行器不再按表名猜测
+/// 归属——自连接两侧真实名相同使名字比较恒读一侧。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinSide {
+    /// 取执行器左输入行
+    Left,
+    /// 取执行器右输入行
+    Right,
+}
+
 /// JOIN 节点（INNER JOIN）
 #[derive(Debug, Clone)]
 pub struct JoinNode {
@@ -564,6 +578,8 @@ pub struct JoinNode {
     pub conditions: Vec<JoinCondition>,
     /// 输出列映射
     pub output_columns: Vec<OutputColumn>,
+    /// 输出列输入侧归属（与 `output_columns` 同序同长）
+    pub output_sides: Vec<JoinSide>,
 }
 
 /// Nested Loop Join 语义类型（MS25 T1 — design D1 加性字段）
@@ -599,6 +615,9 @@ pub struct NestedLoopJoinNode {
     pub predicate: PredicateRef,
     /// 输出列映射（与 JoinNode 同型）
     pub output_columns: Vec<OutputColumn>,
+    /// 输出列输入侧归属（与 `output_columns` 同序同长；RIGHT 交换由计划期
+    /// 反转，执行器侧只见输入项语境）
+    pub output_sides: Vec<JoinSide>,
     /// MS25 T1：连接语义（`Inner` = 变更前逐字节一致的既有形态）
     pub join_type: NestedLoopJoinType,
 }
@@ -701,6 +720,48 @@ pub struct SubqueryEvalNode {
     pub result_column_index: usize,
     /// 相关子查询参数
     pub correlated_params: Vec<CorrelatedParam>,
+    /// T4（change 2026-10-04-external-review-gaps）：输出收窄宽度——相关
+    /// 参数取值列以尾部附加形式保留在输入行中（SELECT 投影之外的补充列），
+    /// 本链最外层节点在参数提取后按此宽度截断，使补充列不泄漏过节点。
+    /// 0 = 不截断（恒等，引入前行为）。
+    pub output_width: usize,
+}
+
+/// WHERE 比较腿标量子查询绑定（T4，change 2026-10-04-external-review-gaps）
+///
+/// 一条标量子查询与其谓词占位的绑定：`param_name` 即谓词树中
+/// `ParameterExpression` 的名字（保留名 `__scalar_subquery_<n>`），执行器
+/// 逐行求值子查询后按名注入标量结果。
+#[derive(Debug, Clone)]
+pub struct ScalarSubqueryBinding {
+    /// 谓词占位参数名（`__scalar_subquery_<n>`）
+    pub param_name: String,
+    /// 子查询计划（标量输出）
+    pub subquery: Box<PhysicalPlan>,
+    /// 相关子查询参数（子查询 WHERE 引用外层列）
+    pub correlated_params: Vec<CorrelatedParam>,
+}
+
+/// WHERE 标量子查询过滤节点（T4，change 2026-10-04-external-review-gaps）
+///
+/// WHERE 含标量子查询比较腿时的谓词载体：不下推进扫描节点（占位求值需
+/// 逐行注入子查询结果），由执行器对全形状输入行逐行求值各绑定子查询 →
+/// 按名注入谓词 → 求值，再按 `projection` 裁剪输出。`columns` 为裁剪后的
+/// 实际输出列名（IndexScan「已收窄」契约同型——表头与行形状的唯一真源）。
+#[derive(Debug, Clone)]
+pub struct ScalarSubqueryFilterNode {
+    /// 输入计划（产出全形状行；谓词 `column_index` 按其全 schema 解析）
+    pub input: Box<PhysicalPlan>,
+    /// 谓词（含 `__scalar_subquery_<n>` 占位）
+    pub predicate: PredicateRef,
+    /// 标量子查询绑定（占位名 → 子查询计划 + 相关参数）
+    pub bindings: Vec<ScalarSubqueryBinding>,
+    /// 裁剪后的实际输出列名（`projection` 应用后的行形状）
+    pub columns: Vec<String>,
+    /// 表名（输入链的表名，EXPLAIN/诊断用）
+    pub table_name: String,
+    /// 输出投影（全 schema 列 index，空 = 恒等），谓词求值后应用
+    pub projection: Vec<usize>,
 }
 
 /// FROM 子查询（派生表）节点

@@ -426,3 +426,134 @@ async fn compound_arms_with_join_and_where() {
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
+
+// === T5（change 2026-10-04-external-review-gaps）：FROM 派生表内集合操作 ===
+//
+// R5：`FROM (<SELECT> UNION [ALL]/INTERSECT/EXCEPT <SELECT>)` 作派生表源
+// （列名取左臂，外层叠加照常）；IN/EXISTS/标量子查询内的集合操作维持点名
+// 拒绝（S21）。
+
+/// T5 派生表种子：`t1(v INT)` 含 1,2；`t2(v INT)` 含 2,3。
+async fn seed_derived_set_tables(db: &Database) {
+    exec_ok(db, "CREATE TABLE s1 (k INT PRIMARY KEY, v INT)").await;
+    exec_ok(db, "INSERT INTO s1 VALUES (1, 1)").await;
+    exec_ok(db, "INSERT INTO s1 VALUES (2, 2)").await;
+    exec_ok(db, "CREATE TABLE s2 (k INT PRIMARY KEY, v INT)").await;
+    exec_ok(db, "INSERT INTO s2 VALUES (1, 2)").await;
+    exec_ok(db, "INSERT INTO s2 VALUES (2, 3)").await;
+}
+
+/// S19：UNION 去重并集作派生表源。
+#[tokio::test]
+async fn derived_union_dedup_source() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_derived_set_tables(&db).await;
+    let r = query_rows(
+        db.execute_sql("SELECT COUNT(*) FROM (SELECT v FROM s1 UNION SELECT v FROM s2)")
+            .await,
+    );
+    assert_eq!(r, vec![vec![json!(3)]]);
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S19：UNION ALL 保留重复。
+#[tokio::test]
+async fn derived_union_all_source() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_derived_set_tables(&db).await;
+    let r = query_rows(
+        db.execute_sql("SELECT COUNT(*) FROM (SELECT v FROM s1 UNION ALL SELECT v FROM s2)")
+            .await,
+    );
+    assert_eq!(r, vec![vec![json!(4)]]);
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S19：INTERSECT / EXCEPT 作派生表源。
+#[tokio::test]
+async fn derived_intersect_except_source() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_derived_set_tables(&db).await;
+    let r = query_rows(
+        db.execute_sql("SELECT v FROM (SELECT v FROM s1 INTERSECT SELECT v FROM s2)")
+            .await,
+    );
+    assert_eq!(r, vec![vec![json!(2)]]);
+    let r = query_rows(
+        db.execute_sql("SELECT v FROM (SELECT v FROM s1 EXCEPT SELECT v FROM s2)")
+            .await,
+    );
+    assert_eq!(r, vec![vec![json!(1)]]);
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S19/S20：列名取左臂；外层 WHERE / ORDER BY 叠加照常。
+#[tokio::test]
+async fn derived_set_source_outer_composition() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_derived_set_tables(&db).await;
+    let r = query_rows(
+        db.execute_sql(
+            "SELECT v FROM (SELECT v FROM s1 UNION SELECT v FROM s2) \
+             WHERE v > 1 ORDER BY v DESC",
+        )
+        .await,
+    );
+    assert_eq!(r, vec![vec![json!(3)], vec![json!(2)]]);
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S21：IN 子查询内集合操作维持点名拒绝（文案逐字节不变）。
+#[tokio::test]
+async fn set_op_inside_in_subquery_still_rejected() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_derived_set_tables(&db).await;
+    let msg = error_msg(
+        db.execute_sql("SELECT k FROM s1 WHERE v IN (SELECT v FROM s1 UNION SELECT v FROM s2)")
+            .await,
+    );
+    assert!(
+        msg.contains("Set operations are not supported inside subqueries"),
+        "unexpected error: {msg}"
+    );
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S21：EXISTS 子查询内集合操作维持点名拒绝。
+#[tokio::test]
+async fn set_op_inside_exists_subquery_still_rejected() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_derived_set_tables(&db).await;
+    let msg = error_msg(
+        db.execute_sql("SELECT k FROM s1 WHERE EXISTS (SELECT v FROM s1 UNION SELECT v FROM s2)")
+            .await,
+    );
+    assert!(
+        msg.contains("Set operations are not supported inside subqueries"),
+        "unexpected error: {msg}"
+    );
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S21：WHERE 比较腿标量子查询内集合操作维持点名拒绝（T4 通道同面）。
+#[tokio::test]
+async fn set_op_inside_scalar_comparison_still_rejected() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_derived_set_tables(&db).await;
+    let msg = error_msg(
+        db.execute_sql("SELECT k FROM s1 WHERE v = (SELECT v FROM s1 UNION SELECT v FROM s2)")
+            .await,
+    );
+    assert!(
+        msg.contains("Set operations are not supported inside subqueries"),
+        "unexpected error: {msg}"
+    );
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}

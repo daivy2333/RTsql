@@ -661,3 +661,110 @@ async fn drop_index_persists_across_restart() {
     );
     assert_eq!(rows.len(), 2);
 }
+
+// ===========================================================================
+// T1（change 2026-10-04-external-review-gaps R1）：IndexScanAll 列元数据契约
+// ——`columns` 恒为基表全列，输出形状由 `projection` 唯一决定；任意投影组合
+// 表头与行逐位对齐、不 panic；EXPLAIN 同契约；聚合输入映射正确。
+// ===========================================================================
+
+/// R1-S1：后位列单列投影不 panic（修复前：index out of bounds panic，exit 101）。
+#[tokio::test]
+async fn secondary_index_scan_late_column_projection_no_panic() {
+    let (db, _dir) = open_db().await;
+    seed_dup_table(&db).await;
+    exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
+    let rows = query_rows(
+        db.execute_sql("SELECT name FROM t WHERE age = 30").await,
+        "late column projection",
+    );
+    assert_eq!(rows, vec![vec![serde_json::json!("c")]]);
+}
+
+/// R1-S2：乱序多列投影行序与请求一致（lib 层行形状回归守卫；表头对齐由
+/// cli_test `test_secondary_index_scan_projection_headers` 承载）。
+#[tokio::test]
+async fn secondary_index_scan_out_of_order_projection_rows() {
+    let (db, _dir) = open_db().await;
+    seed_dup_table(&db).await;
+    exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
+    let rows = query_rows(
+        db.execute_sql("SELECT name, id FROM t WHERE age = 30")
+            .await,
+        "out-of-order projection",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![serde_json::json!("c"), serde_json::json!(3)]]
+    );
+}
+
+/// R1-S3：EXPLAIN 渲染遵循同一契约，不 panic 且显示真实输出形状
+/// （修复前：plan_format 渲染点 panic）。
+#[tokio::test]
+async fn explain_secondary_index_projection_shape_no_panic() {
+    let (db, _dir) = open_db().await;
+    seed_dup_table(&db).await;
+    exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
+    let lines: Vec<String> = query_rows(
+        db.execute_sql("EXPLAIN SELECT name FROM t WHERE age = 30")
+            .await,
+        "explain",
+    )
+    .iter()
+    .map(|r| r[0].as_str().expect("plan line").to_string())
+    .collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("IndexScanAll") && l.contains("columns=[name]")),
+        "EXPLAIN must render the projected output shape, got: {lines:?}"
+    );
+}
+
+/// R1-S4：PK 路由、范围谓词回落与通配投影零回归。
+#[tokio::test]
+async fn secondary_index_scan_pk_range_wildcard_zero_regression() {
+    let (db, _dir) = open_db().await;
+    seed_dup_table(&db).await;
+    exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
+    // PK 等值路由（IndexScan，「已收窄」契约）零变化
+    let rows = query_rows(
+        db.execute_sql("SELECT name FROM t WHERE id = 3").await,
+        "pk route",
+    );
+    assert_eq!(rows, vec![vec![serde_json::json!("c")]]);
+    // 范围谓词回落扫描
+    let rows = query_rows(
+        db.execute_sql("SELECT name FROM t WHERE age > 24").await,
+        "range fallback",
+    );
+    assert_eq!(rows.len(), 3);
+    // 通配投影经二级索引扫描
+    let rows = query_rows(
+        db.execute_sql("SELECT * FROM t WHERE age = 30").await,
+        "wildcard",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            serde_json::json!(3),
+            serde_json::json!(30),
+            serde_json::json!("c")
+        ]]
+    );
+}
+
+/// R1-S5：二级索引扫描上的聚合输入按基表列号正确映射。
+#[tokio::test]
+async fn aggregate_over_secondary_index_scan_maps_correctly() {
+    let (db, _dir) = open_db().await;
+    seed_dup_table(&db).await;
+    exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
+    let rows = query_rows(
+        db.execute_sql("SELECT COUNT(*), MAX(id) FROM t WHERE age = 25")
+            .await,
+        "aggregate over index scan",
+    );
+    assert_eq!(rows, vec![vec![serde_json::json!(2), serde_json::json!(2)]]);
+}

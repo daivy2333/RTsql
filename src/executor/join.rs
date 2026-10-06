@@ -1,6 +1,8 @@
 //! Join executor - INNER JOIN using hash join algorithm
 
-use crate::executor::{ExecResult, Executor, JoinCondition, JoinConfig, OutputColumn, Value};
+use crate::executor::{
+    ColumnRef, ExecResult, Executor, JoinCondition, JoinConfig, JoinSide, OutputColumn, Value,
+};
 use crate::storage::Result;
 use std::collections::HashMap;
 
@@ -27,8 +29,8 @@ pub struct JoinExecutor {
     left_column_indices: HashMap<String, usize>,
     /// 右表列名到索引的映射
     right_column_indices: HashMap<String, usize>,
-    /// 左表名称
-    left_table_name: String,
+    /// 输出列输入侧归属（T9 replan design D9，与 output_columns 同序同长）
+    output_sides: Vec<JoinSide>,
     /// 右表名称
     _right_table_name: String,
 
@@ -53,7 +55,7 @@ impl JoinExecutor {
             output_columns: config.output_columns,
             left_column_indices: config.left_column_indices,
             right_column_indices: config.right_column_indices,
-            left_table_name: config.left_table_name,
+            output_sides: config.output_sides,
             _right_table_name: config.right_table_name,
             right_hashmap: HashMap::new(),
             left_rows: Vec::new(),
@@ -65,6 +67,21 @@ impl JoinExecutor {
         }
     }
 
+    /// T11（change 2026-10-04-external-review-gaps）：条件键列位查表——
+    /// `(真实表, 列)` 限定键优先、裸名回退。链式 JOIN 的左输入含多表同名
+    /// 列，裸名查表静默串列；pipeline 侧已注册限定键（唯一命中才注册），
+    /// 测试直构的裸名 map / 未注册形态回落既有语义。查无 → `None`，由
+    /// 调用方既有 `.expect` 防御臂处理。
+    fn condition_column_index(map: &HashMap<String, usize>, column: &ColumnRef) -> Option<usize> {
+        if let Some(table) = &column.table {
+            let qualified = format!("{}.{}", table.to_lowercase(), column.column.to_lowercase());
+            if let Some(idx) = map.get(&qualified) {
+                return Some(*idx);
+            }
+        }
+        map.get(&column.column).copied()
+    }
+
     /// 计算右表行的哈希键（ON 条件右表列值组合）
     /// 返回 None 表示键包含 NULL，在 INNER JOIN 中不会匹配任何行
     fn build_hash_key_right(&self, row: &[Value]) -> Option<Vec<Value>> {
@@ -72,11 +89,10 @@ impl JoinExecutor {
             .conditions
             .iter()
             .map(|cond| {
-                let idx = self
-                    .right_column_indices
-                    .get(&cond.right_column.column)
-                    .expect("right column index must exist");
-                row[*idx].clone()
+                let idx =
+                    Self::condition_column_index(&self.right_column_indices, &cond.right_column)
+                        .expect("right column index must exist");
+                row[idx].clone()
             })
             .collect();
 
@@ -94,11 +110,10 @@ impl JoinExecutor {
             .conditions
             .iter()
             .map(|cond| {
-                let idx = self
-                    .left_column_indices
-                    .get(&cond.left_column.column)
-                    .expect("left column index must exist");
-                row[*idx].clone()
+                let idx =
+                    Self::condition_column_index(&self.left_column_indices, &cond.left_column)
+                        .expect("left column index must exist");
+                row[idx].clone()
             })
             .collect();
 
@@ -110,15 +125,16 @@ impl JoinExecutor {
     }
 
     /// 构建输出行（根据 output_columns 从左/右表提取列）
+    ///
+    /// T9 replan（design D9）：归属按计划期 `output_sides` 侧标志——自连接
+    /// 两侧真实名相同使表名比较恒读一侧。
     fn build_output_row(&self, left_row: &[Value], right_row: &[Value]) -> Vec<Value> {
         self.output_columns
             .iter()
-            .map(|col| {
-                if col.table_alias == self.left_table_name {
-                    left_row[col.column_index].clone()
-                } else {
-                    right_row[col.column_index].clone()
-                }
+            .zip(&self.output_sides)
+            .map(|(col, side)| match side {
+                JoinSide::Left => left_row[col.column_index].clone(),
+                JoinSide::Right => right_row[col.column_index].clone(),
             })
             .collect()
     }

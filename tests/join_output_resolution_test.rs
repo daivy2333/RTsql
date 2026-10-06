@@ -432,3 +432,104 @@ fn run_cli(dir: &Path, args: &[&str]) -> CliOutput {
         }
     }
 }
+
+// ==== T10（change 2026-10-04-external-review-gaps）：JOIN 基座输出列序
+// SELECT 化（R10，S38–S41）====
+//
+// 纯列清单的 JOIN 基座输出列序 SHALL 按 SELECT 清单序（对齐 Scan 基座既有
+// 语义）：裸路径 kept 与 WHERE/ORDER BY 裁剪路径同规则；重复项重复产出；
+// `SELECT *` 表序不变；消费面（CTAS 列名）随输出表头。
+
+/// S38：裸路径（无 WHERE / 无 ORDER BY）按 SELECT 序。
+#[tokio::test]
+async fn select_order_bare_path() {
+    let dir = tempdir().unwrap();
+    let db = join_base(&dir).await;
+    let rows = query_rows(
+        db.execute_sql("SELECT t2.w, t1.v FROM t1 JOIN t2 ON t1.k = t2.k")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("x"), json!("b")], vec![json!("y"), json!("a")]],
+        "rows: {rows:?}"
+    );
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S39：WHERE 裁剪路径按 SELECT 序（Filter 承载裁剪）。
+#[tokio::test]
+async fn select_order_where_path() {
+    let dir = tempdir().unwrap();
+    let db = join_base(&dir).await;
+    let rows = query_rows(
+        db.execute_sql("SELECT t2.w, t1.v FROM t1 JOIN t2 ON t1.k = t2.k WHERE t2.k = 2")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!("y"), json!("a")]], "rows: {rows:?}");
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S40：ORDER BY 裁剪路径按 SELECT 序（Sort 承载裁剪，排序键在裁剪之外
+/// 仍可达）。
+#[tokio::test]
+async fn select_order_order_by_path() {
+    let dir = tempdir().unwrap();
+    let db = join_base(&dir).await;
+    let rows = query_rows(
+        db.execute_sql("SELECT t2.w, t1.v FROM t1 JOIN t2 ON t1.k = t2.k ORDER BY t1.v")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("y"), json!("a")], vec![json!("x"), json!("b")]],
+        "rows: {rows:?}"
+    );
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S41：重复项重复产出；`SELECT *` 表序不变。
+#[tokio::test]
+async fn select_order_duplicates_and_star() {
+    let dir = tempdir().unwrap();
+    let db = join_base(&dir).await;
+    let rows = query_rows(
+        db.execute_sql("SELECT t1.v, t1.v FROM t1 JOIN t2 ON t1.k = t2.k WHERE t1.k = 1")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!("b"), json!("b")]], "rows: {rows:?}");
+    let rows = query_rows(
+        db.execute_sql("SELECT * FROM t1 JOIN t2 ON t1.k = t2.k ORDER BY t1.k")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![json!(1), json!("b"), json!(1), json!("x")],
+            vec![json!(2), json!("a"), json!(2), json!("y")],
+        ],
+        "rows: {rows:?}"
+    );
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}
+
+/// S41：消费面表头随输出序——CTAS 列名取输出表头（与 Scan 基座一致）。
+#[tokio::test]
+async fn select_order_ctas_column_names() {
+    let dir = tempdir().unwrap();
+    let db = join_base(&dir).await;
+    exec_ok(
+        &db,
+        "CREATE TABLE ct AS SELECT t2.w, t1.v FROM t1 JOIN t2 ON t1.k = t2.k",
+    )
+    .await;
+    // SELECT * 直接暴露物化列序——表头随 SELECT 输出序（修复前表序
+    // [v, w]，行随之错序）。
+    let rows = query_rows(db.execute_sql("SELECT * FROM ct").await);
+    assert_eq!(
+        rows,
+        vec![vec![json!("x"), json!("b")], vec![json!("y"), json!("a")]],
+        "rows: {rows:?}"
+    );
+    db.wal_buffer.as_ref().unwrap().shutdown().await;
+}

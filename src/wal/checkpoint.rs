@@ -15,6 +15,11 @@ pub struct CheckpointManager {
     checkpoint_path: PathBuf,
     wal_writer: Arc<WalWriter>,
     buffer_pool: Arc<BufferPool>,
+    /// T2（change 2026-10-04-external-review-gaps D2）：打开时 WAL 是否曾含
+    /// 事务记录（恢复会话收敛标志，来自 `RecoveryResult.wal_had_tx_records`）。
+    /// 该形态视同未决工作参与零工作判定——无论恢复重放是否实际发生 redo，
+    /// 本会话 close()/checkpoint() SHALL 执行完整 checkpoint 截断 WAL。
+    pending_wal_at_open: bool,
 }
 
 /// Checkpoint 位点（MS17-T02 Iter002，design D8：24B = lsn + timestamp + tx watermark）
@@ -62,17 +67,31 @@ pub(crate) fn read_site_file(path: &std::path::Path) -> Result<Option<Checkpoint
 
 impl CheckpointManager {
     /// 创建 CheckpointManager
+    ///
+    /// T2（change 2026-10-04-external-review-gaps D2）：`pending_wal_at_open`
+    /// 取自恢复结果 `RecoveryResult.wal_had_tx_records`——打开时 WAL 曾含
+    /// 事务记录的会话（含零 redo 形态）不触发零工作跳过。无恢复上下文的
+    /// 直接构造（单测等）传 `false`，语义与既有一致。
     pub fn new(
         db_path: &std::path::Path,
         wal_writer: Arc<WalWriter>,
         buffer_pool: Arc<BufferPool>,
+        pending_wal_at_open: bool,
     ) -> Self {
         let checkpoint_path = db_path.with_extension("checkpoint");
         Self {
             checkpoint_path,
             wal_writer,
             buffer_pool,
+            pending_wal_at_open,
         }
+    }
+
+    /// T2（change 2026-10-04-external-review-gaps D2）：打开时 WAL 是否曾含
+    /// 事务记录。CLI checkpoint 命令的消息两形态取样消费该标志——零工作
+    /// 取样必须 AND `!pending`，否则恢复后状态误报 "no pending work"。
+    pub fn pending_wal_at_open(&self) -> bool {
+        self.pending_wal_at_open
     }
 
     /// 读取 checkpoint 位点
@@ -151,7 +170,14 @@ impl CheckpointManager {
         // 0. MS18-T01 零工作跳过：WAL 无追加且池无脏页时整体无操作。
         //    磁盘已处于本方法将产生的 checkpoint-clean 态，九步全为无谓 I/O
         //    （位点 fsync + WAL 重写截断）。任一条件非空 → 全量路径逐字节不变。
-        if self.wal_writer.get_write_count() == 0 && !self.buffer_pool.has_dirty_pages() {
+        //    T2（change 2026-10-04-external-review-gaps D2）：打开时 WAL 曾含
+        //    事务记录的恢复会话（含零 redo 形态）视同未决工作——该形态
+        //    SHALL NOT 触发零工作早退，本会话 close()/checkpoint() 执行完整
+        //    checkpoint 截断 WAL，check/--readonly 随之收敛。
+        if !self.pending_wal_at_open
+            && self.wal_writer.get_write_count() == 0
+            && !self.buffer_pool.has_dirty_pages()
+        {
             return Ok(0);
         }
 
@@ -216,7 +242,7 @@ mod tests {
         let wal_writer = Arc::new(WalWriter::open(db_path).unwrap());
         let storage = FileStorage::open(db_path).unwrap();
         let buffer_pool = Arc::new(BufferPool::new(10, Arc::new(storage)).unwrap());
-        CheckpointManager::new(db_path, wal_writer, buffer_pool)
+        CheckpointManager::new(db_path, wal_writer, buffer_pool, false)
     }
 
     /// ms07-rest-tx-checkpoint-pushdown「Checkpoint 零工作跳过」：WAL 无追加

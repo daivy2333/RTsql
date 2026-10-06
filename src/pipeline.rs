@@ -6,9 +6,9 @@ use crate::executor::{
     DropViewExecutor, ExecResult, Executor, ExplainExecutor, FilterExecutor, HavingExecutor,
     IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, InsertNode, InsertSelectNode,
     JoinConfig, JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor,
-    PhysicalPlan, ProjectionExecutor, ScanExecutor, SemiJoinExecutorV2, SetOperationExecutor,
-    SingleRowExecutor, SortExecutor, SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor,
-    UpsertExecutor, UpsertNode, Value,
+    PhysicalPlan, ProjectionExecutor, ScalarSubqueryFilterExecutor, ScanExecutor,
+    SemiJoinExecutorV2, SetOperationExecutor, SingleRowExecutor, SortExecutor,
+    SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor, UpsertExecutor, UpsertNode, Value,
 };
 use crate::network::protocol::Response;
 use crate::parser::planner::ViewDef;
@@ -1594,10 +1594,16 @@ pub(crate) fn create_executor_from_plan<'a>(
 
             PhysicalPlan::Join(join_node) => {
                 // Build column index mappings from ScanNodes (must do before moving)
-                let (left_column_indices, left_table_name) =
-                    extract_column_indices(&join_node.left)?;
-                let (right_column_indices, right_table_name) =
+                // T9 replan：链首表名不再参与归属（output_sides 侧标志取代），
+                // 名字结果弃置；对左输入的调用保留——嵌套链形态既有错误传播面。
+                let (mut left_column_indices, _) = extract_column_indices(&join_node.left)?;
+                let (mut right_column_indices, right_table_name) =
                     extract_column_indices(&join_node.right)?;
+                // T11（change 2026-10-04-external-review-gaps）：注册
+                // `(真实表, 列)` 限定键——链上同名列条件键按限定解析不串列
+                //（执行器限定优先、裸名回退；限定键唯一命中才注册）。
+                register_join_qualified_keys(&mut left_column_indices, &join_node.left);
+                register_join_qualified_keys(&mut right_column_indices, &join_node.right);
 
                 // Build left executor recursively
                 let left_executor = create_executor_from_plan(
@@ -1624,18 +1630,18 @@ pub(crate) fn create_executor_from_plan<'a>(
                     right_executor,
                     conditions: join_node.conditions.clone(),
                     output_columns: join_node.output_columns.clone(),
+                    output_sides: join_node.output_sides.clone(),
                     left_column_indices,
                     right_column_indices,
-                    left_table_name,
                     right_table_name,
                 })) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::NestedLoopJoin(node) => {
-                // MS09-T02: left input chain head table name (output_columns
-                // ownership decision in the executor, same source as the Join
-                // arm's extract_column_indices use).
-                let (_, left_table_name) = extract_column_indices(&node.left)?;
+                // T9 replan：链首表名不再参与归属（output_sides 侧标志取代）。
+                // 保留对左输入的列索引解析调用——嵌套链形态既有错误传播面，
+                // 结果弃置。
+                extract_column_indices(&node.left)?;
 
                 // Build left and right executors recursively
                 let left_executor = create_executor_from_plan(
@@ -1660,7 +1666,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     right_executor,
                     node.predicate.clone(),
                     node.output_columns.clone(),
-                    left_table_name,
+                    node.output_sides.clone(),
                     node.join_type,
                 )) as Box<dyn Executor + Send>)
             }
@@ -1759,7 +1765,18 @@ pub(crate) fn create_executor_from_plan<'a>(
             }
 
             PhysicalPlan::SubqueryEval(node) => {
-                let (outer_column_indices, _) = extract_column_indices(&node.input)?;
+                // T4（change 2026-10-04-external-review-gaps）：外层列位映射
+                // 按输入链的收窄后行形状解析（相关参数按行取值；SELECT 投影
+                // ∪ 相关参数列补充）。扫描类/链式形状列名序可得，其余形状
+                // 回落既有 name→pos 映射（恒等行，行为与引入前一致）。
+                let outer_column_indices = match plan_output_names(&node.input) {
+                    Some(names) => names
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, col)| (col.to_lowercase(), idx))
+                        .collect(),
+                    None => extract_column_indices(&node.input)?.0,
+                };
                 let input_executor = create_executor_from_plan(
                     *node.input,
                     database,
@@ -1768,7 +1785,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     routed,
                 )
                 .await?;
-                Ok(Box::new(SubqueryEvalExecutor::new(
+                Ok(Box::new(SubqueryEvalExecutor::with_output_width(
                     input_executor,
                     *node.subquery,
                     node.output_column.clone(),
@@ -1778,6 +1795,31 @@ pub(crate) fn create_executor_from_plan<'a>(
                     Arc::new(database.clone()),
                     snapshot,
                     Arc::new(routed.clone()),
+                    node.output_width,
+                )) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::ScalarSubqueryFilter(node) => {
+                // T4（change 2026-10-04-external-review-gaps）：外层列位映射按
+                // 输入链全形状解析（谓词与相关参数在裁剪前的全行上求值）。
+                let (outer_column_indices, _) = extract_column_indices(&node.input)?;
+                let input_executor = create_executor_from_plan(
+                    *node.input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                )
+                .await?;
+                Ok(Box::new(ScalarSubqueryFilterExecutor::new(
+                    input_executor,
+                    node.predicate.clone(),
+                    node.bindings.clone(),
+                    outer_column_indices,
+                    Arc::new(database.clone()),
+                    snapshot,
+                    Arc::new(routed.clone()),
+                    node.projection.clone(),
                 )) as Box<dyn Executor + Send>)
             }
 
@@ -1900,6 +1942,119 @@ pub(crate) fn value_to_json(value: Value) -> serde_json::Value {
     }
 }
 
+/// T4（change 2026-10-04-external-review-gaps）：计划的输出列名序（仅覆盖
+/// SubqueryEval 消费面可达的形状——扫描类/聚合/排序/链式标量节点；其余形状
+/// 返回 `None` 交回调用方既有 name→pos 映射）。投影裁剪语义与
+/// `get_plan_output_columns` 同款：空投影 = 恒等，非空 = 按索引裁剪。
+fn plan_output_names(plan: &PhysicalPlan) -> Option<Vec<String>> {
+    match plan {
+        PhysicalPlan::Scan(n) => Some(if n.projection.is_empty() {
+            n.columns.clone()
+        } else {
+            n.projection.iter().map(|&i| n.columns[i].clone()).collect()
+        }),
+        PhysicalPlan::DataScan(n) => Some(if n.projection.is_empty() {
+            n.columns.clone()
+        } else {
+            n.projection.iter().map(|&i| n.columns[i].clone()).collect()
+        }),
+        PhysicalPlan::DerivedScan(n) => Some(if n.projection.is_empty() {
+            n.columns.clone()
+        } else {
+            n.projection.iter().map(|&i| n.columns[i].clone()).collect()
+        }),
+        PhysicalPlan::IndexScan(n) => Some(n.columns.clone()),
+        PhysicalPlan::IndexScanAll(n) => Some(if n.projection.is_empty() {
+            n.columns.clone()
+        } else {
+            n.projection.iter().map(|&i| n.columns[i].clone()).collect()
+        }),
+        PhysicalPlan::ScalarSubqueryFilter(n) => Some(n.columns.clone()),
+        PhysicalPlan::Aggregate(n) => Some(n.output_columns.clone()),
+        PhysicalPlan::Sort(n) => Some(if n.projection.is_empty() {
+            n.columns.clone()
+        } else {
+            n.projection.iter().map(|&i| n.columns[i].clone()).collect()
+        }),
+        PhysicalPlan::Limit(n) => plan_output_names(&n.input),
+        PhysicalPlan::SubqueryEval(n) => {
+            let mut names = plan_output_names(&n.input)?;
+            if n.output_width > 0 {
+                names.truncate(n.output_width);
+            }
+            let idx = n.result_column_index.min(names.len());
+            names.insert(idx, n.output_column.clone());
+            Some(names)
+        }
+        _ => None,
+    }
+}
+
+/// T11（change 2026-10-04-external-review-gaps）：为 Join 条件键查表注册
+/// `(真实表, 列)` 限定键——限定键在该输入内唯一命中时才注册（自连接同表
+/// 两侧限定键歧义时不注册，执行器回落裸名查表既有语义）。基位映射沿用
+/// `extract_column_indices` 的裸名语义，本函数只做加性补充（`or_insert`，
+/// 不覆盖既有条目）。
+fn register_join_qualified_keys(map: &mut HashMap<String, usize>, plan: &PhysicalPlan) {
+    let mut pairs: Vec<(String, String, usize)> = Vec::new();
+    collect_join_key_pairs(plan, &mut pairs);
+    let mut candidates: HashMap<String, usize> = HashMap::new();
+    let mut ambiguous: HashSet<String> = HashSet::new();
+    for (table, column, pos) in pairs {
+        let key = format!("{}.{}", table.to_lowercase(), column.to_lowercase());
+        if candidates.remove(&key).is_some() {
+            ambiguous.insert(key);
+        } else {
+            candidates.insert(key, pos);
+        }
+    }
+    for (key, pos) in candidates {
+        if ambiguous.contains(&key) {
+            continue;
+        }
+        map.entry(key).or_insert(pos);
+    }
+}
+
+/// 收集条件键限定对 `(真实表, 列, 输出行绝对位)`——覆盖链输入可达的形状
+///（Scan / DerivedScan / IndexScan / Join / NLJ / Semi / Anti 的输出列）；
+/// 其余形状不产生限定键（执行器裸名回退）。
+fn collect_join_key_pairs(plan: &PhysicalPlan, out: &mut Vec<(String, String, usize)>) {
+    match plan {
+        PhysicalPlan::Scan(n) => {
+            for (i, col) in n.columns.iter().enumerate() {
+                out.push((n.table_name.clone(), col.clone(), i));
+            }
+        }
+        PhysicalPlan::DerivedScan(n) => {
+            for (i, col) in n.columns.iter().enumerate() {
+                out.push((n.alias.clone(), col.clone(), i));
+            }
+        }
+        PhysicalPlan::IndexScan(n) => {
+            for (i, col) in n.columns.iter().enumerate() {
+                out.push((n.table_name.clone(), col.clone(), i));
+            }
+        }
+        PhysicalPlan::Join(n) => collect_output_column_pairs(&n.output_columns, out),
+        PhysicalPlan::NestedLoopJoin(n) => collect_output_column_pairs(&n.output_columns, out),
+        PhysicalPlan::SemiJoin(n) => collect_output_column_pairs(&n.output_columns, out),
+        PhysicalPlan::AntiJoin(n) => collect_output_column_pairs(&n.output_columns, out),
+        _ => {}
+    }
+}
+
+fn collect_output_column_pairs(
+    columns: &[crate::executor::OutputColumn],
+    out: &mut Vec<(String, String, usize)>,
+) {
+    for (i, col) in columns.iter().enumerate() {
+        if let Some(table) = &col.table {
+            out.push((table.clone(), col.column.clone(), i));
+        }
+    }
+}
+
 fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>, String)> {
     match plan {
         PhysicalPlan::Scan(scan_node) => {
@@ -2001,11 +2156,64 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
             Ok((indices, agg_node.table_name.clone()))
         }
         PhysicalPlan::SubqueryEval(node) => {
-            // Recurse into input, then add the scalar result column
+            // T4（change 2026-10-04-external-review-gaps）：扫描类/链式形状的
+            // 输出列名序可得——按 output_width 截断 + 插列后的最终输出重建
+            // 列位映射；其余形状回落既有 name→pos 映射 + 插列（恒等行）。
+            if let Some(mut names) = plan_output_names(&node.input) {
+                if node.output_width > 0 {
+                    names.truncate(node.output_width);
+                }
+                let idx = node.result_column_index.min(names.len());
+                names.insert(idx, node.output_column.clone());
+                let indices: HashMap<String, usize> = names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, col)| (col.to_lowercase(), idx))
+                    .collect();
+                let table_name = extract_column_indices(&node.input)?.1;
+                return Ok((indices, table_name));
+            }
             let (mut indices, table_name) = extract_column_indices(&node.input)?;
             let next_idx = indices.len();
             indices.insert(node.output_column.to_lowercase(), next_idx);
             Ok((indices, table_name))
+        }
+        PhysicalPlan::ScalarSubqueryFilter(node) => {
+            // T4: `columns` 即裁剪后实际输出形状（IndexScan「已收窄」契约
+            // 同型——表头与执行器行的唯一真源）。
+            let indices: HashMap<String, usize> = node
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, node.table_name.clone()))
+        }
+        PhysicalPlan::Sort(sort_node) => {
+            // T4: ORDER BY + 标量子查询项形态下 SubqueryEval 落在 Sort 之上
+            // ——`columns` 是其输入行的真实列序，`projection` 非空时行已
+            // 按其收窄（列名随投影裁剪，与 get_plan_output_columns 的 Sort
+            // 臂同款）。
+            let names: Vec<String> = if sort_node.projection.is_empty() {
+                sort_node.columns.clone()
+            } else {
+                sort_node
+                    .projection
+                    .iter()
+                    .map(|&i| sort_node.columns[i].clone())
+                    .collect()
+            };
+            let indices: HashMap<String, usize> = names
+                .into_iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, sort_node.table_name.clone()))
+        }
+        PhysicalPlan::Limit(limit_node) => {
+            // T4: Limit 不改列——透传输入映射（SubqueryEval 可经 LIMIT 之上
+            // 包裹到达）。
+            extract_column_indices(&limit_node.input)
         }
         PhysicalPlan::DerivedScan(node) => {
             let indices: HashMap<String, usize> = node
@@ -2026,8 +2234,18 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
             Ok((indices, node.table_name.clone()))
         }
         PhysicalPlan::IndexScanAll(node) => {
-            let indices: HashMap<String, usize> = node
-                .columns
+            // T1（change 2026-10-04-external-review-gaps D1）：`columns` 是
+            // 基表全列，输出形状由 `projection` 决定——先裁剪再建立输出位
+            // 映射（对齐 IndexScan 臂「已收窄」口径；执行器行即该形状）。
+            let projected: Vec<String> = if node.projection.is_empty() {
+                node.columns.clone()
+            } else {
+                node.projection
+                    .iter()
+                    .map(|&i| node.columns[i].clone())
+                    .collect()
+            };
+            let indices: HashMap<String, usize> = projected
                 .iter()
                 .enumerate()
                 .map(|(idx, col)| (col.to_lowercase(), idx))
@@ -2037,7 +2255,7 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
         // MS13 T9: no-FORM 输入节点不可达此处（无列消费方）；空臂防御。
         PhysicalPlan::SingleRow => Ok((HashMap::new(), String::new())),
         _ => Err(crate::storage::StorageError::ExecutionError(
-            "Expected Scan, Join, SemiJoin, AntiJoin, Filter, Aggregate, SubqueryEval, DerivedScan, IndexScan, or IndexScanAll".into(),
+            "Expected Scan, Join, SemiJoin, AntiJoin, Filter, Aggregate, SubqueryEval, ScalarSubqueryFilter, Sort, Limit, DerivedScan, IndexScan, or IndexScanAll".into(),
         )),
     }
 }

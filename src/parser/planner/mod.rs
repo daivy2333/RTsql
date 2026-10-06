@@ -189,6 +189,11 @@ pub struct PlanBuilder {
     /// 消费面——SELECT 表达式项的顶层 Projection 路由在子查询上下文抑制，
     /// 子查询计划保持既有行为。
     pub(crate) building_subquery: bool,
+    /// T5（change 2026-10-04-external-review-gaps）：FROM 派生表上下文标志
+    /// ——仅 FROM 派生臂置位；其余子查询入口（IN/EXISTS、标量绑定、SELECT
+    /// 投影位、视图展开）一律复位 false。集合操作守卫据此区分「FROM 派生
+    /// 放行」与「表达式/视图子查询维持拒绝」。
+    pub(crate) building_from_derived: bool,
     /// MS09-T02 (I015): NLJ 组合行列布局（design D5a 加性通道）。Some 时
     /// `build_expression` 两个列解析臂优先消费——列引用解析为组合行绝对
     /// 索引（前序表偏移累计 + 表内位置）。仅在 NLJ 分支编译 ON 期间置位
@@ -255,6 +260,7 @@ impl PlanBuilder {
             table_has_live_rows: HashMap::new(),
             inner_table_names: None,
             building_subquery: false,
+            building_from_derived: false,
             join_column_layout: None,
             attached_tables: std::collections::HashSet::new(),
             cte_plans: Vec::new(),

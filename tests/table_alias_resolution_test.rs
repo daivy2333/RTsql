@@ -498,3 +498,201 @@ async fn left_join_alias_projection_and_null_padding() {
     );
     assert_eq!(rows, vec![vec![json!("cat")]], "rows: {rows:?}");
 }
+
+// ===========================================================================
+// T3（change 2026-10-04-external-review-gaps R3）：JOIN 基座 ORDER BY 限定键
+// ——无 WHERE 无聚合 JOIN 基座上两段限定键按组合行布局解析并真实排序；
+// 自连接同名列按限定符精确解析；既有排序面零回归。
+// ===========================================================================
+
+/// R3-S10 种子：emp(id, name, dept_id, salary) + dept(id, label)，插入序与
+/// 排序序不同，排序结果可观察。
+async fn seed_join_order(db: &Database) {
+    exec_ok(
+        db,
+        "CREATE TABLE emp (id INT PRIMARY KEY, name STRING, dept_id INT, salary INT)",
+    )
+    .await;
+    exec_ok(db, "CREATE TABLE dept (id INT PRIMARY KEY, label STRING)").await;
+    exec_ok(db, "INSERT INTO emp VALUES (3, 'c3', 1, 300)").await;
+    exec_ok(db, "INSERT INTO emp VALUES (1, 'a1', 2, 100)").await;
+    exec_ok(db, "INSERT INTO emp VALUES (2, 'b2', 3, 200)").await;
+    exec_ok(db, "INSERT INTO dept VALUES (1, 'd1')").await;
+    exec_ok(db, "INSERT INTO dept VALUES (2, 'd2')").await;
+    exec_ok(db, "INSERT INTO dept VALUES (3, 'd3')").await;
+}
+
+/// R3-S10：无 WHERE 无聚合 JOIN 基座 ORDER BY 两段限定键真实排序
+/// （修复前：`Column not found: id` exit 3）。
+#[tokio::test]
+async fn join_order_by_qualified_key_sorts_without_where() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_join_order(&db).await;
+
+    // 别名限定键：按左表 id 排序
+    let rows = query_rows(
+        db.execute_sql("SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY e.id")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("a1")], vec![json!("b2")], vec![json!("c3")]],
+        "rows: {rows:?}"
+    );
+
+    // 全表名限定键同语义
+    let rows = query_rows(
+        db.execute_sql("SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY emp.id")
+            .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("a1")], vec![json!("b2")], vec![json!("c3")]],
+        "rows: {rows:?}"
+    );
+
+    // 非主键限定键 + DESC
+    let rows = query_rows(
+        db.execute_sql(
+            "SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY e.salary DESC",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("c3")], vec![json!("b2")], vec![json!("a1")]],
+        "rows: {rows:?}"
+    );
+
+    // 右表限定键优先 + 左表限定键次键
+    let rows = query_rows(
+        db.execute_sql(
+            "SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY d.id DESC, e.id",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("b2")], vec![json!("a1")], vec![json!("c3")]],
+        "rows: {rows:?}"
+    );
+}
+
+/// R3-S11：自连接同名列按限定符精确解析（布局索引，非裸名首匹配）。
+///
+/// 行序断言依赖自连接 Hash Join 输出行本身正确——该前提曾由**既有执行层
+/// 双重缺陷**打破（条件交换判定用归一真实表名比较；输出行归属按真实表名
+/// 无法区分同表两侧），已随同 change T9（design D9，`tests/self_join_test.rs`
+/// S31–S37）修复，本用例解除 `#[ignore]` 转常规验收。
+#[tokio::test]
+async fn self_join_same_name_columns_resolve_by_qualifier() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    exec_ok(
+        &db,
+        "CREATE TABLE emp (id INT PRIMARY KEY, name STRING, dept_id INT, salary INT, manager_id INT)",
+    )
+    .await;
+    // (m1,r1) 经理薪 300 / 汇报者薪 200；(m2,r2) 经理薪 100 / 汇报者薪 400
+    exec_ok(&db, "INSERT INTO emp VALUES (1, 'm1', 1, 300, NULL)").await;
+    exec_ok(&db, "INSERT INTO emp VALUES (2, 'm2', 2, 100, NULL)").await;
+    exec_ok(&db, "INSERT INTO emp VALUES (3, 'r1', 1, 200, 1)").await;
+    exec_ok(&db, "INSERT INTO emp VALUES (4, 'r2', 2, 400, 2)").await;
+
+    // ORDER BY e1.salary：按经理薪 100(m2) < 300(m1) → r2, r1
+    let rows = query_rows(
+        db.execute_sql(
+            "SELECT e2.name FROM emp e1 JOIN emp e2 ON e1.id = e2.manager_id ORDER BY e1.salary",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("r2")], vec![json!("r1")]],
+        "rows: {rows:?}"
+    );
+
+    // ORDER BY e2.salary：按汇报者薪 200(r1) < 400(r2) → r1, r2
+    let rows = query_rows(
+        db.execute_sql(
+            "SELECT e2.name FROM emp e1 JOIN emp e2 ON e1.id = e2.manager_id ORDER BY e2.salary",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("r1")], vec![json!("r2")]],
+        "rows: {rows:?}"
+    );
+}
+
+/// R3-S12：既有排序面零回归——单表限定键、带 WHERE JOIN 限定键、聚合基座、
+/// DISTINCT、集合操作尾限定键拒绝边界。
+#[tokio::test]
+async fn order_by_existing_surfaces_zero_regression() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    seed_join_order(&db).await;
+
+    // 单表限定键既有语义
+    let rows = query_rows(db.execute_sql("SELECT name FROM emp e ORDER BY e.id").await);
+    assert_eq!(
+        rows,
+        vec![vec![json!("a1")], vec![json!("b2")], vec![json!("c3")]],
+        "rows: {rows:?}"
+    );
+
+    // 带 WHERE JOIN 限定键（Filter 承载全列，既有）
+    let rows = query_rows(
+        db.execute_sql(
+            "SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id WHERE d.id > 1 ORDER BY e.id",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!("a1")], vec![json!("b2")]],
+        "rows: {rows:?}"
+    );
+
+    // 聚合基座：GROUP BY 限定键 + ORDER BY 同键
+    let rows = query_rows(
+        db.execute_sql(
+            "SELECT d.id, COUNT(*) FROM emp e JOIN dept d ON e.dept_id = d.id GROUP BY d.id ORDER BY d.id",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![json!(1), json!(1)],
+            vec![json!(2), json!(1)],
+            vec![json!(3), json!(1)]
+        ],
+        "rows: {rows:?}"
+    );
+
+    // DISTINCT + ORDER BY 输出列
+    let rows = query_rows(
+        db.execute_sql(
+            "SELECT DISTINCT d.id FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY d.id",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        vec![vec![json!(1)], vec![json!(2)], vec![json!(3)]],
+        "rows: {rows:?}"
+    );
+
+    // 集合操作尾 ORDER BY 限定键维持 TableNotFound 既有拒绝边界
+    let msg = error_msg(
+        db.execute_sql("SELECT name FROM emp UNION SELECT label FROM dept ORDER BY e.id")
+            .await,
+    );
+    assert!(
+        msg.contains("Table not found: e"),
+        "set-op tail qualified key must stay TableNotFound: {msg}"
+    );
+}

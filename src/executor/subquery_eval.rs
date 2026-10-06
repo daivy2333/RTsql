@@ -41,6 +41,9 @@ pub struct SubqueryEvalExecutor {
     /// 1 rows; multi-row evaluations error before reaching the store). Errors
     /// are never cached.
     correlated_cache: HashMap<Vec<(String, Value)>, Vec<Vec<Value>>>,
+    /// T4（change 2026-10-04-external-review-gaps）：输出收窄宽度（节点
+    /// `output_width`）——参数提取后、标量插入前按此宽度截断行；0 = 恒等。
+    output_width: usize,
 }
 
 impl SubqueryEvalExecutor {
@@ -57,6 +60,35 @@ impl SubqueryEvalExecutor {
         snapshot: Option<Snapshot>,
         routed_tables: Arc<crate::pipeline::RoutedTables>,
     ) -> Self {
+        Self::with_output_width(
+            input,
+            subquery_plan,
+            output_column,
+            result_column_index,
+            correlated_params,
+            outer_column_indices,
+            database,
+            snapshot,
+            routed_tables,
+            0,
+        )
+    }
+
+    /// T4（change 2026-10-04-external-review-gaps）：带输出收窄宽度的构造——
+    /// 语义同 `new`，另在参数提取后按 `output_width` 截断行（0 = 恒等）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_output_width(
+        input: Box<dyn Executor + Send>,
+        subquery_plan: PhysicalPlan,
+        output_column: String,
+        result_column_index: usize,
+        correlated_params: Vec<CorrelatedParam>,
+        outer_column_indices: HashMap<String, usize>,
+        database: Arc<Database>,
+        snapshot: Option<Snapshot>,
+        routed_tables: Arc<crate::pipeline::RoutedTables>,
+        output_width: usize,
+    ) -> Self {
         Self {
             input,
             subquery_plan,
@@ -69,6 +101,7 @@ impl SubqueryEvalExecutor {
             routed_tables,
             cached_result: None,
             correlated_cache: HashMap::new(),
+            output_width,
         }
     }
 
@@ -192,6 +225,11 @@ impl Executor for SubqueryEvalExecutor {
                         self.cached_result.as_ref().unwrap().clone()
                     };
 
+                    // T4: 相关参数列已在参数提取时消费——收窄宽度非零时先
+                    // 截断补充列，再按 result_column_index 插入标量值。
+                    if self.output_width > 0 && self.output_width <= row.len() {
+                        row.truncate(self.output_width);
+                    }
                     // Insert scalar value at result_column_index
                     if self.result_column_index <= row.len() {
                         row.insert(self.result_column_index, scalar_value);

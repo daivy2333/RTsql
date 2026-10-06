@@ -7,10 +7,11 @@
 
 use super::PlanBuilder;
 use crate::executor::{
-    AntiJoinNode, ColumnRef, CorrelatedParam, JoinCondition, PhysicalPlan, SemiJoinNode,
+    AntiJoinNode, ColumnRef, CorrelatedParam, JoinCondition, PhysicalPlan, ScalarSubqueryBinding,
+    SemiJoinNode,
 };
 use crate::parser::error::PlanError;
-use sqlparser::ast::{Expr, Query, SetExpr, TableFactor};
+use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Query, SetExpr, TableFactor};
 
 impl PlanBuilder {
     /// Try to build a SemiJoin/AntiJoin plan from WHERE subquery expressions.
@@ -33,16 +34,22 @@ impl PlanBuilder {
 
                 self.inner_table_names = Some(inner_tables.clone());
                 let saved_subquery_ctx = self.building_subquery;
+                // T5：表达式型子查询上下文——FROM 派生标志复位（IN 子查询内
+                // 集合操作维持拒绝）。
+                let saved_from_derived = self.building_from_derived;
                 self.building_subquery = true;
+                self.building_from_derived = false;
                 let right_plan = match self.build_query(subquery) {
                     Ok(p) => p,
                     Err(e) => {
                         self.building_subquery = saved_subquery_ctx;
+                        self.building_from_derived = saved_from_derived;
                         self.inner_table_names = None;
                         return Err(e);
                     }
                 };
                 self.building_subquery = saved_subquery_ctx;
+                self.building_from_derived = saved_from_derived;
                 self.inner_table_names = None;
 
                 let left_column = self.resolve_column_in_plan(left_expr, table_name)?;
@@ -82,16 +89,22 @@ impl PlanBuilder {
 
                 self.inner_table_names = Some(inner_tables.clone());
                 let saved_subquery_ctx = self.building_subquery;
+                // T5：表达式型子查询上下文——FROM 派生标志复位（EXISTS 子查询
+                // 内集合操作维持拒绝）。
+                let saved_from_derived = self.building_from_derived;
                 self.building_subquery = true;
+                self.building_from_derived = false;
                 let right_plan = match self.build_query(subquery) {
                     Ok(p) => p,
                     Err(e) => {
                         self.building_subquery = saved_subquery_ctx;
+                        self.building_from_derived = saved_from_derived;
                         self.inner_table_names = None;
                         return Err(e);
                     }
                 };
                 self.building_subquery = saved_subquery_ctx;
+                self.building_from_derived = saved_from_derived;
                 self.inner_table_names = None;
 
                 let output_columns =
@@ -122,6 +135,227 @@ impl PlanBuilder {
             }
             _ => Ok(None),
         }
+    }
+
+    /// T4（change 2026-10-04-external-review-gaps）：WHERE 比较腿标量子查询
+    /// 的绑定与占位改写——深度优先（左→右）遍历表达式树，每个 `Expr::Subquery`
+    /// 构建子查询计划（`building_subquery` 上下文 + 相关参数提取，IN/EXISTS
+    /// 同款机制）并替换为保留名占位 `Expr::Function`（`__scalar_subquery_<n>`，
+    /// 编译期经 `build_expression` 保留名臂映射为 `ParameterExpression`）。
+    /// 返回改写后表达式与按占位序排列的绑定清单。遍历变体集与
+    /// `contains_scalar_subquery`（query.rs）同面。
+    pub(crate) fn bind_where_scalar_subqueries(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<(Expr, Vec<ScalarSubqueryBinding>), PlanError> {
+        let mut bindings = Vec::new();
+        let rewritten = self.rewrite_scalar_subqueries(expr, &mut bindings)?;
+        Ok((rewritten, bindings))
+    }
+
+    /// 构建单个标量子查询绑定（子查询计划 + 相关参数 + 占位参数名）。
+    fn build_scalar_subquery_binding(
+        &mut self,
+        subquery: &Query,
+        index: usize,
+    ) -> Result<ScalarSubqueryBinding, PlanError> {
+        let inner_tables = Self::extract_subquery_table_names(subquery);
+        self.inner_table_names = Some(inner_tables.clone());
+        let saved_subquery_ctx = self.building_subquery;
+        // T5：表达式型子查询上下文——FROM 派生标志复位（标量子查询内集合
+        // 操作维持拒绝）。
+        let saved_from_derived = self.building_from_derived;
+        self.building_subquery = true;
+        self.building_from_derived = false;
+        let plan = match self.build_query(subquery) {
+            Ok(p) => p,
+            Err(e) => {
+                self.building_subquery = saved_subquery_ctx;
+                self.building_from_derived = saved_from_derived;
+                self.inner_table_names = None;
+                return Err(e);
+            }
+        };
+        self.building_subquery = saved_subquery_ctx;
+        self.building_from_derived = saved_from_derived;
+        self.inner_table_names = None;
+        let correlated_params = self.extract_correlated_params(subquery, &inner_tables)?;
+        Ok(ScalarSubqueryBinding {
+            param_name: format!("__scalar_subquery_{index}"),
+            subquery: Box::new(plan),
+            correlated_params,
+        })
+    }
+
+    /// 表达式树改写体——`Expr::Subquery` 腿替换为占位，其余表达式载体逐变体
+    /// 递归重建；遍历集与 `contains_scalar_subquery` 检测一致（InSubquery/
+    /// Exists 腿与 Query 体内不进入，维持既有拒绝面）。
+    fn rewrite_scalar_subqueries(
+        &mut self,
+        expr: &Expr,
+        bindings: &mut Vec<ScalarSubqueryBinding>,
+    ) -> Result<Expr, PlanError> {
+        match expr {
+            Expr::Subquery(subquery) => {
+                let index = bindings.len();
+                bindings.push(self.build_scalar_subquery_binding(subquery, index)?);
+                Ok(Self::scalar_subquery_placeholder(index))
+            }
+            Expr::BinaryOp { left, op, right } => Ok(Expr::BinaryOp {
+                left: Box::new(self.rewrite_scalar_subqueries(left, bindings)?),
+                op: op.clone(),
+                right: Box::new(self.rewrite_scalar_subqueries(right, bindings)?),
+            }),
+            Expr::UnaryOp { op, expr: inner } => Ok(Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(self.rewrite_scalar_subqueries(inner, bindings)?),
+            }),
+            Expr::Nested(inner) => Ok(Expr::Nested(Box::new(
+                self.rewrite_scalar_subqueries(inner, bindings)?,
+            ))),
+            Expr::Between {
+                expr: inner,
+                negated,
+                low,
+                high,
+            } => Ok(Expr::Between {
+                expr: Box::new(self.rewrite_scalar_subqueries(inner, bindings)?),
+                negated: *negated,
+                low: Box::new(self.rewrite_scalar_subqueries(low, bindings)?),
+                high: Box::new(self.rewrite_scalar_subqueries(high, bindings)?),
+            }),
+            Expr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => Ok(Expr::InList {
+                expr: Box::new(self.rewrite_scalar_subqueries(inner, bindings)?),
+                list: list
+                    .iter()
+                    .map(|e| self.rewrite_scalar_subqueries(e, bindings))
+                    .collect::<Result<Vec<_>, _>>()?,
+                negated: *negated,
+            }),
+            Expr::Like {
+                negated,
+                expr: inner,
+                pattern,
+                escape_char,
+            } => Ok(Expr::Like {
+                negated: *negated,
+                expr: Box::new(self.rewrite_scalar_subqueries(inner, bindings)?),
+                pattern: Box::new(self.rewrite_scalar_subqueries(pattern, bindings)?),
+                escape_char: *escape_char,
+            }),
+            Expr::IsNull(inner) => Ok(Expr::IsNull(Box::new(
+                self.rewrite_scalar_subqueries(inner, bindings)?,
+            ))),
+            Expr::IsNotNull(inner) => Ok(Expr::IsNotNull(Box::new(
+                self.rewrite_scalar_subqueries(inner, bindings)?,
+            ))),
+            Expr::Cast {
+                expr: inner,
+                data_type,
+                format,
+            } => Ok(Expr::Cast {
+                expr: Box::new(self.rewrite_scalar_subqueries(inner, bindings)?),
+                data_type: data_type.clone(),
+                format: format.clone(),
+            }),
+            Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => Ok(Expr::Case {
+                operand: match operand {
+                    Some(e) => Some(Box::new(self.rewrite_scalar_subqueries(e, bindings)?)),
+                    None => None,
+                },
+                conditions: conditions
+                    .iter()
+                    .map(|e| self.rewrite_scalar_subqueries(e, bindings))
+                    .collect::<Result<Vec<_>, _>>()?,
+                results: results
+                    .iter()
+                    .map(|e| self.rewrite_scalar_subqueries(e, bindings))
+                    .collect::<Result<Vec<_>, _>>()?,
+                else_result: match else_result {
+                    Some(e) => Some(Box::new(self.rewrite_scalar_subqueries(e, bindings)?)),
+                    None => None,
+                },
+            }),
+            Expr::Function(func) => Ok(Expr::Function(sqlparser::ast::Function {
+                name: func.name.clone(),
+                args: func
+                    .args
+                    .iter()
+                    .map(|arg| match arg {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Ok(FunctionArg::Unnamed(
+                            FunctionArgExpr::Expr(self.rewrite_scalar_subqueries(e, bindings)?),
+                        )),
+                        other => Ok(other.clone()),
+                    })
+                    .collect::<Result<Vec<_>, PlanError>>()?,
+                filter: func.filter.clone(),
+                null_treatment: func.null_treatment,
+                over: func.over.clone(),
+                distinct: func.distinct,
+                special: func.special,
+                order_by: func.order_by.clone(),
+            })),
+            Expr::Trim {
+                expr: inner,
+                trim_where,
+                trim_what,
+                trim_characters,
+            } => Ok(Expr::Trim {
+                expr: Box::new(self.rewrite_scalar_subqueries(inner, bindings)?),
+                trim_where: *trim_where,
+                trim_what: match trim_what {
+                    Some(e) => Some(Box::new(self.rewrite_scalar_subqueries(e, bindings)?)),
+                    None => None,
+                },
+                trim_characters: match trim_characters {
+                    Some(chars) => Some(
+                        chars
+                            .iter()
+                            .map(|e| self.rewrite_scalar_subqueries(e, bindings))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                    None => None,
+                },
+            }),
+            Expr::Ceil { expr: inner, field } => Ok(Expr::Ceil {
+                expr: Box::new(self.rewrite_scalar_subqueries(inner, bindings)?),
+                field: *field,
+            }),
+            Expr::Floor { expr: inner, field } => Ok(Expr::Floor {
+                expr: Box::new(self.rewrite_scalar_subqueries(inner, bindings)?),
+                field: *field,
+            }),
+            // 其余变体原样保留：InSubquery/Exists 腿与 Query 体内不进入
+            //（维持既有拒绝面）；值/类型字面量等无子表达式载体不可携带
+            // 标量子查询腿。
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// 保留名占位表达式（`__scalar_subquery_<n>` 零参函数形态）——
+    /// `build_expression` 按前缀映射为 `ParameterExpression`。
+    fn scalar_subquery_placeholder(index: usize) -> Expr {
+        Expr::Function(sqlparser::ast::Function {
+            name: sqlparser::ast::ObjectName(vec![sqlparser::ast::Ident::new(format!(
+                "__scalar_subquery_{index}"
+            ))]),
+            args: Vec::new(),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            distinct: false,
+            special: false,
+            order_by: Vec::new(),
+        })
     }
 
     /// Extract table names from a subquery's FROM clause

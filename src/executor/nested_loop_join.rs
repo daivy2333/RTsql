@@ -18,7 +18,7 @@
 //! side of the rewritten plan.
 
 use crate::executor::{
-    ExecResult, Executor, NestedLoopJoinType, OutputColumn, PredicateRef, Value,
+    ExecResult, Executor, JoinSide, NestedLoopJoinType, OutputColumn, PredicateRef, Value,
 };
 use crate::storage::Result;
 
@@ -28,8 +28,9 @@ pub struct NestedLoopJoinExecutor {
     right_executor: Box<dyn Executor + Send>,
     predicate: PredicateRef,
     output_columns: Vec<OutputColumn>,
-    /// 左输入链首表名（output_columns 归属判定，与 JoinExecutor 同型）
-    left_table_name: String,
+    /// 输出列输入侧归属（T9 replan design D9，与 output_columns 同序同长；
+    /// RIGHT 交换由计划期反转）
+    output_sides: Vec<JoinSide>,
     /// MS25 T1: 连接语义（Inner = 变更前逐字节一致的既有形态）
     join_type: NestedLoopJoinType,
 
@@ -54,7 +55,7 @@ impl NestedLoopJoinExecutor {
         right_executor: Box<dyn Executor + Send>,
         predicate: PredicateRef,
         output_columns: Vec<OutputColumn>,
-        left_table_name: String,
+        output_sides: Vec<JoinSide>,
         join_type: NestedLoopJoinType,
     ) -> Self {
         Self {
@@ -62,7 +63,7 @@ impl NestedLoopJoinExecutor {
             right_executor,
             predicate,
             output_columns,
-            left_table_name,
+            output_sides,
             join_type,
             right_rows: Vec::new(),
             right_materialized: false,
@@ -76,20 +77,21 @@ impl NestedLoopJoinExecutor {
 
     /// 构建输出行（根据 output_columns 从左/右组合侧提取列，
     /// 与 executor/join.rs `build_output_row` 同型）
+    ///
+    /// T9 replan（design D9）：归属按计划期 `output_sides` 侧标志——自连接
+    /// 两侧真实名相同使表名比较恒读一侧。
     fn build_output_row(&self, left_row: &[Value], right_row: &[Value]) -> Vec<Value> {
         self.output_columns
             .iter()
-            .map(|col| {
-                if col.table_alias == self.left_table_name {
-                    left_row[col.column_index].clone()
-                } else {
-                    right_row[col.column_index].clone()
-                }
+            .zip(&self.output_sides)
+            .map(|(col, side)| match side {
+                JoinSide::Left => left_row[col.column_index].clone(),
+                JoinSide::Right => right_row[col.column_index].clone(),
             })
             .collect()
     }
 
-    /// MS25 T1: 外连接的补齐行——`output_columns` 归属侧取原值，缺席侧
+    /// MS25 T1: 外连接的补齐行——`output_sides` 归属侧取原值，缺席侧
     /// （`None`）填 NULL。只发生在产出层，不改写任何存储行或谓词语义。
     fn build_padded_row(
         &self,
@@ -98,11 +100,11 @@ impl NestedLoopJoinExecutor {
     ) -> Vec<Value> {
         self.output_columns
             .iter()
-            .map(|col| {
-                let source = if col.table_alias == self.left_table_name {
-                    left_row
-                } else {
-                    right_row
+            .zip(&self.output_sides)
+            .map(|(col, side)| {
+                let source = match side {
+                    JoinSide::Left => left_row,
+                    JoinSide::Right => right_row,
                 };
                 match source {
                     Some(row) => row[col.column_index].clone(),

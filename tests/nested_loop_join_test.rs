@@ -312,6 +312,8 @@ fn correlated_on_injection() {
         })),
         predicate: Arc::clone(&join_pred),
         output_columns: Vec::new(),
+        // T9 replan 加性字段：空输出列清单对应空侧标志清单。
+        output_sides: Vec::new(),
         // MS25 T1 加性字段：本用例构造的是既有 INNER 形态（注入路径见证，
         // 与连接语义无关），显式给出既有取值。
         join_type: rtsql::executor::NestedLoopJoinType::Inner,
