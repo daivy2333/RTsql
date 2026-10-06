@@ -33,6 +33,15 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
             inject_correlated_values(&node.input, param_values);
             inject_correlated_values(&node.subquery, param_values);
         }
+        // T4（change 2026-10-04-external-review-gaps）：标量谓词节点——输入
+        // 链与各绑定子查询内的相关参数注入；节点自身谓词的占位参数由执行器
+        // 逐行注入，不在此处消费外层值。
+        PhysicalPlan::ScalarSubqueryFilter(node) => {
+            inject_correlated_values(&node.input, param_values);
+            for binding in &node.bindings {
+                inject_correlated_values(&binding.subquery, param_values);
+            }
+        }
         PhysicalPlan::DataScan(node) => {
             // MS07-T06: DataScan can carry a pushed-down WHERE predicate that
             // contains ParameterExpression nodes for correlated subqueries.

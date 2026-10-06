@@ -547,6 +547,15 @@ impl PlanBuilder {
             // keep the existing rejection below.
             Expr::Function(func) => {
                 let func_name = func.name.to_string().to_uppercase();
+                // T4（change 2026-10-04-external-review-gaps）：WHERE 标量
+                // 子查询腿的保留名占位（`__scalar_subquery_<n>`，planner 绑定
+                // 路径合成，用户 SQL 不可达该前缀注册）——编译为
+                // ParameterExpression，执行器逐行按名注入子查询标量结果。
+                if func_name.starts_with("__SCALAR_SUBQUERY_") {
+                    return Ok(Arc::new(ParameterExpression::new(
+                        func_name.to_lowercase(),
+                    )));
+                }
                 if func_name == "COALESCE" {
                     let mut args = Vec::with_capacity(func.args.len());
                     for arg in &func.args {

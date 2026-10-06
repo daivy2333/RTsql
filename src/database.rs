@@ -309,11 +309,16 @@ impl Database {
         };
 
         // 3. Full recovery: Redo committed + cleanup uncommitted（只读不运行）
+        // T2（change 2026-10-04-external-review-gaps D2）：恢复会话收敛标志
+        // 提升到本作用域——打开时 WAL 曾含事务记录的会话（含零 redo 形态）
+        // 的 close()/checkpoint() SHALL 执行完整 checkpoint 截断 WAL。
+        let mut pending_wal_at_open = false;
         if mode == OpenMode::ReadWrite {
             let recovery_result =
                 RecoveryManager::full_recover(path, buffer_pool.clone(), table_manager.clone())
                     .await
                     .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?;
+            pending_wal_at_open = recovery_result.wal_had_tx_records;
 
             // MS09 Iter000 001-replan (D10/T6-R3): advance the tx id allocator
             // past every id observed in recovery so ids are never reused after a
@@ -356,6 +361,7 @@ impl Database {
                     .clone()
                     .expect("ReadWrite mode holds a WAL writer"),
                 buffer_pool.clone(),
+                pending_wal_at_open,
             )))
         } else {
             None
@@ -554,6 +560,18 @@ impl Database {
     /// a zero-work skip that happens to match.
     pub async fn close(&self) -> Result<()> {
         self.checkpoint().await
+    }
+
+    /// T2（change 2026-10-04-external-review-gaps D2）：打开时 WAL 是否曾含
+    /// 事务记录（任一非 Checkpoint 记录）。CLI checkpoint 命令的零工作取样
+    /// 消费该标志——恢复后状态（零 redo 形态）下取样谓词为真但 checkpoint
+    /// 实际执行，消息 SHALL 报告实际执行而非 "no pending work"。
+    /// 只读/内存形态无 checkpoint 管理器 → `false`（不参与判定）。
+    pub fn wal_pending_at_open(&self) -> bool {
+        self.checkpoint_manager
+            .as_ref()
+            .map(|m| m.pending_wal_at_open())
+            .unwrap_or(false)
     }
 
     /// Run a checkpoint: flush dirty pages, write the checkpoint site and

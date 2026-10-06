@@ -2041,6 +2041,54 @@ fn test_scalar_function_alias_header() {
     assert_eq!(parsed["rows"], serde_json::json!([["ALICE"]]));
 }
 
+/// T1（change 2026-10-04-external-review-gaps R1）：二级索引等值扫描任意
+/// 投影组合的 CLI 表头与行逐位对齐（修复前：后位列投影 panic exit 101；
+/// 乱序投影表头静默错位 `["id","name"]` vs 行 `["Ada",1]`）。
+#[test]
+fn test_secondary_index_scan_projection_headers() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE q6 (id INT PRIMARY KEY, name STRING, dept_id INT, salary INT)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["app", "INSERT INTO q6 VALUES (1, 'Ada', 1, 90)"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE INDEX idx_q6_sal ON q6 (salary)"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+
+    // 后位单列：表头 ["name"]、行 [["Ada"]]（修复前 panic exit 101）
+    let out = run_cli(
+        dir.path(),
+        &["app", "SELECT name FROM q6 WHERE salary = 90"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["name"]));
+    assert_eq!(parsed["rows"], serde_json::json!([["Ada"]]));
+
+    // 乱序多列：表头 ["name","id"] 与行逐位对齐（修复前表头 ["id","name"] 错位）
+    let out = run_cli(
+        dir.path(),
+        &["app", "SELECT name, id FROM q6 WHERE salary = 90"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["name", "id"]));
+    assert_eq!(parsed["rows"], serde_json::json!([["Ada", 1]]));
+}
+
 /// 怪癖修正：`SELECT 42 FROM t` 单列常量（表头 `42`），不再恒等回退全 schema
 #[test]
 fn test_projection_constant_single_column() {
@@ -3045,18 +3093,17 @@ fn test_scalar_subquery_header_carries_alias_json() {
     );
     assert_eq!(out.code, Some(0), "query failed: {}", out.stderr);
     let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
-    // 行形状按 Preserve 锁定为全外层行 + 标量插 index 1：修后表头镜像
-    // 执行器插入语义，别名 "region" 落 index 1，列数 == 行宽。
-    assert_eq!(
-        parsed["columns"],
-        serde_json::json!(["id", "region", "name", "salary"])
-    );
+    // T4（change 2026-10-04-external-review-gaps）校准：SELECT 清单解析自身
+    // 投影——表头 = [id, region]，未请求列不再泄漏（修前全外层行泄漏 +
+    // 标量插 index 1）；相关参数取值列（emp.id ∈ SELECT 投影）经
+    // SubqueryEval 在收窄行上取值，列数 == 行宽。
+    assert_eq!(parsed["columns"], serde_json::json!(["id", "region"]));
     let ncols = parsed["columns"].as_array().unwrap().len();
     let row_width = parsed["rows"][0].as_array().unwrap().len();
     assert_eq!(ncols, row_width, "columns width must match row width");
     assert_eq!(
         parsed["rows"],
-        serde_json::json!([[1, "East", "Alice", 50000], [2, "West", "Bob", 60000]])
+        serde_json::json!([[1, "East"], [2, "West"]])
     );
 }
 

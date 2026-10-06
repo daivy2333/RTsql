@@ -12,7 +12,7 @@ fn test_read_write_checkpoint_site() {
     let storage = FileStorage::open(db_path).unwrap();
     let buffer_pool = Arc::new(BufferPool::new(10, Arc::new(storage)).unwrap());
 
-    let manager = CheckpointManager::new(db_path, wal_writer, buffer_pool);
+    let manager = CheckpointManager::new(db_path, wal_writer, buffer_pool, false);
 
     // 无位点文件
     let result = manager.read_checkpoint_site().unwrap();
@@ -47,7 +47,7 @@ async fn test_checkpoint_flow() {
             .unwrap();
     }
 
-    let manager = CheckpointManager::new(db_path, wal_writer.clone(), buffer_pool);
+    let manager = CheckpointManager::new(db_path, wal_writer.clone(), buffer_pool, false);
 
     // 执行 checkpoint
     let captured_lsn = manager.checkpoint(|| 0).await.unwrap();

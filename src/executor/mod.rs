@@ -36,6 +36,7 @@ mod plan_format;
 mod predicate;
 mod projection;
 mod result;
+mod scalar_subquery_filter;
 mod scan;
 mod semi_join;
 mod set_operation;
@@ -82,8 +83,9 @@ pub use plan::{
     CreateTableAsSelectNode, CreateTableNode, CreateViewNode, DataScanNode, DeleteNode,
     DerivedScanNode, DistinctNode, DropIndexNode, DropTableNode, DropViewNode, ExplainNode,
     FilterNode, HavingNode, IndexScanAllNode, IndexScanNode, InsertNode, InsertSelectNode,
-    JoinCondition, JoinNode, LimitNode, NestedLoopJoinNode, NestedLoopJoinType, OrderByColumn,
-    OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode, ScanNode, SemiJoinNode, SetOpKind,
+    JoinCondition, JoinNode, JoinSide, LimitNode, NestedLoopJoinNode, NestedLoopJoinType,
+    OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
+    ScalarSubqueryBinding, ScalarSubqueryFilterNode, ScanNode, SemiJoinNode, SetOpKind,
     SetOperationNode, SortNode, SubqueryEvalNode, TruncateNode, UpdateAssignment, UpdateNode,
     UpdateValue, UpsertAssignment, UpsertNode, UpsertValueExpr,
 };
@@ -95,6 +97,7 @@ pub use predicate::{
 };
 pub use projection::ProjectionExecutor;
 pub use result::ExecResult;
+pub use scalar_subquery_filter::ScalarSubqueryFilterExecutor;
 pub use scan::ScanExecutor;
 pub use semi_join::SemiJoinExecutorV2;
 pub use set_operation::SetOperationExecutor;

@@ -172,10 +172,18 @@ enum InsertValue {
 
 impl PlanBuilder {
     /// 提取 JOIN ON 条件（支持 AND 组合等值条件）
+    ///
+    /// T9 replan（design D9）：腿侧别按书写限定符与声明限定符匹配判定——
+    /// 归一真实名在自连接两臂恒同，不能作侧身份。两腿异侧按侧装配
+    /// （`left_column` 恒为左输入腿，书写反序形态在此归位）；两腿同侧
+    /// `InvalidQuery` 点名拒绝零副作用；裸名腿按书写位置定侧，解析仍经
+    /// 既有 `resolve_column_ref`（`ColumnRef.table` 真实名不变）。
     pub(crate) fn extract_join_conditions(
         &self,
         left_tables: &[String],
+        left_qualifiers: &[String],
         right_table: &str,
+        right_qualifier: &str,
         on_expr: &Expr,
     ) -> Result<Vec<JoinCondition>, PlanError> {
         // 处理 AND 组合
@@ -185,8 +193,20 @@ impl PlanBuilder {
             right,
         } = on_expr
         {
-            let left_conditions = self.extract_join_conditions(left_tables, right_table, left)?;
-            let right_conditions = self.extract_join_conditions(left_tables, right_table, right)?;
+            let left_conditions = self.extract_join_conditions(
+                left_tables,
+                left_qualifiers,
+                right_table,
+                right_qualifier,
+                left,
+            )?;
+            let right_conditions = self.extract_join_conditions(
+                left_tables,
+                left_qualifiers,
+                right_table,
+                right_qualifier,
+                right,
+            )?;
             return Ok(left_conditions
                 .into_iter()
                 .chain(right_conditions)
@@ -200,17 +220,28 @@ impl PlanBuilder {
             right,
         } = on_expr
         {
-            let left_ref = self.resolve_column_ref(left, left_tables)?;
-            let right_ref = self.resolve_column_ref(right, &[right_table.to_string()])?;
+            // 侧别判定（裸名腿 None → 按书写位置：左操作数左输入、右操作数
+            // 右输入，与既有按侧解析上下文一致）。
+            let first_side = self
+                .expr_join_side(left, left_qualifiers, right_qualifier)?
+                .unwrap_or(true);
+            let second_side = self
+                .expr_join_side(right, left_qualifiers, right_qualifier)?
+                .unwrap_or(false);
 
-            // 验证：左边列来自左表，右边列来自右表（或反序）
-            if left_ref.table.as_deref() == Some(right_table) {
-                // 反序：right.col = left.col，交换
-                return Ok(vec![JoinCondition {
-                    left_column: right_ref,
-                    right_column: left_ref,
-                }]);
+            if first_side == second_side {
+                return Err(PlanError::InvalidQuery(
+                    "JOIN ON condition must reference both sides of the join".into(),
+                ));
             }
+
+            let (left_expr, right_expr) = if first_side {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            let left_ref = self.resolve_column_ref(left_expr, left_tables)?;
+            let right_ref = self.resolve_column_ref(right_expr, &[right_table.to_string()])?;
 
             Ok(vec![JoinCondition {
                 left_column: left_ref,
@@ -221,6 +252,35 @@ impl PlanBuilder {
                 "JOIN ON CONSTRAINT".into(),
             ))
         }
+    }
+
+    /// T9 replan（design D9）：ON 等值腿的输入侧归属。限定腿按书写限定符与
+    /// 声明限定符匹配（左链各臂依次 → 左输入；右臂 → 右输入；均未命中
+    /// `TableNotFound` 点名限定符，与 `resolve_qualified_column` 未知限定符
+    /// 同面）；裸名腿返回 `None` 交调用方按书写位置定侧。三段/表达式腿在
+    /// Hash 接受面外（`is_pure_equi_join_on` 只放行裸名/两段），交
+    /// `resolve_column_ref` 既有错误面。
+    fn expr_join_side(
+        &self,
+        expr: &Expr,
+        left_qualifiers: &[String],
+        right_qualifier: &str,
+    ) -> Result<Option<bool>, PlanError> {
+        let qualifier = match expr {
+            Expr::Identifier(_) => return Ok(None),
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => parts[0].value.to_lowercase(),
+            _ => return Ok(None),
+        };
+        if left_qualifiers
+            .iter()
+            .any(|declared| self.qualifier_matches_declared(&qualifier, declared))
+        {
+            return Ok(Some(true));
+        }
+        if self.qualifier_matches_declared(&qualifier, right_qualifier) {
+            return Ok(Some(false));
+        }
+        Err(PlanError::TableNotFound(qualifier))
     }
 
     /// Build PhysicalPlan for INSERT statement

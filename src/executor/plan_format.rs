@@ -38,6 +38,14 @@ fn render_node(plan: &PhysicalPlan, depth: usize, out: &mut Vec<String>) {
             render_node(&node.input, depth + 1, out);
             render_node(&node.subquery, depth + 1, out);
         }
+        // T4（change 2026-10-04-external-review-gaps）：标量谓词过滤节点——
+        // 输入链与各绑定子查询逐一下探（绑定计划是可执行子树）。
+        PhysicalPlan::ScalarSubqueryFilter(node) => {
+            render_node(&node.input, depth + 1, out);
+            for binding in &node.bindings {
+                render_node(&binding.subquery, depth + 1, out);
+            }
+        }
         PhysicalPlan::DerivedScan(node) => render_node(&node.subquery, depth + 1, out),
         // MS20 T4: CTAS 的物化源作为子树下探（表头与行宽描述在 CTAS 行本身）
         PhysicalPlan::CreateTableAsSelect(node) => render_node(&node.select, depth + 1, out),
@@ -314,6 +322,16 @@ fn describe(plan: &PhysicalPlan) -> String {
             "SubqueryEval (column={}, correlated_params={})",
             node.output_column,
             node.correlated_params.len()
+        ),
+        PhysicalPlan::ScalarSubqueryFilter(node) => format!(
+            "ScalarSubqueryFilter {} (bindings={}, correlated_params={}, columns={})",
+            node.table_name,
+            node.bindings.len(),
+            node.bindings
+                .iter()
+                .map(|b| b.correlated_params.len())
+                .sum::<usize>(),
+            columns(&node.columns, &[])
         ),
         PhysicalPlan::DerivedScan(node) => format!(
             "DerivedScan {} (columns=[{}])",

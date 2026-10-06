@@ -28,6 +28,12 @@ pub struct RecoveryResult {
     /// max(WAL 观测最大 id, 本水位) 推进分配器，checkpoint 截断 WAL 后
     /// 高水位前提仍然健全。
     pub checkpoint_tx_watermark: Option<u64>,
+    /// T2（change 2026-10-04-external-review-gaps D2）：打开时 WAL 是否曾含
+    /// 事务记录（任一非 Checkpoint 记录，无论恢复重放是否实际发生 redo）。
+    /// 恢复会话 WAL 收敛的判定标志——`CheckpointManager` 零工作守卫把该
+    /// 形态视同未决工作（marker-only 空事务形态三集合为空但 WAL 仍有
+    /// Begin/Commit 记录，故按记录类别判定而非集合）。
+    pub wal_had_tx_records: bool,
 }
 
 /// R-T0b-R7 (D10) + T8-R2：重放期的磁盘版本多映射，按表分桶。
@@ -558,6 +564,13 @@ impl RecoveryManager {
         let mut reader = WalReader::open(&wal_path)?;
         let records = reader.read_all_with_lsn()?;
 
+        // T2（change 2026-10-04-external-review-gaps D2）：按记录类别判定
+        // WAL 是否曾含事务记录——marker-only 空事务（Begin/Commit 无数据
+        // 记录）同样为真；redo 是否实际发生与本判定解耦。
+        let wal_had_tx_records = records
+            .iter()
+            .any(|(_, record)| !matches!(record, WalRecord::Checkpoint { .. }));
+
         if records.is_empty() {
             return Ok(RecoveryResult {
                 checkpoint_tx_watermark,
@@ -647,6 +660,7 @@ impl RecoveryManager {
             uncommitted_tx_ids,
             redo_count,
             checkpoint_tx_watermark,
+            wal_had_tx_records,
         })
     }
 

@@ -1121,12 +1121,7 @@ fn update_delete_subquery_shapes_still_rejected() {
     // change 2026-10-03-practical-core-gaps T8：子查询右值拒绝面由泛化
     // `Unsupported value type` 收敛为携能力名的 `UPDATE SUBQUERY`——拒绝
     // 语义（计划期、exit 3、零副作用）不变，仅文案断言随能力名校准。
-    assert_failure(
-        &upd,
-        3,
-        "UPDATE SUBQUERY",
-        "UPDATE subquery assignment",
-    );
+    assert_failure(&upd, 3, "UPDATE SUBQUERY", "UPDATE subquery assignment");
 
     let del = run_cli(
         dir.path(),

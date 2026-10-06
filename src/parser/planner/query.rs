@@ -93,6 +93,12 @@ impl PlanBuilder {
                 node.columns.clone()
             }
             PhysicalPlan::IndexScanAll(node) => projected_columns(&node.columns, &node.projection),
+            PhysicalPlan::ScalarSubqueryFilter(node) => {
+                // T4（change 2026-10-04-external-review-gaps）：`columns` 即
+                // 裁剪后实际输出形状（IndexScan「已收窄」契约同型——构造期
+                // 已按基表 schema × projection 收窄，此处直出不再二次裁剪）。
+                node.columns.clone()
+            }
             PhysicalPlan::Join(node) => {
                 // JOIN 行组装严格按 output_columns 顺序（见 executor/join.rs），
                 // 列名直接取自节点，不递归合并左右子计划。
@@ -123,7 +129,12 @@ impl PlanBuilder {
                 // MS17-T02/ISS03: 执行器在 result_column_index 插入标量值
                 //（越界时 push，见 executor/subquery_eval.rs）——表头镜像该
                 // 语义插入标量列名，保证列数与行宽一致。
+                // T4：相关参数补充列以尾部附加形式在输入行中，本节点按
+                // output_width 截断后再插列——表头同步截断。
                 let mut columns = self.get_plan_output_columns(&node.input);
+                if node.output_width > 0 {
+                    columns.truncate(node.output_width);
+                }
                 let idx = node.result_column_index.min(columns.len());
                 columns.insert(idx, node.output_column.clone());
                 columns
@@ -398,16 +409,23 @@ impl PlanBuilder {
             TableFactor::Derived {
                 subquery, alias, ..
             } => {
+                // T5（change 2026-10-04-external-review-gaps）：FROM 派生臂是
+                // 唯一置位 `building_from_derived` 的入口——集合操作守卫据此
+                // 放行派生表源；save/restore 与 `building_subquery` 严格配对。
                 let saved_subquery_ctx = self.building_subquery;
+                let saved_from_derived = self.building_from_derived;
                 self.building_subquery = true;
+                self.building_from_derived = true;
                 let subquery_plan = match self.build_query(subquery) {
                     Ok(p) => p,
                     Err(e) => {
                         self.building_subquery = saved_subquery_ctx;
+                        self.building_from_derived = saved_from_derived;
                         return Err(e);
                     }
                 };
                 self.building_subquery = saved_subquery_ctx;
+                self.building_from_derived = saved_from_derived;
                 let alias_name = alias
                     .as_ref()
                     .map(|a| a.name.value.to_lowercase())
@@ -443,8 +461,16 @@ impl PlanBuilder {
         // design D4：末次迭代的 `output_qualifiers`（与最终节点 `output_columns`
         // 同序同长）；无 JOIN 臂时保持空——调用方只在组合形状存在时消费。
         let mut combined_qualifiers: Vec<String> = Vec::new();
+        // T11（change 2026-10-04-external-review-gaps D11）：链装配三修复——
+        // ① 严格校验与 SELECT 收窄（kept）只在**末步**执行（非末步强制全
+        // 组合承载，链前缀列对后续 ON/谓词/投影恒可达）；② 链前缀列
+        // `column_index` 重定基为**左输入行绝对偏移**（累计宽度，链长 1 时
+        // 数值与 within-table 相同，两表形态逐字节不变）；③ 条件键限定解析
+        // 在执行器查表侧（pipeline 注册 `(真实表, 列)` 键——见 join.rs）。
+        let total_joins = from[0].joins.len();
 
-        for join in &from[0].joins {
+        for (step, join) in from[0].joins.iter().enumerate() {
+            let is_last = step + 1 == total_joins;
             // MS25 T1（design D1）：JOIN 形态分类。`Inner(On)` 与
             // `Inner(Using/Natural/None)` 维持既有两臂（编译 / `MissingOnClause`
             // 拒绝）；`LeftOuter(On)` 经 NLJ 承载，`FullOuter(On)` 经 NLJ 全侧
@@ -524,34 +550,45 @@ impl PlanBuilder {
             // design D4：`all_qualifiers` 与 `all_columns` 同序同长，记录每列
             // 所属 FROM 臂的声明限定符。限定列按它匹配（自连接同表两别名各占
             // 一段，真实表名无法区分归属）；`OutputColumn` 的真实表名字段不变。
-            let all_columns: Vec<OutputColumn> = current_tables
-                .iter()
-                .flat_map(|t| {
-                    let columns = self
-                        .tables
-                        .get(t)
-                        .expect("validated table must exist in metadata");
-                    columns.iter().enumerate().map(|(idx, col)| OutputColumn {
+            //
+            // T11：`column_index` 为该列在**本步输出行**中的绝对偏移——左链
+            // 各臂列按累计宽度重定基（左输入行 = 前序步全组合输出），右臂列
+            // = 左链总宽 + 表内位置。链长 1（两表）时左链恰一表，数值与
+            // within-table 相同，行为逐字节不变。
+            let mut left_width = 0usize;
+            let mut all_columns: Vec<OutputColumn> = Vec::new();
+            for t in &current_tables {
+                let columns = self
+                    .tables
+                    .get(t)
+                    .expect("validated table must exist in metadata");
+                let base = left_width;
+                left_width += columns.len();
+                for (idx, col) in columns.iter().enumerate() {
+                    all_columns.push(OutputColumn {
                         table: Some(t.clone()),
                         column: col.clone(),
                         table_alias: t.clone(),
-                        column_index: idx,
-                    })
-                })
-                .chain(
-                    self.tables
-                        .get(&right_table)
-                        .expect("validated right_table must exist")
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, col)| OutputColumn {
-                            table: Some(right_table.clone()),
-                            column: col.clone(),
-                            table_alias: right_table.clone(),
-                            column_index: idx,
-                        }),
-                )
-                .collect();
+                        column_index: base + idx,
+                    });
+                }
+            }
+            for (idx, col) in self
+                .tables
+                .get(&right_table)
+                .expect("validated right_table must exist")
+                .iter()
+                .enumerate()
+            {
+                all_columns.push(OutputColumn {
+                    table: Some(right_table.clone()),
+                    column: col.clone(),
+                    table_alias: right_table.clone(),
+                    // 右臂列保持 within-table 语义——执行器按右输入行寻址
+                    //（左链列的绝对偏移重定基只针对左输入行）。
+                    column_index: idx,
+                });
+            }
             let all_qualifiers: Vec<String> = current_qualifiers
                 .iter()
                 .zip(&current_tables)
@@ -571,6 +608,27 @@ impl PlanBuilder {
                         .len(),
                 ))
                 .collect();
+            // design D9：输出列输入侧标志（与 `all_columns`/`all_qualifiers`
+            // 同序同长，原始表序语境——左链各臂列 Left、右臂列 Right）。执行器
+            // 据此取行，自连接两侧真实名相同不再使归属失效。
+            let all_sides: Vec<crate::executor::JoinSide> = current_tables
+                .iter()
+                .flat_map(|t| {
+                    let width = self
+                        .tables
+                        .get(t)
+                        .expect("validated table must exist in metadata")
+                        .len();
+                    std::iter::repeat_n(crate::executor::JoinSide::Left, width)
+                })
+                .chain(std::iter::repeat_n(
+                    crate::executor::JoinSide::Right,
+                    self.tables
+                        .get(&right_table)
+                        .expect("validated right_table must exist")
+                        .len(),
+                ))
+                .collect();
 
             let select_star = qualified_columns.iter().any(|(_, c)| c == "*");
             // MS25 T8（design D9）：过滤式解析前的严格校验——纯列清单里既不
@@ -581,7 +639,10 @@ impl PlanBuilder {
             // design D4：限定名按声明限定符匹配——限定符不属本 FROM 作用域
             // 交由链末的 `validate_projection_qualifiers` 点名（42P01 携带限定符），
             // 此处只判列存在性（未知列 42703 / 裸名多命中 42702）。
-            if !carry_all_columns && !select_star && pure_column_list {
+            // T11：严格校验只在**末步**执行——中间步的当前组合形状不含后续
+            // 表列（第三表列在第一步即误点名 `ColumnNotFound` 的链式失败
+            // 根因），末步作用域 = 全链组合形状，真未知列仍在此点名。
+            if is_last && !carry_all_columns && !select_star && pure_column_list {
                 for (qual_table, qual_col) in qualified_columns {
                     // design D4：不在 FROM 作用域内的限定符交由链末的
                     // `validate_projection_qualifiers` 点名（42P01 携带限定符），
@@ -614,29 +675,52 @@ impl PlanBuilder {
                     }
                 }
             }
-            let (output_columns, output_qualifiers) = if carry_all_columns || select_star {
+            let (output_columns, output_qualifiers, output_sides) = if carry_all_columns
+                || select_star
+                // T11：非末步强制全组合承载——中间步收窄会使左输入行形状 ≠
+                // 下一步的全宽假设（链上 ON 条件列缺失 → 执行器键查 panic /
+                // 错位），末步按查询标志现行逻辑。
+                || !is_last
+            {
                 // SELECT *（或 D2 的组合行全列承载）：输出所有列
-                (all_columns, all_qualifiers)
+                (all_columns, all_qualifiers, all_sides)
             } else {
                 // SELECT col1, col2... 或 SELECT t.col1, t.col2...
+                //
+                // T10（change 2026-10-04-external-review-gaps D10）：kept 按
+                // SELECT 清单序重建（对齐 Scan 基座 `resolve_projection_indices`
+                // 的按清单序语义）——逐 SELECT 项定位命中列（限定名按声明限定
+                // 符精确匹配、裸名任意命中），重复项重复产出。纯列清单的 0
+                // 命中/裸名多命中已由上方严格校验点名；非纯清单维持既有静默
+                // 跳过语义（`*` 项同样跳过）。三清单（列/限定符/侧标志）同步
+                // 产出，行组装与归属不变。
                 let mut kept: Vec<OutputColumn> = Vec::new();
                 let mut kept_qualifiers: Vec<String> = Vec::new();
-                for (col, qualifier) in all_columns.into_iter().zip(all_qualifiers) {
-                    let selected = qualified_columns.iter().any(|(qual_table, qual_col)| {
-                        col.column.to_lowercase() == qual_col.to_lowercase()
+                let mut kept_sides: Vec<crate::executor::JoinSide> = Vec::new();
+                for (qual_table, qual_col) in qualified_columns {
+                    if qual_col == "*" {
+                        continue;
+                    }
+                    for ((col, qualifier), side) in all_columns
+                        .iter()
+                        .zip(all_qualifiers.iter())
+                        .zip(all_sides.iter())
+                    {
+                        let matched = col.column.to_lowercase() == qual_col.to_lowercase()
                             && match qual_table {
                                 // Qualified column: qualifier.col（T7：原文相等
                                 // 或归一化命中——隐式短名 `u` ↔ 声明 `o.u`）。
-                                Some(table) => self.qualifier_matches_declared(table, &qualifier),
+                                Some(table) => self.qualifier_matches_declared(table, qualifier),
                                 None => true,
-                            }
-                    });
-                    if selected {
-                        kept.push(col);
-                        kept_qualifiers.push(qualifier);
+                            };
+                        if matched {
+                            kept.push(col.clone());
+                            kept_qualifiers.push(qualifier.clone());
+                            kept_sides.push(*side);
+                        }
                     }
                 }
-                (kept, kept_qualifiers)
+                (kept, kept_qualifiers, kept_sides)
             };
 
             // MS09-T02 (I015): 计划期启发式路由（delta spec R4）。结构探测的
@@ -647,8 +731,13 @@ impl PlanBuilder {
             // 能力取代。MS25 T1：外连接三态一律经 NLJ（Hash JoinExecutor
             // 零触碰；等值外连接的性能路径归 MS22 域）。
             if matches!(outer, OuterJoinKind::None) && is_pure_equi_join_on(on_clause) {
-                let conditions =
-                    self.extract_join_conditions(&current_tables, &right_table, on_clause)?;
+                let conditions = self.extract_join_conditions(
+                    &current_tables,
+                    &current_qualifiers,
+                    &right_table,
+                    &right_qualifier,
+                    on_clause,
+                )?;
 
                 // 构建 Join 节点
                 current_plan = PhysicalPlan::Join(crate::executor::JoinNode {
@@ -656,6 +745,7 @@ impl PlanBuilder {
                     right: Box::new(right_plan),
                     conditions,
                     output_columns,
+                    output_sides,
                 });
             } else {
                 // 非纯等值 ON → NLJ：组合行布局（左表偏移 0..n、右表
@@ -711,8 +801,20 @@ impl PlanBuilder {
 
                 // RIGHT = 交换左右输入的 LEFT：保存侧（原右表）成为左输入，
                 // 未匹配的原左行丢弃；FULL 不做交换（两侧都补齐）。
-                // `output_columns` 按原表序保持不变（执行器按 `table_alias`
-                // 归属提取，与输入侧无关）。
+                // `output_columns` 按原表序保持不变；输出归属由 `output_sides`
+                // 侧标志承载（design D9）——RIGHT 交换后执行器输入侧对调，
+                // 侧标志随输入交换反转（原右臂列改读左输入行，原左链列反之）。
+                let output_sides = if outer == OuterJoinKind::Right {
+                    output_sides
+                        .into_iter()
+                        .map(|side| match side {
+                            crate::executor::JoinSide::Left => crate::executor::JoinSide::Right,
+                            crate::executor::JoinSide::Right => crate::executor::JoinSide::Left,
+                        })
+                        .collect()
+                } else {
+                    output_sides
+                };
                 let join_type = match outer {
                     OuterJoinKind::None => crate::executor::NestedLoopJoinType::Inner,
                     OuterJoinKind::Left | OuterJoinKind::Right => {
@@ -726,6 +828,7 @@ impl PlanBuilder {
                         right: Box::new(current_plan),
                         predicate,
                         output_columns,
+                        output_sides,
                         join_type,
                     })
                 } else {
@@ -734,6 +837,7 @@ impl PlanBuilder {
                         right: Box::new(right_plan),
                         predicate,
                         output_columns,
+                        output_sides,
                         join_type,
                     })
                 };
@@ -763,6 +867,56 @@ impl PlanBuilder {
     fn qualifier_in_scope(&self, qualifier: &str) -> bool {
         let key = self.resolve_table_qualifier(qualifier).unwrap_or(qualifier);
         self.tables.contains_key(key)
+    }
+
+    /// T3（change 2026-10-04-external-review-gaps D3）：JOIN 基座 ORDER BY 限定
+    /// 键的组合行布局解析——限定符命中声明段键时产出指向组合行绝对索引的
+    /// `ColumnExpression`（SortExecutor decorate 通路消费）。
+    ///
+    /// 匹配序：① 书写限定符与声明段键直接匹配（别名原文相等 / 隐式短名归一，
+    /// `qualifier_matches_declared` 同款）；② 全表名书写（FROM 臂声明了别名）：
+    /// 段键归一（别名 → 真实键）后与书写限定符归一结果比较——单表面全表名
+    /// 恒可达（`qualifier_in_scope` 真实名分支），JOIN 基座同规则；多段归一
+    /// 同键（自连接 + 全表名）首个命中，与既有裸名首匹配语义同源。两步都未
+    /// 命中返回 `None` 交回调用方回落既有裸名键路径。命中段缺列 →
+    /// `ColumnNotFound` 点名（限定符精确归属，镜像 `qualified_column_expression`
+    /// 布局臂）。
+    fn resolve_order_by_layout_key(
+        &self,
+        layout: &[(String, Vec<String>)],
+        written: &str,
+        column: &str,
+    ) -> Result<Option<ExpressionRef>, PlanError> {
+        let col = column.to_lowercase();
+        let mut offset = 0usize;
+        for (declared, seg) in layout {
+            if self.qualifier_matches_declared(written, declared) {
+                return match seg.iter().position(|c| c.to_lowercase() == col) {
+                    Some(pos) => Ok(Some(Arc::new(ColumnExpression {
+                        column_name: col,
+                        column_index: offset + pos,
+                    }))),
+                    None => Err(PlanError::ColumnNotFound(column.to_string())),
+                };
+            }
+            offset += seg.len();
+        }
+        let written_key = self.resolve_table_qualifier(written).unwrap_or(written);
+        let mut offset = 0usize;
+        for (declared, seg) in layout {
+            let declared_key = self.resolve_table_qualifier(declared).unwrap_or(declared);
+            if declared_key.eq_ignore_ascii_case(written_key) {
+                return match seg.iter().position(|c| c.to_lowercase() == col) {
+                    Some(pos) => Ok(Some(Arc::new(ColumnExpression {
+                        column_name: col,
+                        column_index: offset + pos,
+                    }))),
+                    None => Err(PlanError::ColumnNotFound(column.to_string())),
+                };
+            }
+            offset += seg.len();
+        }
+        Ok(None)
     }
 
     /// design D4：纯列清单的限定符计划期点名——归一（别名 → 真实键）后无对应
@@ -824,8 +978,11 @@ impl PlanBuilder {
             ));
         }
         // 子查询上下文内的复合：范围外（子查询计划形状由 SemiJoin / SubqueryEval
-        // / DerivedScan 机制消费），点名拒绝而非静默
-        if self.building_subquery {
+        // / DerivedScan 机制消费），点名拒绝而非静默。
+        // T5（change 2026-10-04-external-review-gaps）：FROM 派生上下文放行
+        // （`building_from_derived` 置位）——评测点名形态；视图展开与表达式
+        // 子查询（IN/EXISTS/标量）上下文维持拒绝，错误文案逐字节不变。
+        if self.building_subquery && !self.building_from_derived {
             return Err(PlanError::ParseError(
                 "Set operations are not supported inside subqueries".to_string(),
             ));
@@ -1137,9 +1294,14 @@ impl PlanBuilder {
             )));
         };
         let saved_subquery_ctx = self.building_subquery;
+        // T5：视图展开是表达式型子查询上下文——FROM 派生标志复位（视图定义
+        // 内集合操作维持拒绝），save/restore 严格配对。
+        let saved_from_derived = self.building_from_derived;
         self.building_subquery = true;
+        self.building_from_derived = false;
         let inner_result = self.build_query(inner_query);
         self.building_subquery = saved_subquery_ctx;
+        self.building_from_derived = saved_from_derived;
         let inner_plan = inner_result?;
         let effective = alias
             .map(|a| a.name.value.to_lowercase())
@@ -1245,16 +1407,21 @@ impl PlanBuilder {
             self.inner_table_names = Some(inner_tables.clone());
             let correlated_params = self.extract_correlated_params(expr, &inner_tables)?;
             let saved_subquery_ctx = self.building_subquery;
+            // T5：SELECT 投影位子查询是表达式型上下文——FROM 派生标志复位。
+            let saved_from_derived = self.building_from_derived;
             self.building_subquery = true;
+            self.building_from_derived = false;
             let subquery_plan = match self.build_query(expr) {
                 Ok(p) => p,
                 Err(e) => {
                     self.building_subquery = saved_subquery_ctx;
+                    self.building_from_derived = saved_from_derived;
                     self.inner_table_names = None;
                     return Err(e);
                 }
             };
             self.building_subquery = saved_subquery_ctx;
+            self.building_from_derived = saved_from_derived;
             self.inner_table_names = None;
             subquery_evals.push((idx, subquery_plan, col_name, correlated_params));
         }
@@ -1318,7 +1485,10 @@ impl PlanBuilder {
         let (base_plan, combined_qualifiers) = self.build_from_clause_with_projection(
             &select.from,
             &qualified_columns,
-            select.selection.is_some() || projection_has_aggregates,
+            // T3（change 2026-10-04-external-review-gaps D3）：ORDER BY 存在时
+            // JOIN 节点同样承载全组合列（镜像 WHERE 规则）——排序键在组合形状
+            // 上解析，SELECT 裁剪归其上的 Sort（sort_projection）。
+            select.selection.is_some() || projection_has_aggregates || !query.order_by.is_empty(),
             select_list_is_pure_column_list(select, &subquery_indices),
         )?;
 
@@ -1682,7 +1852,30 @@ impl PlanBuilder {
             _ => None,
         };
         let sort_due = !query.order_by.is_empty();
-        let projection_indices = if has_aggregates || !subquery_evals.is_empty() {
+        // T4（change 2026-10-04-external-review-gaps）：标量子查询项不再整体
+        // 恒等化投影——混排形态（纯列项 + 子查询项）按过滤后清单解析裁剪，
+        // SubqueryEval 的插列位置公式在 SELECT 序行上成立；清单全为子查询项
+        // 时无基列可解析，维持恒等（既有行为：全行 + 插列）。
+        //
+        // 相关参数取值列补充：子查询项携带相关参数时，参数按列名从外层行取
+        // 值——SELECT 投影之外的取值列追加到输入投影尾部（不裁掉），由
+        // SubqueryEval 链最外层节点按 output_width 截断收尾。任一取值列在
+        // 基表 schema 上不可解析（派生表别名等未知形状）→ 整体回落恒等
+        // （引入前行为：全行承载，参数恒可达）。
+        let subquery_param_columns: Vec<String> = subquery_evals
+            .iter()
+            .flat_map(|(.., params)| params.iter().map(|p| p.outer_column.to_lowercase()))
+            .collect();
+        let mut subquery_param_extras: Option<usize> = if subquery_param_columns.is_empty() {
+            Some(0)
+        } else {
+            None
+        };
+        let projection_indices = if has_aggregates
+            // T4：清单全为标量子查询项——无基列可解析，维持恒等（既有行为：
+            // 全行 + 插列）。
+            || (!subquery_evals.is_empty() && filtered_projection.is_empty())
+        {
             None
         } else if has_expression_items {
             // MS11-T01 Iter001: 表达式查询禁用 per-node 裁剪——输入全形状
@@ -1699,7 +1892,35 @@ impl PlanBuilder {
                     // 投影已由 `has_expression_items` 分流到 Projection 通路。
                     // 二者都维持恒等，与变更前一致。
                     if select_list_is_pure_column_list(select, &subquery_indices) {
-                        resolve_projection_indices(&projection_columns, schema)?
+                        let mut indices = resolve_projection_indices(&projection_columns, schema)?;
+                        if let Some(list) = indices.as_mut() {
+                            let mut extras = 0usize;
+                            let mut resolvable = true;
+                            for name in &subquery_param_columns {
+                                if projection_columns.iter().any(|c| c.to_lowercase() == *name) {
+                                    continue;
+                                }
+                                match schema.iter().position(|c| c.to_lowercase() == *name) {
+                                    Some(i) => {
+                                        if !list.contains(&i) {
+                                            list.push(i);
+                                            extras += 1;
+                                        }
+                                    }
+                                    None => {
+                                        resolvable = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if resolvable {
+                                subquery_param_extras = Some(extras);
+                            } else {
+                                // 相关取值列不可解析 → 恒等（引入前行为）
+                                indices = None;
+                            }
+                        }
+                        indices
                     } else {
                         None
                     }
@@ -1736,10 +1957,13 @@ impl PlanBuilder {
                 // 输入是单表计划——保持变更前的计划期拒绝（同名信息），不与本
                 // 能力同批解禁。子查询形态嵌套在复合谓词内时，既有
                 // `build_where` 无该臂 → `UnsupportedExpression` 点名拒绝。
+                // T4（change 2026-10-04-external-review-gaps）：含标量子查询
+                // 比较腿的谓词同面点名拒绝（镜像 InSubquery/Exists）。
                 if matches!(
                     where_expr,
                     sqlparser::ast::Expr::InSubquery { .. } | sqlparser::ast::Expr::Exists { .. }
-                ) {
+                ) || contains_scalar_subquery(where_expr)
+                {
                     return Err(PlanError::UnsupportedStatement(
                         "WHERE CLAUSE ON JOIN".into(),
                     ));
@@ -1795,17 +2019,52 @@ impl PlanBuilder {
                 &projection_columns,
             )? {
                 subquery_plan
+            } else if contains_scalar_subquery(where_expr) {
+                // T4（change 2026-10-04-external-review-gaps D4）：WHERE 比较
+                // 腿标量子查询——子查询绑定预构建 + 占位改写 + 编译，谓词由
+                // ScalarSubqueryFilter 逐行承载（不下推进扫描节点、不路由
+                // 索引：占位求值需逐行注入子查询结果）。裁剪在谓词求值之后
+                // 由节点自身 `projection` 应用（Order BY 存在时为空，Sort
+                // 承担裁剪——`is_base_scan_chain` 契约同 Filter 链）。
+                let (rewritten, bindings) = self.bind_where_scalar_subqueries(where_expr)?;
+                let predicate = self.build_where(&table_name, &rewritten)?;
+                let base_columns = base_schema.clone().unwrap_or_default();
+                let columns = if proj_or_empty.is_empty() {
+                    base_columns
+                } else {
+                    proj_or_empty
+                        .iter()
+                        .map(|&i| base_columns[i].clone())
+                        .collect()
+                };
+                PhysicalPlan::ScalarSubqueryFilter(crate::executor::ScalarSubqueryFilterNode {
+                    input: Box::new(base_plan),
+                    predicate,
+                    bindings,
+                    columns,
+                    table_name: table_name.clone(),
+                    projection: proj_or_empty.clone(),
+                })
             } else if let Some(key) = self.extract_pk_from_where_gated(&table_name, where_expr)? {
                 // Try to extract primary key from WHERE clause for index scan
                 // Simple PK equality check - use index scan
                 // Note: This is a simplification. A more sophisticated optimizer would
                 // check if the WHERE clause is ONLY pk = value, not part of a complex expression
                 if self.is_simple_pk_equality(&table_name, where_expr)? {
+                    // T4: 相关参数补充列在输入投影尾部——IndexScan「已收窄」
+                    // 列名随投影同步附加（行形状 = SELECT ∪ 补充列）。
+                    let mut narrowed = projection_columns.clone();
+                    for name in &subquery_param_columns {
+                        let n = name.to_lowercase();
+                        if !narrowed.iter().any(|c| c.to_lowercase() == n) {
+                            narrowed.push(name.clone());
+                        }
+                    }
                     PhysicalPlan::IndexScan(IndexScanNode {
                         table_name: table_name.clone(),
                         key,
                         columns: if !sort_due && projection_indices.is_some() {
-                            projection_columns.clone()
+                            narrowed
                         } else {
                             base_schema.clone().unwrap_or_default()
                         },
@@ -1827,17 +2086,16 @@ impl PlanBuilder {
                 // MS21 Iter002 (T2-g/D6)：二级索引等值路由——PK 判定链未命中
                 // 后、非 PK 臂前插入。单条件 `<登记列> = <Int 字面量>` 命中
                 // 登记索引即 `IndexScanAll`（执行器消费该登记树）；其余形态
-                // （AND/OR 嵌入、非 Int/NULL 字面量）一律既有路径。计划形状
-                // 与 PK 键位路由同型：`columns`/`projection` 装配镜像上方
-                // IndexScan 臂。
+                // （AND/OR 嵌入、非 Int/NULL 字面量）一律既有路径。
+                // T1（change 2026-10-04-external-review-gaps D1）：`columns`
+                // 恒为基表全列，输出形状由 `projection` 唯一决定——消费方
+                // （get_plan_output_columns / EXPLAIN 渲染 / 聚合输入 schema）
+                // 按「基表全列 × 投影号」契约裁剪。PK IndexScan 臂保持
+                // 「已收窄」契约不变，两契约并存是消费方现状。
                 PhysicalPlan::IndexScanAll(IndexScanAllNode {
                     table_name: table_name.clone(),
                     key,
-                    columns: if !sort_due && projection_indices.is_some() {
-                        projection_columns.clone()
-                    } else {
-                        base_schema.clone().unwrap_or_default()
-                    },
+                    columns: base_schema.clone().unwrap_or_default(),
                     projection: proj_or_empty.clone(),
                     index_name: Some(index_name),
                 })
@@ -2351,6 +2609,29 @@ impl PlanBuilder {
                         if !self.qualifier_in_scope(qualifier) {
                             return Err(PlanError::TableNotFound(qualifier.clone()));
                         }
+                        // T3（change 2026-10-04-external-review-gaps D3）：JOIN
+                        // 基座（组合行布局存在）的限定键经布局解析产出表达式
+                        // 键（decorate-sort-undecorate，别名键先例同型）——
+                        // 自连接同名列按限定符精确解析，不再受裸名首匹配局限。
+                        // 仅限 Sort 输入行 = 组合行的形态（无聚合、无标量
+                        // 子查询项）：聚合查询的 Sort 在聚合输出行上，限定键
+                        // 维持既有裸名键路径（按聚合输出列集解析）。布局未命中
+                        // （非 JOIN 基座等）同回落。
+                        if !has_aggregates && subquery_evals.is_empty() {
+                            if let Some(layout) = &join_layout {
+                                if let Some(expr) =
+                                    self.resolve_order_by_layout_key(layout, qualifier, &column)?
+                                {
+                                    // sqlparser: asc field is Option<bool>
+                                    let asc = o.asc.unwrap_or(true);
+                                    return Ok(OrderByColumn {
+                                        column,
+                                        asc,
+                                        expr: Some(expr),
+                                    });
+                                }
+                            }
+                        }
                     }
                     // sqlparser: asc field is Option<bool>
                     // None or Some(true) = ASC, Some(false) = DESC
@@ -2396,6 +2677,25 @@ impl PlanBuilder {
                 projection_indices.clone().unwrap_or_default()
             } else if is_identity_filter_over_join(&plan_with_aggregate) {
                 where_join_projection.clone().unwrap_or_default()
+            } else if join_combined_columns(&plan_with_aggregate).is_some() {
+                // T3（change 2026-10-04-external-review-gaps D3）：无 WHERE 的
+                // 裸 JOIN 基座在 ORDER BY 存在时承载全组合列（carry_all 加序），
+                // SELECT 裁剪归 Sort——与 WHERE×JOIN 的 `where_join_projection`
+                // 同规则解析。标量子查询项维持既有恒等承载（与 WHERE 路径
+                // `filter_projection` 的排序让位条件同款）。
+                if subquery_evals.is_empty() {
+                    resolve_join_projection_indices(
+                        self,
+                        join_combined_columns(&plan_with_aggregate)
+                            .expect("JOIN base checked above"),
+                        &combined_qualifiers,
+                        &qualified_columns,
+                        select_list_is_pure_column_list(select, &subquery_indices),
+                    )?
+                    .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             };
@@ -2580,19 +2880,38 @@ impl PlanBuilder {
         // === Wrap with SubqueryEval nodes for scalar subqueries in SELECT ===
         // Process from right to left so that result_column_index calculations remain stable
         // result_column_index = projection_index - (number of subqueries at indices < projection_index)
+        //
+        // T4：相关参数补充列（`subquery_param_extras`）只在输入行中存活到
+        // 本链**最外层**节点（k+1 == total）——该节点按 output_width（SELECT
+        // 纯列宽 + 更深节点的标量数）截断收尾，补充列不泄漏进输出。
         let mut plan = plan_with_limit;
-        for (proj_idx, subquery_plan, col_name, correlated_params) in subquery_evals.iter().rev() {
+        let total_subquery_items = subquery_evals.len();
+        for (k, (proj_idx, subquery_plan, col_name, correlated_params)) in
+            subquery_evals.iter().rev().enumerate()
+        {
             let subqueries_before = subquery_evals
                 .iter()
                 .filter(|(idx, _, _, _)| idx < proj_idx)
                 .count();
             let result_column_index = proj_idx - subqueries_before;
+            let output_width = match subquery_param_extras {
+                Some(extras) if extras > 0 && k + 1 == total_subquery_items => {
+                    projection_indices
+                        .as_ref()
+                        .map(|l| l.len() - extras)
+                        .unwrap_or(0)
+                        + total_subquery_items
+                        - 1
+                }
+                _ => 0,
+            };
             plan = PhysicalPlan::SubqueryEval(crate::executor::SubqueryEvalNode {
                 input: Box::new(plan),
                 subquery: Box::new(subquery_plan.clone()),
                 output_column: col_name.clone(),
                 result_column_index,
                 correlated_params: correlated_params.clone(),
+                output_width,
             });
         }
 
@@ -3126,18 +3445,6 @@ fn resolve_join_projection_indices(
     qualified_columns: &[(Option<String>, String)],
     pure_column_list: bool,
 ) -> Result<Option<Vec<usize>>, PlanError> {
-    let matches_select = |idx: usize, col: &OutputColumn| -> bool {
-        qualified_columns.iter().any(|(qual_table, qual_col)| {
-            col.column.to_lowercase() == qual_col.to_lowercase()
-                && match qual_table {
-                    // T7（R9）：原文相等或归一化命中（隐式短名）。
-                    Some(table) => qualifiers
-                        .get(idx)
-                        .is_some_and(|q| builder.qualifier_matches_declared(table, q)),
-                    None => true,
-                }
-        })
-    };
     if qualified_columns.is_empty() || qualified_columns.iter().any(|(_, c)| c == "*") {
         return Ok(None);
     }
@@ -3167,14 +3474,28 @@ fn resolve_join_projection_indices(
             }
         }
     }
-    Ok(Some(
-        combined
-            .iter()
-            .enumerate()
-            .filter(|(idx, col)| matches_select(*idx, col))
-            .map(|(idx, _)| idx)
-            .collect(),
-    ))
+    // T10（change 2026-10-04-external-review-gaps D10）：索引按 SELECT 清单序
+    // 收集（对齐 Scan 基座语义）——逐 SELECT 项定位其命中组合列（限定名按
+    // 声明限定符精确、裸名任意命中），重复项重复产出；纯列清单的命中/歧义
+    // 已由上方校验保证，非纯清单的未命中项维持既有静默跳过。
+    let mut indices = Vec::with_capacity(qualified_columns.len());
+    for (qual_table, qual_col) in qualified_columns {
+        if qual_col == "*" {
+            continue;
+        }
+        if let Some((idx, _)) = combined.iter().enumerate().find(|(idx, col)| {
+            col.column.to_lowercase() == qual_col.to_lowercase()
+                && match qual_table {
+                    Some(table) => qualifiers
+                        .get(*idx)
+                        .is_some_and(|q| builder.qualifier_matches_declared(table, q)),
+                    None => true,
+                }
+        }) {
+            indices.push(idx);
+        }
+    }
+    Ok(Some(indices))
 }
 
 /// Whether the plan is the single-table scan chain (optionally Filter-wrapped)
@@ -3191,7 +3512,11 @@ fn is_base_scan_chain(plan: &PhysicalPlan) -> bool {
         // projection is empty (the Sort node then owns the trim), and its
         // projection indices are resolved against the same derived column
         // set the Select list was resolved from.
-        | PhysicalPlan::DerivedScan(_) => true,
+        | PhysicalPlan::DerivedScan(_)
+        // T4（change 2026-10-04-external-review-gaps）：标量谓词过滤节点——
+        // 谓词在全形状行上求值，`projection` 空 = 全 schema 行流出，Sort
+        // 承担裁剪（与 Filter 包裹链同契约）。
+        | PhysicalPlan::ScalarSubqueryFilter(_) => true,
         PhysicalPlan::Filter(node) => is_base_scan_chain(&node.input),
         _ => false,
     }
@@ -3342,6 +3667,67 @@ fn contains_or(expr: &Expr) -> bool {
             } => contains_or(e),
             _ => false,
         }),
+        _ => false,
+    }
+}
+
+/// T4（change 2026-10-04-external-review-gaps）：WHERE 表达式是否含标量
+/// 子查询（`Expr::Subquery`）腿。遍历变体集与
+/// `PlanBuilder::rewrite_scalar_subqueries`（subquery.rs）的改写面一致——
+/// InSubquery/Exists 腿与 Query 体内不进入（既有机制/拒绝面承载）。
+fn contains_scalar_subquery(expr: &Expr) -> bool {
+    match expr {
+        Expr::Subquery(_) => true,
+        Expr::BinaryOp { left, right, .. } => {
+            contains_scalar_subquery(left) || contains_scalar_subquery(right)
+        }
+        Expr::UnaryOp { expr, .. } => contains_scalar_subquery(expr),
+        Expr::Nested(expr) => contains_scalar_subquery(expr),
+        Expr::InList { expr, list, .. } => {
+            contains_scalar_subquery(expr) || list.iter().any(contains_scalar_subquery)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            contains_scalar_subquery(expr)
+                || contains_scalar_subquery(low)
+                || contains_scalar_subquery(high)
+        }
+        Expr::Like { expr, pattern, .. } => {
+            contains_scalar_subquery(expr) || contains_scalar_subquery(pattern)
+        }
+        Expr::IsNull(expr) | Expr::IsNotNull(expr) => contains_scalar_subquery(expr),
+        Expr::Cast { expr, .. } => contains_scalar_subquery(expr),
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|e| contains_scalar_subquery(e))
+                || conditions.iter().any(contains_scalar_subquery)
+                || results.iter().any(contains_scalar_subquery)
+                || else_result
+                    .as_ref()
+                    .is_some_and(|e| contains_scalar_subquery(e))
+        }
+        Expr::Function(func) => func.args.iter().any(|arg| match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => contains_scalar_subquery(e),
+            FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(e),
+                ..
+            } => contains_scalar_subquery(e),
+            _ => false,
+        }),
+        Expr::Trim {
+            expr, trim_what, ..
+        } => {
+            contains_scalar_subquery(expr)
+                || trim_what.as_deref().is_some_and(contains_scalar_subquery)
+        }
+        Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => contains_scalar_subquery(expr),
         _ => false,
     }
 }

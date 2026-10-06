@@ -224,13 +224,20 @@ pub(super) async fn checkpoint_db(
         move |db| {
             Box::pin(async move {
                 // 零工作谓词必须在 checkpoint() 之前取样（checkpoint 清脏页）。
-                // 会话持独占锁期间无并发写者，取样稳定；恢复重放的 redo 页经
-                // BufferPool 置脏，故「WAL 有未决」时谓词正确为 false。新会话
-                // get_write_count 恒 0，判定由 has_dirty_pages 承载。wal_writer
-                // 为 None 的臂在本命令路径不可达（只读/内存组合已被守卫拦截），
-                // 防御性按「有工作」处理即可，不加专门拒绝。
+                // 会话持独占锁期间无并发写者，取样稳定。新会话 get_write_count
+                // 恒 0，判定由 has_dirty_pages 承载。wal_writer 为 None 的臂在
+                // 本命令路径不可达（只读/内存组合已被守卫拦截），防御性按
+                // 「有工作」处理即可，不加专门拒绝。
+                // T2（change 2026-10-04-external-review-gaps D2）：打开时 WAL
+                // 曾含事务记录的恢复会话（含零 redo 形态——恢复重放零页写入，
+                // 取样谓词为真）视同未决工作，消息 SHALL 报告实际执行而非
+                // "no pending work"。
                 let zero_work = match &db.wal_writer {
-                    Some(wal) => wal.get_write_count() == 0 && !db.buffer_pool.has_dirty_pages(),
+                    Some(wal) => {
+                        wal.get_write_count() == 0
+                            && !db.buffer_pool.has_dirty_pages()
+                            && !db.wal_pending_at_open()
+                    }
                     None => true,
                 };
                 if let Err(e) = db.checkpoint().await {

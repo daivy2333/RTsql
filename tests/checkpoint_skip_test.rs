@@ -39,7 +39,7 @@ fn stamp_sentinel_site(db_path: &Path) {
     let wal_writer = Arc::new(WalWriter::open(db_path).unwrap());
     let storage = FileStorage::open(db_path).unwrap();
     let buffer_pool = Arc::new(BufferPool::new(10, Arc::new(storage)).unwrap());
-    CheckpointManager::new(db_path, wal_writer, buffer_pool)
+    CheckpointManager::new(db_path, wal_writer, buffer_pool, false)
         .write_checkpoint_site(0, 1, 0)
         .unwrap();
 }
