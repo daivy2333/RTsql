@@ -461,15 +461,16 @@ async fn s26_truncate_and_where_forms_zero_change() {
     let n = affected(exec(&db, "DELETE FROM t WHERE id = 2").await);
     assert_eq!(n, 1, "single-row PK-equality delete unchanged");
 
-    // 第二重门：带 WHERE 非 PK 等值维持点名拒绝（文案逐字节）。
+    // 第二重门：带 WHERE 非 PK 等值维持点名拒绝（文案逐字节；ISS11 起
+    // 解析类错误恰一层 `Parse error:`，PlanFailure 不再叠加 `Plan error:`）。
     let msg = error_msg(exec(&db, "UPDATE t SET v = 1 WHERE v = 99").await);
     assert_eq!(
-        msg, "Plan error: Parse error: UPDATE requires primary key equality in WHERE clause",
+        msg, "Parse error: UPDATE requires primary key equality in WHERE clause",
         "second gate text byte-exact"
     );
     let msg = error_msg(exec(&db, "DELETE FROM t WHERE v = 99").await);
     assert_eq!(
-        msg, "Plan error: Parse error: DELETE requires primary key equality in WHERE clause",
+        msg, "Parse error: DELETE requires primary key equality in WHERE clause",
         "second gate text byte-exact"
     );
 
@@ -506,4 +507,54 @@ async fn s26_full_table_update_empty_table_and_miss_forms() {
     exec(&db, "INSERT INTO t VALUES (1, 10)").await;
     let n = affected(exec(&db, "DELETE FROM t WHERE id = 99").await);
     assert_eq!(n, 0, "miss-keyed single-row delete stays affected 0");
+}
+
+// === S27: multi-level PK tree full-table DML（本 change T2 / B2） ===
+
+/// S27：≥3 层 PK 树（乱序 20000 唯一键）上无 WHERE 全表 UPDATE/DELETE 的
+/// `scan_all` 枚举必须触达全部行——affected_rows = 行数、逐行生效。
+/// RED 见证（B2）：修复前多层树 scan_all 返回空/碎片，UPDATE 中途
+/// `Abort failed: Key not found` 或 affected 严重偏少。
+#[tokio::test]
+async fn s27_full_table_dml_multi_level_pk_tree() {
+    let (db, _dir) = open_db().await;
+    exec(&db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)").await;
+
+    // 20000 个乱序唯一键（确定性乘法哈希序）→ PK 树 ≥3 层。
+    let mut ids: Vec<i64> = (1..=20000).collect();
+    ids.sort_by_key(|id| id.wrapping_mul(2654435761) % 1000003);
+    for chunk in ids.chunks(1000) {
+        let values = chunk
+            .iter()
+            .map(|id| format!("({id}, {})", id * 10))
+            .collect::<Vec<_>>()
+            .join(", ");
+        exec(&db, &format!("INSERT INTO t VALUES {values}")).await;
+    }
+
+    // 全表 UPDATE：affected = 行数，SUM 证明逐行恰生效一次（v = id*10 + 1）。
+    let n = affected(exec(&db, "UPDATE t SET v = v + 1").await);
+    assert_eq!(
+        n, 20000,
+        "full-table UPDATE must touch every row of a multi-level PK tree"
+    );
+    let r = rows(exec(&db, "SELECT SUM(v) AS s FROM t").await);
+    assert_eq!(
+        r[0][0].as_i64(),
+        Some(20000 * 20001 / 2 * 10 + 20000),
+        "every row updated exactly once"
+    );
+    // 抽查边界行
+    let r = rows(exec(&db, "SELECT v AS x FROM t WHERE id = 1").await);
+    assert_eq!(r[0][0].as_i64(), Some(11));
+    let r = rows(exec(&db, "SELECT v AS x FROM t WHERE id = 20000").await);
+    assert_eq!(r[0][0].as_i64(), Some(200001));
+
+    // 全表 DELETE：affected = 行数，表空。
+    let n = affected(exec(&db, "DELETE FROM t").await);
+    assert_eq!(
+        n, 20000,
+        "full-table DELETE must touch every row of a multi-level PK tree"
+    );
+    assert_ids(&db, "SELECT id FROM t", &[], "empty after full delete").await;
 }

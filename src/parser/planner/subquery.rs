@@ -5,6 +5,7 @@
 //! bodies are moved verbatim; only `impl PlanBuilder` block boundary and
 //! per-module imports are introduced.
 
+use super::query::projected_columns;
 use super::PlanBuilder;
 use crate::executor::{
     AntiJoinNode, ColumnRef, CorrelatedParam, JoinCondition, PhysicalPlan, ScalarSubqueryBinding,
@@ -17,6 +18,10 @@ impl PlanBuilder {
     /// Try to build a SemiJoin/AntiJoin plan from WHERE subquery expressions.
     /// Returns Ok(Some(plan)) if the expression is an IN subquery or EXISTS subquery,
     /// returns Ok(None) if the expression does not match any subquery pattern.
+    ///
+    /// T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：`projection_columns`
+    /// 不再消费——基座 `output_columns` 恒为左表全列（R5），调用方签名保持
+    /// 不变（外层按基表 schema 装配裁剪位）。
     pub(crate) fn try_build_where_subquery(
         &mut self,
         expr: &Expr,
@@ -24,6 +29,7 @@ impl PlanBuilder {
         table_name: &str,
         projection_columns: &[String],
     ) -> Result<Option<PhysicalPlan>, PlanError> {
+        let _ = projection_columns;
         match expr {
             Expr::InSubquery {
                 expr: left_expr,
@@ -60,8 +66,11 @@ impl PlanBuilder {
                     right_column,
                 }];
 
-                let output_columns =
-                    self.build_output_columns_for_table(table_name, projection_columns);
+                // T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：
+                // 基座承载左表全宽行——`output_columns` 为基表全列（行内容 =
+                // 左行直通），SELECT 清单裁剪由下游承担（无 ORDER BY 时本节点
+                // `projection`，ORDER BY 时 Sort）。R5：排序键可见非输出列。
+                let output_columns = self.build_full_output_columns_for_table(table_name);
 
                 // Detect correlated parameters
                 let correlated_params = self.extract_correlated_params(subquery, &inner_tables)?;
@@ -72,6 +81,7 @@ impl PlanBuilder {
                         right: Box::new(right_plan),
                         conditions,
                         output_columns,
+                        projection: Vec::new(),
                         correlated_params,
                     })))
                 } else {
@@ -80,6 +90,7 @@ impl PlanBuilder {
                         right: Box::new(right_plan),
                         conditions,
                         output_columns,
+                        projection: Vec::new(),
                         correlated_params,
                     })))
                 }
@@ -107,8 +118,9 @@ impl PlanBuilder {
                 self.building_from_derived = saved_from_derived;
                 self.inner_table_names = None;
 
-                let output_columns =
-                    self.build_output_columns_for_table(table_name, projection_columns);
+                // T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：
+                // 同 IN 臂——基座承载左表全宽行。
+                let output_columns = self.build_full_output_columns_for_table(table_name);
 
                 let conditions = vec![]; // EXISTS does not need equality conditions
 
@@ -121,6 +133,7 @@ impl PlanBuilder {
                         right: Box::new(right_plan),
                         conditions,
                         output_columns,
+                        projection: Vec::new(),
                         correlated_params,
                     })))
                 } else {
@@ -129,6 +142,7 @@ impl PlanBuilder {
                         right: Box::new(right_plan),
                         conditions,
                         output_columns,
+                        projection: Vec::new(),
                         correlated_params,
                     })))
                 }
@@ -685,6 +699,33 @@ impl PlanBuilder {
                     table: Some(node.alias.clone()),
                     column: node.columns[0].clone(),
                 })
+            }
+            // T8（change 2026-10-13-e2e-verification-and-defect-closure D11）：
+            // 裸名主键等值右支是 IndexScan——`columns` 构造期已收窄为
+            // SELECT 清单形状（契约同 `get_plan_output_columns` 的
+            // IndexScan 臂），直取首列不再误报多列。空清单维持多列错误。
+            PhysicalPlan::IndexScan(node) => {
+                if node.columns.is_empty() {
+                    return Err(PlanError::SubqueryReturnsMultipleColumns);
+                }
+                Ok(ColumnRef {
+                    table: Some(node.table_name.clone()),
+                    column: node.columns[0].clone(),
+                })
+            }
+            // T8（同上）：二级索引等值右支是 IndexScanAll——`columns` 恒为
+            // 基表全列、输出形状由 `projection` 唯一决定（按
+            // `get_plan_output_columns` 同款 `projected_columns` 规则先裁剪
+            // 再取首列；投影非空时不得回退基表第一列）。空清单维持多列错误。
+            PhysicalPlan::IndexScanAll(node) => {
+                let output_columns = projected_columns(&node.columns, &node.projection);
+                match output_columns.first() {
+                    Some(column) => Ok(ColumnRef {
+                        table: Some(node.table_name.clone()),
+                        column: column.clone(),
+                    }),
+                    None => Err(PlanError::SubqueryReturnsMultipleColumns),
+                }
             }
             _ => Err(PlanError::SubqueryReturnsMultipleColumns),
         }

@@ -104,14 +104,20 @@ struct CliArgs {
     /// 加密库密钥；也可经 RTSQL_KEY 环境变量提供（显式 flag 优先）
     #[arg(long, value_name = "KEY", global = true, env = "RTSQL_KEY")]
     key: Option<String>,
-    /// MS28 T1：advisory 锁等待预算（毫秒，默认 5000）；也可经
-    /// RTSQL_BUSY_TIMEOUT 提供（显式 flag 优先）。0 ＝ 不额外等待，仅内部
-    /// ~8ms 可见性下限窗口。独占与只读共享锁两侧统一生效。
-    #[arg(long, value_name = "MS", global = true, env = "RTSQL_BUSY_TIMEOUT")]
+    // MS28 T1：advisory 锁等待预算（毫秒，默认 5000）——flag 经 clap 完成
+    // u64 校验；未给 flag 时经 RTSQL_BUSY_TIMEOUT 提供（代码侧校验，ISS13），
+    // 显式 flag 优先。0 ＝ 不额外等待，仅内部 ~8ms 可见性下限窗口。独占与
+    // 只读共享锁两侧统一生效。
+    /// advisory 锁等待预算（毫秒，默认 5000）；也可经 RTSQL_BUSY_TIMEOUT
+    /// 环境变量提供（显式 flag 优先）。0 ＝ 不额外等待，仅内部 ~8ms 可见性
+    /// 下限窗口。独占与只读共享锁两侧统一生效。
+    #[arg(long, value_name = "MS", global = true)]
     busy_timeout: Option<u64>,
-    /// MS26 T1：只读打开主库（advisory 共享锁，多读单写）。写语句在计划期
-    /// 以 SQLSTATE 25006 拒绝。仅主命令有效——生命周期子命令维持读写打开
-    /// （proposal 假设 10）。
+    // MS26 T1：只读打开主库（advisory 共享锁，多读单写）。写语句在计划期
+    // 以 SQLSTATE 25006 拒绝。仅主命令有效——生命周期子命令维持读写打开
+    // （proposal 假设 10）。
+    /// 只读打开主库（advisory 共享锁，多读单写）。写语句在计划期以
+    /// SQLSTATE 25006 拒绝。仅主命令有效——生命周期子命令维持读写打开。
     #[arg(long)]
     readonly: bool,
     #[command(subcommand)]
@@ -276,10 +282,18 @@ async fn execute_command(args: &CliArgs) -> ExitStatus {
     if args.key.as_deref() == Some("") {
         return ExitStatus::Usage("key must not be empty".to_string());
     }
-    // MS28 T1：锁等待预算单点解析（`busy-timeout` 通道）——flag 经 clap
-    // 完成 u64 校验与 flag>env 优先（非法值在任何命令前 usage exit 2），
-    // 此处只承担单位换算与全域穿线（主命令、生命周期子命令、ATTACH）。
-    let lock_wait = args.busy_timeout.map(Duration::from_millis);
+    // MS28 T1 + ISS13：锁等待预算单点解析——flag 显式值优先，未给 flag 时
+    // 读 RTSQL_BUSY_TIMEOUT（代码侧校验，沿 RTSQL_WAL_CHECKPOINT_BYTES 先例），
+    // 非法值在开库前点名拒绝 exit 2（零副作用）；此处只承担单位换算与全域
+    // 穿线（主命令、生命周期子命令、ATTACH）。
+    let lock_wait = match args.busy_timeout {
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => match busy_timeout_from_env() {
+            Ok(Some(ms)) => Some(Duration::from_millis(ms)),
+            Ok(None) => None,
+            Err(message) => return ExitStatus::Usage(message),
+        },
+    };
     // MS26 T5/T6（`wal-auto-checkpoint` R2）：非法水位配置在**打开前**点名
     // 拒绝 exit 2（零副作用），与 `RTSQL_KEY` 空值同一纪律与通道。校验只对
     // 开库路径生效——未开库命令（list/new/delete/completions）不消费 WAL
@@ -368,7 +382,30 @@ async fn execute_command(args: &CliArgs) -> ExitStatus {
             );
             ExitStatus::Success
         }
-        None => execute_main_command(args).await,
+        None => execute_main_command(args, lock_wait).await,
+    }
+}
+
+/// 锁等待预算的环境变量名（ISS13，与 `RTSQL_WAL_CHECKPOINT_BYTES` 同族的
+/// 代码侧校验通道）。
+const ENV_BUSY_TIMEOUT: &str = "RTSQL_BUSY_TIMEOUT";
+
+/// 解析 `RTSQL_BUSY_TIMEOUT`（ISS13）。
+///
+/// `Ok(None)` = 未设置（保持引擎默认 5000ms）；`Ok(Some(ms))` = 合法毫秒数
+/// （`0` 表示不额外等待）；`Err(msg)` = 非法值，文案点名变量名与回显非法值，
+/// 由调用方映射为 `Usage`（exit 2）。
+///
+/// 解析用 `u64`：非数字、负数与溢出三种非法形态同归此一支。
+fn busy_timeout_from_env() -> Result<Option<u64>, String> {
+    match std::env::var(ENV_BUSY_TIMEOUT) {
+        Err(_) => Ok(None),
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(ms) => Ok(Some(ms)),
+            Err(_) => Err(format!(
+                "{ENV_BUSY_TIMEOUT} must be a non-negative integer (milliseconds, 0 disables waiting), got {raw:?}"
+            )),
+        },
     }
 }
 
@@ -417,7 +454,9 @@ fn lifecycle_db_target(command: &Command) -> Option<&str> {
 }
 
 /// 主命令臂：db/sql 任一缺失 → 手动 usage（exit 2）；合法输入走既有全链路。
-async fn execute_main_command(args: &CliArgs) -> ExitStatus {
+/// `lock_wait` 由 `execute_command` 单点解析（flag > RTSQL_BUSY_TIMEOUT）传入，
+/// 本臂不再自行读取环境变量。
+async fn execute_main_command(args: &CliArgs, lock_wait: Option<Duration>) -> ExitStatus {
     let (db, sql) = match (&args.db, &args.sql) {
         (Some(db), Some(sql)) => (db, sql),
         _ => {
@@ -467,7 +506,6 @@ async fn execute_main_command(args: &CliArgs) -> ExitStatus {
     let format = args.format;
     let key = args.key.clone();
     let readonly = args.readonly;
-    let lock_wait = args.busy_timeout.map(Duration::from_millis);
     execute_command_inner_mode(
         &db_path,
         args.key.as_deref(),
@@ -777,8 +815,9 @@ async fn run_sql(
 ) -> ExitStatus {
     let statements = match parse_stage(sql).await {
         Ok(statements) => statements,
-        // parse 错误无 SQLSTATE 分类（文本自带行列定位）。
-        Err(e) => return ExitStatus::Sql(e, None),
+        // parse 错误无 SQLSTATE 分类（单层 `Parse error:` 前缀 + 文本自带行列
+        // 定位，ISS11；前缀由本漏斗点统一赋予，parse_stage 返回裸解析器文本）。
+        Err(e) => return ExitStatus::Sql(format!("Parse error: {e}"), None),
     };
 
     // MS10-T04：分片逐条执行。每条语句独立 plan/execute，结果顺序渲染写

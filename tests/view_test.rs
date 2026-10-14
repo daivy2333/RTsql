@@ -725,3 +725,93 @@ async fn view_combination_surface() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0].as_i64().unwrap(), 3);
 }
+
+// ===========================================================================
+// R4（change 2026-10-13-e2e-verification-and-defect-closure T4）：视图内层
+// 输出列外层可见——delta spec `join-output-shape-resolution` ADDED R4 +
+// `sql-views` MODIFIED「视图解析与计划一致性」。
+//
+// 病灶（pre-fix 实测）：视图展开把 `building_from_derived` 置假，定义内的
+// `col AS alias`、表达式列与 DISTINCT 走表达式子查询抑制——外层按别名引用
+// 收 42703，DISTINCT 静默跳过；与 CTE/派生表通道「逐字节一致」声明矛盾。
+// 修复：视图展开与 FROM 派生同型置位，分类门只看
+// `building_subquery && !building_from_derived`。
+// ===========================================================================
+
+/// R4-S1：视图定义含别名列可查询（修复前 42703 `Column not found`）。
+#[tokio::test]
+async fn r4_view_inner_alias_outer_visible() {
+    let (db, _dir) = open_db().await;
+    seed_table(&db).await;
+    exec_ok(&db, "CREATE VIEW va AS SELECT v AS val FROM t", "create va").await;
+
+    let rows = count_rows(&db, "SELECT val FROM va ORDER BY val", "query va").await;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0][0].as_i64().unwrap(), 10);
+    assert_eq!(rows[1][0].as_i64().unwrap(), 200);
+    assert_eq!(rows[2][0].as_i64().unwrap(), 300);
+}
+
+/// R4-S2：视图定义含表达式（计算）列可查询。
+#[tokio::test]
+async fn r4_view_inner_expression_outer_visible() {
+    let (db, _dir) = open_db().await;
+    seed_table(&db).await;
+    exec_ok(
+        &db,
+        "CREATE VIEW ve AS SELECT v + 1 AS inc FROM t",
+        "create ve",
+    )
+    .await;
+
+    let rows = count_rows(&db, "SELECT inc FROM ve ORDER BY inc", "query ve").await;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0][0].as_i64().unwrap(), 11);
+    assert_eq!(rows[1][0].as_i64().unwrap(), 201);
+    assert_eq!(rows[2][0].as_i64().unwrap(), 301);
+}
+
+/// R4-S3：视图定义含 DISTINCT 真实去重（修复前静默跳过）。
+#[tokio::test]
+async fn r4_view_distinct_dedups() {
+    let (db, _dir) = open_db().await;
+    exec_ok(&db, "CREATE TABLE t2 (k INT, v INT)", "create t2").await;
+    for (k, v) in [(1, 5), (2, 7), (3, 5)] {
+        exec_ok(
+            &db,
+            &format!("INSERT INTO t2 VALUES ({k}, {v})"),
+            "insert t2",
+        )
+        .await;
+    }
+    exec_ok(
+        &db,
+        "CREATE VIEW vd AS SELECT DISTINCT v FROM t2",
+        "create vd",
+    )
+    .await;
+
+    let rows = count_rows(&db, "SELECT v FROM vd ORDER BY v", "query vd").await;
+    assert_eq!(rows.len(), 2, "DISTINCT view must dedup");
+    assert_eq!(rows[0][0].as_i64().unwrap(), 5);
+    assert_eq!(rows[1][0].as_i64().unwrap(), 7);
+}
+
+/// R4-S4：嵌套视图（视图定义引用含别名列的视图）零回归可达。
+#[tokio::test]
+async fn r4_nested_view_over_alias_view() {
+    let (db, _dir) = open_db().await;
+    seed_table(&db).await;
+    exec_ok(&db, "CREATE VIEW va AS SELECT v AS val FROM t", "create va").await;
+    exec_ok(
+        &db,
+        "CREATE VIEW vb AS SELECT val FROM va WHERE val > 100",
+        "create vb",
+    )
+    .await;
+
+    let rows = count_rows(&db, "SELECT val FROM vb ORDER BY val", "query vb").await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0].as_i64().unwrap(), 200);
+    assert_eq!(rows[1][0].as_i64().unwrap(), 300);
+}

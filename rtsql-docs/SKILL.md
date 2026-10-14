@@ -102,6 +102,10 @@ cargo build --release
 ./target/release/rtsql --version
 ```
 
+Verify the database as a whole from a source checkout:
+
+`cargo test --test e2e_test -- --test-threads=1` runs the end-to-end journey suite: real CLI subprocesses that walk whole user journeys (lifecycle, import, crash recovery, indexes, locking, cross-database, encryption, large values, analytics, output shapes, error surfaces). It is the fastest way to verify that the database works as a whole.
+
 ## Resolve a database
 
 A database argument follows two rules:
@@ -147,7 +151,7 @@ It creates no `.db`, `.wal`, or `.checkpoint` file, `close()` and `checkpoint()`
 |---|---|---|
 | `new` | `rtsql new demo` | Create an empty database; fails if the target already exists. This is the only creation channel for a missing database. |
 | `list` | `rtsql list` | Enumerate `$RTSQL_HOME/db/*.db` without opening the files. |
-| `schema` | `rtsql schema demo` | Print user-table DDL. |
+| `schema` | `rtsql schema demo` | Print user-table DDL (column types render as standard names: `INTEGER`, `TEXT`, `FLOAT`, `BOOLEAN`, `DATE`, `TIMESTAMP`). |
 | `dump` | `rtsql dump demo > demo.sql` | Export SQL text (`CREATE TABLE` + `INSERT` rows). A missing or damaged data-page chain is reported on stderr (see Behavioral notes) while the reachable part is still exported. |
 | `restore` | `rtsql restore demo-restored demo.sql` | Load a dump into an existing, still-empty target database (create it with `new` first); `-` reads the dump from stdin. |
 | `import` | `rtsql import demo people people.csv --csv` | Load a CSV file into a table (`--csv` required). The target table may already exist (header must match its column names) or it is auto-created from the CSV header with inferred types. `-` reads the CSV from stdin. Rows commit one by one. |
@@ -189,7 +193,8 @@ Per-code action guidance is in Select output and handle failures.
 - `dump` renders `PRIMARY KEY` in the exported DDL only when the primary-key column is declared `INTEGER` (the only form the engine enforces). Dumps produced by older versions that embed a non-integer `... PRIMARY KEY` DDL fail `restore` on a new database (plan-time refusal, exit 3) — that declaration was never enforced; re-dump with the current version or edit the DDL.
 - `rtsql check <db>` scans the whole file read-only: it never repairs, never writes, and leaves the file byte-identical. After a crash recovery the data chain can legitimately terminate on a page ahead of the persisted catalog tail (the replay advances the tail in memory only); `check` reports that as an informational line (`benign after crash recovery`) without changing the exit code, while a chain that ends before the persisted tail is an error.
 - `SELECT` resolves `FROM` table aliases across all clauses: qualified references such as `u.id` work in `SELECT`, `ON`, `WHERE`, `GROUP BY`, aggregate arguments, and `ORDER BY` — including qualified sort keys on `JOIN` bases, with or without a `WHERE` clause; an unknown qualifier is a plan-time error.
-- Long values are transparent: a row value larger than the single-page inline capacity (~4KB) is stored through overflow page chains with no artificial limit. `INSERT`/`UPDATE`/`SELECT`, `dump`/`restore`, and `import` round-trip oversized values unchanged (the internal switch between the ≤65535-byte and long-string representations is invisible to users), and crash recovery, `DROP TABLE`/`TRUNCATE`, encrypted databases, `:memory:`, and read-only sessions handle them the same way. The one visible bound: a `DEFAULT` literal lives in the catalog's in-page column row (~4KB), so an oversized default is refused at `CREATE TABLE` with the existing page-full error, while written values have no such limit.
+- Long values are transparent: a row value larger than the single-page inline capacity (~4KB) is stored through overflow page chains with no artificial limit. `INSERT`/`UPDATE`/`SELECT`, `dump`/`restore`, and `import` round-trip oversized values unchanged (the internal switch between the ≤65535-byte and long-string representations is invisible to users), and crash recovery, `DROP TABLE`/`TRUNCATE`, encrypted databases, `:memory:`, and read-only sessions handle them the same way. The one visible bound: a `DEFAULT` literal lives in the catalog's in-page column row (~4KB), so an oversized default is refused at plan time with `DEFAULT type mismatch: column '<name>': DEFAULT value is too large for the catalog page capacity` — before the table exists, with no side effects — while written values have no such limit.
+- Schema changes are durable at the statement boundary: a successful `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `ALTER TABLE ADD COLUMN`, or `CREATE TABLE AS SELECT` writes its catalog pages to disk before the statement returns (the `__tables` row lands last, as the commit point), so a process killed at any later instant still finds the schema on reopen, and WAL replay recovers the rows. The remaining crash windows are `DROP` statements (whose page release is checkpoint-based) and DDL on encrypted databases (whose WAL and checkpoint sidecars are plaintext by design); after either, verify with `rtsql check <db>` or prefer `dump` / `restore` for backups.
 - Errors that carry a SQLSTATE class name the code in CLI output: text formats append ` [SQLSTATE xxxx]` to the stderr error line, and `--format json` reports the error as a single-line JSON object on stderr carrying a `sqlstate` field (omitted when the error has no class). Exit codes are unchanged.
 
 ## Execute SQL
@@ -268,7 +273,7 @@ rtsql list
 rtsql schema demo
 ```
 
-`new` creates an empty database and fails if the target already exists. `list` enumerates `$RTSQL_HOME/db/*.db` without opening the listed databases. `schema` prints user-table DDL.
+`new` creates an empty database and fails if the target already exists. `list` enumerates `$RTSQL_HOME/db/*.db` without opening the listed databases. `schema` prints user-table DDL, with column types rendered as standard names (`INTEGER`, `TEXT`, `FLOAT`, `BOOLEAN`, `DATE`, `TIMESTAMP`).
 
 ### Evolve schema
 
@@ -284,7 +289,7 @@ rtsql demo "EXPLAIN SELECT id FROM people WHERE name = 'Ada'"
 
 - `ALTER TABLE` accepts one operation per statement. `ADD COLUMN` appends at the tail; existing rows read back the declared `DEFAULT` or NULL (`NOT NULL` without `DEFAULT` is refused on a non-empty table); the declared `DEFAULT` is validated against the column type exactly like `CREATE TABLE` (a FLOAT column upgrades an integer literal, a DATE/TIMESTAMP column parses the string, other mismatches are refused with the table unchanged). `DROP COLUMN` rewrites the table in one implicit transaction — all rows or none — and refuses a column referenced by an index or the last remaining column.
 - `TRUNCATE` empties a table and releases its data pages immediately, keeping the definition and index definitions (indexes rebuild empty).
-- `CREATE INDEX` builds a secondary index on a single integer column (non-unique; `UNIQUE` comes from the column constraint) and backfills existing rows; `DROP INDEX` removes it.
+- `CREATE INDEX` builds a secondary index on a single integer column (non-unique; `UNIQUE` comes from the column constraint) and backfills existing rows; `DROP INDEX` removes it. An equality predicate on the indexed column is served automatically, and the row set always matches a full table scan exactly — same rows, no duplicates, no misses — at any table size, including after restart and crash recovery.
 - `EXPLAIN SELECT` prints the plan tree without executing the query.
 
 ### Dump and restore
@@ -303,7 +308,7 @@ rtsql new demo-stdin
 rtsql dump demo | rtsql restore demo-stdin -
 ```
 
-A restore target must be empty. Dump files contain SQL and row data in plaintext; protect them as plaintext database exports.
+A restore target must be empty. The exported DDL renders column types with the same standard names (`INTEGER`, `TEXT`, `FLOAT`, `BOOLEAN`, `DATE`, `TIMESTAMP`), so a `dump` → `restore` round-trip reproduces the declarations. Dump files contain SQL and row data in plaintext; protect them as plaintext database exports.
 
 ### Import CSV
 
@@ -392,6 +397,8 @@ rtsql --format table demo "SELECT id, name, age FROM people"
 ```
 
 Without `--format`, an interactive terminal receives a table and redirected output receives JSON.
+
+Under `--format json`, multi-statement output is JSONL — one standalone JSON object per statement line — and a successful DDL statement reports `{"affected_rows":0}`, like any other zero-row statement.
 
 | Exit code | Meaning | Action |
 |---:|---|---|

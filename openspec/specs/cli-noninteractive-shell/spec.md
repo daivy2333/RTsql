@@ -465,6 +465,20 @@ CLI SHALL 对以 `;` 分隔的多条 SQL 语句逐条执行：每条语句独立
 - **WHEN** `rtsql dump <db>` 或 `rtsql restore <db> dump.sql`
 - **THEN** stderr 输出以 `database is locked` 开头的错误信息，退出码 4
 
+**e2e 验证与缺陷清偿 change（T6/ISS12，2026-10-14 收尾）追加**：`schema` 与 `dump` 的 DDL 列类型 SHALL 渲染标准长名——`INTEGER`、`FLOAT`、`BOOLEAN`、`DATE`、`TIMESTAMP`、`TEXT`（不再输出引擎内部短名 `INT`/`STRING`/`BOOL`）。dump→restore 往返与多代 dump/restore 幂等 SHALL 保持（解析器接受长名）。
+
+#### Scenario: 类型名渲染与声明一致
+
+- **GIVEN** `CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, ok BOOLEAN, score FLOAT)`
+- **WHEN** `rtsql schema t` / `rtsql dump t`
+- **THEN** DDL 输出 `INTEGER`/`TEXT`/`BOOLEAN`/`FLOAT`（失败边界——修复前：渲染 `INT`/`STRING`/`BOOL` 短名）
+
+#### Scenario: dump→restore 往返与多代幂等
+
+- **GIVEN** 同上库 dump
+- **WHEN** restore 到新库后再 dump
+- **THEN** 类型名与数据逐字节幂等
+
 ### Requirement: dump 数据链完整性预检
 
 `rtsql dump <db>` SHALL 在导出前对每张用户表执行数据页链完整性预检：自 head 沿页链收集，链终止页与 catalog 持久的尾页一致视为完整。链不完整时 SHALL 向 stderr 输出一行告警（点名表名、catalog 尾页与链终止页、以及「备份可能不完整，库可能已损坏」），SHALL 继续产出可达部分并保持退出码 0。完整库的 dump 行为与输出 SHALL 与修复前逐字节一致（零告警）。
@@ -720,6 +734,18 @@ CLI SHALL 提供全局 `--busy-timeout <MS>` flag（对齐 `--key` 的 global �
 - **WHEN** `rtsql --busy-timeout 200 x.db "SELECT 1"`
 - **THEN** 约 200ms 后 exit 4，错误信息维持既有 `DatabaseLocked` 文案（含库名）
 
+**e2e 验证与缺陷清偿 change（T6/ISS13，2026-10-14 收尾）修正**：env 通道非法值报错面——经 `RTSQL_BUSY_TIMEOUT` 设置非法值（非 u64）SHALL 在任何开库前 exit 2，报错文案 SHALL 点名环境变量 `RTSQL_BUSY_TIMEOUT` 与实际值（不再只指向 `--busy-timeout` flag）；flag 显式值优先语义与退出码 SHALL 不变。`RTSQL_KEY` / `RTSQL_WAL_CHECKPOINT_BYTES` 同族 env 校验报错 SHALL 同样点名各自 env 名（如有同病一并收敛）。
+
+#### Scenario: env 非法值报错点名环境变量
+
+- **WHEN** `RTSQL_BUSY_TIMEOUT=abc rtsql demo "SELECT 1"`
+- **THEN** exit 2，报错含 `RTSQL_BUSY_TIMEOUT` 与 `abc`（失败边界——修复前：`error: invalid value 'abc' for '--busy-timeout <MS>'`——env 设置者被误导去查不存在的命令行参数）
+
+#### Scenario: flag 优先与既有锁矩阵零回归
+
+- **WHEN** flag 与 env 同时设置（flag 合法 env 非法 / 两者均合法不同值）；既有锁等待/超时/信号中断用例
+- **THEN** flag 优先、锁矩阵行为与退出码不变
+
 ### Requirement: 生命周期子命令 checkpoint
 
 `rtsql checkpoint <db>` SHALL：经 `resolve_existing_db` 解析目标库（缺失以既有 General 语义 exit 1 拒绝）→ 以读写模式独占打开（锁冲突经 `--busy-timeout`/env 等待预算后 `DatabaseLocked` exit 4）→ 执行 `Database::checkpoint()` → 向 stdout 输出一行确认并 exit 0；WAL 无未决工作（无追加且无脏页）时 SHALL 输出明示零工作早退的确认并 exit 0（`Database::checkpoint()` 零工作跳过语义不变）。`--readonly` 组合与 `:memory:` 目标 SHALL 以 exit 2 拒绝（对齐既有子命令拒绝先例）。加密库 SHALL 经既有全局 `--key`/`RTSQL_KEY` 打开，密钥错误沿用 exit 5。checkpoint 的执行 SHALL 与 close/水位自动 checkpoint 的全量九步路径同源，落盘后外部备份可见完整已提交数据。
@@ -781,3 +807,23 @@ CLI 错误输出 SHALL 在 `Response::Error` 携带 `sqlstate` 时渲染该代�
 - **GIVEN** serve/PG 客户端与正常查询
 - **WHEN** 既有 pg_integration 断言与正常结果渲染
 - **THEN** 零回归
+
+### Requirement: 多语句 JSONL 与 DDL affected_rows 输出形态（锁定）
+
+多语句输入以 `--format json` 执行时，输出 SHALL 为逐语句一个独立 JSON 对象（JSONL 流，含既有 fail-fast 序号定位）；DDL 语句成功 SHALL 输出 `{"affected_rows":0}`。两者为文档化设计形态（2026-10-13 用户裁定维持现状），以测试与文档锁定；退出码与渲染语义 SHALL 零变化。
+
+#### Scenario: 多语句 JSONL 形态
+
+- **GIVEN** 库与两条查询语句以 `;` 连接
+- **WHEN** `rtsql demo --format json "SELECT 1; SELECT 2"`
+- **THEN** stdout 两行独立 JSON 对象（每行可独立解析）
+
+#### Scenario: DDL affected_rows 形态
+
+- **WHEN** `rtsql demo --format json "CREATE TABLE t (id INTEGER)"`
+- **THEN** 输出 `{"affected_rows":0}`、exit 0
+
+#### Scenario: help 文本无内部开发标记
+
+- **WHEN** `rtsql --help` / `rtsql import --help`
+- **THEN** 帮助文本不含内部任务编号（`MS2x` 类）与提案标记（`proposal`）（失败边界——修复前：`--busy-timeout` help 含「MS28 T1：」、`--readonly` help 含「MS26 T1：」「proposal 假设 10」）

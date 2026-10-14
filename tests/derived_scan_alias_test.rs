@@ -349,6 +349,114 @@ async fn nested_derived_column_order() {
     );
 }
 
+// ==== R4：派生表/视图内层输出列外层可见（change 2026-10-13-e2e-verification-and-defect-closure T4，delta spec `join-output-shape-resolution` ADDED R4）====
+//
+// 病灶（pre-fix 实测）：派生表内层的 `col AS alias`、表达式列与 DISTINCT 被
+// `building_subquery` 分类门抑制——外层按别名引用收 42703，DISTINCT 静默
+// 跳过；CTE 通道（顶层构建）不受影响。修复把抑制条件统一为
+// `building_subquery && !building_from_derived`（视图展开与 FROM 派生同型
+// 置位，见 view_test.rs R4 组）。e2e 见证：`e11_inner_columns_outer_visible`
+// 解除 ignore 由 RED 转 GREEN。
+
+/// R4-S1：派生表内层别名列外层可引用。
+#[tokio::test]
+async fn r4_derived_inner_alias_outer_visible() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("SELECT val FROM (SELECT v AS val FROM t) d ORDER BY val")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!("a")], vec![json!("b")]]);
+}
+
+/// R4-S2：派生表内层表达式（计算）列外层可引用。
+#[tokio::test]
+async fn r4_derived_inner_expression_outer_visible() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    let rows = rows_of(
+        db.execute_sql("SELECT up FROM (SELECT upper(v) AS up FROM t) d ORDER BY up")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!("A")], vec![json!("B")]]);
+}
+
+/// R4-S3：派生表内层 DISTINCT 真实去重（修复前静默跳过）。
+#[tokio::test]
+async fn r4_derived_inner_distinct_dedups() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+    exec_ok(&db, "CREATE TABLE t2 (v STRING)").await;
+    for v in ["x", "y", "x"] {
+        exec_ok(&db, &format!("INSERT INTO t2 VALUES ('{v}')")).await;
+    }
+
+    let rows = rows_of(
+        db.execute_sql("SELECT d FROM (SELECT DISTINCT v AS d FROM t2) s ORDER BY d")
+            .await,
+    );
+    assert_eq!(rows, vec![vec![json!("x")], vec![json!("y")]]);
+}
+
+/// R4-S4：三通道一致——同一内层定义经派生表 / 视图 / CTE 输出逐字节一致。
+#[tokio::test]
+async fn r4_three_channels_identical() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+    exec_ok(
+        &db,
+        "CREATE VIEW vw AS SELECT v AS val, upper(v) AS up FROM t",
+    )
+    .await;
+
+    let expected = vec![vec![json!("a"), json!("A")], vec![json!("b"), json!("B")]];
+    let derived = rows_of(
+        db.execute_sql(
+            "SELECT val, up FROM (SELECT v AS val, upper(v) AS up FROM t) d ORDER BY val",
+        )
+        .await,
+    );
+    let view = rows_of(db.execute_sql("SELECT val, up FROM vw ORDER BY val").await);
+    let cte = rows_of(
+        db.execute_sql(
+            "WITH c AS (SELECT v AS val, upper(v) AS up FROM t) SELECT val, up FROM c ORDER BY val",
+        )
+        .await,
+    );
+    assert_eq!(derived, expected);
+    assert_eq!(
+        view, expected,
+        "view channel must match derived byte-for-byte"
+    );
+    assert_eq!(
+        cte, expected,
+        "cte channel must match derived byte-for-byte"
+    );
+}
+
+/// R4-S5：IN/EXISTS/标量上下文内层表达式项维持既有拒绝（文案逐字节不变）。
+#[tokio::test]
+async fn r4_expression_items_still_rejected_in_expression_subqueries() {
+    let dir = tempdir().unwrap();
+    let db = seed(&dir).await;
+
+    for sql in [
+        "SELECT n FROM t WHERE n IN (SELECT upper(v) FROM t)",
+        "SELECT n FROM t WHERE n IN (SELECT upper(v) AS u FROM t)",
+        "SELECT n FROM t WHERE EXISTS (SELECT upper(v) FROM t)",
+        "SELECT n FROM t WHERE n = (SELECT upper(v) FROM t)",
+    ] {
+        let msg = error_msg(db.execute_sql(sql).await);
+        assert!(
+            msg.contains("Invalid aggregate argument: Expected column name"),
+            "expression subquery rejection surface must be unchanged: {sql:?} -> {msg}"
+        );
+    }
+}
+
 // ==== CLI 夹具（表头断言需要真二进制 JSON 列名）====
 
 fn query_cli(sql: &str) -> CliOutput {

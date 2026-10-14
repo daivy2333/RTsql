@@ -204,7 +204,7 @@ fn auto_create_type_inference_and_promotion() {
     let out = run_cli(dir.path(), &["schema", "app"]);
     assert_success(&out, "schema");
     assert!(
-        out.stdout.contains("\"id\" INT"),
+        out.stdout.contains("\"id\" INTEGER"),
         "schema: {:?}",
         out.stdout
     );
@@ -214,7 +214,7 @@ fn auto_create_type_inference_and_promotion() {
         out.stdout
     );
     assert!(
-        out.stdout.contains("\"label\" STRING"),
+        out.stdout.contains("\"label\" TEXT"),
         "schema: {:?}",
         out.stdout
     );
@@ -240,9 +240,13 @@ fn auto_create_all_null_column() {
 
     let out = run_cli(dir.path(), &["schema", "app"]);
     assert_success(&out, "schema");
-    assert!(out.stdout.contains("\"a\" INT"), "schema: {:?}", out.stdout);
     assert!(
-        out.stdout.contains("\"b\" STRING"),
+        out.stdout.contains("\"a\" INTEGER"),
+        "schema: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("\"b\" TEXT"),
         "all-NULL column must fall to STRING: {:?}",
         out.stdout
     );
@@ -273,9 +277,9 @@ fn auto_create_zero_data_rows() {
     let out = run_cli(dir.path(), &["schema", "app"]);
     assert_success(&out, "schema");
     assert!(
-        out.stdout.contains("\"a\" STRING")
-            && out.stdout.contains("\"b\" STRING")
-            && out.stdout.contains("\"c\" STRING"),
+        out.stdout.contains("\"a\" TEXT")
+            && out.stdout.contains("\"b\" TEXT")
+            && out.stdout.contains("\"c\" TEXT"),
         "header-only CSV must create all-STRING columns: {:?}",
         out.stdout
     );
@@ -351,7 +355,7 @@ fn auto_create_first_column_implicit_pk_semantics() {
     let out = run_cli(dir.path(), &["schema", "app"]);
     assert_success(&out, "schema");
     assert!(
-        out.stdout.contains("\"id\" INT PRIMARY KEY"),
+        out.stdout.contains("\"id\" INTEGER PRIMARY KEY"),
         "auto-created schema must render first column as PRIMARY KEY: {:?}",
         out.stdout
     );

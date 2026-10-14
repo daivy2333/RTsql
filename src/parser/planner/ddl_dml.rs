@@ -1150,6 +1150,33 @@ impl PlanBuilder {
             }
         }
 
+        // change 2026-10-13 T3 (design D6): serialized-size precheck — a
+        // column whose catalog row (including the declared DEFAULT) cannot
+        // fit an empty catalog page is rejected here, named and with zero
+        // side effects, instead of failing at execution time with
+        // "Page full" after a half-built table. The probe serializes the
+        // exact row the create path persists (`to_schema_column` is the
+        // same conversion the executor uses), so the threshold is derived
+        // from the real page format.
+        for (idx, col) in column_defs.iter().enumerate() {
+            let schema_col = col.to_schema_column();
+            let probe = crate::storage::catalog::CatalogColumnRow {
+                table_name: table_name.clone(),
+                column_index: idx as u32,
+                column_name: schema_col.name.clone(),
+                column_type: schema_col.data_type,
+                not_null: schema_col.not_null,
+                unique: schema_col.unique,
+                default_value: schema_col.default_value,
+            };
+            if !crate::storage::catalog::catalog_column_row_fits(&probe) {
+                return Err(PlanError::DefaultTypeMismatch(format!(
+                    "column '{}': DEFAULT value is too large for the catalog page capacity",
+                    col.name
+                )));
+            }
+        }
+
         // Extract primary key
         let primary_key = self.extract_primary_key(columns, constraints)?;
 
@@ -1401,6 +1428,37 @@ impl PlanBuilder {
                     {
                         default_value = Some(normalized);
                     }
+                }
+                // change 2026-10-13 T3 (design D6): same serialized-size
+                // precheck as CREATE TABLE — the column row the ALTER appends
+                // must fit an empty catalog page. `to_schema_column` is the
+                // same conversion the executor uses for the catalog write.
+                let mut probe_constraints = Vec::new();
+                if not_null {
+                    probe_constraints.push(ColumnConstraint::NotNull);
+                }
+                if let Some(v) = &default_value {
+                    probe_constraints.push(ColumnConstraint::DefaultValue(v.clone()));
+                }
+                let schema_col = ColumnDef {
+                    name: column_name.clone(),
+                    data_type: column_type.clone(),
+                    constraints: probe_constraints,
+                }
+                .to_schema_column();
+                let probe = crate::storage::catalog::CatalogColumnRow {
+                    table_name: table_name.clone(),
+                    column_index: column_list.len() as u32,
+                    column_name: schema_col.name.clone(),
+                    column_type: schema_col.data_type,
+                    not_null: schema_col.not_null,
+                    unique: schema_col.unique,
+                    default_value: schema_col.default_value,
+                };
+                if !crate::storage::catalog::catalog_column_row_fits(&probe) {
+                    return Err(PlanError::DefaultTypeMismatch(format!(
+                        "column '{column_name}': DEFAULT value is too large for the catalog page capacity"
+                    )));
                 }
                 // NOT NULL 无 DEFAULT 且表非空 → 计划期点名拒绝（存量行无法
                 // 满足）；表非空判定为 plan_stage 注入的通道输入

@@ -1085,12 +1085,12 @@ fn test_schema_outputs_ddl() {
         out.stdout
     );
     assert!(
-        out.stdout.contains("\"id\" INT PRIMARY KEY"),
+        out.stdout.contains("\"id\" INTEGER PRIMARY KEY"),
         "PK column must be rendered: {:?}",
         out.stdout
     );
     assert!(
-        out.stdout.contains("\"label\" STRING NOT NULL"),
+        out.stdout.contains("\"label\" TEXT NOT NULL"),
         "NOT NULL constraint must be rendered: {:?}",
         out.stdout
     );
@@ -1123,7 +1123,7 @@ fn test_schema_unique_roundtrip() {
         out.stderr
     );
     assert!(
-        out.stdout.contains("\"code\" INT UNIQUE"),
+        out.stdout.contains("\"code\" INTEGER UNIQUE"),
         "UNIQUE constraint must be rendered: {:?}",
         out.stdout
     );
@@ -1639,18 +1639,18 @@ async fn test_dump_pk_rendering_matches_enforced_semantics() {
     let dump = run_cli(dir.path(), &["dump", legacy.to_str().unwrap()]);
     assert_eq!(dump.code, Some(0), "stderr: {}", dump.stderr);
 
-    // INTEGER PK 渲染逐字节不变。
+    // INTEGER PK 渲染规则保持（PK 随列输出）——ISS12 起类型名为标准长名。
     assert!(
         dump.stdout
-            .contains("CREATE TABLE \"ok\" (\"id\" INT PRIMARY KEY, \"v\" INT);"),
-        "INTEGER PK DDL must stay byte-identical: {:?}",
+            .contains("CREATE TABLE \"ok\" (\"id\" INTEGER PRIMARY KEY, \"v\" INTEGER);"),
+        "INTEGER PK DDL must keep the PK rendering rule: {:?}",
         dump.stdout
     );
     // 非 INT PK 渲染不含 PRIMARY KEY——声明从未被强制，输出与语义一致
     // （隐式 PK 非 INT 首列表在 catalog 中同型，同断言覆盖）。
     assert!(
         dump.stdout
-            .contains("CREATE TABLE \"s\" (\"name\" STRING, \"v\" INT);"),
+            .contains("CREATE TABLE \"s\" (\"name\" TEXT, \"v\" INTEGER);"),
         "non-INTEGER PK DDL must not carry PRIMARY KEY: {:?}",
         dump.stdout
     );
@@ -2091,6 +2091,81 @@ fn test_secondary_index_scan_projection_headers() {
     let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
     assert_eq!(parsed["columns"], serde_json::json!(["name", "id"]));
     assert_eq!(parsed["rows"], serde_json::json!([["Ada", 1]]));
+}
+
+/// T5（change 2026-10-13-e2e-verification-and-defect-closure R5）：IN 子查询
+/// 基座全宽承载后的 CLI 表头对照——表头恒 SELECT 清单、行逐位对齐，基表
+/// 全宽行不得泄漏到输出（无 ORDER BY 与 ORDER BY 非输出列两形态）。
+#[test]
+fn test_subquery_semi_join_projection_header() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "app"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "CREATE TABLE emp (id INT, name STRING, dept_id INT, salary INT)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    for row in [
+        "(1, 'Ada', 10, 90)",
+        "(2, 'Bob', 20, 70)",
+        "(3, 'Cy', 10, 80)",
+    ] {
+        let out = run_cli(
+            dir.path(),
+            &["app", &format!("INSERT INTO emp VALUES {row}")],
+        );
+        assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    }
+    let out = run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE dept (id INT, region STRING)"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(dir.path(), &["app", "INSERT INTO dept VALUES (10, 'East')"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+
+    // 无 ORDER BY：表头 ["name"]、行宽 1（修复风险面——基座全宽后泄漏多列）
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT name FROM emp WHERE dept_id IN (SELECT id FROM dept)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["name"]));
+    assert_eq!(parsed["rows"], serde_json::json!([["Ada"], ["Cy"]]));
+    // ORDER BY 非输出列 salary：表头仍 ["name"]，行按 salary 降序 Ada,Cy
+    // （dept 仅含 10：Bob 的 dept_id=20 不命中）
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT name FROM emp WHERE dept_id IN (SELECT id FROM dept) ORDER BY salary DESC",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["name"]));
+    assert_eq!(parsed["rows"], serde_json::json!([["Ada"], ["Cy"]]));
+
+    // 多列投影 + ORDER BY 非输出列：表头与行逐位对齐
+    let out = run_cli(
+        dir.path(),
+        &[
+            "app",
+            "SELECT name, salary FROM emp WHERE dept_id IN (SELECT id FROM dept) ORDER BY salary",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(parsed["columns"], serde_json::json!(["name", "salary"]));
+    assert_eq!(parsed["rows"], serde_json::json!([["Cy", 80], ["Ada", 90]]));
 }
 
 /// 怪癖修正：`SELECT 42 FROM t` 单列常量（表头 `42`），不再恒等回退全 schema
@@ -2653,7 +2728,7 @@ fn test_stats_numeric_column_full_fields() {
             .unwrap_or_else(|| panic!("missing stats row for column {name}: {rows:?}"))
     };
     let id = find("id");
-    assert_eq!(id[1], serde_json::json!("INT"));
+    assert_eq!(id[1], serde_json::json!("INTEGER"));
     assert_eq!(id[2], serde_json::json!(5));
     assert_eq!(id[3], serde_json::json!(0));
     assert_eq!(id[4], serde_json::json!(5));
@@ -2950,7 +3025,7 @@ fn test_profile_mixed_columns() {
 
     // name top-3（默认 k=5，3 个 distinct）
     let name = find("name");
-    assert_eq!(name[1], serde_json::json!("STRING"));
+    assert_eq!(name[1], serde_json::json!("TEXT"));
     assert_eq!(name[4], serde_json::json!("alice(4), bob(2), carol(1)"));
 }
 
@@ -3774,7 +3849,7 @@ async fn legacy_bool_pk_dump_form_restores() {
     assert!(
         dump_out
             .stdout
-            .contains("CREATE TABLE \"flagged\" (\"pk\" BOOL NOT NULL, \"v\" INT);"),
+            .contains("CREATE TABLE \"flagged\" (\"pk\" BOOLEAN NOT NULL, \"v\" INTEGER);"),
         "dump must drop the never-enforced PRIMARY KEY marker, keep NOT NULL: {:?}",
         dump_out.stdout
     );
@@ -3833,13 +3908,13 @@ fn test_dump_restore_roundtrip_preserves_defaults() {
     let dump_out = run_cli(dir.path(), &["dump", "app"]);
     assert_eq!(dump_out.code, Some(0), "dump failed: {}", dump_out.stderr);
     assert!(
-        dump_out.stdout.contains("\"name\" STRING DEFAULT 'anon'"),
-        "dump DDL must render STRING DEFAULT: {:?}",
+        dump_out.stdout.contains("\"name\" TEXT DEFAULT 'anon'"),
+        "dump DDL must render TEXT DEFAULT: {:?}",
         dump_out.stdout
     );
     assert!(
-        dump_out.stdout.contains("\"score\" INT DEFAULT 0"),
-        "dump DDL must render INT DEFAULT: {:?}",
+        dump_out.stdout.contains("\"score\" INTEGER DEFAULT 0"),
+        "dump DDL must render INTEGER DEFAULT: {:?}",
         dump_out.stdout
     );
     assert!(
@@ -4648,4 +4723,138 @@ fn cli_error_without_sqlstate_omits_field_and_suffix() {
         "usage json omits sqlstate: {}",
         usage.stderr
     );
+}
+
+// ===========================================================================
+// Iteration 004 T6（ISS10–13）：文案四点——help 无内部标记、错误前缀单层、
+// busy-timeout env 代码侧校验（沿 RTSQL_WAL_CHECKPOINT_BYTES 先例；
+// RTSQL_KEY 空值族由 key_empty_exit_2 既有覆盖）。
+// ===========================================================================
+
+/// ISS10：--help 与子命令帮助均为用户视角，无内部任务编号/提案标记。
+#[test]
+fn help_text_has_no_internal_markers() {
+    let dir = fixture();
+    for args in [
+        &["--help"][..],
+        &["new", "--help"][..],
+        &["dump", "--help"][..],
+    ] {
+        let out = run_cli(dir.path(), args);
+        assert_eq!(
+            out.code,
+            Some(0),
+            "help failed for {args:?}: {}",
+            out.stderr
+        );
+        for marker in ["MS28", "MS26", "proposal", "ISS", "T1：", "Iteration"] {
+            assert!(
+                !out.stdout.contains(marker),
+                "{args:?} help must not leak internal marker {marker:?}: {}",
+                out.stdout
+            );
+        }
+    }
+}
+
+/// ISS11：解析类错误恰一层 `Parse error:`——文本级漏斗（裸 SQL）与
+/// 计划级漏斗（ParseError 变体经 PlanFailure）两条路径均无双层嵌套。
+#[test]
+fn parse_error_prefix_is_single_layer_all_paths() {
+    let dir = fixture();
+    run_cli(dir.path(), &["new", "app"]);
+    run_cli(
+        dir.path(),
+        &["app", "CREATE TABLE t (id INT PRIMARY KEY, v INT)"],
+    );
+
+    // 文本级漏斗：sqlparser 裸错误 → 单层前缀（默认 JSON 错误对象）。
+    let out = run_cli(dir.path(), &["app", "SELEC id FROM t"]);
+    assert_eq!(out.code, Some(3), "parse must fail: {}", out.stderr);
+    let parsed = parse_json_stderr(&out.stderr);
+    let msg = parsed["error"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("Parse error: Parse error:"),
+        "double parse prefix: {msg}"
+    );
+    assert!(
+        !msg.contains("Plan error:"),
+        "plan prefix must not wrap parse errors: {msg}"
+    );
+    assert!(msg.contains("Parse error"), "single prefix kept: {msg}");
+
+    // 计划级漏斗：ParseError 变体（第二重门）不再叠加 `Plan error:`。
+    let out = run_cli(dir.path(), &["app", "UPDATE t SET v = 1 WHERE v = 2"]);
+    assert_eq!(out.code, Some(3), "plan must fail: {}", out.stderr);
+    let parsed = parse_json_stderr(&out.stderr);
+    let msg = parsed["error"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("Plan error: Parse error:"),
+        "double layer via PlanFailure: {msg}"
+    );
+    assert!(
+        msg.contains("Parse error: UPDATE requires primary key equality in WHERE clause"),
+        "single-layer plan parse error: {msg}"
+    );
+}
+
+/// ISS13：RTSQL_BUSY_TIMEOUT 代码侧校验——非法值在开库前 exit 2 且点名
+/// 变量名与回显值；显式 flag 优先于 env；合法值（含 0）正常生效。
+#[test]
+fn busy_timeout_env_code_side_validation() {
+    let dir = fixture();
+    run_cli(dir.path(), &["new", "app"]);
+
+    // 非法值：exit 2 + 点名环境变量与非法值（零副作用——库未打开）。
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_BUSY_TIMEOUT", "abc")],
+        &["app", "SELECT 1"],
+    );
+    assert_eq!(
+        out.code,
+        Some(2),
+        "invalid env must exit 2: {} {}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("RTSQL_BUSY_TIMEOUT") && out.stderr.contains("abc"),
+        "error must name the env var and echo the value: {}",
+        out.stderr
+    );
+
+    // flag 显式值优先：env 非法但 flag 合法 → 命令正常执行。
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_BUSY_TIMEOUT", "abc")],
+        &["app", "--busy-timeout", "50", "SELECT 1"],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "explicit flag must win over env: {} {}",
+        out.stdout,
+        out.stderr
+    );
+
+    // 合法值（0 = 不额外等待）正常生效。
+    let out = run_cli_env(
+        dir.path(),
+        &[("RTSQL_BUSY_TIMEOUT", "0")],
+        &["app", "SELECT 1"],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "valid env must apply: {} {}",
+        out.stdout,
+        out.stderr
+    );
+}
+
+/// 从 stderr 解析单行 JSON 错误对象（CLI JSON 渲染契约）。
+fn parse_json_stderr(stderr: &str) -> serde_json::Value {
+    serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("stderr is not JSON: {e}: {stderr}"))
 }

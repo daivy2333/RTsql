@@ -177,21 +177,31 @@ impl<'a> LeafNode<'a> {
         let mut sorted_entries = entries;
         sorted_entries.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
 
-        // 3. 清空页（重新初始化）
+        // 3. 记录旧叶链指针（B1 修复：`LeafNode::init` 重置 header，不恢复的
+        //    话 sibling 链被清零——对齐 `shift_slots_right_internal` 与
+        //    `LeafNode::split` 的保真先例）
+        let old_next_page_id = self.next_leaf_page_id();
+
+        // 4. 清空页（重新初始化）
         let page_id = self.slotted.page_id();
         let mut new_page = Page::new(page_id);
         let mut new_leaf = LeafNode::init(&mut new_page);
 
-        // 4. 按排序后的顺序重新插入
+        // 5. 按排序后的顺序重新插入
         for (key, row_id) in sorted_entries {
             new_leaf.insert_simple(&key, &row_id)?;
         }
 
-        // 5. 将新页数据复制回当前页
+        // 6. 将新页数据复制回当前页
         self.slotted
             .page
             .data
             .copy_from_slice(new_page.data.as_ref());
+
+        // 7. 恢复叶链指针并刷新缓存 header（copy_from_slice 改了原始字节，
+        //    缓存 header 必须重读——同 `LeafNode::split` :372 与 internal 版 :788）
+        self.slotted.page.data[5..9].copy_from_slice(&old_next_page_id.to_le_bytes());
+        self.slotted.reload_header();
 
         Ok(())
     }
@@ -288,8 +298,8 @@ impl<'a> LeafNode<'a> {
         let mut new_page = Page::new(page_id);
         let mut new_leaf = LeafNode::init(&mut new_page);
 
-        for (k, r) in updated_entries {
-            new_leaf.insert_simple(&k, &r)?;
+        for (k, r) in &updated_entries {
+            new_leaf.insert_simple(k, r)?;
         }
 
         // Copy new page data to current page
@@ -719,56 +729,80 @@ impl<'a> InternalNode<'a> {
         }
     }
 
-    /// 插入分隔符（key + right_child_page_id）
+    /// 在被分裂子页的紧右边插入分隔符。
+    ///
+    /// `left_sibling` 是刚分裂、仍保留原页号的那一页。新分隔键插在它和
+    /// `right_child`（新页）之间，不按键值在等值分隔键串里重排。
     pub fn insert_separator(
         &mut self,
         key: &Key,
         right_child: PageId,
+        left_sibling: PageId,
     ) -> Result<usize, StorageError> {
-        // 1. 查找插入位置
-        let position = self.find_insert_position(key);
+        let position = self.separator_index_after_child(left_sibling.0 as u32)?;
 
-        // 2. 检查 PageFull
         let entry_size = MAX_KEY_LEN + 4; // Key + PageId (u32)
         if self.slotted.free_space() < Slot::SIZE + entry_size {
             return Err(StorageError::PageFull);
         }
 
-        // 3. 构造数据
         let mut data = vec![0u8; entry_size];
         key.serialize(&mut data[..MAX_KEY_LEN]);
         data[MAX_KEY_LEN..].copy_from_slice(&(right_child.0 as u32).to_le_bytes());
 
-        // 4. 添加 slot
         let (_logical_id, slot_index) = self
             .slotted
             .add_slot(&data)
             .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
 
-        // 5. 调整顺序（如果不是插入到末尾）
         if slot_index != position {
-            self.shift_slots_right_internal(position, slot_index)?;
+            self.splice_separator(position, slot_index)?;
         }
 
         Ok(position)
     }
 
-    /// 查找插入位置（用于有序插入）
-    fn find_insert_position(&self, key: &Key) -> usize {
-        for i in 0..self.key_count() {
-            if let Some(k) = self.get_key(i) {
-                if k >= *key {
-                    return i;
-                }
-            }
-        }
-        self.key_count()
+    /// 原槽改写分隔键和右子页，左右相邻分隔键的顺序不动。
+    pub fn replace_separator(
+        &mut self,
+        index: usize,
+        key: &Key,
+        right_child: PageId,
+    ) -> Result<(), StorageError> {
+        let slot = self.slotted.get_slot(index).ok_or_else(|| {
+            StorageError::Io(std::io::Error::other(format!(
+                "separator index {index} out of range"
+            )))
+        })?;
+        let entry_size = MAX_KEY_LEN + 4;
+        let mut data = vec![0u8; entry_size];
+        key.serialize(&mut data[..MAX_KEY_LEN]);
+        data[MAX_KEY_LEN..].copy_from_slice(&(right_child.0 as u32).to_le_bytes());
+        self.slotted
+            .update_slot_in_place(slot.logical_id, &data)
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
+        Ok(())
     }
 
-    /// 向右移动 slots（为插入腾出位置）- InternalNode 版本
-    fn shift_slots_right_internal(&mut self, _from: usize, _to: usize) -> Result<(), StorageError> {
-        // 简化实现：重建页
-        let entries: Vec<(Key, u32)> = (0..self.key_count())
+    /// `left_sibling` 是 leftmost 时新分隔键在下标 0；否则插在右子页等于
+    /// 该页的分隔键的下一个下标。找不到该页则报错，不退回按键排序。
+    fn separator_index_after_child(&self, left_sibling: u32) -> Result<usize, StorageError> {
+        if self.slotted.header().next_page_id == left_sibling {
+            return Ok(0);
+        }
+        for i in 0..self.key_count() {
+            if self.get_child_page_id(i) == Some(left_sibling) {
+                return Ok(i + 1);
+            }
+        }
+        Err(StorageError::Io(std::io::Error::other(format!(
+            "split child page {left_sibling} is not a child of this internal node"
+        ))))
+    }
+
+    /// 把刚追加的分隔键挪到 `position`，保留现有分隔键的相对顺序和 leftmost。
+    fn splice_separator(&mut self, position: usize, from: usize) -> Result<(), StorageError> {
+        let mut entries: Vec<(Key, u32)> = (0..self.key_count())
             .filter_map(|i| {
                 let key = self.get_key(i)?;
                 let child = self.get_child_page_id(i)?;
@@ -776,18 +810,27 @@ impl<'a> InternalNode<'a> {
             })
             .collect();
 
-        let mut sorted = entries;
-        sorted.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+        if from >= entries.len() || position > entries.len() {
+            return Err(StorageError::Io(std::io::Error::other(
+                "separator splice index out of range",
+            )));
+        }
+        let entry = entries.remove(from);
+        let insert_at = if from < position {
+            position - 1
+        } else {
+            position
+        };
+        entries.insert(insert_at, entry);
 
         let page_id = self.slotted.page_id();
         let leftmost = self.slotted.header().next_page_id;
         let mut new_page = Page::new(page_id);
         let mut new_internal = InternalNode::init(&mut new_page);
-        // Set leftmost_child: init resets header, so set after init
         new_internal.slotted.page.data[5..9].copy_from_slice(&leftmost.to_le_bytes());
         new_internal.slotted.reload_header();
 
-        for (key, child) in sorted {
+        for (key, child) in entries {
             new_internal.insert_separator_simple(&key, PageId(child as u64))?;
         }
 
@@ -795,6 +838,7 @@ impl<'a> InternalNode<'a> {
             .page
             .data
             .copy_from_slice(new_page.data.as_ref());
+        self.slotted.reload_header();
         Ok(())
     }
 
@@ -1078,6 +1122,59 @@ impl<'a> InternalNodeRef<'a> {
             self.get_child_page_id(lo - 1)
                 .unwrap_or(self.leftmost_child())
         }
+    }
+
+    /// 等值查找的候选子树集合（change 2026-10-13-e2e-verification-and-defect-closure
+    /// Iteration 001 T2，ISS05 机制 B 修复）。
+    ///
+    /// 结构不变量：叶分裂以 sorted[mid] 为 middle_key、右半含一切 >= middle
+    /// 的键 ⇒ child(j) 键域 ⊆ [sep_{j-1}, sep_j]（闭区间、两端可取等；
+    /// child(0) = leftmost，child(j) = get_child_page_id(j-1)）。因此键 K
+    /// 只可能落在 j ∈ [lo, min(count, hi+1)]：
+    /// - `lo` = 首个 sep >= K 的下标（0..=count）
+    /// - `hi` = 末个 sep <= K 的下标（isize，无则 -1）
+    ///
+    /// K 严格介于相邻分隔键之间时退化为单子树（≡ `find_child_page_id_binary`
+    /// 常规路由）；等值分隔键连占时覆盖全部相邻子树（修复旧实现「逐对收集
+    /// 左右子树 + 非空即跳过常规路由」的重复发射与边界子树漏发）。每个子
+    /// 树恰访一次，结果无重复。
+    pub fn equality_candidate_children(&self, key: &Key) -> Vec<u32> {
+        let count = self.key_count();
+
+        // lo：首个 sep >= key（binary lower bound，0..=count）
+        let mut lo = 0usize;
+        let mut hi = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.get_key(mid).map(|k| k.cmp(key)) {
+                Some(std::cmp::Ordering::Less) => lo = mid + 1,
+                _ => hi = mid,
+            }
+        }
+
+        // hi：末个 sep <= key（binary upper bound，-1 表示不存在）
+        let mut lo_le = 0isize;
+        let mut hi_le = count as isize - 1;
+        while lo_le <= hi_le {
+            let mid = lo_le + (hi_le - lo_le) / 2;
+            match self.get_key(mid as usize).map(|k| k.cmp(key)) {
+                Some(std::cmp::Ordering::Greater) => hi_le = mid - 1,
+                _ => lo_le = mid + 1,
+            }
+        }
+
+        let j_max = std::cmp::min(count, (hi_le + 1) as usize);
+        let mut out = Vec::with_capacity(j_max.saturating_sub(lo) + 1);
+        for j in lo..=j_max {
+            let pid = if j == 0 {
+                self.leftmost_child()
+            } else {
+                self.get_child_page_id(j - 1)
+                    .unwrap_or_else(|| self.leftmost_child())
+            };
+            out.push(pid);
+        }
+        out
     }
 }
 
@@ -1434,11 +1531,14 @@ mod tests {
 
         // Insert enough separators for a meaningful split
         let total = 50;
+        let mut left_sibling = 100u64;
         for i in 0..total {
             let key = Key::new(format!("key_{:03}", i).as_bytes());
+            let right = 101 + i as u64;
             internal
-                .insert_separator(&key, PageId(101 + i as u64))
+                .insert_separator(&key, PageId(right), PageId(left_sibling))
                 .unwrap();
+            left_sibling = right;
         }
 
         assert_eq!(internal.key_count(), total);
@@ -1514,7 +1614,7 @@ mod tests {
         internal.slotted.reload_header();
 
         internal
-            .insert_separator(&Key::new(b"only"), PageId(99))
+            .insert_separator(&Key::new(b"only"), PageId(99), PageId(50))
             .unwrap();
         assert_eq!(internal.key_count(), 1);
 
@@ -1538,6 +1638,7 @@ mod tests {
         internal.slotted.page.data[5..9].copy_from_slice(&10u32.to_le_bytes());
         internal.slotted.reload_header();
 
+        let mut left_sibling = 10u64;
         for (ch, child) in [
             (b'a', 100u64),
             (b'b', 200u64),
@@ -1546,8 +1647,9 @@ mod tests {
             (b'e', 500u64),
         ] {
             internal
-                .insert_separator(&Key::new(&[ch]), PageId(child))
+                .insert_separator(&Key::new(&[ch]), PageId(child), PageId(left_sibling))
                 .unwrap();
+            left_sibling = child;
         }
 
         let split_data = internal.split(PageId(10)).unwrap();
@@ -1572,13 +1674,13 @@ mod tests {
         internal.slotted.reload_header();
 
         internal
-            .insert_separator(&Key::new(b"a"), PageId(100))
+            .insert_separator(&Key::new(b"a"), PageId(100), PageId(10))
             .unwrap();
         internal
-            .insert_separator(&Key::new(b"b"), PageId(200))
+            .insert_separator(&Key::new(b"b"), PageId(200), PageId(100))
             .unwrap();
         internal
-            .insert_separator(&Key::new(b"c"), PageId(300))
+            .insert_separator(&Key::new(b"c"), PageId(300), PageId(200))
             .unwrap();
 
         assert_eq!(internal.key_count(), 3);
@@ -1600,10 +1702,10 @@ mod tests {
         internal.slotted.page.data[5..9].copy_from_slice(&10u32.to_le_bytes());
         internal.slotted.reload_header();
         internal
-            .insert_separator(&Key::new(b"b"), PageId(100))
+            .insert_separator(&Key::new(b"b"), PageId(100), PageId(10))
             .unwrap();
         internal
-            .insert_separator(&Key::new(b"c"), PageId(200))
+            .insert_separator(&Key::new(b"c"), PageId(200), PageId(100))
             .unwrap();
 
         let mut right_page = Page::new(PageId(1));
@@ -1611,10 +1713,10 @@ mod tests {
         right.slotted.page.data[5..9].copy_from_slice(&300u32.to_le_bytes());
         right.slotted.reload_header();
         right
-            .insert_separator(&Key::new(b"e"), PageId(400))
+            .insert_separator(&Key::new(b"e"), PageId(400), PageId(300))
             .unwrap();
         right
-            .insert_separator(&Key::new(b"f"), PageId(500))
+            .insert_separator(&Key::new(b"f"), PageId(500), PageId(400))
             .unwrap();
 
         let parent_sep = Key::new(b"d");
