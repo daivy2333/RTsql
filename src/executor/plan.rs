@@ -687,6 +687,10 @@ pub struct SemiJoinNode {
     pub conditions: Vec<JoinCondition>,
     /// 输出列（仅左表列）
     pub output_columns: Vec<OutputColumn>,
+    /// T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：SELECT
+    /// 清单裁剪位（基表全宽行上的索引；空 = 恒等全宽输出——ORDER BY 存在时
+    /// 裁剪归 Sort 承担）。R5：基座全宽承载，排序键可见非输出列。
+    pub projection: Vec<usize>,
     /// 相关子查询参数（空 = 独立子查询）
     pub correlated_params: Vec<CorrelatedParam>,
 }
@@ -703,6 +707,9 @@ pub struct AntiJoinNode {
     pub conditions: Vec<JoinCondition>,
     /// 输出列（仅左表列）
     pub output_columns: Vec<OutputColumn>,
+    /// T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：SELECT
+    /// 清单裁剪位（同 SemiJoinNode.projection）。
+    pub projection: Vec<usize>,
     /// 相关子查询参数
     pub correlated_params: Vec<CorrelatedParam>,
 }

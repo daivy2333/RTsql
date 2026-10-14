@@ -203,14 +203,24 @@ async fn dml_session_close_keeps_full_checkpoint() {
     db.close().await.unwrap();
 }
 
-/// S4 DDL-only 会话保持全量 checkpoint: WAL 空但有脏页, 不跳过, schema 不丢.
+/// S4 DDL-only 会话：语句边界有序落盘后会话本身零工作，close 跳过；
+/// schema 经语句边界落盘（D4）跨 close 存活。
+///
+/// 校准记录（change 2026-10-13 T3）：本用例原断言「DDL-only close 必须
+/// 全量 checkpoint」（站点写入 + 位点重写），其编码的是旧持久化模型
+/// 「DDL 只留脏页、靠 close 落盘」。T3/D4 起 DDL 成功返回前即完成有序
+/// 落盘，close 时缓冲池无脏页、WAL 无追加——零工作判定谓词
+/// （`write_count == 0 && !has_dirty_pages()`）逐字节未变，输入状态按
+/// 新模型为真，跳过是正确结果。schema 持久性由语句边界落盘承载，
+/// 崩溃面由 tests/ddl_crash_recovery_test.rs 矩阵锁定。
 #[tokio::test]
-async fn ddl_only_close_keeps_full_checkpoint_and_schema() {
+async fn ddl_only_close_is_zero_work_and_schema_survives() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test.db");
 
-    // Session 1: schema only. DDL writes no WAL record, so the skip predicate
-    // must be defeated by the dirty pages alone.
+    // Session 1: schema only. DDL writes no WAL record and the statement
+    // boundary flush leaves no dirty pages, so close is a legitimate
+    // zero-work skip (no site write, no WAL marker).
     let db = Database::open(&path).await.unwrap();
     assert_eq!(
         db.wal_writer.as_ref().unwrap().get_write_count(),
@@ -221,14 +231,13 @@ async fn ddl_only_close_keeps_full_checkpoint_and_schema() {
     db.close().await.unwrap();
     drop(db);
 
-    let site = read_bytes_opt(&site_path(&path)).expect("DDL-only close must write a site");
-    assert_eq!(site.len(), 24, "site is 24B");
     assert!(
-        read_bytes_opt(&wal_path(&path)).is_some(),
-        "full checkpoint leaves the Checkpoint marker record"
+        read_bytes_opt(&site_path(&path)).is_none(),
+        "DDL-only close is zero-work under statement-boundary durability (D4): no site write"
     );
 
-    // Session 2: another DDL-only session must not skip either.
+    // Session 2: another DDL-only session is zero-work too — a pre-existing
+    // site must be left untouched by the skip.
     stamp_sentinel_site(&path);
     let site_before = read_bytes_opt(&site_path(&path)).expect("site present");
 
@@ -242,10 +251,10 @@ async fn ddl_only_close_keeps_full_checkpoint_and_schema() {
     db.close().await.unwrap();
     drop(db);
 
-    assert_ne!(
+    assert_eq!(
         Some(site_before),
         read_bytes_opt(&site_path(&path)),
-        "DDL-only close must rewrite the site despite an empty WAL"
+        "DDL-only close must leave the site alone: zero work, nothing pending"
     );
 
     let db = Database::open(&path).await.unwrap();

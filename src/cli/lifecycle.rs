@@ -609,8 +609,9 @@ pub(super) async fn restore(
                 };
                 let statements = match parse_stage(&sql_text).await {
                     Ok(statements) => statements,
-                    // parse 全串解析、零执行，错误文本自带行列定位（与主命令同语义）
-                    Err(e) => return ExitStatus::Sql(e, None),
+                    // parse 全串解析、零执行（与主命令同语义）：单层
+                    // `Parse error:` 前缀 + 行列定位，无 SQLSTATE 分类（ISS11）。
+                    Err(e) => return ExitStatus::Sql(format!("Parse error: {e}"), None),
                 };
                 let total = statements.len();
                 for (index, stmt) in statements.iter().enumerate() {
@@ -1022,14 +1023,17 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// schema/dump DDL 与 stats/profile 输出的列类型渲染——SQL 标准长名
+/// （ISS12：INT→INTEGER、STRING→TEXT、BOOL→BOOLEAN；FLOAT/DATE/TIMESTAMP
+/// 不变）。解析器接受长名，dump→restore 往返与多代幂等保持。
 fn column_type_sql(column_type: &ColumnType) -> &'static str {
     match column_type {
-        ColumnType::Int => "INT",
+        ColumnType::Int => "INTEGER",
         ColumnType::Float => "FLOAT",
-        ColumnType::Bool => "BOOL",
+        ColumnType::Bool => "BOOLEAN",
         ColumnType::Date => "DATE",
         ColumnType::Timestamp => "TIMESTAMP",
-        ColumnType::String(_) => "STRING",
+        ColumnType::String(_) => "TEXT",
     }
 }
 
@@ -1563,11 +1567,11 @@ mod tests {
             "table ident must be quoted: {ddl}"
         );
         assert!(
-            ddl.contains("\"id\" INT PRIMARY KEY"),
+            ddl.contains("\"id\" INTEGER PRIMARY KEY"),
             "PK must be an inline column constraint: {ddl}"
         );
         assert!(
-            ddl.contains("\"name\" STRING NOT NULL"),
+            ddl.contains("\"name\" TEXT NOT NULL"),
             "NOT NULL must be rendered: {ddl}"
         );
         assert!(
@@ -1579,14 +1583,15 @@ mod tests {
     #[test]
     fn ddl_generator_quotes_and_orders_constraints() {
         // change 2026-10-03-practical-core-gaps T3：PRIMARY KEY 仅对 INTEGER
-        // pk 列渲染——夹具 pk 列保持 INT（本测试面为引号转义与约束序）。
+        // pk 列渲染——夹具 pk 列保持 INTEGER（本测试面为引号转义与约束序；
+        // ISS12：类型名渲染标准长名）。
         let t = table("we\"ird", "pk");
         let columns = vec![column(0, "pk", ColumnType::Int, true, true)];
 
         let ddl = create_table_sql(&t, &columns);
         assert_eq!(
             ddl,
-            "CREATE TABLE \"we\"\"ird\" (\"pk\" INT PRIMARY KEY NOT NULL UNIQUE);"
+            "CREATE TABLE \"we\"\"ird\" (\"pk\" INTEGER PRIMARY KEY NOT NULL UNIQUE);"
         );
     }
 
@@ -1615,11 +1620,11 @@ mod tests {
             ],
         );
         assert!(
-            ddl.contains("\"name\" STRING DEFAULT 'anon'"),
+            ddl.contains("\"name\" TEXT DEFAULT 'anon'"),
             "String DEFAULT must render: {ddl}"
         );
         assert!(
-            ddl.contains("\"note\" INT DEFAULT NULL"),
+            ddl.contains("\"note\" INTEGER DEFAULT NULL"),
             "DEFAULT NULL must render literally: {ddl}"
         );
         assert!(

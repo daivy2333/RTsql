@@ -40,7 +40,7 @@ pub(crate) struct GroupKey {
 /// executors trim rows by `projection` after predicate evaluation, so the
 /// column metadata must be trimmed the same way (same mapping as the
 /// Filter/Sort arms in `get_plan_output_columns`). Empty = identity.
-fn projected_columns(columns: &[String], projection: &[usize]) -> Vec<String> {
+pub(crate) fn projected_columns(columns: &[String], projection: &[usize]) -> Vec<String> {
     if projection.is_empty() {
         columns.to_vec()
     } else {
@@ -115,16 +115,37 @@ impl PlanBuilder {
                     .map(|c| c.column.clone())
                     .collect()
             }
-            PhysicalPlan::SemiJoin(node) => node
-                .output_columns
-                .iter()
-                .map(|c| c.column.clone())
-                .collect(),
-            PhysicalPlan::AntiJoin(node) => node
-                .output_columns
-                .iter()
-                .map(|c| c.column.clone())
-                .collect(),
+            PhysicalPlan::SemiJoin(node) => {
+                // T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：
+                // `output_columns` 恒为基表全列；节点 `projection` 非空时行已
+                // 按其收窄（无 ORDER BY 的 SELECT 清单裁剪），列名随投影裁剪
+                // ——与 Scan/Sort 臂同款，表头与行形状一致（I034 纪律）。
+                if node.projection.is_empty() {
+                    node.output_columns
+                        .iter()
+                        .map(|c| c.column.clone())
+                        .collect()
+                } else {
+                    node.projection
+                        .iter()
+                        .map(|&i| node.output_columns[i].column.clone())
+                        .collect()
+                }
+            }
+            PhysicalPlan::AntiJoin(node) => {
+                // T5：同 SemiJoin 臂。
+                if node.projection.is_empty() {
+                    node.output_columns
+                        .iter()
+                        .map(|c| c.column.clone())
+                        .collect()
+                } else {
+                    node.projection
+                        .iter()
+                        .map(|&i| node.output_columns[i].column.clone())
+                        .collect()
+                }
+            }
             PhysicalPlan::SubqueryEval(node) => {
                 // MS17-T02/ISS03: 执行器在 result_column_index 插入标量值
                 //（越界时 push，见 executor/subquery_eval.rs）——表头镜像该
@@ -1294,11 +1315,13 @@ impl PlanBuilder {
             )));
         };
         let saved_subquery_ctx = self.building_subquery;
-        // T5：视图展开是表达式型子查询上下文——FROM 派生标志复位（视图定义
-        // 内集合操作维持拒绝），save/restore 严格配对。
+        // change 2026-10-13-e2e-verification-and-defect-closure T4：视图展开
+        // 与 FROM 派生表同型——置位 `building_from_derived`，内层别名/表达式列
+        // 与 DISTINCT 经分类门全量放行（R4 三通道一致）；IN/EXISTS/标量
+        // 入口的复位不受影响，save/restore 严格配对。
         let saved_from_derived = self.building_from_derived;
         self.building_subquery = true;
-        self.building_from_derived = false;
+        self.building_from_derived = true;
         let inner_result = self.build_query(inner_query);
         self.building_subquery = saved_subquery_ctx;
         self.building_from_derived = saved_from_derived;
@@ -1324,6 +1347,10 @@ impl PlanBuilder {
         // 抑制 SELECT 表达式项路由——子查询计划形状是 SemiJoin/SubqueryEval/
         // DerivedScan 机制的消费面，保持既有行为（R6 零回归）。
         let building_subquery = self.building_subquery;
+        // change 2026-10-13-e2e-verification-and-defect-closure T4：分类门与
+        // DISTINCT 门只在「真子查询（IN/EXISTS/标量）且非派生」时抑制——
+        // FROM 派生表/视图内层与顶层同权（R4），CTE 通道对照零变化。
+        let inner_suppressed = building_subquery && !self.building_from_derived;
         // === MS25 T5: WITH 消费（design D5）===
         // 位于 body 分派之前：语句级 `WITH` 先于侧臂构建消费（定义内集合操作
         // 可达，两臂引用同一注册表）。子查询上下文 / `RECURSIVE` / 嵌套定义内
@@ -1356,13 +1383,13 @@ impl PlanBuilder {
         // DISTINCT` 照常返回重复行。`SELECT ALL` 解析为 `None`，与无量化词
         // 形态同路径（显式无操作，SQLite 对齐）。`DISTINCT ON(...)` 点名拒绝。
         //
-        // 仅顶层语句消费：子查询计划形状由 SemiJoin / SubqueryEval /
-        // DerivedScan 机制消费（`get_subquery_first_column` 等按既有节点形状
-        // 匹配），子查询内 DISTINCT 维持变更前的零消费行为（契约 Forbidden
-        // 项——超范围静默不变即无回归）。
+        // 仅顶层与派生上下文消费（R4）：FROM 派生表/视图内层 DISTINCT 真实
+        // 去重，与 CTE 通道一致；真子查询（IN/EXISTS/标量）内 DISTINCT 维持
+        // 零消费（SemiJoin/SubqueryEval/ScalarSubqueryFilter 按既有节点形状
+        // 消费的契约 Forbidden 项不变）。
         let distinct_due = match &select.distinct {
             None => false,
-            Some(sqlparser::ast::Distinct::Distinct) => !building_subquery,
+            Some(sqlparser::ast::Distinct::Distinct) => !inner_suppressed,
             Some(sqlparser::ast::Distinct::On(_)) => {
                 return Err(PlanError::ParseError(
                     "DISTINCT ON(...) is not supported".to_string(),
@@ -1569,7 +1596,7 @@ impl PlanBuilder {
                         aggregate_args.push(aggregate_arg_expr(expr).cloned());
                         aggregates.push(func);
                         aggregate_display_names.push(name);
-                    } else if !building_subquery && contains_aggregate_expr(expr) {
+                    } else if !inner_suppressed && contains_aggregate_expr(expr) {
                         // change 2026-10-03-practical-core-gaps T4: 聚合嵌入
                         // 表达式项——嵌套聚合调用注册进共享清单，项本体在聚合
                         // 输出行上求值（wrap 阶段编译）。
@@ -1582,7 +1609,7 @@ impl PlanBuilder {
                         has_expression_items = true;
                         agg_row_expr_items.push(item_idx);
                         item_roles[item_idx] = Some(SelectItemRole::Expression(expr.to_string()));
-                    } else if !building_subquery && !is_plain_column_expr(expr) {
+                    } else if !inner_suppressed && !is_plain_column_expr(expr) {
                         has_expression_items = true;
                         // T4: 无列引用的纯常量项在聚合查询中按常量混排合法
                         // （聚合输出行求值）；非聚合查询经既有顶层 Projection
@@ -1611,7 +1638,7 @@ impl PlanBuilder {
                         aggregate_args.push(aggregate_arg_expr(expr).cloned());
                         aggregates.push(func);
                         aggregate_display_names.push(name);
-                    } else if !building_subquery && contains_aggregate_expr(expr) {
+                    } else if !inner_suppressed && contains_aggregate_expr(expr) {
                         // T4: 聚合嵌入表达式项（同 UnnamedExpr 臂；输出名 = 别名）。
                         register_aggregate_calls(
                             expr,
@@ -1623,7 +1650,7 @@ impl PlanBuilder {
                         agg_row_expr_items.push(item_idx);
                         item_roles[item_idx] =
                             Some(SelectItemRole::Expression(alias.value.clone()));
-                    } else if !building_subquery && !is_plain_column_expr(expr) {
+                    } else if !inner_suppressed && !is_plain_column_expr(expr) {
                         has_expression_items = true;
                         if is_pure_constant_expr(expr) {
                             agg_row_expr_items.push(item_idx);
@@ -1667,14 +1694,15 @@ impl PlanBuilder {
         // `has_expression_items`，交既有顶层 Projection 通路求值（表头 = 别名，
         // 行 = 该列）；`build_expression` 顺带把未知列点名为 ColumnNotFound。
         //
-        // 范围：非聚合、非子查询内、清单不含通配符；基座为 Scan、派生表
-        // （DerivedScan：FROM 子查询与 CTE 引用共用此装配）与 JOIN/NLJ。
+        // 范围：非聚合、非抑制上下文（顶层 + FROM 派生表/视图内层——R4 三
+        // 通道一致；IN/EXISTS/标量内仍抑制）、清单不含通配符；基座为 Scan、
+        // 派生表（DerivedScan：FROM 子查询与 CTE 引用共用此装配）与 JOIN/NLJ。
         // MS25 T8：JOIN 基座的纯列别名项改标后不再撞上「表达式项 + JOIN」
         // 拒绝臂（该臂只拦真正的表达式项，见下方 `expression_items_plain`）；
         // 组合行承载与名字解析按 `join_layout` 同基座，输出名 = 别名。
         // 含通配符的清单仍维持改标前行为（会撞上「`*` 不能与表达式项混用」）。
         let alias_reroutable = !has_aggregates
-            && !building_subquery
+            && !inner_suppressed
             && matches!(
                 &base_plan,
                 PhysicalPlan::Scan(_)
@@ -2012,12 +2040,26 @@ impl PlanBuilder {
                     projection: filter_projection,
                 })
             // Try subquery patterns first (IN subquery / EXISTS)
-            } else if let Some(subquery_plan) = self.try_build_where_subquery(
+            } else if let Some(mut subquery_plan) = self.try_build_where_subquery(
                 where_expr,
                 &base_plan,
                 &table_name,
                 &projection_columns,
             )? {
+                // T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：
+                // 基座全宽承载——无 ORDER BY 时 SELECT 清单裁剪由本节点
+                // `projection` 承担（ORDER BY 存在时留空恒等，裁剪归 Sort，
+                // 排序键可见非输出列）。`projection_indices` 为 None（聚合
+                // 输入/表达式项/恒等面）时留空恒等，与 Scan 基座
+                // `proj_or_empty` 同规则。
+                if !sort_due {
+                    let trim = projection_indices.clone().unwrap_or_default();
+                    match &mut subquery_plan {
+                        PhysicalPlan::SemiJoin(node) => node.projection = trim,
+                        PhysicalPlan::AntiJoin(node) => node.projection = trim,
+                        _ => {}
+                    }
+                }
                 subquery_plan
             } else if contains_scalar_subquery(where_expr) {
                 // T4（change 2026-10-04-external-review-gaps D4）：WHERE 比较
@@ -2677,6 +2719,16 @@ impl PlanBuilder {
                 projection_indices.clone().unwrap_or_default()
             } else if is_identity_filter_over_join(&plan_with_aggregate) {
                 where_join_projection.clone().unwrap_or_default()
+            } else if matches!(
+                plan_with_aggregate,
+                PhysicalPlan::SemiJoin(_) | PhysicalPlan::AntiJoin(_)
+            ) {
+                // T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：
+                // SemiJoin/AntiJoin 基座全宽承载（行 = 左表全宽行），Sort 在其上
+                // 按全宽列集排序（ORDER BY 非输出列可达），裁剪归本节点——
+                // 索引按基表 schema 序解析（与 Scan 基座臂同规则；`None` 恒等
+                // 面 unwrap_or_default 为空 = 全宽输出）。
+                projection_indices.clone().unwrap_or_default()
             } else if join_combined_columns(&plan_with_aggregate).is_some() {
                 // T3（change 2026-10-04-external-review-gaps D3）：无 WHERE 的
                 // 裸 JOIN 基座在 ORDER BY 存在时承载全组合列（carry_all 加序），
@@ -3271,26 +3323,24 @@ impl PlanBuilder {
         Ok(None)
     }
 
-    /// Build output_columns for a single-table query
-    pub(crate) fn build_output_columns_for_table(
+    /// Build output_columns for a subquery-base node (T5, change
+    /// 2026-10-13-e2e-verification-and-defect-closure D8): the full left-table
+    /// column list at schema ordinals — the node carries full-width rows
+    /// (`build_output_row` passes the left row through) and the SELECT-list
+    /// trim is owned downstream (node `projection` / Sort `sort_projection`).
+    pub(crate) fn build_full_output_columns_for_table(
         &self,
         table_name: &str,
-        projection_columns: &[String],
     ) -> Vec<OutputColumn> {
         let columns = self.tables.get(table_name).cloned().unwrap_or_default();
-        projection_columns
+        columns
             .iter()
-            .map(|col| {
-                let column_index = columns
-                    .iter()
-                    .position(|c| c.to_lowercase() == col.to_lowercase())
-                    .unwrap_or(0);
-                OutputColumn {
-                    table: Some(table_name.to_string()),
-                    column: col.clone(),
-                    table_alias: table_name.to_string(),
-                    column_index,
-                }
+            .enumerate()
+            .map(|(column_index, col)| OutputColumn {
+                table: Some(table_name.to_string()),
+                column: col.clone(),
+                table_alias: table_name.to_string(),
+                column_index,
             })
             .collect()
     }

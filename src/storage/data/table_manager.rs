@@ -266,6 +266,11 @@ impl TableManager {
             // way). ALTER rewrites keep the chain ordered, this closes the
             // dependency for good.
             cols.sort_by_key(|c| c.column_index);
+            // change 2026-10-13 T3 (D5): bound by the table row's declared
+            // count. An orphan column row (ALTER ADD COLUMN crash window
+            // between its flush and the table-row commit flush) must not
+            // materialize as a phantom column on reopen.
+            cols.truncate(row.column_count as usize);
             let columns: Vec<(String, ColumnType)> = cols
                 .iter()
                 .map(|c| (c.column_name.clone(), c.column_type.clone()))
@@ -561,9 +566,29 @@ impl TableManager {
             )
             .collect();
         if let Err(e) = self.catalog.insert_table(&catalog_row, &catalog_cols).await {
-            // Roll back the in-memory insert to keep state consistent.
-            let mut tables = self.tables.write().await;
-            tables.remove(name);
+            // change 2026-10-13 T3 (D5): failure cleanup — the CREATE leaves
+            // zero usable residue and the same name is retryable:
+            // 1. roll back the in-memory registration;
+            // 2. remove the column rows already appended (the `__tables`
+            //    row is written last inside `insert_table`, so on a column
+            //    failure none exists — `delete_table`'s TABLES arm is a
+            //    no-op and its COLUMNS arm removes exactly our rows);
+            // 3. release the pages allocated for this attempt (data head +
+            //    fresh index roots — create_index.rs backfill-failure
+            //    precedent, best-effort).
+            {
+                let mut tables = self.tables.write().await;
+                tables.remove(name);
+            }
+            let _ = self.catalog.delete_table(name).await;
+            let _ = self.buffer_pool.free_page(page_id).await;
+            let _ = self
+                .buffer_pool
+                .free_page(table_meta.index_manager.root_page_id())
+                .await;
+            for (_, uindex) in table_meta.unique_indexes.iter() {
+                let _ = self.buffer_pool.free_page(uindex.root_page_id()).await;
+            }
             return Err(e);
         }
 
@@ -612,8 +637,13 @@ impl TableManager {
             default_value: default_value.clone(),
         };
         self.catalog.insert_column_row(&col_row).await?;
+        // change 2026-10-13 T3 (D4): the column-count rewrite is the ALTER
+        // ADD COLUMN commit point — flushed last so a reopened catalog never
+        // advertises a column whose row never reached disk (orphan rows left
+        // by an earlier crash stay invisible: open bounds columns by the
+        // table row's `column_count`, D5).
         self.catalog
-            .update_table_column_count(table, (old.columns.len() + 1) as u32)
+            .update_table_column_count_ddl(table, (old.columns.len() + 1) as u32)
             .await?;
 
         let mut columns = old.columns.clone();

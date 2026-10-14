@@ -106,6 +106,8 @@ Copying `<db>.db` alone is equivalent to a full backup **only after the writer c
 
 Companion names are derived from the main file name, so any rename or move must carry `<db>.wal` and `<db>.checkpoint` along under the same base name. A file-level copy taken while a writer is active should include `<db>.wal`; otherwise close the writer first — or run `rtsql checkpoint <db>` to fold the WAL into the main file — and verify with `rtsql <db> "SELECT count(*) FROM t"` on the copy.
 
+Schema changes are durable at the statement boundary: a successful `CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `ALTER TABLE ADD COLUMN`, or `CREATE TABLE AS SELECT` writes its catalog pages to disk before the statement returns — the `__tables` row lands last, as the commit point — so a process killed at any later instant still finds the schema on reopen, and WAL replay recovers the rows. The remaining crash windows are `DROP` statements (whose page release is checkpoint-based) and DDL on encrypted databases (whose WAL and checkpoint sidecars are plaintext by design); after either, verify with `rtsql check <db>` or prefer `dump` / `restore` for backups.
+
 `rtsql delete <db>` removes one database family; `./install.sh --uninstall --purge-data` wipes the whole data directory during uninstall. Neither is recoverable through RTsql.
 
 ### Delete a database
@@ -171,8 +173,8 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql <db> <sql>` | Execute one SQL statement or a semicolon-separated script |
 | `rtsql new <target>` | Create an empty named database or path |
 | `rtsql list` | List databases in the centralized storage directory |
-| `rtsql schema <db>` | Print user-table DDL |
-| `rtsql dump <db>` | Export DDL and rows as SQL text |
+| `rtsql schema <db>` | Print user-table DDL (column types render as standard names: `INTEGER`, `TEXT`, `FLOAT`, `BOOLEAN`, `DATE`, `TIMESTAMP`) |
+| `rtsql dump <db>` | Export DDL and rows as SQL text (same type-name rendering; a `dump` → `restore` round-trip recreates the schema and rows) |
 | `rtsql restore <db> <file>` | Restore a dump into an empty database; `-` reads stdin |
 | `rtsql import <db> <table> <file\|-> --csv` | Import CSV with a matching header row, or auto-create the table from the header; `-` reads stdin; `:memory:` targets are accepted |
 | `rtsql delete <db> [--dry-run]` | Delete a database and its `.wal` / `.checkpoint` companions; `--dry-run` only lists them |
@@ -231,6 +233,8 @@ A read-write session checkpoints the WAL automatically once the bytes appended s
 
 `--format` accepts `table`, `json`, `csv`, and `tsv`. RTsql uses `table` for an interactive terminal and `json` otherwise unless the option is set.
 
+A script may pack several statements into one invocation, separated by `;`. Each statement executes in order with its own auto-commit, and a failure stops the script with its statement number. Under `--format json`, the output is JSONL — one standalone JSON object per statement line — and a successful DDL statement reports `{"affected_rows":0}`, like any other zero-row statement.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -256,7 +260,7 @@ A read-write session checkpoints the WAL automatically once the bytes appended s
 - **Constant queries:** expressions without `FROM`, such as `SELECT 1 + 1`.
 - **Transactions:** explicit library transactions and CLI `BEGIN` / `COMMIT` / `ROLLBACK` sessions.
 - **MVCC:** Repeatable Read by default and opt-in Read Committed through `Database::open_with_isolation`.
-- **Storage:** persistent schema, B-Tree primary-key indexes, WAL with frame checksums, checkpointing, crash recovery, and page reuse.
+- **Storage:** persistent schema, B-Tree primary-key indexes, WAL with frame checksums, checkpointing, crash recovery, and page reuse. A secondary index created with `CREATE INDEX` serves equality predicates automatically, and its row set always matches a full table scan exactly — same rows, no duplicates, no misses — at any table size, including after restart and crash recovery.
 - **Long values:** row values larger than the single-page inline capacity (~4KB) are stored automatically through overflow page chains, with no artificial length limit. Overflow is transparent to the SQL layer: `INSERT`/`UPDATE`/`SELECT`, `dump`/`restore`/`import`, crash recovery, GC and `DROP TABLE`/`TRUNCATE` release, encrypted databases, `:memory:`, and read-only sessions all handle it the same way (rows beyond page capacity previously failed with `No enough space in page`; that failure mode is gone).
 - **Runtime forms:** read-only sessions over a shared lock with many concurrent readers and zero writes, plus `:memory:` databases that keep everything in memory for the life of the process.
 
@@ -278,7 +282,7 @@ Every constraint a `CREATE TABLE` statement accepts is either enforced or reject
 
 - **Column list:** `INSERT INTO t (col, ...) VALUES ...` accepts any subset of the table's columns in any order. Omitted columns take their declared `DEFAULT`, or `NULL` when no default is declared; a `NOT NULL` column filled that way is rejected by name. `DEFAULT` inside `VALUES` is equivalent to omitting that column. Declared defaults are persisted in the catalog, apply after restart, and are rendered by `rtsql dump` and `rtsql schema`.
 - **Value types:** a written value must match the column's declared type. `NULL` is exempt, date columns accept their typed literals, a `FLOAT` column accepts integer values (stored as the equivalent float), and any other cross-type write is rejected with `column '<name>' expects <TYPE>, got <type>`. The `dump` / `restore` / `import` paths run through the same rule.
-- **Declared defaults:** a `DEFAULT` literal in `CREATE TABLE` or `ALTER TABLE ADD COLUMN` is validated against the column type at plan time under the same rule — `NULL` is exempt, a `FLOAT` column upgrades an integer literal (persisted as the float), a `DATE`/`TIMESTAMP` column parses the string (an invalid date is refused), and other cross-type declarations are rejected with `DEFAULT type mismatch: column '<name>': expected <TYPE>, got <type>` before the table exists. Typed date literals such as `DEFAULT DATE '2026-01-02'` are accepted, so `dump` → `restore` round-trips tables with date defaults. A `DEFAULT` literal's length is additionally bounded by the catalog column row's in-page capacity (~4KB): an oversized default is rejected by the existing page-full error at table creation, with no side effects. Written values are not subject to this limit (oversized rows go through the overflow page chains).
+- **Declared defaults:** a `DEFAULT` literal in `CREATE TABLE` or `ALTER TABLE ADD COLUMN` is validated against the column type at plan time under the same rule — `NULL` is exempt, a `FLOAT` column upgrades an integer literal (persisted as the float), a `DATE`/`TIMESTAMP` column parses the string (an invalid date is refused), and other cross-type declarations are rejected with `DEFAULT type mismatch: column '<name>': expected <TYPE>, got <type>` before the table exists. Typed date literals such as `DEFAULT DATE '2026-01-02'` are accepted, so `dump` → `restore` round-trips tables with date defaults. A `DEFAULT` literal's length is additionally bounded by the catalog column row's in-page capacity (~4KB): an oversized default is rejected at plan time with `DEFAULT type mismatch: column '<name>': DEFAULT value is too large for the catalog page capacity` — before the table exists, with no side effects. Written values are not subject to this limit (oversized rows go through the overflow page chains).
 - **`UPDATE ... SET` expressions:** several columns may be assigned at once, and each right-hand side accepts a full value expression — column references evaluate against the row's old values as one snapshot (`SET a = a + 1, b = a` reads the old `a`), plus arithmetic, `CAST`, `CASE`, `COALESCE`, and scalar functions. The write type gate, `NOT NULL`, key-column type checks, collision prechecks, rekey, and unique/secondary index maintenance all apply to the evaluated values; a failing assignment leaves the row untouched. Aggregate calls and subqueries on the right-hand side are refused at plan time.
 - **Full-table `UPDATE`/`DELETE`:** omitting `WHERE` applies the statement to every row. The per-row semantics run row by row — write type gate, `NOT NULL`, key-column type checks, collision prechecks, rekey, and unique/secondary index maintenance — and a failure mid-statement rolls back everything the statement wrote (implicit-transaction semantics; inside `BEGIN` the statement is usable and can be rolled back with the transaction). `affected_rows` reports the actual row count. `TRUNCATE TABLE` remains the faster physical-release alternative.
 - **`ON CONFLICT DO NOTHING`:** conflicting rows are skipped and are not counted in the affected-row count.
@@ -321,6 +325,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo bench
 ```
+
+`cargo test --test e2e_test -- --test-threads=1` runs the end-to-end journey suite: real CLI subprocesses that walk whole user journeys (lifecycle, import, crash recovery, indexes, locking, cross-database, encryption, large values, analytics, output shapes, error surfaces). It is the fastest way to verify that the database works as a whole.
 
 The repository also contains Criterion benchmarks and SQLite comparison benchmarks under `benches/`. RISC-V 64 Linux (musl) artifacts are produced by `build-riscv64-musl.sh`; see [Cross-build for RISC-V 64 Linux (musl)](#cross-build-for-risc-v-64-linux-musl).
 

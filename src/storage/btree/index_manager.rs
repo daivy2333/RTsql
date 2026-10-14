@@ -211,38 +211,16 @@ impl IndexManager {
                     }
                     return Ok(row_ids);
                 } else {
-                    // Internal: check if key matches any separator (need to search both subtrees)
+                    // Internal: 等值查找的候选子树集合（ISS05 机制 B 修复，
+                    // 公式见 `InternalNodeRef::equality_candidate_children`——
+                    // 闭区间键域 ⇒ 每子树恰访一次；等值分隔键连占时覆盖全部
+                    // 相邻子树，无「非空即跳过常规路由」分支）。
                     let internal = InternalNodeRef::new(&data_guard);
-                    let count = internal.key_count();
-
-                    let mut child_page_ids = Vec::new();
-                    for i in 0..count {
-                        if let Some(sep_key) = internal.get_key(i) {
-                            if sep_key == *key {
-                                // Key matches separator: search both left and right subtrees
-                                let left_child = if i == 0 {
-                                    internal.leftmost_child()
-                                } else {
-                                    internal
-                                        .get_child_page_id(i - 1)
-                                        .unwrap_or(internal.leftmost_child())
-                                };
-                                let right_child = internal
-                                    .get_child_page_id(i)
-                                    .unwrap_or(internal.leftmost_child());
-                                child_page_ids.push(PageId(left_child as u64));
-                                child_page_ids.push(PageId(right_child as u64));
-                            }
-                        }
-                    }
-
-                    // If no separator match, follow normal routing
-                    if child_page_ids.is_empty() {
-                        let child_page_id = internal.find_child_page_id_binary(key);
-                        child_page_ids.push(PageId(child_page_id as u64));
-                    }
-
-                    child_page_ids
+                    internal
+                        .equality_candidate_children(key)
+                        .into_iter()
+                        .map(|c| PageId(c as u64))
+                        .collect::<Vec<PageId>>()
                 }
             }; // guard and data_guard dropped
 
@@ -341,32 +319,50 @@ impl IndexManager {
         self.scan_all_async_from_root(root_page_id).await
     }
 
+    /// 树遍历枚举全部条目（B2）。显式栈、内部页感知、visited 去重；
+    /// 子页按从左到右压栈，弹出顺序即叶序，结果保持键升序。
+    /// 不沿叶链走，也不以 page 0 作为终止哨兵——栈空即结束。
     async fn scan_all_async_from_root(
         &self,
         root_page_id: PageId,
     ) -> Result<Vec<(Vec<u8>, RowId)>> {
         let mut results = Vec::new();
-        let mut page_id = root_page_id;
+        let mut stack = vec![root_page_id];
+        let mut visited = HashSet::new();
 
-        while page_id.0 != 0 {
+        while let Some(page_id) = stack.pop() {
+            if !visited.insert(page_id.0) {
+                continue;
+            }
             let guard = self.async_loader.load_page(page_id).await?;
             let data_guard = guard.page_data();
-            let leaf = LeafNodeRef::new(&data_guard);
+            let page_type = data_guard[0];
 
-            let count = leaf.key_count();
-            let mut entries = Vec::with_capacity(count);
-            for i in 0..count {
-                if let (Some(key), Some(row_id)) = (leaf.get_key(i), leaf.get_row_id(i)) {
-                    entries.push((key.as_bytes().to_vec(), row_id));
+            if page_type == LEAF_NODE {
+                let leaf = LeafNodeRef::new(&data_guard);
+                for i in 0..leaf.key_count() {
+                    if let (Some(key), Some(row_id)) = (leaf.get_key(i), leaf.get_row_id(i)) {
+                        results.push((key.as_bytes().to_vec(), row_id));
+                    }
+                }
+            } else if page_type == INTERNAL_NODE {
+                let internal = InternalNodeRef::new(&data_guard);
+                let mut children = Vec::with_capacity(internal.key_count() + 1);
+                children.push(internal.leftmost_child());
+                for i in 0..internal.key_count() {
+                    if let Some(child) = internal.get_child_page_id(i) {
+                        children.push(child);
+                    }
+                }
+                // 右到左入栈，弹出时从左到右，叶序即键序。
+                // 页号 0 是合法页（根分裂后旧根常为 page 0），不能当哨兵丢弃。
+                for child in children.into_iter().rev() {
+                    let child_id = PageId(child as u64);
+                    if !visited.contains(&child_id.0) {
+                        stack.push(child_id);
+                    }
                 }
             }
-
-            let next_page_u32 = leaf.next_leaf_page_id();
-            drop(data_guard);
-            drop(guard);
-
-            results.extend(entries);
-            page_id = PageId(next_page_u32 as u64);
         }
 
         Ok(results)
@@ -642,5 +638,244 @@ mod tests {
         // 缺失键 KeyNotFound（leaf 层精确语义，不误删「首个 ≥」邻近条目）
         assert!(im.delete_exact(b"zzz", rid_c).await.is_err());
         assert_eq!(im.search_all(b"other").await.unwrap(), vec![rid_c]);
+    }
+
+    // ===========================================================================
+    // change 2026-10-13-e2e-verification-and-defect-closure Iteration 001 (T2):
+    // B1（叶链保真）/ B2（scan_all 树遍历）/ 机制 B（delete_exact 候选子树集合）
+    // ===========================================================================
+
+    /// Deterministic shuffle: multiplicative hash sort (no RNG state).
+    fn shuffled(n: usize) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..n).collect();
+        v.sort_by_key(|i| i.wrapping_mul(2654435761) % 1000003);
+        v
+    }
+
+    /// Descend to the leftmost leaf via internal `leftmost_child` links, then
+    /// walk the sibling chain through `next_leaf_page_id`, returning every
+    /// entry in chain order plus the number of leaves visited.
+    async fn walk_leaf_chain(im: &IndexManager) -> (Vec<(Vec<u8>, RowId)>, usize) {
+        let mut page_id = im.root_page_id();
+        loop {
+            let (is_leaf, next) = {
+                let guard = im.async_loader.load_page(page_id).await.unwrap();
+                let data = guard.page_data();
+                if data[0] == LEAF_NODE {
+                    (true, 0)
+                } else {
+                    let internal = InternalNodeRef::new(&data);
+                    (false, internal.leftmost_child())
+                }
+            };
+            if is_leaf {
+                break;
+            }
+            page_id = PageId(next as u64);
+        }
+
+        let mut out = Vec::new();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut leaves = 0usize;
+        loop {
+            assert!(
+                visited.insert(page_id.0),
+                "cycle in leaf chain at {:?}",
+                page_id
+            );
+            let next = {
+                let guard = im.async_loader.load_page(page_id).await.unwrap();
+                let data = guard.page_data();
+                assert_eq!(data[0], LEAF_NODE, "chain must only visit leaves");
+                let leaf = LeafNodeRef::new(&data);
+                leaves += 1;
+                for i in 0..leaf.key_count() {
+                    out.push((
+                        leaf.get_key(i).unwrap().as_bytes().to_vec(),
+                        leaf.get_row_id(i).unwrap(),
+                    ));
+                }
+                leaf.next_leaf_page_id()
+            };
+            if next == 0 {
+                break;
+            }
+            page_id = PageId(next as u64);
+        }
+        (out, leaves)
+    }
+
+    /// B1 回归：`shift_slots_right` 重建页时必须保留 `next_leaf_page_id`。
+    /// 乱序插入使大量插入落位叶中（触发 shift），修复前 ~90% 叶子链指针
+    /// 被清零，链walk只能触达首叶。
+    #[tokio::test]
+    async fn shift_slots_right_preserves_leaf_chain_on_mid_inserts() {
+        let (_dir, im) = make_manager().await;
+        for n in shuffled(300) {
+            let key = format!("key{:07}", n);
+            im.insert(key.as_bytes(), RowId::new(n as u32, n as u16))
+                .await
+                .unwrap();
+        }
+
+        let (chain, leaves) = walk_leaf_chain(&im).await;
+        assert!(
+            leaves >= 3,
+            "300 shuffled keys must span several leaves, walked {leaves}"
+        );
+        assert_eq!(
+            chain.len(),
+            300,
+            "leaf chain must reach every entry (B1: chain pointer zeroed pre-fix)"
+        );
+        assert!(
+            chain.windows(2).all(|w| w[0].0 <= w[1].0),
+            "leaf chain order must be non-decreasing"
+        );
+    }
+
+    /// B2 回归：`scan_all` 对多层树返回全部条目（树遍历，不依赖叶链，
+    /// 不把内部页当叶读），并保持升序。
+    #[tokio::test]
+    async fn scan_all_returns_full_set_on_multi_level_tree() {
+        let (_dir, im) = make_manager().await;
+        let mut expected = Vec::with_capacity(3000);
+        for n in shuffled(3000) {
+            let key = format!("key{:07}", n);
+            let rid = RowId::new(n as u32, n as u16);
+            im.insert(key.as_bytes(), rid).await.unwrap();
+            expected.push((key.into_bytes(), rid));
+        }
+
+        let scanned = im.scan_all().await.unwrap();
+        assert_eq!(
+            scanned.len(),
+            3000,
+            "scan_all must return every entry of a multi-level tree (B2: dropped pre-fix)"
+        );
+        assert!(
+            scanned.windows(2).all(|w| w[0].0 <= w[1].0),
+            "scan_all must preserve ascending key order"
+        );
+        let scanned_set: HashSet<(Vec<u8>, RowId)> = scanned.iter().cloned().collect();
+        let expected_set: HashSet<(Vec<u8>, RowId)> = expected.into_iter().collect();
+        assert_eq!(
+            scanned_set, expected_set,
+            "scan_all must return exactly the inserted entry set"
+        );
+    }
+
+    /// 机制 B 回归：`delete_exact` 必须经由等值候选子树集合下探（同值键可
+    /// 散布在多个相邻子树、分隔键可等于查找键），叶级候选叶穷尽后才
+    /// KeyNotFound——不依赖叶链回退。5 键 × 400 rid 乱序插入使每个键的
+    /// 400 个条目跨 4~5 片叶子散布，根部分隔键出现等值长连——修复前
+    /// 「首个等值分隔键左后右」双径下探对第三子树即 KeyNotFound。
+    #[tokio::test]
+    async fn delete_exact_reaches_every_duplicate_entry() {
+        let (_dir, im) = make_manager().await;
+        let mut entries: Vec<(String, RowId)> = Vec::with_capacity(2000);
+        for d in 0..5u64 {
+            for r in 0..400u64 {
+                entries.push((
+                    format!("dup{:02}", d),
+                    RowId::new((1000 + d * 400 + r) as u32, r as u16),
+                ));
+            }
+        }
+        for idx in shuffled(entries.len()) {
+            let (key, rid) = &entries[idx];
+            im.insert(key.as_bytes(), *rid).await.unwrap();
+        }
+
+        for (key, rid) in &entries {
+            im.delete_exact(key.as_bytes(), *rid)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("delete_exact({key}, {rid:?}) must reach the entry: {e}")
+                });
+        }
+        for d in 0..5u64 {
+            let key = format!("dup{:02}", d);
+            assert!(
+                im.search_all(key.as_bytes()).await.unwrap().is_empty(),
+                "all entries of {key} must be gone"
+            );
+        }
+    }
+
+    /// 树高至少 3 的重复键：每个键的 `search_all` 条数等于插入条数，
+    /// 随后逐条 `delete_exact` 成功，再 `search_all` 为空。
+    /// 与 `delete_exact_reaches_every_duplicate_entry` 同一洗牌序。
+    #[tokio::test]
+    async fn delete_exact_reaches_every_entry_on_height_at_least_3() {
+        let (_dir, im) = make_manager().await;
+        let keys = 8u64;
+        let rids = 800u64;
+        let mut entries: Vec<(String, RowId)> = Vec::with_capacity((keys * rids) as usize);
+        for d in 0..keys {
+            for r in 0..rids {
+                entries.push((
+                    format!("dup{:02}", d),
+                    RowId::new((d * rids + r) as u32, r as u16),
+                ));
+            }
+        }
+        for idx in shuffled(entries.len()) {
+            let (key, rid) = &entries[idx];
+            im.insert(key.as_bytes(), *rid).await.unwrap();
+        }
+
+        let height = index_height(&im).await;
+        assert!(
+            height >= 3,
+            "8 keys x 800 rids must reach an internal child of the root, height={height}"
+        );
+
+        for d in 0..keys {
+            let key = format!("dup{:02}", d);
+            let found = im.search_all(key.as_bytes()).await.unwrap();
+            assert_eq!(
+                found.len(),
+                rids as usize,
+                "search_all({key}) must return every inserted rid"
+            );
+        }
+
+        for (key, rid) in &entries {
+            im.delete_exact(key.as_bytes(), *rid)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("delete_exact({key}, {rid:?}) must reach the entry: {e}")
+                });
+        }
+        for d in 0..keys {
+            let key = format!("dup{:02}", d);
+            assert!(
+                im.search_all(key.as_bytes()).await.unwrap().is_empty(),
+                "all entries of {key} must be gone"
+            );
+        }
+    }
+
+    async fn index_height(im: &IndexManager) -> usize {
+        let mut page_id = im.root_page_id();
+        let mut height = 1usize;
+        loop {
+            let (is_leaf, child) = {
+                let guard = im.async_loader.load_page(page_id).await.unwrap();
+                let data = guard.page_data();
+                if data[0] == LEAF_NODE {
+                    (true, 0u32)
+                } else {
+                    let internal = InternalNodeRef::new(&data);
+                    (false, internal.leftmost_child())
+                }
+            };
+            if is_leaf {
+                return height;
+            }
+            height += 1;
+            page_id = PageId(child as u64);
+        }
     }
 }

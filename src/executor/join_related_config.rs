@@ -1,5 +1,5 @@
 use crate::database::Database;
-use crate::executor::{CorrelatedParam, Executor, JoinCondition, OutputColumn, PhysicalPlan};
+use crate::executor::{CorrelatedParam, Executor, JoinCondition, PhysicalPlan};
 use crate::transaction::Snapshot;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,7 +11,9 @@ pub struct JoinRelatedConfig {
     pub left: Box<dyn Executor + Send>,
     pub right: Box<dyn Executor + Send>,
     pub conditions: Vec<JoinCondition>,
-    pub output_columns: Vec<OutputColumn>,
+    /// T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：SELECT
+    /// 清单裁剪位（空 = 恒等全宽输出）。
+    pub projection: Vec<usize>,
     pub correlated_params: Vec<CorrelatedParam>,
     pub left_column_indices: HashMap<String, usize>,
     pub right_column_indices: HashMap<String, usize>,

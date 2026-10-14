@@ -107,10 +107,14 @@ pub async fn execute(database: &Database, sql: &str) -> Response {
 
 /// Pipeline 阶段 1：SQL 文本 → AST。
 ///
-/// `parse_sql` 失败时返回 `Err("Parse error: {e}")`；解析后语句集为空时返回
+/// `parse_sql` 失败时返回**裸解析器错误文本**（无前缀；单层 `Parse error:`
+/// 前缀由错误分类漏斗点统一赋予，ISS11）；解析后语句集为空时返回
 /// `Err("Empty SQL")`。编排器将 Err 文本包成 `Response::Error`。
 pub async fn parse_stage(sql: &str) -> std::result::Result<Vec<Statement>, String> {
-    let statements = parse_sql(sql).map_err(|e| format!("Parse error: {}", e))?;
+    let statements = parse_sql(sql).map_err(|e| match e {
+        PlanError::ParseError(msg) => msg,
+        other => other.to_string(),
+    })?;
     if statements.is_empty() {
         return Err("Empty SQL".to_string());
     }
@@ -122,7 +126,9 @@ pub async fn parse_stage(sql: &str) -> std::result::Result<Vec<Statement>, Strin
 const PARSE_SQLSTATE: &str = "42601";
 
 /// Pipeline 阶段 2 的类型化失败（MS19-T02）：`Display` 与既有 `String` 错误
-/// 逐字节等价（`Plan error: ` 前缀在此引入），额外携带 PG SQLSTATE 分类。
+/// 逐字节等价（`Plan error: ` 前缀在此引入；ISS11：解析类错误以
+/// `PlanError::ParseError` Display 的单层 `Parse error: ` 为唯一前缀，此处
+/// 不再叠加），额外携带 PG SQLSTATE 分类。
 #[derive(Debug, Clone)]
 pub struct PlanFailure {
     pub message: String,
@@ -139,8 +145,12 @@ impl std::error::Error for PlanFailure {}
 
 impl From<PlanError> for PlanFailure {
     fn from(e: PlanError) -> Self {
+        let message = match &e {
+            PlanError::ParseError(_) => e.to_string(),
+            _ => format!("Plan error: {}", e),
+        };
         Self {
-            message: format!("Plan error: {}", e),
+            message,
             sqlstate: e.sqlstate(),
         }
     }
@@ -986,7 +996,7 @@ pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Respon
         Ok(s) => s,
         Err(message) => {
             return Response::Error {
-                message,
+                message: format!("Parse error: {message}"),
                 sqlstate: Some(PARSE_SQLSTATE.to_string()),
             }
         }
@@ -1208,7 +1218,7 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
                 record_time("parse", start.elapsed());
             }
             return Response::Error {
-                message,
+                message: format!("Parse error: {message}"),
                 sqlstate: Some(PARSE_SQLSTATE.to_string()),
             };
         }
@@ -1709,7 +1719,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     left: left_executor,
                     right: right_executor,
                     conditions: node.conditions,
-                    output_columns: node.output_columns,
+                    projection: node.projection,
                     correlated_params: node.correlated_params,
                     left_column_indices,
                     right_column_indices,
@@ -1755,7 +1765,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     left: left_executor,
                     right: right_executor,
                     conditions: node.conditions,
-                    output_columns: node.output_columns,
+                    projection: node.projection,
                     correlated_params: node.correlated_params,
                     left_column_indices,
                     right_column_indices,
@@ -1972,6 +1982,26 @@ fn plan_output_names(plan: &PhysicalPlan) -> Option<Vec<String>> {
             n.projection.iter().map(|&i| n.columns[i].clone()).collect()
         }),
         PhysicalPlan::ScalarSubqueryFilter(n) => Some(n.columns.clone()),
+        // T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：
+        // SemiJoin/AntiJoin 全宽承载 + 节点投影裁剪——与 Scan 臂同款（空投影 =
+        // 恒等全宽，非空 = 按索引裁剪），SubqueryEval 外层列位映射按真实行形状
+        // 解析。
+        PhysicalPlan::SemiJoin(n) => Some(if n.projection.is_empty() {
+            n.output_columns.iter().map(|c| c.column.clone()).collect()
+        } else {
+            n.projection
+                .iter()
+                .map(|&i| n.output_columns[i].column.clone())
+                .collect()
+        }),
+        PhysicalPlan::AntiJoin(n) => Some(if n.projection.is_empty() {
+            n.output_columns.iter().map(|c| c.column.clone()).collect()
+        } else {
+            n.projection
+                .iter()
+                .map(|&i| n.output_columns[i].column.clone())
+                .collect()
+        }),
         PhysicalPlan::Aggregate(n) => Some(n.output_columns.clone()),
         PhysicalPlan::Sort(n) => Some(if n.projection.is_empty() {
             n.columns.clone()
@@ -2752,14 +2782,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parse_stage_invalid_sql_returns_parse_error() {
+    async fn parse_stage_invalid_sql_returns_raw_parser_error() {
         // Unmatched parenthesis is unambiguously rejected by sqlparser.
+        // ISS11：parse_stage 返回裸解析器文本（无 `Parse error:` 前缀），
+        // 单层前缀由错误分类漏斗点统一赋予。
         let err = parse_stage("SELECT (1 FROM t")
             .await
             .expect_err("parse should fail");
         assert!(
-            err.starts_with("Parse error:"),
-            "expected 'Parse error:' prefix, got: {}",
+            !err.starts_with("Parse error:"),
+            "parse_stage must not add a prefix, got: {}",
+            err
+        );
+        assert!(
+            err.contains("sql parser error"),
+            "raw sqlparser text expected, got: {}",
             err
         );
     }

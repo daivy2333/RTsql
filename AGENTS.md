@@ -12,7 +12,7 @@
 | 参考 | `.agents/memory/references.md` | `openspec-docs-maintainer` |
 | 改进 | `.agents/memory/improvements.md` | `openspec-docs-maintainer` |
 | 行为规格 | `openspec/specs/<domain>/spec.md` | `openspec-docs-maintainer` 收尾合并 |
-| 活跃变更 | `openspec/changes/` | OpenSpec、plan、act |
+| 活跃变更 | `openspec/changes/` | plan、act |
 | Change Evidence | `openspec/changes/<change>/evidence/` | `openspec-act` |
 | 分析文档 | `.agents/analysis/` | `openspec-explorer` |
 | Runbook | `.agents/runbooks/` | `openspec-experience-recorder` |
@@ -73,9 +73,9 @@
 | 用户决策 | 对需求、风险和不可逆动作取得明确选择 |
 | 文件读取 | 完整读取所选规则和引用 |
 | 精准编辑 | 只修改相关片段 |
-| 命令执行 | 保留命令、输出和退出码 |
+| 命令执行 | 保留命令与实际结果 |
 | 并行委托 | 仅在环境支持且任务可独立时使用 |
-| OpenSpec 集成 | 按当前职责创建、应用、验证或归档 change |
+| 变更文件操作 | 用 OpenSpec 集成、目录创建和引用扫描完成 change 生命周期 |
 
 平台工具名只是适配，不改变上述语义。
 
@@ -85,7 +85,7 @@
 - SNAPSHOT 不保存工作状态、操作流程、约束、原因或历史记录。
 - 其他文档只引用 SNAPSHOT，不复制当前项目描述。
 - 项目路线、稳定基线和阶段边界写 tasks，编号 `MSxx`。
-- 已承诺工作写 tasks 或 OpenSpec change。
+- 已承诺工作写 tasks 或 change。
 - 当前开发约束写 project-model，编号 `Mxx`。
 - 长期选择及其理由写 change 的 `design.md`，随 change 归档。
 - 系统当前行为写 specs 语料库；maintainer 在 change 收尾时合并增量规格。
@@ -156,7 +156,7 @@ Analysis、Iteration、Cycle、Act Response、Evidence 和 Issue 可以保留采
 4. 不测试通过不提交。
 5. 不验证成功不声明。
 6. 三次失败必须反思。
-7. 不见测试见证不变更。
+7. 没有先行测试不变更。
 8. 不见场景缺口扫描不进设计。
 
 ## BDD
@@ -166,6 +166,7 @@ Analysis、Iteration、Cycle、Act Response、Evidence 和 Issue 可以保留采
 - Happy Path。
 - Sad Path。
 - Edge Case。
+- 组合路径：两个以上特性的组合、声明与消费的配对、多步状态转换。
 - 错误、超时、取消和兼容性。
 
 输出场景草图：前置状态、动作、结果和失败边界。用户显式接受的缺口写入 proposal。
@@ -184,7 +185,7 @@ Plan 在制定任务前读取实际代码并记录：
 
 ## TDD
 
-铁律：`NO CHANGE WITHOUT TEST WITNESS`。
+铁律：先有测试，再有变更（NO CHANGE WITHOUT A PRIOR TEST）。
 
 - 新功能：测试定义期望，观察 RED，再实现 GREEN。
 - Bug：测试复现问题，观察 RED，再修复 GREEN。
@@ -203,8 +204,8 @@ Plan 在制定任务前读取实际代码并记录：
 
 - Gate 1：需求、BDD、场景、范围和 change 获批。
 - Gate 2：调查、设计、任务分轮、追踪和当前轮验证均达到执行就绪；非实质未知项不阻塞。
-- Gate 3：每个任务先 spec review，后 code review。
-- Gate 4：完成声明有新鲜证据或可采信的未失效结论。
+- Gate 3：每任务即时 Review，拦住 spec 偏离和会蔓延的缺陷；表面质量由 Plan Review 终审。
+- Gate 4：Task Contract 的验证全部满足，完成声明基于真实运行或采信未失效结论。
 - Gate 5：阻塞即停；三次失败后反思。
 
 Gate BLOCK 必须记录原因。用户显式豁免必须保留原话和风险。
@@ -243,39 +244,36 @@ agent 可执行的测试和 Review 不形成边界。验证失败时保留当前
 - Plan 把 Persisted Evidence 明确设为 `none` 或 `required`；`required` 项映射到 Gate 和通过条件。
 - Act 只写当前 Cycle 的 `Act Response`。
 - Act 每个 task 或 repair item 完成后执行 Gate 3；完整 diff 终审由 Plan Review 独立承担。
-- Act 不建立或复核 Plan 基线；直接按 ready 的 Plan Context 建立测试见证并实施。
+- Act 不建立或复核 Plan 基线；直接按 ready 的 Plan Context 建立先行测试并实施。
 - Act 可处理非实质局部差异并在 Response 记录；实质问题返回 Plan。
 - Act 修复当前 Cycle 计划范围内的问题；新设计或范围问题返回 Plan。
 - Act Response 记录自检发现、已修复内容和遗留 Minor 问题；没有发现时省略。
 - Act Response 记录有证据的 Runbook、Issue 候选；没有则写 `None`。
 - 当前 change 范围外的实质缺陷，Plan 在 Plan Review 或计划交付中、Act 在 Act Response 中作为 Issue 候选报告，只报告不落账；Issue 的建立、关闭与重开由 Recorder 按用户指令执行。
-- Act Response 状态允许 `pending → reported`、`pending → blocked`、用户解决阻塞后的 `blocked → pending`，以及 Plan 要求当前 Cycle 修复时的 `reported → pending`。
+- Act Response 状态为 `reported` 或 `blocked`；blocked 经用户解除后继续，完成时改为 `reported`。
 - 计划偏差或 `required` Evidence 不再满足白名单、必要性或可采集性时，Act 写 Blocker Handoff，将 Response 改为 `blocked`，并按需保存 `act-added / BLOCKED` Evidence。
 - 用户解决阻塞并要求继续时，Act 追加 Blocker Resolution，保留原 Blocker Handoff，再恢复当前 Cycle。
-- Review 保持 `pending` 且没有后继 Cycle 时，Plan 和 Act 可分别覆盖自己的区域为最新完整状态；进入终态或创建后继 Cycle 后，Cycle 冻结。Plan Context 始终不可改写。
+- Review 保持 `pending` 且没有后继 Cycle 时，Plan 和 Act 可分别覆盖自己的区域为最新完整状态；得出最终结论或创建后继 Cycle 后，Cycle 冻结。Plan Context 始终不可改写。
 - Act 只在用户明确要求、结果无法低成本复现、一次性环境即将消失、Issue/Blocker 需要保留现场，或摘要会丢失决定性结构时创建 `evidence/<iteration>/<cycle>/`。
 - Evidence 目录与 Iteration/Cycle 层级一致，随 change 归档，不登记 R。
 - Act 不得创建下一 Cycle 或下一 Iteration。
 - Plan Review 必须检查代码和证据，不以 Act Self-Review 代替独立检查；独立检查指独立阅读代码与 diff、核对 Act Response 声明与代码一致，不包含重复运行已采信的验证（公共规则 › 验证）。
 - Plan Review 把偏差分类为 Plan 遗漏、Plan 错误、Act 偏离、基线变化或新证据，并区分阻塞 Acceptance 与非阻塞 Minor finding。
 - 既有 Acceptance 的有限修复仍受当前执行契约约束时，Plan 保持 Review Result 为 `pending` 并要求 Act 继续当前 Cycle；需要新执行契约时才创建 rework Cycle。
-- Review Result 的终态为 `accepted | rework-required | replan-required`；Plan 写完 Review 和后继产物后最后更新。`rework-required` 不修改 Map；`replan-required` 调整计划并创建同一 Iteration 的 replan Cycle。
+- Review Result 的最终结论为 `accepted | rework-required | replan-required`；Plan 写完 Review 和后继产物后最后更新。`rework-required` 不修改 Map；`replan-required` 调整计划并创建同一 Iteration 的 replan Cycle。
 - 连续两个 rework Cycle 未缩小同一 Acceptance gap 时重新检查 Plan、设计和需求假设；同一问题三次失败后不得创建第四次同类 Cycle。
 - 当前 Iteration 只有在 Review Result 为 `accepted` 后才能完成并展开 Map 中的下一 Iteration。
 - 展开后继 Iteration 时，Current Baseline 优先引用前一 Iteration 最终 Act Response 的改动、验证结论和 accepted Review，只补查本次需求新涉及的代码表面。
 
 ## 验证
 
-完成声明必须包含：
+完成声明基于真实运行：写明执行的命令或操作，以及实际观察到的结果；输出长时只保留能判断结果的部分。
 
-- 验证命令或操作。
-- 每项不超过 20 行的决定性输出；输出更长时只保留能判断结果的片段。
-- 退出码或明确结果。
-- 证据支持的结论。
+单元测试与受影响范围的验证随时进行。昂贵验证——全量测试套件、真机端到端等——按 Iteration 预算：每个 Iteration 一次，时机由 Plan 写入 Iteration Plan；replan 修订验证契约时重新预算。异常定向审计和用户显式要求复现不占预算。现有结果足以判断 Acceptance 后停止。
 
-验证按影响范围递增：直接目标测试 → 受影响边界 → 必要的集成或全量 Gate；现有结果足以判断 Acceptance 后停止。
+端到端验证单独成类：输入由系统真实产生（上游产物、磁盘文件、stdin），断言用户实际所见（退出码、输出、磁盘状态）；单元测试自己构造输入、观察单元内部。触发条件涉及两个以上特性、经过至少一层外部接口、或跨越多步状态转换的 scenario，验证必须走真实入口——实际运行命令、实际调用或实际启动；其余行为类 scenario 优先真实入口。Iteration 是否把端到端纳入稳定基线判据，由 Plan 按项目成本决定并写入 Iteration Plan。
 
-每条验证的判定依据被测对象和项目测试框架自身的退出码与原生输出；禁止为判定测试或验证结果新增脚本、封装命令、专用参数或判定器，原生输出需要过滤时使用现成通用工具的单步管道。在同样满足判定的方案中依次选择：已有测试命令 > 项目原生能力 > 通用工具单步管道 > 在项目测试框架内新增测试代码；判定逻辑不得放在项目测试框架之外。人工验证仅用于自动命令无法判定的情形：计划写明最短操作步骤和每步直接可观察的结果，所见即判定；结果由执行人以一句话记入验证记录，不要求填表、截图留档或汇总工具；未执行的人工项不得计入完成声明。发现判定层时删除该层、改为直接判定并重新运行验证；产品 requirement 明确要求的自检或校验输出属于目标行为，不适用本句。
+一切判定以实际为准：结论来自被测对象真实运行的可观察结果，不来自叙述；不得为判定新增脚本、封装命令、专用参数或判定层，实际输出需要过滤时使用现成通用工具的单步管道。在同样满足判定的方案中依次选择：已有测试命令 > 项目原生能力 > 通用工具单步管道 > 在项目测试框架内新增测试代码；判定逻辑不得放在项目测试框架之外。人工验证仅用于自动命令无法判定的情形：计划写明最短操作步骤和每步直接可观察的结果，所见即判定；结果由执行人以一句话记入验证记录，不要求填表、截图留档或汇总工具；未执行的人工项不得计入完成声明。发现判定层时删除该层、改为直接判定并重新运行验证；产品 requirement 明确要求的自检或校验输出属于目标行为，不适用本句。
 
 上下文和环境默认可信：本会话真实运行过、或产生后覆盖范围未变化的验证结论直接采信；Gate 按默认结论通过，不逐项记录证据。采信时在自己的 Review 或 Response 中注明来源和结论，不复制长输出，不创建 Evidence。
 
@@ -288,15 +286,15 @@ agent 可执行的测试和 Review 不形成边界。验证失败时保留当前
 - 同一问题第三次失败。
 - 进入 rework 或 replan 时受影响的范围。
 
-两道检查不可默认：完成声明背后至少有一次真实运行（TDD 的 GREEN 即是）；Plan Review 独立阅读完整 diff，核对 Act 声明与代码一致，不以 Act 自检代替。修改前的测试见证按同一规则采信既有结论：覆盖未变化时，既有结论就是当前基线的合法观察，恢复阻塞和 rework 场景按此采信。
+两道检查不可默认：完成声明背后至少有一次真实运行（TDD 的 GREEN 即是）；Plan Review 独立阅读完整 diff，核对 Act 声明与代码一致，不以 Act 自检代替。修改前的先行测试按同一规则采信既有结论：覆盖未变化时，既有结论就是当前基线的合法观察，恢复阻塞和 rework 场景按此采信。
 
 验证通过一次即为通过；禁止自行重复运行已通过的验证以增强可靠性或信心，禁止重试直至通过。同一验证的重复仅适用于两种情形：计划在通过条件中写明判定方式的不稳定验证（时序、并发或已知不稳定类，如固定重复次数取结果），以及失败后判定是否偶发错误的一次复核；复核通过按通过处理，并在验证记录注明首跑失败。
 
-命令顺序由当前工作流状态和退出结果表达，时间戳只能辅助诊断。Hash、revision、run-id、peer、manifest 或时间顺序一致均不能使 Gate 通过；没有目标状态、输出、错误结果或退出码等行为证据时，验证结论为失败。
+命令顺序由当前工作流状态和实际结果表达，时间戳只能辅助诊断。Hash、revision、run-id、peer、manifest 或时间顺序一致均不能使 Gate 通过；没有目标状态、输出、错误结果等实际行为证据时，验证结论为失败。
 
 Persisted Evidence 默认 `none`。设为 `required` 前必须说明它支持哪个 Acceptance、为什么 Act Response 不够、为什么无法低成本重跑，以及缺少它会阻止哪个决定；任一项无法回答时保持 `none`。禁止保存完整日志目录、源码副本或完整测试套件输出。
 
-禁止使用"应该、大概、基本完成"替代证据。
+禁止使用“应该、大概、基本完成”替代证据。
 
 change 结构自检覆盖：tasks 状态与实际完成一致，specs、design 与已实现行为一致，Iteration 与 Cycle 文件齐全，`Review Result` 与流程状态一致。
 

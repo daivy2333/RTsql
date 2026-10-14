@@ -7,7 +7,7 @@
 
 use crate::database::Database;
 use crate::executor::{
-    CorrelatedParam, ExecResult, Executor, JoinCondition, JoinRelatedConfig, OutputColumn,
+    apply_projection, CorrelatedParam, ExecResult, Executor, JoinCondition, JoinRelatedConfig,
     PhysicalPlan, Value,
 };
 use crate::storage::Result;
@@ -35,7 +35,9 @@ pub struct AntiJoinExecutor {
     left: Box<dyn Executor + Send>,
     right: Box<dyn Executor + Send>,
     conditions: Vec<JoinCondition>,
-    output_columns: Vec<OutputColumn>,
+    /// T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：SELECT
+    /// 清单裁剪位（空 = 恒等全宽输出——ORDER BY 存在时裁剪归 Sort 承担）。
+    projection: Vec<usize>,
     /// Correlated subquery parameters (empty = independent subquery)
     correlated_params: Vec<CorrelatedParam>,
 
@@ -76,7 +78,7 @@ impl AntiJoinExecutor {
             left: config.left,
             right: config.right,
             conditions: config.conditions,
-            output_columns: config.output_columns,
+            projection: config.projection,
             correlated_params: config.correlated_params,
             right_plan: config.right_plan,
             database: config.database,
@@ -139,12 +141,11 @@ impl AntiJoinExecutor {
         Some(key)
     }
 
-    /// Build output row from left-table row (anti-join only outputs left columns)
+    /// Build output row from left-table row (T5 D8：基座全宽承载——行内容 = 左行
+    /// 直通；SELECT 清单裁剪由本节点 `projection` 在直通后应用，ORDER BY 存在时
+    /// projection 为空、裁剪归 Sort)。
     fn build_output_row(&self, left_row: &[Value]) -> Vec<Value> {
-        self.output_columns
-            .iter()
-            .map(|oc| left_row[oc.column_index].clone())
-            .collect()
+        apply_projection(&self.projection, left_row.to_vec())
     }
 
     /// Extract correlated parameter values from a left-table row.

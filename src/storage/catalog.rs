@@ -215,25 +215,61 @@ impl Catalog {
     /// one `CatalogColumnRow` per column. The `data_page_head` /
     /// `data_page_tail` are equal at create time (the new head page is
     /// the tail until first auto-allocation).
+    ///
+    /// change 2026-10-13 T3 (D4/D5): column rows are written FIRST and the
+    /// `__tables` row LAST — the table row is the create-statement commit
+    /// point: a reopened catalog that can see the table row is guaranteed
+    /// to also see every column row it references. On success the ordered
+    /// statement-boundary flush runs (referenced pages first, commit page
+    /// last) so "DDL succeeded" implies "definition durable" even if the
+    /// process dies before any checkpoint.
     pub async fn insert_table(
         &self,
         meta: &CatalogRow,
         columns: &[CatalogColumnRow],
     ) -> Result<()> {
         let _guard = self.lock.lock().await;
-        let payload = serialize_catalog_row(meta);
-        let tables_root = *self.tables_root.lock().await;
-        append_to_chain(&self.buffer_pool, &self.storage, tables_root, &payload).await?;
-        // Note: the new head page is recorded by `append_to_chain` in the
-        // root if a fresh page had to be allocated. Re-read in that case.
-        *self.tables_root.lock().await = chain_head(&self.buffer_pool, tables_root).await?;
 
+        // Column rows first, in declaration order.
         for col in columns {
             let payload = serialize_catalog_column_row(col);
             let columns_root = *self.columns_root.lock().await;
             append_to_chain(&self.buffer_pool, &self.storage, columns_root, &payload).await?;
             *self.columns_root.lock().await = chain_head(&self.buffer_pool, columns_root).await?;
         }
+
+        // The table row last: its existence on disk is the commit point.
+        let payload = serialize_catalog_row(meta);
+        let tables_root = *self.tables_root.lock().await;
+        let prev_tail = chain_head(&self.buffer_pool, tables_root).await?;
+        let (table_page, _lid) =
+            append_to_chain(&self.buffer_pool, &self.storage, tables_root, &payload).await?;
+        // Note: the new head page is recorded by `append_to_chain` in the
+        // root if a fresh page had to be allocated. Re-read in that case.
+        *self.tables_root.lock().await = chain_head(&self.buffer_pool, tables_root).await?;
+
+        // Ordered flush: everything else first, then the commit page(s). If
+        // the table row landed on a freshly-linked page, the previous tail
+        // page's link bytes are part of the commit point too — without them
+        // a reopened chain walk would stop one page short of the new row.
+        let mut commit_pages = vec![table_page];
+        if table_page != prev_tail {
+            commit_pages.push(prev_tail);
+        }
+        self.flush_commit_point(&commit_pages).await?;
+
+        Ok(())
+    }
+
+    /// change 2026-10-13 T3 (D4): DDL statement-boundary ordered flush. Every
+    /// dirty page EXCEPT the commit page(s) is written first, then the commit
+    /// page(s) in order. A crash mid-sequence then never leaves a durable
+    /// catalog row pointing at pages that never reached disk: the commit row
+    /// is either absent (statement视同未发生) or fully consistent.
+    async fn flush_commit_point(&self, commit_pages: &[PageId]) -> Result<()> {
+        let exclude: std::collections::HashSet<PageId> = commit_pages.iter().copied().collect();
+        self.buffer_pool.flush_all_except(&exclude).await?;
+        self.buffer_pool.flush_pages(commit_pages).await?;
         Ok(())
     }
 
@@ -360,6 +396,37 @@ impl Catalog {
             },
         )
         .await
+        .map(|_| ())
+    }
+
+    /// change 2026-10-13 T3 (D4/D5): ALTER TABLE ADD COLUMN variant of
+    /// [`Self::update_table_column_count`]. The column-count rewrite on the
+    /// `__tables` row is the statement commit point: the new column row must
+    /// be durable BEFORE the count that advertises it, so the updated row's
+    /// page is flushed last (referenced pages first). ALTER DROP COLUMN
+    /// keeps the plain method — DROP-class DDL retains its checkpoint-based
+    /// crash boundary (design D4 wiring list).
+    pub async fn update_table_column_count_ddl(&self, name: &str, new_count: u32) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let page = update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.column_count = new_count;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await?;
+        if let Some(page) = page {
+            self.flush_commit_point(&[page]).await?;
+        }
+        Ok(())
     }
 
     /// Update the `data_page_tail` field of an existing row in `__tables`.
@@ -382,6 +449,7 @@ impl Catalog {
             },
         )
         .await
+        .map(|_| ())
     }
 
     /// Update the `index_root_page_id` field of an existing row in `__tables`.
@@ -411,6 +479,7 @@ impl Catalog {
             },
         )
         .await
+        .map(|_| ())
     }
 
     /// MS23 Iteration 001 (2.1/D4): update the Nth UNIQUE index root of an
@@ -452,6 +521,7 @@ impl Catalog {
             },
         )
         .await
+        .map(|_| ())
     }
 
     /// MS21 Iteration 002 (D4): update the Nth secondary index root of an
@@ -491,12 +561,18 @@ impl Catalog {
             },
         )
         .await
+        .map(|_| ())
     }
 
     /// MS21 Iteration 002 (D4/D5): append one secondary-index registration to
     /// an existing row in `__tables` (the CREATE INDEX catalog write, performed
     /// only after the tree was built and backfilled — CTAS
     /// 「建表→物化→登记」 ordering precedent).
+    ///
+    /// change 2026-10-13 T3 (D4): the updated `__tables` copy is the CREATE
+    /// INDEX commit point — its page is flushed last (the built tree's pages
+    /// first), so a reopen either sees the registration with a durable tree
+    /// or no registration at all.
     ///
     /// No-op if the table does not exist.
     pub async fn append_secondary_index(
@@ -505,7 +581,7 @@ impl Catalog {
         entry: &CatalogSecondaryIndex,
     ) -> Result<()> {
         let _guard = self.lock.lock().await;
-        update_field_in_chain(
+        let page = update_field_in_chain(
             &self.buffer_pool,
             &self.storage,
             PageId(TABLES_PAGE_ID),
@@ -519,7 +595,11 @@ impl Catalog {
                 Ok(Some(serialize_catalog_row(&row)))
             },
         )
-        .await
+        .await?;
+        if let Some(page) = page {
+            self.flush_commit_point(&[page]).await?;
+        }
+        Ok(())
     }
 
     /// MS21 Iteration 002 (D4): remove the named secondary-index registration
@@ -545,6 +625,7 @@ impl Catalog {
             },
         )
         .await
+        .map(|_| ())
     }
 }
 
@@ -764,15 +845,17 @@ where
 ///   non-destructive. The two steps are not atomic; a crash between them leaves
 ///   two copies, which [`Catalog::scan_tables`] collapses deterministically.
 ///
-/// No-op if the row does not exist. An update that cannot be persisted never
-/// reports success.
+/// No-op if the row does not exist (`Ok(None)`); on a write, returns the
+/// page the updated bytes landed on (`Some`) — the in-place page for an
+/// equal-length rewrite, the freshly-appended copy page otherwise. An
+/// update that cannot be persisted never reports success.
 async fn update_field_in_chain<F>(
     bp: &BufferPool,
     storage: &Arc<dyn AsyncStorage>,
     root: PageId,
     target_name: &str,
     updater: F,
-) -> Result<()>
+) -> Result<Option<PageId>>
 where
     F: Fn(&[u8]) -> Result<Option<Vec<u8>>>,
 {
@@ -816,7 +899,7 @@ where
 
     // Row absent: existing no-op contract.
     let Some((page_id, lid, old_len, new_bytes)) = target else {
-        return Ok(());
+        return Ok(None);
     };
 
     if new_bytes.len() == old_len {
@@ -825,11 +908,12 @@ where
             let mut slotted = SlottedPage::new(page);
             slotted.update_slot_in_place(lid, &new_bytes)
         });
-        return updated.map_err(|e| {
+        updated.map_err(|e| {
             StorageError::Internal(format!(
                 "catalog update of table '{target_name}' failed: {e}"
             ))
-        });
+        })?;
+        return Ok(Some(page_id));
     }
 
     let (new_page, new_lid) = append_to_chain(bp, storage, root, &new_bytes)
@@ -839,7 +923,8 @@ where
                 "catalog update of table '{target_name}' failed: {e}"
             ))
         })?;
-    delete_named_copies_except(bp, root, target_name, (new_page.0, new_lid)).await
+    delete_named_copies_except(bp, root, target_name, (new_page.0, new_lid)).await?;
+    Ok(Some(new_page))
 }
 
 /// Delete every same-name row in the chain except the copy identified by
@@ -1266,6 +1351,21 @@ pub(crate) fn serialize_catalog_column_row(row: &CatalogColumnRow) -> Vec<u8> {
         }
     }
     buf
+}
+
+/// change 2026-10-13 T3 (design D6): plan-time capacity probe for a catalog
+/// column row. Serializes the row and attempts the same slot placement
+/// `append_to_chain` performs on a freshly-initialized empty chain page. A
+/// row that cannot fit an empty page can never be appended, so the planner
+/// rejects it (named, zero side effects) instead of failing mid-CREATE with
+/// "Page full" after a half-built table. The threshold is derived from the
+/// real page format — no hardcoded byte constant.
+pub(crate) fn catalog_column_row_fits(row: &CatalogColumnRow) -> bool {
+    let payload = serialize_catalog_column_row(row);
+    let mut page = Page::new(PageId(0));
+    let _ = SlottedPage::init(&mut page, 0x03);
+    let mut slotted = SlottedPage::new(&mut page);
+    slotted.add_slot(&payload).is_ok()
 }
 
 pub(crate) fn deserialize_catalog_column_row(data: &[u8]) -> Result<CatalogColumnRow> {

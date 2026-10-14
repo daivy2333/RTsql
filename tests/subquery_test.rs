@@ -825,3 +825,289 @@ async fn test_in_subquery_non_join_single_column_reachable() {
     let r = rows(resp);
     assert_eq!(r, vec![vec![serde_json::json!(5)]]);
 }
+
+// === R5: SemiJoin/AntiJoin 基座全宽承载与排序键（change
+// 2026-10-13-e2e-verification-and-defect-closure T5，delta spec
+// `join-output-shape-resolution` ADDED R5）===
+//
+// 病灶（pre-fix 实测，e2e `e11_semijoin_order_by_non_output_column` RED
+// 见证）：SemiJoin/AntiJoin 的 `output_columns` 只承载 SELECT 清单列，
+// `ORDER BY <非输出列>` 收 42703 或静默丢序。修复后基座承载左表全宽行
+// （`build_full_output_columns_for_table`），SELECT 清单裁剪由节点
+// `projection`（无 ORDER BY）或 Sort（有 ORDER BY）下游承担。
+
+/// R5-S1: IN 子查询按非输出列排序（ASC/DESC 双向真实排序）。
+#[tokio::test]
+async fn r5_in_order_by_non_output_column() {
+    let db = open_db().await;
+    setup_emp_dept(&db).await;
+
+    // 输入序 Alice,Bob,Carol,Dave,Eve；salary 序 Dave,Alice,Carol,Bob,Eve
+    // ——与输入序不同，排序真实发生的见证。
+    let resp = exec(
+        &db,
+        "SELECT name FROM emp WHERE dept IN (SELECT id FROM dept) ORDER BY salary",
+    )
+    .await;
+    let r = rows(resp);
+    let names: Vec<&str> = r.iter().map(|row| row[0].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["Dave", "Alice", "Carol", "Bob", "Eve"]);
+
+    let resp = exec(
+        &db,
+        "SELECT name FROM emp WHERE dept IN (SELECT id FROM dept) ORDER BY salary DESC",
+    )
+    .await;
+    let r = rows(resp);
+    let names: Vec<&str> = r.iter().map(|row| row[0].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["Eve", "Bob", "Carol", "Alice", "Dave"]);
+}
+
+/// R5-S2: 排序语义与无子查询基座一致——带子查询、去子查询、字面量 IN
+/// 三形态同序（spec 场景「排序语义与无子查询基座一致」）。
+#[tokio::test]
+async fn r5_ordering_matches_no_subquery_and_literal_forms() {
+    let db = open_db().await;
+    setup_emp_dept(&db).await;
+
+    let with_sub = rows(
+        exec(
+            &db,
+            "SELECT name FROM emp WHERE dept IN (SELECT id FROM dept) ORDER BY salary",
+        )
+        .await,
+    );
+    let no_sub = rows(exec(&db, "SELECT name FROM emp ORDER BY salary").await);
+    let literal = rows(
+        exec(
+            &db,
+            "SELECT name FROM emp WHERE dept IN (10, 20, 30) ORDER BY salary",
+        )
+        .await,
+    );
+    assert_eq!(with_sub, no_sub, "subquery base must sort like plain scan");
+    assert_eq!(
+        with_sub, literal,
+        "literal IN path must stay zero-regressed"
+    );
+}
+
+/// R5-S3: 投影形状零回归——无 ORDER BY 时输出行宽度 = SELECT 清单宽度
+/// （基座全宽承载不得泄漏到最终输出；含多列投影）。
+#[tokio::test]
+async fn r5_projection_shape_no_full_width_leak() {
+    let db = open_db().await;
+    setup_emp_dept(&db).await;
+
+    let resp = exec(
+        &db,
+        "SELECT name FROM emp WHERE dept IN (SELECT id FROM dept)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r.len(), 5);
+    assert_eq!(r[0].len(), 1, "single-column projection must stay width 1");
+
+    let resp = exec(
+        &db,
+        "SELECT name, salary FROM emp WHERE dept IN (SELECT id FROM dept) ORDER BY name",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r[0].len(), 2, "two-column projection must stay width 2");
+    assert_eq!(
+        r,
+        vec![
+            vec![serde_json::json!("Alice"), serde_json::json!(50000)],
+            vec![serde_json::json!("Bob"), serde_json::json!(60000)],
+            vec![serde_json::json!("Carol"), serde_json::json!(55000)],
+            vec![serde_json::json!("Dave"), serde_json::json!(45000)],
+            vec![serde_json::json!("Eve"), serde_json::json!(65000)],
+        ]
+    );
+}
+
+/// R5-S4: EXISTS 基座按非输出列排序。
+#[tokio::test]
+async fn r5_exists_order_by_non_output_column() {
+    let db = open_db().await;
+    setup_emp_dept(&db).await;
+
+    let resp = exec(
+        &db,
+        "SELECT name FROM emp WHERE EXISTS \
+         (SELECT 1 FROM dept WHERE dept.id = emp.dept) ORDER BY salary DESC",
+    )
+    .await;
+    let r = rows(resp);
+    let names: Vec<&str> = r.iter().map(|row| row[0].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["Eve", "Bob", "Carol", "Alice", "Dave"]);
+}
+
+/// R5-S5: NOT IN（AntiJoin）基座按非输出列排序。
+///
+/// 注：内层 WHERE 刻意用非 PK 列——编写时（Iteration 003）内层裸名 PK 等值
+///（`WHERE id = 10`）走 IndexScan 路由而 `get_subquery_first_column` 缺
+/// IndexScan 臂误报「multiple columns」（当时登记为 Issue 候选）。该缺陷已由
+/// Iteration 005 T8（R8）修复，见本文件 T8 节 `r8_in_subquery_*` 用例矩阵。
+#[tokio::test]
+async fn r5_not_in_anti_join_order_by_non_output_column() {
+    let db = open_db().await;
+    setup_emp_dept(&db).await;
+
+    // dept NOT IN West 区（dept 20）：Alice(50000), Carol(55000), Dave(45000)
+    // salary 序 Dave,Alice,Carol
+    let resp = exec(
+        &db,
+        "SELECT name FROM emp WHERE dept NOT IN \
+         (SELECT id FROM dept WHERE region = 'West') ORDER BY salary",
+    )
+    .await;
+    let r = rows(resp);
+    let names: Vec<&str> = r.iter().map(|row| row[0].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["Dave", "Alice", "Carol"]);
+}
+
+/// R5-S6: 相关 IN 子查询按非输出列排序（相关参数取值列在全宽行上不受裁剪影响）。
+#[tokio::test]
+async fn r5_correlated_in_order_by_non_output_column() {
+    let db = open_db().await;
+    setup_emp_dept(&db).await;
+
+    // 相关内层命中 East 区 dept（10 与 30）→ Alice(10), Carol(10), Dave(30)
+    // salary DESC：Carol(55000), Alice(50000), Dave(45000)
+    let resp = exec(
+        &db,
+        "SELECT emp.name FROM emp WHERE emp.dept IN \
+         (SELECT dept.id FROM dept WHERE dept.id = emp.dept AND dept.region = 'East') \
+         ORDER BY emp.salary DESC",
+    )
+    .await;
+    let r = rows(resp);
+    let names: Vec<&str> = r.iter().map(|row| row[0].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["Carol", "Alice", "Dave"]);
+}
+
+// === T8 (R8): IN 子查询索引扫描取首列 ===
+//
+// Iteration 003 Act Response 记录的既有缺陷：内层裸名主键等值（`WHERE id = 10`）
+// 使右支成为 `IndexScan`（`columns` 已按 SELECT 清单收窄），二级索引等值成为
+// `IndexScanAll`（基表全列 + `projection` 裁剪），两者均无
+// `get_subquery_first_column` 匹配臂，落入兜底误报「multiple columns」。
+
+/// R8-S1: 裸名主键等值——内层 IndexScan 按 SELECT 清单首列匹配。
+#[tokio::test]
+async fn r8_in_subquery_pk_equality_index_scan_first_column() {
+    let db = open_db().await;
+    setup_emp_dept(&db).await;
+
+    // 内层 `WHERE id = 10` 是裸名主键等值 → IndexScan（columns = ["id"]）。
+    let resp = exec(
+        &db,
+        "SELECT emp.name FROM emp WHERE emp.dept IN (SELECT id FROM dept WHERE id = 10)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r.len(), 2);
+    let names: Vec<&str> = r.iter().map(|row| row[0].as_str().unwrap()).collect();
+    assert!(names.contains(&"Alice"));
+    assert!(names.contains(&"Carol"));
+}
+
+/// R8-S2: IndexScan 首列为非首列——内层 SELECT 清单收窄为基表第二列，
+/// 首列提取必须取收窄后的 `columns[0]`，而非基表第一列。
+#[tokio::test]
+async fn r8_in_subquery_index_scan_non_first_column_output() {
+    let db = open_db().await;
+    exec(&db, "CREATE TABLE item (id INT, sku TEXT, tag TEXT)").await;
+    exec(&db, "INSERT INTO item VALUES (1, 'apple', 'x')").await;
+    exec(&db, "INSERT INTO item VALUES (2, 'pear', 'apple')").await;
+    exec(&db, "INSERT INTO item VALUES (3, 'fig', 'y')").await;
+
+    // 内层 `SELECT sku FROM item WHERE id = 1` → IndexScan，columns = ["sku"]
+    //（基表第二列）。若误取基表第一列 "id"，tag 与 id 值比较将恒空。
+    let resp = exec(
+        &db,
+        "SELECT item.id FROM item WHERE item.tag IN (SELECT sku FROM item WHERE id = 1)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0][0].as_i64().unwrap(), 2);
+}
+
+/// R8-S3: 二级索引等值——内层 `IndexScanAll`（基表全列 + `projection` 裁剪），
+/// 首列必须按 `projected_columns` 规则取投影后第一列，投影非空时不得回退
+/// 基表第一列。
+#[tokio::test]
+async fn r8_in_subquery_secondary_index_equality_projected_first_column() {
+    let db = open_db().await;
+    exec(&db, "CREATE TABLE t2 (id INT, n INT, s TEXT)").await;
+    exec(&db, "CREATE INDEX idx_n ON t2(n)").await;
+    exec(&db, "INSERT INTO t2 VALUES (1, 100, 'x')").await;
+    exec(&db, "INSERT INTO t2 VALUES (2, 200, 'y')").await;
+    exec(&db, "INSERT INTO t2 VALUES (3, 100, 'z')").await;
+
+    // 内层 `SELECT n FROM t2 WHERE n = 100` → IndexScanAll（columns = 基表全列
+    // [id, n, s]，projection = [1]）。投影首列 "n"（非基表第一列 "id"）：
+    // 若误取 "id"，外层 n（100/200/100）与 {1, 3} 比较将恒空。
+    let resp = exec(
+        &db,
+        "SELECT t2.s FROM t2 WHERE t2.n IN (SELECT n FROM t2 WHERE n = 100)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r.len(), 2);
+    let names: Vec<&str> = r.iter().map(|row| row[0].as_str().unwrap()).collect();
+    assert!(names.contains(&"x"));
+    assert!(names.contains(&"z"));
+
+    // 对照：projection = [0]（SELECT id）——投影首列与基表第一列同名 "id"，
+    // 结果行集一致（命中 n=100 的 id 1 与 3）。
+    let resp = exec(
+        &db,
+        "SELECT t2.s FROM t2 WHERE t2.id IN (SELECT id FROM t2 WHERE n = 100)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r.len(), 2);
+}
+
+/// R8-S4: 限定名主键等值（`dept.id = 10`）不满足裸名要求，内层不走
+/// IndexScan（既有 DataScan/Filter 路径），修复前后结果不变。
+#[tokio::test]
+async fn r8_in_subquery_qualified_pk_equality_unchanged() {
+    let db = open_db().await;
+    setup_emp_dept(&db).await;
+
+    let resp = exec(
+        &db,
+        "SELECT emp.name FROM emp WHERE emp.dept IN (SELECT id FROM dept WHERE dept.id = 10)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r.len(), 2);
+    let names: Vec<&str> = r.iter().map(|row| row[0].as_str().unwrap()).collect();
+    assert!(names.contains(&"Alice"));
+    assert!(names.contains(&"Carol"));
+}
+
+/// R8-S5: JOIN 形内层仍由 JOIN 臂点名拒绝——新两臂不得吞掉 JOIN 形态
+/// （JOIN 臂在匹配顺序上先于兜底，文案逐字节不变）。
+#[tokio::test]
+async fn r8_in_subquery_join_rejection_unchanged() {
+    let db = open_db().await;
+    setup_o_r_s(&db).await;
+
+    let resp = exec(
+        &db,
+        "SELECT o.x FROM o WHERE o.x IN \
+         (SELECT r.a FROM r JOIN s ON r.a = s.b WHERE r.a = 1)",
+    )
+    .await;
+    let msg = error_msg(resp);
+    assert!(
+        msg.contains("IN subquery with JOIN is not supported"),
+        "expected JOIN-naming rejection, got: {msg}"
+    );
+}

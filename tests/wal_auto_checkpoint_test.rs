@@ -349,15 +349,29 @@ async fn pure_select_session_writes_nothing() {
         for _ in 0..5 {
             let _ = query_rows(&db, "SELECT * FROM t", "pure select").await;
         }
+        // 校准记录（change 2026-10-13 T3）：原断言覆盖整段会话（含末尾
+        // 空 begin/commit 的收敛尾），其基线依赖「DDL 会话 close 全量
+        // checkpoint」旧模型。T3/D4 起 DDL 语句边界有序落盘，会话 A 的
+        // close 为零工作跳过（规格 `wal-auto-checkpoint`「零工作跳过保持」
+        // + `wal-recovery-replay-integrity` 零工作判定谓词逐字节未变），
+        // 基线从「1 条标记记录」变为 0。规格不变量「纯 SELECT 零 WAL 字节」
+        // 在 SELECT 阶段严格断言；空事务尾由阈值 1 的自动 checkpoint 收敛
+        // （其自身语义由 reopen 用例覆盖），close 对收敛态不追加。
+        assert_eq!(
+            wal_len(&db_path),
+            baseline,
+            "纯 SELECT 会话不得追加任何 WAL 字节"
+        );
         let tx = db.begin().await.unwrap();
         db.commit(tx).await.unwrap();
+        let converged = wal_len(&db_path);
         db.close().await.unwrap();
+        assert_eq!(
+            wal_len(&db_path),
+            converged,
+            "收敛态 close 为零工作跳过：不得追加 WAL 字节"
+        );
     }
-    assert_eq!(
-        wal_len(&db_path),
-        baseline,
-        "纯 SELECT 会话的提交边界不得追加任何 WAL 字节"
-    );
 }
 
 /// wal-auto-checkpoint R2 `=0` 禁用（lib 通道）：阈值 0 时不发生自动

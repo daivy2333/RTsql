@@ -106,6 +106,8 @@ rtsql --format table demo-restored "SELECT id, name, age FROM people ORDER BY id
 
 伴生文件名由主文件名派生，因此任何重命名或移动都必须让 `<db>.wal` 与 `<db>.checkpoint` 随主文件以同一基名同行。写入进行中的文件级拷贝必须包含 `<db>.wal`；否则先让写入方关闭——或运行 `rtsql checkpoint <db>` 将 WAL 折入主文件——再对副本执行 `rtsql <db> "SELECT count(*) FROM t"` 确认。
 
+Schema 变更在语句边界持久：成功的 `CREATE TABLE`、`CREATE INDEX`、`CREATE VIEW`、`ALTER TABLE ADD COLUMN`、`CREATE TABLE AS SELECT` 在语句返回前即将其 catalog 页有序落盘——`__tables` 行最后落盘作为 commit point——因此进程在其后任何时刻被杀死，重开仍能找到该 schema，数据行由 WAL 重放恢复。剩余的崩溃窗口是 `DROP` 类语句（页释放为 checkpoint 基准）与加密库上的 DDL（其 WAL 与 checkpoint 伴生文件按设计为明文）；这两类之后用 `rtsql check <db>` 校验，或备份优先使用 `dump` / `restore`。
+
 `rtsql delete <db>` 删除单个数据库文件族；`./install.sh --uninstall --purge-data` 在卸载时清空整个数据目录。两者均不可通过 RTsql 恢复。
 
 ### 删除数据库
@@ -171,8 +173,8 @@ rtsql [OPTIONS] [DB] [SQL] [COMMAND]
 | `rtsql <db> <sql>` | 执行一条 SQL 或分号分隔的 SQL 脚本 |
 | `rtsql new <target>` | 创建空的裸名数据库或路径数据库 |
 | `rtsql list` | 列出集中存储目录中的数据库 |
-| `rtsql schema <db>` | 输出用户表 DDL |
-| `rtsql dump <db>` | 将 DDL 和数据导出为 SQL 文本 |
+| `rtsql schema <db>` | 输出用户表 DDL（列类型渲染标准长名：`INTEGER`、`TEXT`、`FLOAT`、`BOOLEAN`、`DATE`、`TIMESTAMP`） |
+| `rtsql dump <db>` | 将 DDL 和数据导出为 SQL 文本（同样的类型名渲染；`dump` → `restore` 往返可重建 schema 与数据） |
 | `rtsql restore <db> <file>` | 将 dump 恢复到空数据库；`-` 表示 stdin |
 | `rtsql import <db> <table> <file\|-> --csv` | 按表头列名导入 CSV，或按表头自动建表；`-` 表示 stdin；接受 `:memory:` 目标 |
 | `rtsql delete <db> [--dry-run]` | 删除数据库及其 `.wal` / `.checkpoint` 伴生文件；`--dry-run` 只列出 |
@@ -231,6 +233,8 @@ rtsql app "ATTACH 'orders' AS o; \
 
 `--format` 接受 `table`、`json`、`csv` 和 `tsv`。未显式指定时，交互式终端默认使用 `table`，其他环境默认使用 `json`。
 
+脚本可以在一次调用中以 `;` 分隔携带多条语句。每条语句按顺序各自 auto-commit 执行，失败时以语句序号定位并停止。`--format json` 下输出为 JSONL——每条语句一行独立 JSON 对象——成功的 DDL 语句与其他零行语句一样输出 `{"affected_rows":0}`。
+
 ### 退出码
 
 | 退出码 | 含义 |
@@ -256,7 +260,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **常量查询：** 支持 `SELECT 1 + 1` 等无 `FROM` 表达式。
 - **事务：** 显式库 API 事务，以及 CLI `BEGIN` / `COMMIT` / `ROLLBACK` 会话。
 - **MVCC：** 默认 Repeatable Read，也可通过 `Database::open_with_isolation` 选择 Read Committed。
-- **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。
+- **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。`CREATE INDEX` 建的二级索引自动服务等值谓词，其结果集与全表扫描严格一致——同行集、不重复、不漏行——任意表规模成立，重启与崩溃恢复两态一致。
 - **长值存储：** 超过单页内联容量（约 4KB）的行值自动经溢出页链存取，无人为长度上限。溢出对 SQL 层透明：`INSERT`/`UPDATE`/`SELECT`、`dump`/`restore`/`import`、崩溃恢复、GC 与 `DROP TABLE`/`TRUNCATE` 释放、加密库、`:memory:` 与只读会话同等可用（此前超过页容量的行以 `No enough space in page` 失败，该失败形态已终止）。
 - **运行形态：** 共享锁上的只读会话（多个并发读者、零写入），以及全程驻留内存的 `:memory:` 数据库。
 
@@ -278,7 +282,7 @@ rtsql app "ATTACH 'orders' AS o; \
 
 - **列清单：** `INSERT INTO t (col, ...) VALUES ...` 接受表列的任意子集且顺序任意。省略列取声明 `DEFAULT`，无声明则取 `NULL`；NOT NULL 列这样被填入 `NULL` 时点名拒绝。`VALUES` 中的 `DEFAULT` 等价于省略该列。声明默认值经 catalog 持久化、重启后生效，并由 `rtsql dump` 与 `rtsql schema` 渲染。
 - **值类型：** 写入值必须与列声明类型一致。`NULL` 豁免，日期列接受其类型化字面量，`FLOAT` 列接受整数值（以等价浮点存储），其余跨类型写入以 `column '<列名>' expects <类型>, got <类型>` 拒绝。`dump` / `restore` / `import` 通道经同一规则。
-- **声明默认值：** `CREATE TABLE` 或 `ALTER TABLE ADD COLUMN` 声明的 `DEFAULT` 字面量在计划期按同一规则与列类型校验——`NULL` 豁免，`FLOAT` 列整数字面量升格（以浮点持久化），`DATE`/`TIMESTAMP` 列解析字符串（非法日期拒绝），其余跨类型声明以 `DEFAULT type mismatch: column '<列名>': expected <类型>, got <类型>` 在建表前拒绝、零副作用。类型化日期字面量（如 `DEFAULT DATE '2026-01-02'`）可接受，含日期默认值的表 `dump` → `restore` 往返保真。`DEFAULT` 字面量长度另受 catalog 列行页内容量约束（约 4KB 量级）：超长默认值在建表时按既有页满错误点名拒绝、零副作用；写入值本身不受此限制（超页行走溢出页链）。
+- **声明默认值：** `CREATE TABLE` 或 `ALTER TABLE ADD COLUMN` 声明的 `DEFAULT` 字面量在计划期按同一规则与列类型校验——`NULL` 豁免，`FLOAT` 列整数字面量升格（以浮点持久化），`DATE`/`TIMESTAMP` 列解析字符串（非法日期拒绝），其余跨类型声明以 `DEFAULT type mismatch: column '<列名>': expected <类型>, got <类型>` 在建表前拒绝、零副作用。类型化日期字面量（如 `DEFAULT DATE '2026-01-02'`）可接受，含日期默认值的表 `dump` → `restore` 往返保真。`DEFAULT` 字面量长度另受 catalog 列行页内容量约束（约 4KB 量级）：超长默认值在计划期以 `DEFAULT type mismatch: column '<列名>': DEFAULT value is too large for the catalog page capacity` 点名拒绝——建表前拒绝、零副作用；写入值本身不受此限制（超页行走溢出页链）。
 - **`UPDATE ... SET` 表达式：** 可一次赋值多列，右值接受完整值表达式——列引用按旧行值同快照求值（`SET a = a + 1, b = a` 中 `b` 读旧 `a`），另支持算术、`CAST`、`CASE`、`COALESCE` 与标量函数。写入类型门、`NOT NULL`、键列类型门、碰撞预检、rekey 与唯一/次级索引维护全部作用于求值结果；任一赋值失败整行保持原状。右值为聚合调用或子查询时计划期点名拒绝。
 - **全表 `UPDATE`/`DELETE`：** 省略 `WHERE` 时语句作用于全部行。行级语义逐行生效——写入类型门、`NOT NULL`、键列类型门、碰撞预检、rekey 与唯一/次级索引维护——语句中途失败回滚该语句已写入的全部行（隐式事务语义；`BEGIN` 内可用并可随事务 `ROLLBACK`）。`affected_rows` 为实际行数。`TRUNCATE TABLE` 仍是更快的物理释放替代。
 - **`ON CONFLICT DO NOTHING`：** 冲突行被跳过，不计入受影响行数。
@@ -321,6 +325,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo bench
 ```
+
+`cargo test --test e2e_test -- --test-threads=1` 运行端到端旅程套件：以真实 CLI 子进程走完整用户旅程（生命周期、导入、崩溃恢复、索引、锁、跨库、加密、大值、分析子命令、输出形态、错误面）。它是验证数据库整体功能正常最快的入口。
 
 仓库的 `benches/` 目录还包含 Criterion 基准和 SQLite 对比基准。RISC-V 64 Linux（musl）产物由 `build-riscv64-musl.sh` 生成，见上文「交叉构建 RISC-V 64 Linux（musl）」章节。
 

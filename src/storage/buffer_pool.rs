@@ -232,6 +232,60 @@ impl BufferPool {
         Ok(())
     }
 
+    /// change 2026-10-13 T3 (design D4): flush the given pages in the given
+    /// order; non-dirty pages are skipped. Same per-page discipline as
+    /// `flush_all` — the frame lock is held only to copy the page and clear
+    /// the dirty bit, never across the storage write await (M17).
+    pub async fn flush_pages(&self, page_ids: &[PageId]) -> Result<()> {
+        for &page_id in page_ids {
+            let page_copy = {
+                if let Some(entry) = self.pages.get(&page_id) {
+                    let mut frame_guard = entry.value().lock().unwrap();
+                    if frame_guard.dirty {
+                        frame_guard.dirty = false;
+                        Some(frame_guard.page.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(page) = page_copy {
+                self.storage.write_page(page_id, &page).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// change 2026-10-13 T3 (design D4): flush every dirty page except those
+    /// in `exclude`. Same two-phase collect-then-write discipline as
+    /// `flush_all`.
+    pub async fn flush_all_except(
+        &self,
+        exclude: &std::collections::HashSet<PageId>,
+    ) -> Result<()> {
+        // Phase 1: collect dirty pages while holding per-shard locks briefly.
+        let mut to_write: Vec<(PageId, Page)> = Vec::new();
+        for entry in self.pages.iter() {
+            if exclude.contains(entry.key()) {
+                continue;
+            }
+            let mut frame_guard = entry.value().lock().unwrap();
+            if frame_guard.dirty {
+                frame_guard.dirty = false;
+                to_write.push((*entry.key(), frame_guard.page.clone()));
+            }
+        }
+
+        // Phase 2: write to storage (no locks held).
+        for (page_id, page) in to_write {
+            self.storage.write_page(page_id, &page).await?;
+        }
+
+        Ok(())
+    }
+
     /// MS18-T01: read-only probe — is any cached page dirty (not yet flushed
     /// to storage)?
     ///

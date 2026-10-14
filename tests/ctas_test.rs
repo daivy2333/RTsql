@@ -222,7 +222,7 @@ fn ctas_output_columns_follow_select_header() {
     let ddl = schema_ddl(dir.path(), "app");
     assert_ddl_contains(
         &ddl,
-        r#"CREATE TABLE "m" ("k" INT PRIMARY KEY, "name" STRING)"#,
+        r#"CREATE TABLE "m" ("k" INTEGER PRIMARY KEY, "name" TEXT)"#,
         "ctas header",
     );
 }
@@ -342,7 +342,7 @@ fn ctas_expression_alias_defines_output_shape() {
     );
 
     let ddl = schema_ddl(dir.path(), "app");
-    assert_ddl_contains(&ddl, r#""inc" INT"#, "expression alias header");
+    assert_ddl_contains(&ddl, r#""inc" INTEGER"#, "expression alias header");
 
     let out = run_cli(dir.path(), &["app", "SELECT * FROM m"]);
     assert_rows(&out, r#""rows":[[2],[3],[4]]"#, "expression alias values");
@@ -383,7 +383,7 @@ fn ctas_infers_column_types_from_output_values() {
     let ddl = schema_ddl(dir.path(), "app");
     assert_ddl_contains(
         &ddl,
-        r#"CREATE TABLE "m_null" ("k" INT PRIMARY KEY, "v" STRING)"#,
+        r#"CREATE TABLE "m_null" ("k" INTEGER PRIMARY KEY, "v" TEXT)"#,
         "all-null → STRING",
     );
     // change 2026-10-03-practical-core-gaps T3：非 INT 隐式首列不渲染
@@ -395,7 +395,7 @@ fn ctas_infers_column_types_from_output_values() {
     );
     assert_ddl_contains(
         &ddl,
-        r#"CREATE TABLE "m_typed" ("k" INT PRIMARY KEY, "d" DATE, "ts" TIMESTAMP)"#,
+        r#"CREATE TABLE "m_typed" ("k" INTEGER PRIMARY KEY, "d" DATE, "ts" TIMESTAMP)"#,
         "typed preserved",
     );
 }
@@ -444,7 +444,7 @@ fn ctas_empty_source_creates_empty_string_typed_table() {
     // PRIMARY KEY（声明从未被强制，输出与语义一致）。
     assert_ddl_contains(
         &ddl,
-        r#"CREATE TABLE "m" ("k" STRING, "name" STRING)"#,
+        r#"CREATE TABLE "m" ("k" TEXT, "name" TEXT)"#,
         "empty source shape",
     );
     let out = run_cli(dir.path(), &["app", "SELECT * FROM m"]);
