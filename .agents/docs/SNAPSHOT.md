@@ -96,8 +96,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 44d04d9（主批次：e2e 验证与缺陷清偿批收尾归档统一入库；上一主批次 fa9691c〔外部评测反馈批 Iteration 000/001 进度〕——本行 hash 随收尾提交回填）
-- **ahead of origin**: 5（`git rev-list --count origin/master..master` 写入时实数——origin/master 仍为 2026-10-02 推送位 81c8e6f；本批次提交随后推送同步）
+- **提交基线**: cd88957（主批次：e2e 验证与缺陷清偿批收尾归档统一入库；上一主批次 44d04d9〔外部评测反馈批收尾〕）
+- **ahead of origin**: 7（`git rev-list --count origin/master..master` 回填时实数——主批次 cd88957 + 本回填共 2 提交；origin/master 仍为 2026-10-02 推送位 81c8e6f；本批次提交随收尾一并推送后归零）
 - **工作区**: 收尾批次待提交（e2e 验证与缺陷清偿批实施面〔全部源码与测试〕+ 8 域 spec delta 合并 + change 归档移动 + tasks/SNAPSHOT 同步）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 1994 tests pass, 0 failures, 2 ignored（2026-10-14 Iteration 005 Act 全量 Gate：120 集成目标 6 批 + lib 398 + e2e 22 串行；1929 基线 + 本 change 净增 65）
