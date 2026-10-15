@@ -149,13 +149,26 @@ impl AntiJoinExecutor {
     }
 
     /// Extract correlated parameter values from a left-table row.
-    fn extract_param_values(&self, left_row: &[Value]) -> Vec<(String, Value)> {
+    ///
+    /// T1（change 2026-10-15-antijoin-correlated-param-hardening）：未命中 SHALL
+    /// 报错点名该外层列——修复前 `filter_map` 静默丢弃该参数，使右计划对应参数
+    /// 未注入求值 NULL，且 `correlated_rows_cache` 键短项化可致跨行误共享
+    /// （同族前 change T2 三处为 `unwrap_or(0)` 静默回落外层首列）。
+    fn extract_param_values(&self, left_row: &[Value]) -> Result<Vec<(String, Value)>> {
         self.correlated_params
             .iter()
-            .filter_map(|cp| {
-                self.left_column_indices
+            .map(|cp| {
+                let idx = self
+                    .left_column_indices
                     .get(&cp.outer_column.to_lowercase())
-                    .map(|&idx| (cp.param_name.clone(), left_row[idx].clone()))
+                    .copied()
+                    .ok_or_else(|| {
+                        crate::storage::StorageError::ExecutionError(format!(
+                            "correlated parameter column not found in outer row: {}",
+                            cp.outer_column
+                        ))
+                    })?;
+                Ok((cp.param_name.clone(), left_row[idx].clone()))
             })
             .collect()
     }
@@ -206,7 +219,7 @@ impl Executor for AntiJoinExecutor {
                                     if let (Some(ref right_plan), Some(ref database)) =
                                         (&self.right_plan, &self.database)
                                     {
-                                        let param_values = self.extract_param_values(&left_row);
+                                        let param_values = self.extract_param_values(&left_row)?;
                                         if let Some(rows) =
                                             self.correlated_rows_cache.get(&param_values)
                                         {
@@ -315,5 +328,59 @@ impl Executor for AntiJoinExecutor {
                 }
             }
         }
+    }
+}
+
+/// T1（change 2026-10-15-antijoin-correlated-param-hardening）：关联参数外层
+/// 绑定期望存在而解析失败时显式报错点名列，SHALL NOT 静默丢弃该参数——丢弃会
+/// 使右计划对应参数未注入求值 NULL，且缓存键短项化致跨行误共享。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::JoinRelatedConfig;
+    use crate::executor::{CorrelatedParam, StubRowExecutor};
+
+    /// 外层行只有 id / ref 两列，`missing_col` 不在其中。`right_plan` 与
+    /// `database` 必须给 `Some`：`ScanLeft` 的相关分支整体位于
+    /// `if let (Some(right_plan), Some(database))` 之内，二者缺一时绑定期根本
+    /// 不被经过，断言会因错误原因通过。
+    async fn config(outer_column: &str) -> JoinRelatedConfig {
+        JoinRelatedConfig {
+            left: Box::new(StubRowExecutor::new(vec![vec![
+                Value::Int(7),
+                Value::Int(9),
+            ]])),
+            right: Box::new(StubRowExecutor::new(Vec::new())),
+            conditions: Vec::new(),
+            projection: Vec::new(),
+            correlated_params: vec![CorrelatedParam::new(
+                "o".to_string(),
+                outer_column.to_string(),
+                format!("o.{outer_column}"),
+            )],
+            left_column_indices: HashMap::from([
+                ("id".to_string(), 0usize),
+                ("ref".to_string(), 1usize),
+            ]),
+            right_column_indices: HashMap::new(),
+            right_plan: Some(PhysicalPlan::SingleRow),
+            database: Some(Arc::new(Database::open_in_memory().await.unwrap())),
+            snapshot: None,
+            routed_tables: Arc::new(crate::pipeline::RoutedTables::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_outer_column_reports_error_naming_column() {
+        let mut exec = AntiJoinExecutor::new(config("missing_col").await);
+        let err = exec
+            .next()
+            .await
+            .expect_err("绑参未命中应报错而非静默丢弃该参数");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing_col"),
+            "错误应点名未命中的外层列: {msg}"
+        );
     }
 }
