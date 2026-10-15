@@ -1,6 +1,6 @@
 # ISS08 CREATE TABLE 失败残留半表（DDL 无原子性）
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P1-4）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -26,7 +26,7 @@
 
 ## 处置
 
-待用户裁定立项（与 ISS12 同场景交叉：错误文案点名 DEFAULT 过大不改变残留问题，两缺陷独立验收；修复方向候选——预检 DEFAULT 页内容量先行拒绝（计划期、零副作用）或 catalog 写入失败回滚）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 002 T3 修复归档。建表 catalog 写入中途失败零残留：内存不注册 / 孤儿列行清理 / `open_or_init` 按 column_count 裁剪 / 页释放，同名可重试；与 ISS14 的计划期预检方向同批收敛（原建议落实）。`tests/ddl_crash_recovery_test.rs` 含失败零残留与可重试见证。
 
 ## 证据
 

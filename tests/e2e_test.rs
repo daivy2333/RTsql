@@ -662,6 +662,39 @@ fn e8_large_value_journey() {
         "clean check one line: {:?}",
         out.stdout
     );
+
+    // 大值 × 四格式矩阵（ISS15 组合空格）：csv/tsv 全值保真、table 64 字符截断 exit 0
+    let out = run_cli(
+        dir.path(),
+        &["big", "SELECT body FROM docs", "--format", "csv"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let data_line = out.stdout.lines().nth(1).expect("csv data row");
+    assert_eq!(data_line.len(), 2_000_000, "csv full fidelity");
+
+    let out = run_cli(
+        dir.path(),
+        &["big", "SELECT body FROM docs", "--format", "tsv"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let data_line = out.stdout.lines().nth(1).expect("tsv data row");
+    assert_eq!(data_line.len(), 2_000_000, "tsv full fidelity");
+
+    let out = run_cli(
+        dir.path(),
+        &["big", "SELECT body FROM docs", "--format", "table"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "table header/separator/data: {:?}",
+        out.stdout
+    );
+    let cell = lines[2].trim_end();
+    assert_eq!(cell.chars().count(), 64, "table cell truncated");
+    assert!(cell.ends_with("..."));
 }
 
 /// E9 分析子命令：stats/sample/profile × 四格式渲染。
@@ -740,6 +773,68 @@ fn e9_analytics_journey() {
         "profile string column: {}",
         out.stdout
     );
+
+    // 大值 × 分析子命令（ISS15 用户实测 panic 路径）：70,000 字符 > 65,536 阈值
+    let out = run_cli(
+        dir.path(),
+        &[
+            "ana",
+            "CREATE TABLE big_stats (id INT PRIMARY KEY, s STRING)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let big: String = "y".repeat(70_000);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "ana",
+            &format!("INSERT INTO big_stats VALUES (1, '{}')", big),
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+
+    // stats：table 截断 exit 0（String 列 min/max 携带原值 = panic 触发路径）
+    let out = run_cli(
+        dir.path(),
+        &["stats", "ana", "big_stats", "--format", "table"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+
+    // stats json：min/max 全值保真（index 5/6 = min/max）
+    let out = run_cli(
+        dir.path(),
+        &["stats", "ana", "big_stats", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed = json(&out.stdout);
+    let s_row = parsed["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r[0] == "s")
+        .expect("s column row");
+    assert_eq!(
+        s_row[5].as_str().map(|v| v.len()),
+        Some(70_000),
+        "stats min full value"
+    );
+    assert_eq!(
+        s_row[6].as_str().map(|v| v.len()),
+        Some(70_000),
+        "stats max full value"
+    );
+
+    // sample / profile：table 截断 exit 0
+    let out = run_cli(
+        dir.path(),
+        &["sample", "ana", "big_stats", "1", "--format", "table"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["profile", "ana", "big_stats", "--format", "table"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
 }
 
 /// E10 输出面锁定（D-1）：多语句 JSONL、DDL affected_rows:0、四格式渲染形态。
@@ -1100,6 +1195,65 @@ fn e7_encryption_journey() {
         &["enc", "SELECT COUNT(*) AS c FROM s"],
     );
     assert_rows(&out, serde_json::json!(["c"]), serde_json::json!([[2]]));
+
+    // import × 加密库（组合空格，此前零见证）：对钥成功数据可查、错钥 exit 5
+    std::fs::write(dir.path().join("f.csv"), "id,secret\n7,a1\n8,a2\n").unwrap();
+    let out = run_cli(
+        dir.path(),
+        &[
+            "--key",
+            "pw",
+            "enc",
+            "CREATE TABLE s2 (id INT PRIMARY KEY, secret STRING)",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["--key", "pw", "import", "enc", "s2", "f.csv", "--csv"],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    let out = run_cli(
+        dir.path(),
+        &["--key", "pw", "enc", "SELECT COUNT(*) AS c FROM s2"],
+    );
+    assert_rows(&out, serde_json::json!(["c"]), serde_json::json!([[2]]));
+
+    // 错钥 import exit 5（密钥错误打开面与主命令一致）
+    let out = run_cli(
+        dir.path(),
+        &["--key", "wrong", "import", "enc", "s2", "f.csv", "--csv"],
+    );
+    assert_eq!(
+        out.code,
+        Some(5),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    // stats × 加密库（此前零见证）
+    let out = run_cli(
+        dir.path(),
+        &["--key", "pw", "stats", "enc", "s", "--format", "json"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed = json(&out.stdout);
+    assert!(
+        parsed["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r[0] == "secret"),
+        "stats encrypted db rows: {}",
+        out.stdout
+    );
 }
 
 /// E3 崩溃恢复对照（非缺陷面）：已存在表 + 写入中途 SIGKILL → 读写重开

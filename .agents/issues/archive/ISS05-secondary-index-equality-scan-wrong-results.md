@@ -1,6 +1,6 @@
 # ISS05 二级索引等值扫描结果集错误（重复发射 + 索引条目缺失）
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P0-1）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -27,7 +27,7 @@
 
 ## 处置
 
-待用户裁定立项（建议独立 change；验收判据必须为「索引扫描结果集与 DataScan 严格相等」覆盖重复与缺失双向，另含失败 UPDATE 零副作用回归）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 001 T2 修复归档。机制调查修正原假设：回填路径无辜（描述第 2 条的「索引条目缺失」非回填漏行），真凶为等值下探遇等值分隔键跳过边界子树——`search_all_from_page_async` 改闭区间下探 + `BTree::delete_exact` 同集合下探；调查中定位的同面新缺陷一并修复：B1 `LeafNode::shift_slots_right` 叶链指针清零、B2 `IndexManager::scan_all` 内部页当叶读 + page-0 终止符（多层树全表 DML 静默失真）。验收即原建议判据：30000 行多叶等值连串结果集与全表扫描双向严格相等（不重复、不遗漏）+ 失败语句（含 UPDATE 旧键删除路径）索引零副作用；`tests/secondary_index_equality_test.rs` 落地。
 
 ## 证据
 

@@ -1,6 +1,6 @@
 # ISS07 派生表与视图的内层别名/表达式项外层不可见（CTE 通道正常）
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P1-3）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -28,7 +28,7 @@ FROM 派生表与视图的内层 SELECT 若含列别名或计算（表达式）�
 
 ## 处置
 
-待用户裁定立项；修复时须同步处置语料-代码矛盾（`sql-views` R3 修订或实现收敛，见分析文档未确认项 2）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 003 T4 修复归档。`building_from_derived` 放行扩至 DISTINCT 门 + 五分类门 + `alias_reroutable`，视图展开（`resolve_view_reference`）同型置位；派生表/视图内层别名与表达式列外层可见，IN/EXISTS/标量子查询抑制逐字节保持。处置要求中的语料-代码矛盾同步收敛：规格合并 `sql-views` MODIFIED ×1（视图三通道派生语义一致收口）；`tests/derived_scan_alias_test.rs` +5、`tests/view_test.rs` +4 见证。
 
 ## 证据
 

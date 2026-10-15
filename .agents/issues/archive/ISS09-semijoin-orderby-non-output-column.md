@@ -1,6 +1,6 @@
 # ISS09 IN/EXISTS 子查询（SemiJoin 路径）下 ORDER BY 非输出列 42703
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P1-5）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -26,7 +26,7 @@ WHERE 带 IN/EXISTS 子查询时，ORDER BY 引用表内非输出列计划期 42
 
 ## 处置
 
-待用户裁定立项（方向候选：SemiJoin 输出承载全宽 + Sort 裁剪（对齐 design D10 不变量），或排序键校验对 SemiJoin 基座放行输入列）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 003 T5 修复归档。采用原方向候选一：SemiJoin/AntiJoin 基座全宽承载——`build_full_output_columns_for_table` 全列装配 + 节点 `projection` 裁剪位（空 = 恒等）+ `build_output_row` 左行直通 + `sort_projection` 增 SemiJoin/AntiJoin 臂 + `get_plan_output_columns`/`plan_output_names` 两表头消费面对齐；ORDER BY 非输出列可用，字面量 IN/EXISTS/相关/AntiJoin 零回归；规格合并 `join-output-shape-resolution` ADDED（SemiJoin-AntiJoin 基座全宽承载与排序键）。
 
 ## 证据
 
