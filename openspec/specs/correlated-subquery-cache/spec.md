@@ -2,7 +2,7 @@
 
 ## Purpose
 
-约束关联子查询的结果缓存语义：同一语句执行内，关联参数值相同的子查询求值 SHALL 复用缓存结果（SHALL NOT 逐行重复执行），不同参数值 SHALL 独立求值，缓存命中与直执行结果 SHALL 逐字节等价；缓存生命周期 SHALL 为单次语句执行；关联参数按名从外层行解析失败时 SHALL 显式报错点名该列（SHALL NOT 静默回落或丢弃）。来源：MS09-T04（I017；change `2026-09-13-ms09-engine-mvcc-closeout`）；关联参数外层绑定失败显式报错来源 change `2026-10-15-subquery-alias-binding-and-error-prefix`（T2，防御纵深加固）。
+约束关联子查询的结果缓存语义：同一语句执行内，关联参数值相同的子查询求值 SHALL 复用缓存结果（SHALL NOT 逐行重复执行），不同参数值 SHALL 独立求值，缓存命中与直执行结果 SHALL 逐字节等价；缓存生命周期 SHALL 为单次语句执行；关联参数按名从外层行解析失败时 SHALL 显式报错点名该列（SHALL NOT 静默回落或丢弃）。来源：MS09-T04（I017；change `2026-09-13-ms09-engine-mvcc-closeout`）；关联参数外层绑定失败显式报错来源 change `2026-10-15-subquery-alias-binding-and-error-prefix`（T2，防御纵深加固）；AntiJoin 并入同一要求来源 change `2026-10-15-antijoin-correlated-param-hardening`（T1，四执行器收口）。
 
 ## Requirements
 
@@ -69,16 +69,18 @@
 
 ### Requirement: 关联参数外层绑定失败显式报错
 
-执行器（SemiJoin/ScalarSubqueryFilter/SubqueryEval）按名从外层行解析相关参数列时，未命中 SHALL 报错点名该列（`ExecutionError` 携带列名），SHALL NOT 静默回落到外层首列继续执行。修复前：三处 `extract_param_values` 以 `unwrap_or(0)` 回落，未命中参数获外层首列值，是别名幻影参数静默错结果的直接放大器（ISS16/ISS17/ISS18 执行器侧）。本要求仅约束绑定期望存在而解析失败的防御路径；正常 SQL 经计划期分类后参数列 SHALL 存在。
+执行器（SemiJoin/AntiJoin/ScalarSubqueryFilter/SubqueryEval）按名从外层行解析相关参数列时，未命中 SHALL 报错点名该列（`ExecutionError` 携带列名），SHALL NOT 静默回落到外层首列继续执行，SHALL NOT 静默丢弃该参数继续执行。修复前：SemiJoin/ScalarSubqueryFilter/SubqueryEval 三处 `extract_param_values` 以 `unwrap_or(0)` 回落，未命中参数获外层首列值；AntiJoin `extract_param_values` 以 `filter_map` 丢弃未命中参数（右计划参数未注入求值 NULL，且 `correlated_rows_cache` 键短项化可致跨行缓存误共享）——均为别名幻影参数静默错结果的直接放大器（ISS16/ISS17/ISS18 执行器侧）。本要求仅约束绑定期望存在而解析失败的防御路径；正常 SQL 经计划期分类后参数列 SHALL 存在。
+
+**2026-10-15 修改（change `2026-10-15-antijoin-correlated-param-hardening` T1）**：执行器枚举由三扩展为四——AntiJoin 的 `filter_map` 静默丢弃形态补入（前 change T2 收口三处的 `unwrap_or(0)` 回落时漏掉的同构点，经其 Plan Review Finding 1 发现）；错误类型、消息文本与 58000 兜底分类四执行器同模。
 
 #### Scenario: 外层缺列时点名报错
 
-- **GIVEN** 直接构造的 SemiJoin/ScalarSubqueryFilter/SubqueryEval 执行器，其 correlated_params 引用外层行不存在的列
+- **GIVEN** 直接构造的 SemiJoin/AntiJoin/ScalarSubqueryFilter/SubqueryEval 执行器，其 correlated_params 引用外层行不存在的列
 - **WHEN** 执行 next()
-- **THEN** 返回错误且消息点名该列，不产出任何数据行（修复前：按首列值继续产出错误行集）
+- **THEN** 返回错误且消息点名该列，不产出任何数据行（修复前：SemiJoin/ScalarSubqueryFilter/SubqueryEval 按首列值继续产出错误行集；AntiJoin 丢弃该参数继续执行产出错结果）
 
 #### Scenario: 正常相关查询绑定期命中
 
-- **GIVEN** 计划期分类正确的相关 EXISTS / WHERE 标量（含别名内层）
+- **GIVEN** 计划期分类正确的相关 EXISTS / NOT EXISTS / WHERE 标量（含别名内层）
 - **WHEN** 执行
 - **THEN** 参数按外层行正确注入，结果与子查询直执行逐字节等价（与「缓存结果与直执行逐字节等价」要求同锚）
