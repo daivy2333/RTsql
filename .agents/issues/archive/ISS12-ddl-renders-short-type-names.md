@@ -1,6 +1,6 @@
 # ISS12 schema/dump DDL 渲染类型短名（INTEGER→INT、TEXT→STRING）
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P2-8）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -21,7 +21,7 @@
 
 ## 处置
 
-待用户裁定立项（小文案批；映射表改渲染声明名，或文档声明规范化语义——注意既有 dump→restore 测试与解析器接受面）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 004 T6 修复归档。`column_type_sql` 渲染标准长名（INTEGER/TEXT/FLOAT/BOOLEAN/DATE/TIMESTAMP），dump→restore 往返与多代幂等保持；规格合并 `cli-noninteractive-shell` MODIFIED（schema/dump 类型长名）。
 
 ## 证据
 

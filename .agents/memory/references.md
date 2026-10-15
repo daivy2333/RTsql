@@ -343,81 +343,89 @@
 ## R33: ISS05 二级索引等值扫描结果集错误（重复发射 + 索引条目缺失）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS05-secondary-index-equality-scan-wrong-results.md`
+- **路径**: `.agents/issues/archive/ISS05-secondary-index-equality-scan-wrong-results.md`
 - **日期**: 2026-10-12
 - **用途**: 非唯一二级索引等值查询静默错结果的缺陷台账——`search_all_from_page_async` 等值分隔键无 break 双侧收集共享子树成倍重访（根因 Confirmed，`index_manager.rs:214-237`）+ 索引条目缺失（UPDATE KeyNotFound 探针证实、产生行 Unconfirmed）；含失败 UPDATE 索引面副作用与同步版漏行潜伏变体；修复 change 立项与验收（结果集与 DataScan 严格相等）的输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，闭区间下探 + `delete_exact` 同集合下探，叶链破坏与 scan_all 同面缺陷一并修复，双向严格相等与零副作用验收）
 
 ## R34: ISS06 import 自动建表后未 checkpoint 崩溃整库砖化
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS06-crash-after-auto-create-table-bricks-db.md`
+- **路径**: `.agents/issues/archive/ISS06-crash-after-auto-create-table-bricks-db.md`
 - **日期**: 2026-10-12
 - **用途**: DDL catalog 脏页仅池内 + WAL 已有该表已提交行 + SIGKILL 后全命令 exit 1、`check` 恢复指引不可达死锁的缺陷台账（DDL 不入 WAL/池驱逐时序/redo 硬拒绝机制链）；恢复策略设计决策与修复 change 立项的输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，DDL 语句边界 catalog 有序落盘（列行先、表行最后 = commit point + `flush_commit_point` 接线），建后即崩恢复可达）
 
 ## R35: ISS07 派生表与视图内层别名/表达式项外层不可见
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS07-derived-view-inner-alias-invisible.md`
+- **路径**: `.agents/issues/archive/ISS07-derived-view-inner-alias-invisible.md`
 - **日期**: 2026-10-12
 - **用途**: FROM 派生表与视图通道 `building_subquery` 抑制面致内层列别名与计算列外层 42703/58000、CTE 通道正常的三通道不一致缺陷台账（含语料 `sql-views` R3 矛盾）；修复 change 立项与语料同步处置的输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`building_from_derived` 放行扩 + 视图展开同型置位，语料 `sql-views` 矛盾同步收敛）
 
 ## R36: ISS08 CREATE TABLE 失败残留半表（DDL 无原子性）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS08-create-table-failure-residual-half-table.md`
+- **路径**: `.agents/issues/archive/ISS08-create-table-failure-residual-half-table.md`
 - **日期**: 2026-10-12
 - **用途**: 超大 DEFAULT 页满建表失败后残留可写半表、同名重建被拒的缺陷台账；预检先行拒绝或 catalog 写入回滚的方案取舍与立项输入（与 ISS14 同场景交叉）
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，建表失败零残留（孤儿列行清理/`open_or_init` 裁剪/页释放），同名可重试）
 
 ## R37: ISS09 IN/EXISTS 子查询（SemiJoin）下 ORDER BY 非输出列 42703
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS09-semijoin-orderby-non-output-column.md`
+- **路径**: `.agents/issues/archive/ISS09-semijoin-orderby-non-output-column.md`
 - **日期**: 2026-10-12
 - **用途**: SemiJoin/AntiJoin `output_columns` 按投影窄集装配与排序键校验联合致非输出列拒绝、字面量 IN 不受影响的缺陷台账；SemiJoin 形状对齐 design D10 或校验放行的方案取舍输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，SemiJoin/AntiJoin 基座全宽承载 + `sort_projection` 两消费面对齐，ORDER BY 非输出列可用）
 
 ## R38: ISS10 CLI help 文本泄漏内部任务标记
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS10-help-internal-marker-leak.md`
+- **路径**: `.agents/issues/archive/ISS10-help-internal-marker-leak.md`
 - **日期**: 2026-10-12
 - **用途**: `--busy-timeout`/`--readonly` help 含「MS28 T1：」「MS26 T1：」「proposal 假设 10」（`cli/mod.rs:107-114` doc comment）的文案缺陷台账；小文案批修复输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，help 用户视角改写，内部标记移出用户可见面）
 
 ## R39: ISS11 错误消息前缀双层包装
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS11-error-prefix-double-wrapping.md`
+- **路径**: `.agents/issues/archive/ISS11-error-prefix-double-wrapping.md`
 - **日期**: 2026-10-12
 - **用途**: `Parse error: Parse error:` 嵌套（`pipeline.rs:113` 与 `error.rs:74` 两层包装、既有断言锁定双层形态）的文案缺陷台账；单一包装层选定与断言校准输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`parse_stage` 去前缀 + 漏斗点单层赋予，断言校准矩阵随批落地）
 
 ## R40: ISS12 schema/dump DDL 渲染类型短名
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS12-ddl-renders-short-type-names.md`
+- **路径**: `.agents/issues/archive/ISS12-ddl-renders-short-type-names.md`
 - **日期**: 2026-10-12
 - **用途**: 声明 INTEGER/TEXT 渲染为 INT/STRING（`lifecycle.rs:1025` `column_type_sql`）的保真度缺陷台账（往返可达、数据无损）；渲染声明名或文档化规范化语义的决策输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`column_type_sql` 标准长名（INTEGER/TEXT/FLOAT/BOOLEAN/DATE/TIMESTAMP），dump→restore 多代幂等）
 
 ## R41: ISS13 RTSQL_BUSY_TIMEOUT 非法值报错只引用 flag
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS13-busy-timeout-env-error-mentions-flag-only.md`
+- **路径**: `.agents/issues/archive/ISS13-busy-timeout-env-error-mentions-flag-only.md`
 - **日期**: 2026-10-12
 - **用途**: env 通道非法值报错渲染为 flag 参数错误、未点名 `RTSQL_BUSY_TIMEOUT` 的排障误导缺陷台账；与 `RTSQL_KEY`/`RTSQL_WAL_CHECKPOINT_BYTES` 同族 env 校验面一并核对输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，env 非法值代码侧校验点名变量与实际值（`RTSQL_KEY` 同族核对非误报不动））
 
 ## R42: ISS14 超大 DEFAULT 建表失败报 Page full 不指名默认值过大
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS14-oversized-default-error-message.md`
+- **路径**: `.agents/issues/archive/ISS14-oversized-default-error-message.md`
 - **日期**: 2026-10-12
 - **用途**: DEFAULT 字面量超 catalog 页内容量时拒绝文案为泛化 Page full 的错误质量缺陷台账（文档已承认边界、错误面未承载）；与 ISS08 预检方向合并处置输入
-- **状态**: open
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`catalog_column_row_fits` 计划期点名预检（ALTER 同款），与 ISS08 零残留同批收敛）
+
+## R43: ISS15 table 渲染列宽未封顶致 ≥65536 字符单元格 panic（exit 101）
+
+- **类型**: issue
+- **路径**: `.agents/issues/archive/ISS15-table-renderer-panics-on-64k-cell.md`
+- **日期**: 2026-10-14
+- **用途**: `--format table`（TTY 默认）下行集单元格字符数 ≥ 65536 时 `render_table` 未封顶列宽触发 std::fmt 动态宽度上限 panic 的输出面崩溃缺陷台账；影响 SELECT/stats/sample/profile 全部 table 渲染面，JSON/CSV/TSV 不受影响
+- **状态**: closed（2026-10-15 fixed → change `2026-10-14-iss15-table-truncation-and-combination-gaps` 归档，`render_table` 列宽封顶 64 字符截断 + 组合面 e2e 见证补齐；规格 1 MODIFIED + 2 ADDED 合并）
 
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

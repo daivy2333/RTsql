@@ -1,6 +1,6 @@
 # ISS11 错误消息前缀双层包装（Parse error: Parse error: / Plan error: Parse error:）
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P2-7）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -21,7 +21,7 @@
 
 ## 处置
 
-待用户裁定立项（小文案批；选定单一包装层，清理另一层，校准既有前缀断言）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 004 T6 修复归档。错误前缀单层：`parse_stage` 去前缀 + 漏斗点单层赋予；既有前缀断言按校准矩阵逐处更新（cli_test +3、九处渲染断言、pipeline/lifecycle 单测、full_table_dml 双层前缀 2 处、ctas 5 处、import_input 4 处）。
 
 ## 证据
 

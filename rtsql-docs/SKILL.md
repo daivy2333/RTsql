@@ -139,7 +139,7 @@ It creates no `.db`, `.wal`, or `.checkpoint` file, `close()` and `checkpoint()`
 
 | Surface | Effect |
 |---|---|
-| `--format <table\|json\|csv\|tsv>` | Output format; default is `table` on a TTY and `json` otherwise. Global flag. |
+| `--format <table\|json\|csv\|tsv>` | Output format; default is `table` on a TTY and `json` otherwise. Global flag. The `table` format truncates cells longer than 64 characters (headers included) to 61 characters plus `...`; `json`/`csv`/`tsv` always carry full values. |
 | `--key <key>` | Key for an encrypted database; `RTSQL_KEY` is the fallback. Global flag; applies to every command that opens a database. |
 | `--busy-timeout <ms>` | Lock wait budget in milliseconds (default 5000); `0` waits only for an internal ~8 ms visibility floor. Applies to every command that opens a database, for the exclusive and the read-only shared lock alike; an explicit flag wins over `RTSQL_BUSY_TIMEOUT`. `:memory:` accepts and ignores it; the `delete` lock probe never waits. |
 | `--readonly` | Open the main database read-only (shared advisory lock; writes are refused at plan time with SQLSTATE `25006`, exit `3`). Main command only; rejected with exit `2` alongside a subcommand. |

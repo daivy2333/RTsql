@@ -614,6 +614,10 @@ async fn cli_readonly_rejected_with_lifecycle_subcommands() {
         vec!["--readonly", "delete", db],
         vec!["--readonly", "restore", db, "dump.sql"],
         vec!["--readonly", "import", db, "t", "rows.csv", "--csv"],
+        // 分析子命令同走通用拒绝臂（此前零断言）
+        vec!["--readonly", "stats", db, "t"],
+        vec!["--readonly", "sample", db, "t"],
+        vec!["--readonly", "profile", db, "t"],
     ] {
         let out = run_cli(dir.path(), &args);
         assert_eq!(

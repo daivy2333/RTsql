@@ -1,6 +1,6 @@
 # ISS10 CLI help 文本泄漏内部任务标记（MS28 T1 / MS26 T1 / proposal 假设 10）
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P2-6）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -21,7 +21,7 @@
 
 ## 处置
 
-待用户裁定立项（小文案批；改写 doc comment 为用户视角描述，内部编号移入普通注释）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 004 T6 修复归档。help 用户视角改写（去 MS28 T1 / MS26 T1 / proposal 假设 10 内部标记，内部编号移入普通注释）；`tests/cli_test.rs` 白名单断言锁定。
 
 ## 证据
 

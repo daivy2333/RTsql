@@ -231,7 +231,7 @@ rtsql app "ATTACH 'orders' AS o; \
 
 ### 输出格式
 
-`--format` 接受 `table`、`json`、`csv` 和 `tsv`。未显式指定时，交互式终端默认使用 `table`，其他环境默认使用 `json`。
+`--format` 接受 `table`、`json`、`csv` 和 `tsv`。未显式指定时，交互式终端默认使用 `table`，其他环境默认使用 `json`。`table` 格式将超过 64 字符的单元格（含表头）截断为前 61 字符加 `...`；`json`、`csv`、`tsv` 始终全值保真。
 
 脚本可以在一次调用中以 `;` 分隔携带多条语句。每条语句按顺序各自 auto-commit 执行，失败时以语句序号定位并停止。`--format json` 下输出为 JSONL——每条语句一行独立 JSON 对象——成功的 DDL 语句与其他零行语句一样输出 `{"affected_rows":0}`。
 

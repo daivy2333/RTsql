@@ -231,7 +231,7 @@ A read-write session checkpoints the WAL automatically once the bytes appended s
 
 ### Output formats
 
-`--format` accepts `table`, `json`, `csv`, and `tsv`. RTsql uses `table` for an interactive terminal and `json` otherwise unless the option is set.
+`--format` accepts `table`, `json`, `csv`, and `tsv`. RTsql uses `table` for an interactive terminal and `json` otherwise unless the option is set. The `table` format truncates any cell longer than 64 characters (headers included) to its first 61 characters followed by `...`; `json`, `csv`, and `tsv` always carry the full value.
 
 A script may pack several statements into one invocation, separated by `;`. Each statement executes in order with its own auto-commit, and a failure stops the script with its statement number. Under `--format json`, the output is JSONL — one standalone JSON object per statement line — and a successful DDL statement reports `{"affected_rows":0}`, like any other zero-row statement.
 

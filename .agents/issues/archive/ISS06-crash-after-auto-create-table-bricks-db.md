@@ -1,6 +1,6 @@
 # ISS06 import 自动建表后未 checkpoint 崩溃 → 整库砖化（恢复路径不可达）
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P0-2）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -27,7 +27,7 @@
 
 ## 处置
 
-待用户裁定立项（涉及设计决策：redo 容忍缺表延迟建表 / DDL 入 WAL / 打开时先刷 catalog 脏页等方案取舍；`check` 的恢复指引文案需与最终方案同步）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 002 T3 修复归档。方案落地为「DDL 语句边界 catalog 有序落盘」：catalog 写序重排——列行先、`__tables` 行最后落盘 = commit point + `flush_commit_point` 有序冲刷接线 create/CREATE INDEX/CREATE VIEW/ALTER ADD（import 自动建表与 CTAS 建表段经 create 继承）；未 checkpoint 崩溃「建后即崩」恢复可达、check 干净；DROP 类维持 checkpoint-based 边界（剩余崩溃窗口文档同步声明）。`tests/ddl_crash_recovery_test.rs` 6 例见证；`check` 恢复指引文案与方案一致。
 
 ## 证据
 

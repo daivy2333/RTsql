@@ -1,6 +1,6 @@
 # ISS14 超大 DEFAULT 建表失败报「Page full」不指名默认值过大
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-12
 - Source: 外部评测（2026-10-12，P2-12）+ Explorer 核实（`.agents/analysis/2026-10-12-external-eval-defect-verification.md`，R32）
 - Environment: Linux x86_64 (WSL2)、rtsql 0.2.0、HEAD `44d04d9` debug 构建
@@ -21,7 +21,7 @@ DEFAULT 字面量超过 catalog 列行页内容量时建表失败，报错为 `E
 
 ## 处置
 
-待用户裁定立项（小文案批；建议与 ISS08 的计划期预检方向合并处置——预检先行拒绝时文案自然点名 DEFAULT，两问题一并收敛）。
+closed（2026-10-14）——change `2026-10-13-e2e-verification-and-defect-closure` Iteration 002 T3 修复归档。DEFAULT 超限 `catalog_column_row_fits` 计划期点名预检（空页探针无硬编码常数，ALTER ADD 同款预检）——预检先行拒绝即原建议的合并处置，与 ISS08 同批收敛；`tests/default_precheck_test.rs` 5 例见证；规格合并 `sql-write-surface` ADDED（CREATE TABLE 失败零残留与 DEFAULT 超限计划期拒绝）。
 
 ## 证据
 

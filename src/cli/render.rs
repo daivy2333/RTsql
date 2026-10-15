@@ -49,6 +49,18 @@ fn render_rows(kind: OutputKind, columns: &[String], rows: &[Vec<Value>]) -> Str
     }
 }
 
+/// table 单元格显示宽度上限（字符数）：超限单元格截断为前 61 字符 + `...`
+const CELL_WIDTH_CAP: usize = 64;
+
+fn truncate_cell(cell: &str) -> String {
+    if cell.chars().count() <= CELL_WIDTH_CAP {
+        return cell.to_string();
+    }
+    let mut out: String = cell.chars().take(CELL_WIDTH_CAP - 3).collect();
+    out.push_str("...");
+    out
+}
+
 fn value_to_text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
@@ -65,6 +77,14 @@ fn render_table(columns: &[String], rows: &[Vec<Value>]) -> String {
         rows.iter()
             .map(|r| r.iter().map(value_to_text).collect::<Vec<_>>()),
     );
+
+    // 单元格显示宽度封顶（字符数，含表头）：超限截断为前 61 字符 + "..."，
+    // 消除 ≥65536 字符单元格触发的 std::fmt 动态宽度 panic（ISS15）。
+    for line in &mut lines {
+        for cell in line {
+            *cell = truncate_cell(cell);
+        }
+    }
 
     let n_cols = columns.len();
     let widths: Vec<usize> = (0..n_cols)
@@ -249,5 +269,96 @@ mod tests {
             render(OutputKind::Tsv, &[], &QueryPayload::Affected(2)),
             "affected_rows\n2"
         );
+    }
+
+    #[test]
+    fn test_table_cell_cap_boundary() {
+        // 64 字符原样
+        let s64: String = "a".repeat(64);
+        let out = render(
+            OutputKind::Table,
+            &["v".into()],
+            &rows(vec![vec![json!(s64)]]),
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[2].trim_end(), "a".repeat(64));
+
+        // 65 字符截断恰 64 以 "..." 结尾（61 内容字符 + 省略号）
+        let s65: String = "a".repeat(65);
+        let out = render(
+            OutputKind::Table,
+            &["v".into()],
+            &rows(vec![vec![json!(s65)]]),
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        let cell = lines[2].trim_end();
+        assert_eq!(cell.chars().count(), 64);
+        assert!(cell.ends_with("..."));
+        assert_eq!(&cell[..61], &"a".repeat(61));
+    }
+
+    #[test]
+    fn test_table_cell_cap_huge_no_panic() {
+        // 100,000 字符单元格不 panic，截断后以 "..." 结尾（ISS15）
+        let huge: String = "x".repeat(100_000);
+        let out = render(
+            OutputKind::Table,
+            &["v".into()],
+            &rows(vec![vec![json!(huge)]]),
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        let cell = lines[2].trim_end();
+        assert_eq!(cell.chars().count(), 64);
+        assert!(cell.ends_with("..."));
+    }
+
+    #[test]
+    fn test_table_cell_cap_cjk_no_partial_char() {
+        // CJK 多字节串按字符截断，不产生部分字符
+        let cjk: String = "中".repeat(100);
+        let out = render(
+            OutputKind::Table,
+            &["v".into()],
+            &rows(vec![vec![json!(cjk)]]),
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        let cell = lines[2].trim_end();
+        assert_eq!(cell.chars().count(), 64);
+        assert!(cell.ends_with("..."));
+        assert!(cell[..cell.len() - 3].chars().all(|c| c == '中'));
+    }
+
+    #[test]
+    fn test_table_header_cap_same_rule() {
+        // 表头 >64 字符同规则封顶
+        let long_header: String = "h".repeat(70);
+        let out = render(
+            OutputKind::Table,
+            &[long_header],
+            &rows(vec![vec![json!(1)]]),
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        let header = lines[0].trim_end();
+        assert_eq!(header.chars().count(), 64);
+        assert!(header.ends_with("..."));
+    }
+
+    #[test]
+    fn test_delimited_and_json_full_fidelity_with_huge_value() {
+        // csv/tsv/json 对超大值保真（机器消费契约，截断仅限 table）
+        let huge: String = "x".repeat(100_000);
+        let payload = rows(vec![vec![json!(huge.clone())]]);
+        let cols = &["v".to_string()];
+        assert_eq!(
+            render(OutputKind::Csv, cols, &payload),
+            format!("v\n{}", huge)
+        );
+        assert_eq!(
+            render(OutputKind::Tsv, cols, &payload),
+            format!("v\n{}", huge)
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&render(OutputKind::Json, cols, &payload)).unwrap();
+        assert_eq!(parsed["rows"][0][0], json!(huge));
     }
 }
