@@ -373,24 +373,47 @@ impl PlanBuilder {
     }
 
     /// Extract table names from a subquery's FROM clause
+    ///
+    /// T1（change 2026-10-15-subquery-alias-binding-and-error-prefix）：输出**声明
+    /// 限定符**而非仅基表名。修复前丢弃 `alias` 字段使内层别名限定引用
+    /// （`FROM c x ... x.age`）被 `qualified_column_expression` 与
+    /// `collect_outer_column_refs` 双重误判为相关外层引用（ISS16–ISS18）。
     pub(crate) fn extract_subquery_table_names(subquery: &Query) -> Vec<String> {
         match subquery.body.as_ref() {
             SetExpr::Select(select) => select
                 .from
                 .iter()
                 .flat_map(|twj| {
-                    let mut names = Vec::new();
-                    if let TableFactor::Table { name, .. } = &twj.relation {
-                        names.push(crate::parser::ast::object_name_to_table_name(name));
-                    }
+                    let mut names = Self::declared_qualifiers(&twj.relation);
                     for join in &twj.joins {
-                        if let TableFactor::Table { name, .. } = &join.relation {
-                            names.push(crate::parser::ast::object_name_to_table_name(name));
-                        }
+                        names.extend(Self::declared_qualifiers(&join.relation));
                     }
                     names
                 })
                 .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// FROM 项的可解析限定符集——显式别名（`AS` 或隐式）优先，无别名取基表名；
+    /// 派生表取别名且无别名不产出；其余 TableFactor 变体不产出。
+    ///
+    /// A1（2026-10-15 用户裁定豁免，见 Act Response Blocker Resolution）：别名与基
+    /// 表名**并列入集**——别名入集消除幻影相关参数，基表名保留使「别名 + 基名
+    /// 限定」子查询形状维持既有可达能力（本引擎顶层对同一写法本就宽松）。
+    fn declared_qualifiers(factor: &TableFactor) -> Vec<String> {
+        match factor {
+            TableFactor::Table { name, alias, .. } => {
+                let base = crate::parser::ast::object_name_to_table_name(name);
+                match alias.as_ref().map(|a| a.name.value.to_lowercase()) {
+                    Some(alias_name) if alias_name != base => vec![alias_name, base],
+                    _ => vec![base],
+                }
+            }
+            TableFactor::Derived { alias, .. } => alias
+                .as_ref()
+                .map(|a| vec![a.name.value.to_lowercase()])
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }

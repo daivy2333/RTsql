@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-> 最后更新：2026-10-15（**ISS15 table 渲染截断与组合面 e2e 补齐**——change `2026-10-14-iss15-table-truncation-and-combination-gaps` 单 Iteration 五任务全 accepted：`render_table` 列宽封顶 64 字符截断〔≥65536 单元格 std::fmt 动态宽度 panic 单点关闭、主命令与 stats/sample/profile 同面覆盖、json/csv/tsv 保真逐字节不变〕+ 大值×四格式/大值×分析子命令/import×加密库/分析子命令×readonly 与加密四组组合 e2e 见证 + README 双语与 SKILL.md 同步；1 域 delta 合并 1 MODIFIED + 2 ADDED，域数 64 不变；1999 tests / 0 failures / 2 ignored；ISS15 关闭归档 R43）
+> 最后更新：2026-10-15（**子查询别名限定符绑定修复（ISS16–ISS18）与执行器错误前缀单层化（ISS19）**——change `2026-10-15-subquery-alias-binding-and-error-prefix` 单 Iteration 四任务全 accepted：`extract_subquery_table_names` 声明限定符化（别名优先 + 基表名并列保留的 Gate 5 豁免裁定，A1 锚点锁定）+ 22 用例形状覆盖矩阵（六算子 × 三内层形态 × 谓词列 × 相关性 × IN 索引面 + 四审计新形状判别式期望）+ 三执行器绑参未命中点名报错（`unwrap_or(0)` 静默回落终止）+ `ExecutionError` 单层前缀（`:632` 锚点校准）+ e2e 五旅程真实 CLI 见证；3 域 delta 合并 2 ADDED + 1 MODIFIED，域数 64 不变；2029 tests / 0 failures / 2 ignored；ISS16–ISS19 关闭归档 R44–R47）
 > 同步状态：current
 
 ## 项目身份
@@ -75,6 +75,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - 集成测试: recovery-tail-persistence change 新增 `tests/recovery_tail_persistence_test.rs`（4，恢复两态一致〔INSERT 驱动含 CLI check 单行/dump 无告警 + DELETE-only 驱动〕/重复恢复幂等/`redo_count == 0` 零变化）+ `stale_tail_heals_on_write` 单元测试；`check_command_test` 恢复后形态断言校准（info 行 → 干净单行，白名单）（全量 1802 tests）
 - 集成测试: external-review-gaps change 新增 `tests/recovery_wal_convergence_test.rs`（未提交 SIGKILL 后纯读收敛/checkpoint 消息两形态/marker-only/零工作跳过保持/redo>0 零变化）+ `tests/scalar_subquery_comparison_test.rs`（14，WHERE 标量比较矩阵）+ `tests/chain_join_test.rs`（9，三表链矩阵）+ `tests/self_join_test.rs`（自连接侧身份矩阵）+ `tests/full_table_dml_test.rs`（10，全表 DML 矩阵）；table_alias_resolution（JOIN 排序 + S11）、set_operations（+7 派生表矩阵）、join_output_resolution（+5 SELECT 序）、secondary_index（投影矩阵）、subquery（形状校准）、cli/readonly_session（SQLSTATE）、planner/checkpoint 等扩展与八处直构机械适配（全量 1929 tests）
 - 集成测试: e2e-verification change 新增 `tests/e2e_test.rs`（22，E1–E13 旅程级套件〔真实 CLI 子进程入口、退出码/stdout/stderr/磁盘状态断言〕，10 个 `#[ignore]` 随修复逐轮解除、收尾 0 ignored）+ `tests/secondary_index_equality_test.rs`（30000 行多叶等值连串双向严格相等 + 边界子树 UPDATE 探针 + 失败语句零副作用）+ `tests/ddl_crash_recovery_test.rs`（6，create/index/view/alter/ctas/对照建后即崩恢复）+ `tests/default_precheck_test.rs`（5，DEFAULT 超限预检矩阵）+ `subquery_test` +8（r8 索引首列 5 + r5 排序 3）+ `derived_scan_alias_test` +5 + `view_test` +4 + cli_test +4 与 planner/full_table_dml 等扩展（全量 1994 tests）
+- 集成测试: subquery-alias-binding change 新增 `tests/subquery_alias_binding_test.rs`（22，形状覆盖矩阵〔算子 6 面 × 内层形态 3 面 × 谓词列位置 × 相关性三态 × IN 索引面〕+ A1 基名限定豁免锚点 + EXPLAIN `correlated_params` 回落双向断言 + JOIN 形 IN 拒绝面 ×2〔含别名不得绕开拒绝面〕+ 无别名零回归锚点 ×3）+ `tests/e2e_test.rs` +5 旅程（E14：ISS16 WHERE/投影位相关标量、ISS17 EXISTS 四形态 + 审计新增 NOT EXISTS 别名与 JOIN 双臂别名、ISS18 IN×别名×索引、ISS19 单层前缀端到端，各带无别名对照）+ `tests/subquery_test.rs` 锚点校准（双层→单层）+ 三执行器 lib 内联单测 ×3（新 `#[cfg(test)] StubRowExecutor` 行序列支撑）（全量 2029 tests）
 - 单元测试: 文件内 `#[cfg(test)]`（含新增 `src/storage/catalog.rs` 10 单元测试）
 - 基准测试: `benches/` (8 套: micro / concurrent / scale / sqlite_compare / single / precise_compare / data_scan / visibility)
 - OpenSpec: `openspec/`
@@ -96,16 +97,16 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: cd88957（主批次：e2e 验证与缺陷清偿批收尾归档统一入库；上一主批次 44d04d9〔外部评测反馈批收尾〕）
-- **ahead of origin**: 7（`git rev-list --count origin/master..master` 回填时实数——主批次 cd88957 + 本回填共 2 提交；origin/master 仍为 2026-10-02 推送位 81c8e6f；本批次提交随收尾一并推送后归零）
-- **工作区**: 收尾批次待提交（e2e 验证与缺陷清偿批实施面〔全部源码与测试〕+ 8 域 spec delta 合并 + change 归档移动 + tasks/SNAPSHOT 同步）
+- **提交基线**: 23495df（主批次：子查询别名绑定修复与错误前缀单层化批收尾归档统一入库；上一主批次 23495df〔ISS15 table 渲染截断与组合面 e2e 补齐收尾〕——本行 hash 随收尾提交回填）
+- **ahead of origin**: 2（`git rev-list --count origin/master..master` 写入时实数——origin/master 为 2026-10-15 推送位 23495df；本批次提交随后推送同步）
+- **工作区**: 收尾批次待提交（子查询别名绑定修复与错误前缀单层化批实施面〔全部源码与测试〕+ 3 域 spec delta 合并 + change 归档移动 + issues ISS16–ISS19 关闭归档 + references R44–R47 状态同步 + tasks/SNAPSHOT 同步）
 - **最新 tag**: 无（仓库当前无任何 tag）
-- **测试**: 1994 tests pass, 0 failures, 2 ignored（2026-10-14 Iteration 005 Act 全量 Gate：120 集成目标 6 批 + lib 398 + e2e 22 串行；1929 基线 + 本 change 净增 65）
-- **OpenSpec**: 64 specs（域数不变；8 域 delta 合并——`join-output-shape-resolution` +2 ADDED、`error-reporting`/`sql-write-surface`/`wal-recovery-replay-integrity`/`in-subquery-join-rejection`/`cli-noninteractive-shell` 各 +1 ADDED、`sql-secondary-indexes`/`sql-views`/`cli-noninteractive-shell` 各 1 MODIFIED——共 7 ADDED + 3 MODIFIED Requirement）；**活跃 change**：无（最新归档 `archive/2026-10-13-e2e-verification-and-defect-closure/`，六 Iteration 全 accepted；上一归档 `archive/2026-10-04-external-review-gaps/`；下一里程碑 MS22 实测驱动性能批——候选范围量化定稿后转 ready）注：`validate --specs` 对 MS06–MS10 时代 spec 的占位 Purpose 产生 WARNING——既有状态，非本轮引入
+- **测试**: 2029 tests pass, 0 failures, 2 ignored（2026-10-15 Iteration 000 Act 全量 Gate：lib 406 + bins 0 + 13 批集成（每批 10 目标 `--test-threads=1` 批间串行）+ e2e 27 串行；1999 基线 + 形状矩阵 22 + lib 单测 3 + e2e 旅程 5 = 2029 对账吻合）
+- **OpenSpec**: 64 specs（域数不变；3 域 delta 合并——`sql-table-alias-resolution` +1 ADDED〔现 7 Requirement〕、`correlated-subquery-cache` +1 ADDED〔现 6〕、`error-reporting` MODIFIED「错误消息前缀单层」追加执行器通道〔现 8〕）；**活跃 change**：无（最新归档 `archive/2026-10-15-subquery-alias-binding-and-error-prefix/`，单 Iteration 全 accepted；上一归档 `archive/2026-10-14-iss15-table-truncation-and-combination-gaps/`；下一里程碑 MS22 实测驱动性能批——候选范围量化定稿后转 ready）注：`validate --specs` 对 MS06–MS10 时代 spec 的占位 Purpose 产生 WARNING——既有状态，非本轮引入
 
 ## 同步状态
 
-- `current` — 文档与代码一致；**e2e 验证与缺陷清偿批落地收尾**（e2e 旅程套件 22 测试〔E1–E13 真实 CLI 入口旅程〕/ ISS05–ISS14 十项缺陷全量清偿〔索引等值下探漏洞与叶链破坏与 scan_all 多层树失效、DDL 语句边界落盘与建表原子性〔commit point 写序 + DEFAULT 预检〕、派生表与视图内层列外层可见、SemiJoin/AntiJoin 全宽承载与排序键、CLI 文案四点、IN 子查询索引扫描首列〕/ README + rtsql-docs/SKILL.md 文档同步；语料 8 域 delta 合并 7 ADDED + 3 MODIFIED，域数 64 不变；1994 tests 采信；无活跃 change；工作区收尾批次待提交）
+- `current` — 文档与代码一致；**子查询别名绑定修复与错误前缀单层化批落地收尾**（ISS16/ISS17/ISS18 子查询内层别名限定引用被误判为相关外层引用的幻影参数源关闭〔`extract_subquery_table_names` 声明限定符化，别名优先 + 基表名并列保留经 Gate 5 用户豁免〕+ 同类面审计四形状〔NOT EXISTS/NOT IN 别名全放行、EXISTS JOIN 双臂别名恒空集、EXISTS Derived 别名截断〕一并修复 + 三执行器绑参未命中点名报错 + 执行器错误前缀单层〔ISS19〕；覆盖缺口归因与 22 用例形状矩阵落地〔既有 57 子查询用例内层零别名的缺口载体〕；语料 3 域 delta 合并 2 ADDED + 1 MODIFIED，域数 64 不变；2029 tests 采信；无活跃 change；工作区收尾批次待提交）
 
 ## 权威文档
 
@@ -115,7 +116,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - 参考: `.agents/memory/references.md` (Rxx)
 - 改进: `.agents/memory/improvements.md` (Ixx)
 - 任务与路线: `.agents/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含 MS06–MS17、MS18–MS21、MS23/MS24、MS26、MS28/MS29、MS20-T02、MS27、recovery-tail-persistence、practical-core-gaps、external-review-gaps、e2e-verification-and-defect-closure 已完成 carriers 与清理 carriers，最新为 `archive/2026-10-13-e2e-verification-and-defect-closure/`）
+- 变更: `openspec/changes/`（无活跃 change；归档目录含 MS06–MS17、MS18–MS21、MS23/MS24、MS26、MS28/MS29、MS20-T02、MS27、recovery-tail-persistence、practical-core-gaps、external-review-gaps、e2e-verification-and-defect-closure、iss15-table-truncation-and-combination-gaps 已完成 carriers 与清理 carriers，最新为 `archive/2026-10-15-subquery-alias-binding-and-error-prefix/`）
 - Legacy migration carrier: `.agents/legacy/2026-08-25-openspec-init-migration/`
 - 新增能力 spec:
   - `openspec/specs/dml-transaction-lifecycle/spec.md`（MS06-T01 落地）
@@ -155,7 +156,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - `openspec/specs/transaction-isolation-levels/spec.md`（MS09-T01 落地，3 个 Requirement：R1 隔离级别经 lib API 配置（`open_with_isolation`，默认 RR 逐字节等价）/ R2 Read Committed 语句级已提交视图 / R3 既有默认路径零回归；MS17-T02 修改——新增「RC 重启后可见性高水位健全（checkpoint 水位持久化）」（位点 24B 携带 tx watermark + max 合并推进 + 旧格式兼容读），现 4 个 Requirement）
 - `openspec/specs/mvcc-tombstone-visibility/spec.md`（MS09-T01 落地，5 个 Requirement：R1 墓碑自描述且不影响前驱版本 / R2 已提交墓碑抑制整条版本链 / R3 未提交与已回滚墓碑不抑制、评估回溯前驱 / R4 恢复后墓碑语义一致（含 I032 不复活）/ R5 既有 MVCC 语义零回归；附已知边界段——未提交删除/回滚后 PK 点查预存时序边界；MS17-T02 修改——新增「页级可见性摘要无毒化（哨兵语义）」（ISS01+MAX 毒化，`MIN_CREATE_UNKNOWN`），现 6 个 Requirement；MS24 修改——新增「回滚后墓碑行的索引条目还原（PK 与唯一）」7 场景（DELETE/REPLACE/同事务 update→delete/失败语句四形态 + 干净重开两态 + 既有零回归），并相应收窄已知边界段为「未提交删除期间」的 PK 点查时序边界，现 7 个 Requirement）
 - `openspec/specs/join-executor-selection/spec.md`（MS09-T02 落地，5 个 Requirement：R1 纯等值 JOIN Hash 路径保持 / R2 非等值 JOIN 经 NLJ 可达 / R3 NLJ 结果语义与三值 NULL 处理 / R4 启发式选择为计划期判定 / R5 既有 JOIN 面零回归）
-- `openspec/specs/correlated-subquery-cache/spec.md`（MS09-T04 落地，5 个 Requirement：R1 相同关联参数值复用子查询结果 / R2 不同参数值独立求值（NULL 键成分）/ R3 缓存结果与直执行逐字节等价（错误不缓存）/ R4 缓存生命周期为单次语句执行 / R5 既有子查询语义零回归）
+- `openspec/specs/correlated-subquery-cache/spec.md`（MS09-T04 落地，5 个 Requirement：R1 相同关联参数值复用子查询结果 / R2 不同参数值独立求值（NULL 键成分）/ R3 缓存结果与直执行逐字节等价（错误不缓存）/ R4 缓存生命周期为单次语句执行 / R5 既有子查询语义零回归；subquery-alias-binding change +1 Requirement「关联参数外层绑定失败显式报错」〔SemiJoin/ScalarSubqueryFilter/SubqueryEval 三执行器未命中点名报错、防御路径约束、正常 SQL 绑定期命中等价锚〕，现 6 个 Requirement）
 - `openspec/specs/datetime-type-system/spec.md`（MS13-T01 落地，7 个 Requirement：R1 DATE/TIMESTAMP 值与存储格式 / R2 DDL 显式类型映射 / R3 类型字面量与写入边界强制解析 / R4 比较与键控边界 / R5 CAST 矩阵扩展 / R6 渲染与导入导出面 / R7 既有语义零回归，含 BH-1 型校准段——cast_unknown 示例 DATE→TIME）
 - `openspec/specs/datetime-functions/spec.md`（MS13-T02 引擎侧落地，4 个 Requirement：R1 日期函数族注册与语义 / R2 INTERVAL 表达式算术（含 WHERE 腿解缠绕通路）/ R3 datediff 语义 / R4 既有标量函数零回归）
 - `openspec/specs/group-by-expression/spec.md`（MS13-T02 落地，2 个 Requirement：R1 GROUP BY 别名与表达式引用（列名→别名→表达式文本→位置四级解析序）/ R2 匹配失败与既有约束保持，含校准段——聚合×表达式混用拒绝通道改 NonAggregatedColumn）
@@ -164,7 +165,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - `openspec/specs/in-subquery-join-rejection/spec.md`（MS17-T02 落地，2 个 Requirement：R1 IN 子查询 JOIN 形态诚实拒绝（ISS02 最小诚实化——`InSubqueryJoinUnsupported` 计划期点名，不误报多列）/ R2 既有 IN 子查询语义零回归）
 - `openspec/specs/sql-constraint-enforcement/spec.md`（MS23 落地，6 个 Requirement：R1 NOT NULL 写入强制 / R2 约束诚实化拒绝 / R3 INT 列 UNIQUE 强制（含 F1 补强段——唯一列写入值类型一致）/ R4 UNIQUE 形态与类型面诚实化 / R5 干净重开与崩溃恢复两态一致 / R6 既有语义零回归；MS24 修改——R3 明确回滚的 DELETE / REPLACE 由复现行重新占用唯一值（新增场景），仍 6 个 Requirement；practical-core-gaps 修改——+1 Requirement「非 INTEGER PRIMARY KEY 计划期拒绝」（五类型 × 列级/表级矩阵、隐式主键与存量表零波及），现 7 个 Requirement）
 - `openspec/specs/sql-write-surface/spec.md`（MS24 落地，5 个 Requirement：R1 子集列清单 INSERT 与 DEFAULT 应用 / R2 写入值类型一致门（含 FLOAT 声明键列升格落无键行的已知边界段）/ R3 UPSERT 语义（DO NOTHING / DO UPDATE / REPLACE，含仲裁内 F1 守卫角落的已知边界段）/ R4 UPSERT 冲突目标与拒绝面 / R5 既有写面语义零回归；MS29 修改——+2 Requirement「声明期 DEFAULT 类型一致」（CREATE TABLE/ALTER ADD COLUMN 计划期校验/归一、TypedString 日期字面量、dump→restore 往返修复）与「CREATE TABLE 重复列名计划期拒绝」，现 7 个 Requirement；MS20-T02 修改——+1 Requirement「INSERT SELECT 物化后写入」（源完整物化、按位置映射、单隐式事务、冲突动作复用、主库显式事务复用、空源 affected_rows=0），现 8 个 Requirement；practical-core-gaps 修改——+1 Requirement「UPDATE SET 值表达式」（完整值表达式右值、多列同旧行快照、既有写入边界照常、聚合与子查询右值拒绝），现 9 个 Requirement）
-- `openspec/specs/error-reporting/spec.md`（MS19 落地，MS25 修改，7 个 Requirement：计划错误携带能力名〔MS25 T13 增限定通配点名场景——`SELECT t.*` 三基座拒绝文案由泛化 `SELECT ITEM` 改为 `QUALIFIED WILDCARD`〕/ PG 协议错误码分类 / 既有错误语义零回归 / 投影列解析显式化 / 纯查询列别名表头生效〔MS25 T10 扩展至 DerivedScan 基座〕/ 列缺失错误分类一致〔MS25 T12 扩展：聚合参数两基座计划期解析，未知列与别名引用 `ColumnNotFound` 点名〕/ ORDER BY 排序键解析与别名排序〔MS25 T7：原「ORDER BY 排序键计划期校验」移除并由本 Requirement 替换——别名键真实排序语义随 `order-by-alias-sorting` 域承载〕）
+- `openspec/specs/error-reporting/spec.md`（MS19 落地，MS25 修改，7 个 Requirement：计划错误携带能力名〔MS25 T13 增限定通配点名场景——`SELECT t.*` 三基座拒绝文案由泛化 `SELECT ITEM` 改为 `QUALIFIED WILDCARD`〕/ PG 协议错误码分类 / 既有错误语义零回归 / 投影列解析显式化 / 纯查询列别名表头生效〔MS25 T10 扩展至 DerivedScan 基座〕/ 列缺失错误分类一致〔MS25 T12 扩展：聚合参数两基座计划期解析，未知列与别名引用 `ColumnNotFound` 点名〕/ ORDER BY 排序键解析与别名排序〔MS25 T7：原「ORDER BY 排序键计划期校验」移除并由本 Requirement 替换——别名键真实排序语义随 `order-by-alias-sorting` 域承载〕/ 错误消息前缀单层〔e2e-verification 新增；subquery-alias-binding change 修改——追加执行器通道：`StorageError::ExecutionError` Display 无前缀、pipeline 漏斗唯一赋予单层 `Execution error: `（ISS19 双层终止）〕，现 8 个 Requirement）
 - `openspec/specs/sql-secondary-indexes/spec.md`（MS21 落地，5 个 Requirement：R1 CREATE INDEX 建立单列 INT 二级索引（存量回填 + 两态一致 + 拒绝矩阵）/ R2 等值查询路由可达（`IndexScanAll` + 结果等价）/ R3 写路径条目维护（四执行器 + 回滚还原 + 恢复两态）/ R4 DROP INDEX 移除（页释放回落扫描）/ R5 既有语义零回归）
 - `openspec/specs/alter-table-column-evolution/spec.md`（MS21 落地，3 个 Requirement：R1 ADD COLUMN 尾部加列（宽度感知读回 + DEFAULT 覆盖 + dump/restore 保真）/ R2 DROP COLUMN 删列（内隐式事务逐行重写 + 索引引用/最后一列守卫）/ R3 语句形态与既有面边界（单操作/事务内拒绝/零回归））
 - `openspec/specs/truncate-table/spec.md`（MS21 落地，2 个 Requirement：R1 TRUNCATE 物理清空保留定义（checkpoint-first 页释放 + 三类索引空重建 + 无墓碑 + 事务内/多表拒绝 + 幂等）/ R2 DELETE·DROP TABLE 既有语义零回归）
@@ -173,7 +174,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - `openspec/specs/in-memory-database/spec.md`（MS26 落地，4 个 Requirement：R1 内存库打开与全形态会话 / R2 checkpoint 与 WAL 无操作 / R3 边界拒绝面 / R4 ATTACH 与跨库组合零特殊化）
 - `openspec/specs/wal-auto-checkpoint/spec.md`（MS26 落地，5 个 Requirement：R1 提交边界字节水位触发 / R2 水位配置（16 MiB 默认 + env/lib 双通道、0 禁用、非法打开期拒绝）/ R3 显式事务活跃时顺延 / R4 自动 checkpoint 失败传播（已提交数据不受影响）/ R5 既有 checkpoint 语义零回归与死接口删除）
 - `openspec/specs/catalog-update-persistence/spec.md`（本 change Iteration 000 落地，6 个 Requirement：R1 catalog 定长字段更新原地持久化 / R2 更新失败诚实化（零静默成功路径）/ R3 变长行更新跨页重定位与同名去重 / R4 跨进程写序 durability（count/扫描/MIN-MAX/点查/dump 五面一致）/ R5 索引根更新持久化 / R6 既有语义零回归）
-- `openspec/specs/sql-table-alias-resolution/spec.md`（本 change Iteration 001 落地，5 个 Requirement：R1 FROM 表别名注册（MS20-T02 修改——增两段附加 FROM 项隐式关联名语义与两场景：短名全子句面可达、显式别名优先与字面含点不误登记）/ R2 限定列解析认别名（全子句面）/ R3 单表限定列与 JOIN 统一（静默丢弃限定符终止）/ R4 限定形态边界（三段仅 attach 复合键可达）/ R5 限定名排序与既有语义零回归）
+- `openspec/specs/sql-table-alias-resolution/spec.md`（catalog-durability change Iteration 001 落地，R1 FROM 表别名注册（MS20-T02 修改——增两段附加 FROM 项隐式关联名语义与两场景：短名全子句面可达、显式别名优先与字面含点不误登记）/ R2 限定列解析认别名（全子句面）/ R3 单表限定列与 JOIN 统一（静默丢弃限定符终止）/ R4 限定形态边界（三段仅 attach 复合键可达）/ R5 限定名排序与既有语义零回归；external-review-gaps +R6 自连接侧身份与输出归属正确性〔SNAPSHOT 前次未同步计数，补记〕；subquery-alias-binding change +R7「子查询内层声明限定符参与外层引用分类」〔别名优先 + 基表名并列保留的 Gate 5 豁免、JOIN 臂与 Derived 同规则、六算子形状场景、ISS16–ISS18〕，现 7 个 Requirement）
 - `openspec/specs/cross-db-dml/spec.md`（MS20-T02 落地，5 个 Requirement：R1 附加库 DML 路由 / R2 每文件独立提交 / R3 显式事务与只读边界 / R4 写入资源生命周期与文档 / R5 UPDATE DELETE 保持已有语法边界）
 - `openspec/specs/cross-db-namespace-query/spec.md`（MS20 一期落地，3 个 Requirement；MS20-T02 修改——R3「附加库只读边界」收窄：可写会话 DML 按 `cross-db-dml` 路由、只读/显式事务拒绝、附加库 DDL/CTAS 附加目标继续计划期拒绝，现 4 个 Requirement）
 - `openspec/specs/overflow-page-storage/spec.md`（MS27-T01 落地，5 个 Requirement：R1 超页元组经溢出页链存取〔全写通道 + DEFAULT 段长形式同语义〕/ R2 运行形态与加密联动 / R3 恢复两态一致 / R4 溢出页物理生命周期〔GC/drop/TRUNCATE/写入失败零孤儿、回滚 aborted slot 非泄漏〕/ R5 既有行为与格式兼容）

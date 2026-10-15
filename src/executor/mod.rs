@@ -120,3 +120,28 @@ pub(crate) fn apply_projection(projection: &[usize], values: Vec<Value>) -> Vec<
     }
     projection.iter().map(|&i| values[i].clone()).collect()
 }
+
+/// T2（change 2026-10-15-subquery-alias-binding-and-error-prefix）：单元测试用
+/// 行序列执行器——按给定行集逐行产出后结束，供执行器构造面直接实例化被测
+/// 执行器（生产路径不消费）。
+#[cfg(test)]
+pub(crate) struct StubRowExecutor {
+    rows: std::vec::IntoIter<Vec<Value>>,
+}
+
+#[cfg(test)]
+impl StubRowExecutor {
+    pub(crate) fn new(rows: Vec<Vec<Value>>) -> Self {
+        Self {
+            rows: rows.into_iter(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl Executor for StubRowExecutor {
+    async fn next(&mut self) -> crate::storage::Result<Option<ExecResult>> {
+        Ok(self.rows.next().map(ExecResult::Row))
+    }
+}

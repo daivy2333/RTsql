@@ -108,7 +108,10 @@ pub enum StorageError {
     #[error("invalid column type: {0}")]
     InvalidColumnType(String),
 
-    #[error("execution error: {0}")]
+    /// T3（change 2026-10-15-subquery-alias-binding-and-error-prefix）：Display
+    /// 不自带类别前缀——单层 `Execution error: ` 由 pipeline 漏斗唯一赋予
+    /// （ISS19：与漏斗前缀叠加为双层）。
+    #[error("{0}")]
     ExecutionError(String),
 
     #[error("transaction error: {0}")]

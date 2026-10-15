@@ -1,7 +1,7 @@
 # sql-table-alias-resolution Specification
 
 ## Purpose
-约束 FROM 表别名的注册与限定名解析：别名 → 表映射对 SELECT / JOIN（含自连接多别名）/ WHERE / GROUP BY / HAVING / 聚合参数 / ON / ORDER BY 的列引用解析统一生效；限定列引用的限定符经单点归一化（别名命中 → 真实表键，未命中 → 原样）后沿既有通道解析；两段附加 FROM 项无显式别名时尾段作为隐式关联名注册（短名限定列引用与全限定同达）；未知限定符计划期以 `TableNotFound`（42P01）点名，终止「静默丢弃限定符」与「别名被当表名」两类误导错误；三段限定仅 attach 复合键可达，本地形态统一点名拒绝；别名不改变输出表头、`OutputColumn` 真实表名语义或计划形状。来源：change `2026-09-30-catalog-durability-and-cli-surface` Iteration 001（P1 表别名限定引用家族失效收口）；附加 FROM 项隐式关联名来源 MS20-T02（change `2026-10-02-ms20-cross-db-dml` Iteration 002）。
+约束 FROM 表别名的注册与限定名解析：别名 → 表映射对 SELECT / JOIN（含自连接多别名）/ WHERE / GROUP BY / HAVING / 聚合参数 / ON / ORDER BY 的列引用解析统一生效；限定列引用的限定符经单点归一化（别名命中 → 真实表键，未命中 → 原样）后沿既有通道解析；两段附加 FROM 项无显式别名时尾段作为隐式关联名注册（短名限定列引用与全限定同达）；未知限定符计划期以 `TableNotFound`（42P01）点名，终止「静默丢弃限定符」与「别名被当表名」两类误导错误；三段限定仅 attach 复合键可达，本地形态统一点名拒绝；别名不改变输出表头、`OutputColumn` 真实表名语义或计划形状；子查询（IN / EXISTS / 标量）内层 FROM 项的声明限定符（别名优先、声明别名时基表名并列保留）参与内外层引用分类，内层别名限定引用 SHALL NOT 被误判为相关外层引用产生幻影参数。来源：change `2026-09-30-catalog-durability-and-cli-surface` Iteration 001（P1 表别名限定引用家族失效收口）；附加 FROM 项隐式关联名来源 MS20-T02（change `2026-10-02-ms20-cross-db-dml` Iteration 002）；子查询内层声明限定符分类来源 change `2026-10-15-subquery-alias-binding-and-error-prefix`（T1，ISS16–ISS18）。
 
 ## Requirements
 
@@ -160,3 +160,51 @@ ORDER BY SHALL 接受两段限定键：限定符经归一化后按可见列解�
 - **GIVEN** 独立表 JOIN 矩阵（正向/反向书写、裸名 ON、别名、ATTACH 附加库、INNER/LEFT/FULL）
 - **WHEN** 各既有形态查询
 - **THEN** 行为逐字节零变化
+
+### Requirement: 子查询内层声明限定符参与外层引用分类
+
+子查询（IN / EXISTS / 标量）内层 FROM 项的可解析限定符集 SHALL 含每个 FROM 项的声明名：显式或隐式别名优先，无别名取基表名；声明了别名时 SHALL 同时保留基表名作为可解析限定符——本引擎顶层对「别名 + 基名限定」本就宽松，子查询层保持同一宽松度（「别名 + 基名限定」子查询形状由既有正确结果退化为错误不得发生）。JOIN 臂 SHALL 同规则；`TableFactor::Derived`（派生表）SHALL 取其别名。相关参数分类（`collect_outer_column_refs`/`extract_correlated_params`）与 `ParameterExpression` 改写（`qualified_column_expression`）SHALL 以该限定符集判断内外——内层别名限定引用（如 `FROM c x ... x.age`）SHALL 解析为内层表列，SHALL NOT 被误判为相关外层引用产生幻影参数。修复前：内层集丢弃别名，`x.age` 被改写为幻影 `ParameterExpression` 并走相关执行路径，产生恒空集 / 按内层存活行数截断外层 / 全放行 / 碰巧正确四种静默错误结果（ISS16/ISS17/ISS18）。
+
+> 基表名并列保留一项由 2026-10-15 用户豁免裁定（Gate 5 Blocker Handoff 方案一），见 change `2026-10-15-subquery-alias-binding-and-error-prefix` Cycle Act Response 的 Blocker Resolution；对应回归锚点 `a1_base_name_qualifier_inside_aliased_inner`。
+
+#### Scenario: EXISTS 内层别名谓词非首列
+
+- **GIVEN** 外层 `a(id)` 两行，内层 `t(id PRIMARY KEY, name)` 含 `name='Lin'`
+- **WHEN** `SELECT id FROM a WHERE EXISTS (SELECT 1 FROM t x WHERE x.name = 'Lin')`
+- **THEN** 返回两行（修复前：恒空集）
+
+#### Scenario: EXISTS 内层别名谓词首列
+
+- **GIVEN** 同上数据
+- **WHEN** `SELECT id FROM a WHERE EXISTS (SELECT 1 FROM t x WHERE x.id = 1)`
+- **THEN** 返回两行（EXISTS 判定与子查询行存在性相关，修复前：仅返回外层第一行）
+
+#### Scenario: 相关 EXISTS 经外层非主键列
+
+- **GIVEN** 外层 `a6(id PRIMARY KEY, ref INTEGER, ...)` 含 `(9,9)` 无内层匹配，内层 `t(id PRIMARY KEY, name)`
+- **WHEN** `SELECT o.id FROM a6 o WHERE EXISTS (SELECT 1 FROM t x WHERE x.id = o.ref)`
+- **THEN** 仅返回 ref 有匹配的行（修复前：全部外层行放行）
+
+#### Scenario: IN 内层别名谓词走二级索引
+
+- **GIVEN** 外层 `a(id)`，内层 `c(id PRIMARY KEY, age INTEGER)` 有 `age` 二级索引且存在 `age=41`
+- **WHEN** `SELECT id FROM a WHERE a.id IN (SELECT x.id FROM c x WHERE x.age = 41)`
+- **THEN** 返回匹配行（修复前：恒空集）；内层无别名的同形状结果不变
+
+#### Scenario: WHERE 相关标量比较
+
+- **GIVEN** 外层 `a(id)`，内层 `t(id PRIMARY KEY, name)`
+- **WHEN** `SELECT a.id FROM a WHERE (SELECT COUNT(*) FROM t x WHERE x.id = a.id) = 1`
+- **THEN** 返回每个有匹配内层行的外层行（修复前：静默空集）
+
+#### Scenario: SELECT 投影位相关标量
+
+- **GIVEN** 同上数据
+- **WHEN** `SELECT a.id, (SELECT x.name FROM t x WHERE x.id = a.id) AS who FROM a`
+- **THEN** 输出行数与外层一致，who 列为各行匹配名（修复前：塌缩为全部基列或 `Subquery returns multiple rows` 报错）
+
+#### Scenario: 无别名与基名限定形状零回归
+
+- **GIVEN** 上述各查询的无别名内层形态（`FROM t WHERE t.name = ...`）与既有相关子查询用例
+- **WHEN** 执行
+- **THEN** 结果与修复前一致，既有全量测试零修改通过

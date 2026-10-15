@@ -148,7 +148,11 @@ impl SemiJoinExecutorV2 {
     }
 
     /// Extract outer row values for each correlated parameter
-    fn extract_param_values(&self, left_row: &[Value]) -> Vec<(String, Value)> {
+    ///
+    /// T2（change 2026-10-15-subquery-alias-binding-and-error-prefix）：未命中
+    /// SHALL 报错点名该外层列——修复前 `unwrap_or(0)` 静默取外层首列，是别名
+    /// 幻影参数静默错结果的执行器侧放大器（ISS16/ISS17/ISS18）。
+    fn extract_param_values(&self, left_row: &[Value]) -> Result<Vec<(String, Value)>> {
         self.correlated_params
             .iter()
             .map(|cp| {
@@ -156,11 +160,16 @@ impl SemiJoinExecutorV2 {
                     .left_column_indices
                     .get(&cp.outer_column.to_lowercase())
                     .copied()
-                    .unwrap_or(0);
-                (
+                    .ok_or_else(|| {
+                        crate::storage::StorageError::ExecutionError(format!(
+                            "correlated parameter column not found in outer row: {}",
+                            cp.outer_column
+                        ))
+                    })?;
+                Ok((
                     cp.param_name.clone(),
                     left_row.get(idx).cloned().unwrap_or(Value::Null),
-                )
+                ))
             })
             .collect()
     }
@@ -209,7 +218,7 @@ impl Executor for SemiJoinExecutorV2 {
                             Some(ExecResult::Row(left_row)) => {
                                 // CORRELATED PATH: rebuild right for this left row
                                 if !self.correlated_params.is_empty() {
-                                    let param_values = self.extract_param_values(&left_row);
+                                    let param_values = self.extract_param_values(&left_row)?;
                                     if let Some(rows) =
                                         self.correlated_rows_cache.get(&param_values)
                                     {
@@ -313,5 +322,55 @@ impl Executor for SemiJoinExecutorV2 {
                 }
             }
         }
+    }
+}
+
+/// T2（change 2026-10-15-subquery-alias-binding-and-error-prefix）：关联参数外层
+/// 绑定期望存在而解析失败时显式报错点名列，SHALL NOT 静默回落外层首列。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::JoinRelatedConfig;
+    use crate::executor::{CorrelatedParam, StubRowExecutor};
+
+    fn config(outer_column: &str) -> JoinRelatedConfig {
+        JoinRelatedConfig {
+            left: Box::new(StubRowExecutor::new(vec![vec![
+                Value::Int(7),
+                Value::Int(9),
+            ]])),
+            right: Box::new(StubRowExecutor::new(Vec::new())),
+            conditions: Vec::new(),
+            projection: Vec::new(),
+            correlated_params: vec![CorrelatedParam::new(
+                "o".to_string(),
+                outer_column.to_string(),
+                format!("o.{outer_column}"),
+            )],
+            // 外层行只有 id / ref 两列，`missing_col` 不在其中。
+            left_column_indices: HashMap::from([
+                ("id".to_string(), 0usize),
+                ("ref".to_string(), 1usize),
+            ]),
+            right_column_indices: HashMap::new(),
+            right_plan: None,
+            database: None,
+            snapshot: None,
+            routed_tables: Arc::new(crate::pipeline::RoutedTables::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_outer_column_reports_error_naming_column() {
+        let mut exec = SemiJoinExecutorV2::new(config("missing_col"));
+        let err = exec
+            .next()
+            .await
+            .expect_err("绑参未命中应报错而非静默取外层首列");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing_col"),
+            "错误应点名未命中的外层列: {msg}"
+        );
     }
 }

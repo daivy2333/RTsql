@@ -83,7 +83,14 @@ impl ScalarSubqueryFilterExecutor {
 
     /// Extract correlated parameter values for one binding from the outer row
     /// (same by-column-name lookup as SubqueryEvalExecutor).
-    fn extract_param_values(&self, binding_idx: usize, row: &[Value]) -> Vec<(String, Value)> {
+    ///
+    /// T2（change 2026-10-15-subquery-alias-binding-and-error-prefix）：未命中
+    /// SHALL 报错点名该外层列，SHALL NOT 静默回落外层首列。
+    fn extract_param_values(
+        &self,
+        binding_idx: usize,
+        row: &[Value],
+    ) -> Result<Vec<(String, Value)>> {
         self.bindings[binding_idx]
             .correlated_params
             .iter()
@@ -92,11 +99,16 @@ impl ScalarSubqueryFilterExecutor {
                     .outer_column_indices
                     .get(&cp.outer_column.to_lowercase())
                     .copied()
-                    .unwrap_or(0);
-                (
+                    .ok_or_else(|| {
+                        crate::storage::StorageError::ExecutionError(format!(
+                            "correlated parameter column not found in outer row: {}",
+                            cp.outer_column
+                        ))
+                    })?;
+                Ok((
                     cp.param_name.clone(),
                     row.get(idx).cloned().unwrap_or(Value::Null),
-                )
+                ))
             })
             .collect()
     }
@@ -150,7 +162,7 @@ impl ScalarSubqueryFilterExecutor {
             self.caches[binding_idx].scalar = Some(value.clone());
             Ok(value)
         } else {
-            let param_values = self.extract_param_values(binding_idx, row);
+            let param_values = self.extract_param_values(binding_idx, row)?;
             if let Some(cached) = self.caches[binding_idx].correlated.get(&param_values) {
                 return Ok(cached.clone());
             }
@@ -207,5 +219,55 @@ impl Executor for ScalarSubqueryFilterExecutor {
                 Some(ExecResult::RowId(_)) => continue,
             }
         }
+    }
+}
+
+/// T2（change 2026-10-15-subquery-alias-binding-and-error-prefix）：关联参数外层
+/// 绑定期望存在而解析失败时显式报错点名列，SHALL NOT 静默回落外层首列。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::{
+        ConstantPredicate, CorrelatedParam, PhysicalPlan, ScalarSubqueryBinding, StubRowExecutor,
+    };
+    use std::collections::HashMap;
+
+    fn executor(database: Arc<Database>, outer_column: &str) -> ScalarSubqueryFilterExecutor {
+        ScalarSubqueryFilterExecutor::new(
+            Box::new(StubRowExecutor::new(vec![vec![
+                Value::Int(7),
+                Value::Int(9),
+            ]])),
+            std::sync::Arc::new(ConstantPredicate { value: true }),
+            vec![ScalarSubqueryBinding {
+                param_name: "__scalar_subquery_0".to_string(),
+                subquery: Box::new(PhysicalPlan::SingleRow),
+                correlated_params: vec![CorrelatedParam::new(
+                    "o".to_string(),
+                    outer_column.to_string(),
+                    format!("o.{outer_column}"),
+                )],
+            }],
+            HashMap::from([("id".to_string(), 0usize), ("ref".to_string(), 1usize)]),
+            database,
+            None,
+            std::sync::Arc::new(crate::pipeline::RoutedTables::new()),
+            Vec::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn missing_outer_column_reports_error_naming_column() {
+        let db = Arc::new(Database::open_in_memory().await.unwrap());
+        let mut exec = executor(db, "missing_col");
+        let err = exec
+            .next()
+            .await
+            .expect_err("绑参未命中应报错而非静默取外层首列");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing_col"),
+            "错误应点名未命中的外层列: {msg}"
+        );
     }
 }

@@ -629,7 +629,7 @@ async fn test_correlated_subquery_error_not_cached() {
     let msg = error_msg(resp);
     assert_eq!(
         msg,
-        "Execution error: execution error: Subquery returns multiple rows (scalar subquery requires single row)"
+        "Execution error: Subquery returns multiple rows (scalar subquery requires single row)"
     );
 }
 
