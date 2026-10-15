@@ -97,9 +97,9 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 23495df（主批次：子查询别名绑定修复与错误前缀单层化批收尾归档统一入库；上一主批次 23495df〔ISS15 table 渲染截断与组合面 e2e 补齐收尾〕——本行 hash 随收尾提交回填）
-- **ahead of origin**: 2（`git rev-list --count origin/master..master` 写入时实数——origin/master 为 2026-10-15 推送位 23495df；本批次提交随后推送同步）
-- **工作区**: 收尾批次待提交（子查询别名绑定修复与错误前缀单层化批实施面〔全部源码与测试〕+ 3 域 spec delta 合并 + change 归档移动 + issues ISS16–ISS19 关闭归档 + references R44–R47 状态同步 + tasks/SNAPSHOT 同步）
+- **提交基线**: 366caa7（主批次：子查询别名绑定修复与错误前缀单层化批收尾归档统一入库；上一主批次 23495df〔ISS15 table 渲染截断与组合面 e2e 补齐收尾〕）
+- **ahead of origin**: 2（`git rev-list --count origin/master..master` 回填时实数——主批次 366caa7 + 本回填共 2 提交；origin/master 为 2026-10-15 推送位 23495df；本批次 2 提交随收尾指令一并推送后归零）
+- **工作区**: clean（子查询别名批收尾批次已全部入库：主批次 366caa7 + 本回填提交）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 2029 tests pass, 0 failures, 2 ignored（2026-10-15 Iteration 000 Act 全量 Gate：lib 406 + bins 0 + 13 批集成（每批 10 目标 `--test-threads=1` 批间串行）+ e2e 27 串行；1999 基线 + 形状矩阵 22 + lib 单测 3 + e2e 旅程 5 = 2029 对账吻合）
 - **OpenSpec**: 64 specs（域数不变；3 域 delta 合并——`sql-table-alias-resolution` +1 ADDED〔现 7 Requirement〕、`correlated-subquery-cache` +1 ADDED〔现 6〕、`error-reporting` MODIFIED「错误消息前缀单层」追加执行器通道〔现 8〕）；**活跃 change**：无（最新归档 `archive/2026-10-15-subquery-alias-binding-and-error-prefix/`，单 Iteration 全 accepted；上一归档 `archive/2026-10-14-iss15-table-truncation-and-combination-gaps/`；下一里程碑 MS22 实测驱动性能批——候选范围量化定稿后转 ready）注：`validate --specs` 对 MS06–MS10 时代 spec 的占位 Purpose 产生 WARNING——既有状态，非本轮引入
