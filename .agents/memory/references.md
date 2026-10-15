@@ -428,4 +428,36 @@
 - **用途**: `--format table`（TTY 默认）下行集单元格字符数 ≥ 65536 时 `render_table` 未封顶列宽触发 std::fmt 动态宽度上限 panic 的输出面崩溃缺陷台账；影响 SELECT/stats/sample/profile 全部 table 渲染面，JSON/CSV/TSV 不受影响
 - **状态**: closed（2026-10-15 fixed → change `2026-10-14-iss15-table-truncation-and-combination-gaps` 归档，`render_table` 列宽封顶 64 字符截断 + 组合面 e2e 见证补齐；规格 1 MODIFIED + 2 ADDED 合并）
 
+## R44: ISS16 相关标量子查询外参未绑定（WHERE 静默空集 / select list 塌缩或报错）
+
+- **类型**: issue
+- **路径**: `.agents/issues/ISS16-correlated-scalar-subquery-unbound.md`
+- **日期**: 2026-10-15
+- **用途**: 相关标量子查询外层参数绑定失效的正确性缺陷台账（文档宣称 correlated included）；WHERE 形态静默空集、select list 形态输出塌缩或 `Subquery returns multiple rows` 报错；最小 2 表库即复现，上游 subquery 测试全绿的覆盖缺口输入
+- **状态**: closed（2026-10-15 fixed → change `2026-10-15-subquery-alias-binding-and-error-prefix` 归档，`extract_subquery_table_names` 声明限定符化〔别名优先 + 基表名并列保留的用户豁免裁定〕消除幻影相关参数源；规格 `sql-table-alias-resolution` +1 Requirement）
+
+## R45: ISS17 EXISTS 内层带别名静默错误结果（空集/按位截断/全放行/全拒）
+
+- **类型**: issue
+- **路径**: `.agents/issues/ISS17-exists-aliased-inner-silent-wrong-results.md`
+- **日期**: 2026-10-15
+- **用途**: `EXISTS` 内层表带别名时四种静默错误形态（非相关谓词非首列恒空集、谓词首列按内层存活行数截断外层、相关经非 PK 列全放行，评测主库同形状全拒）的缺陷台账；与 ISS16/ISS18 同属子查询别名/参数绑定面，同批调查输入
+- **状态**: closed（2026-10-15 fixed → 同 change，`extract_subquery_table_names` 声明限定符化 + 三执行器绑参未命中点名报错加固；同批覆盖缺口审计四形状〔NOT EXISTS/NOT IN 别名全放行、EXISTS JOIN 双臂别名恒空集、EXISTS Derived 别名截断〕一并修复并由形状覆盖矩阵钉住）
+
+## R46: ISS18 IN 内层带别名 ∧ 索引谓词静默恒空集
+
+- **类型**: issue
+- **路径**: `.agents/issues/ISS18-in-aliased-inner-index-predicate-silent-empty.md`
+- **日期**: 2026-10-15
+- **用途**: `IN` 子查询「内层别名 ∧ 二级索引服务谓词」合取触发恒空集的缺陷台账（别名无索引、无别名有索引均正确）；IN 反连接 × 索引自动服务交叉面的正确性输入
+- **状态**: closed（2026-10-15 fixed → 同 change，`extract_subquery_table_names` 声明限定符化后别名谓词不再走幻影相关路径；矩阵 `in_alias_with_secondary_index_predicate` + e2e 见证钉住）
+
+## R47: ISS19 执行器错误文案双层前缀（ISS11 同族残余）
+
+- **类型**: issue
+- **路径**: `.agents/issues/ISS19-execution-error-double-prefix.md`
+- **日期**: 2026-10-15
+- **用途**: 执行器子查询路径 `Execution error: execution error:` 双层前缀文案缺陷台账（ISS11 修复 parse/plan 漏斗后的执行器漏网点）；错误面断言校准与顺手收敛输入
+- **状态**: closed（2026-10-15 fixed → 同 change T3，`StorageError::ExecutionError` Display 去 thiserror 前缀、单层 `Execution error: ` 由 pipeline 漏斗唯一赋予；锚点 `subquery_test.rs:632` 校准 + e2e 端到端断言）
+
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

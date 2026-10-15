@@ -143,7 +143,10 @@ impl SubqueryEvalExecutor {
 
     /// Extract parameter values from the current outer row.
     /// Maps each correlated parameter to its value using `outer_column_indices`.
-    fn extract_param_values(&self, row: &[Value]) -> Vec<(String, Value)> {
+    ///
+    /// T2（change 2026-10-15-subquery-alias-binding-and-error-prefix）：未命中
+    /// SHALL 报错点名该外层列，SHALL NOT 静默回落外层首列。
+    fn extract_param_values(&self, row: &[Value]) -> Result<Vec<(String, Value)>> {
         self.correlated_params
             .iter()
             .map(|cp| {
@@ -151,11 +154,16 @@ impl SubqueryEvalExecutor {
                     .outer_column_indices
                     .get(&cp.outer_column.to_lowercase())
                     .copied()
-                    .unwrap_or(0);
-                (
+                    .ok_or_else(|| {
+                        crate::storage::StorageError::ExecutionError(format!(
+                            "correlated parameter column not found in outer row: {}",
+                            cp.outer_column
+                        ))
+                    })?;
+                Ok((
                     cp.param_name.clone(),
                     row.get(idx).cloned().unwrap_or(Value::Null),
-                )
+                ))
             })
             .collect()
     }
@@ -171,7 +179,7 @@ impl Executor for SubqueryEvalExecutor {
                     let scalar_value = if is_correlated {
                         // Statement-level cache: same parameter value sequence
                         // reuses the first evaluation's row set (MS09 Iter002).
-                        let param_values = self.extract_param_values(&row);
+                        let param_values = self.extract_param_values(&row)?;
                         if let Some(rows) = self.correlated_cache.get(&param_values) {
                             match rows.first() {
                                 Some(inner_row) if !inner_row.is_empty() => inner_row[0].clone(),
@@ -244,5 +252,50 @@ impl Executor for SubqueryEvalExecutor {
                 None => return Ok(None),
             }
         }
+    }
+}
+
+/// T2（change 2026-10-15-subquery-alias-binding-and-error-prefix）：关联参数外层
+/// 绑定期望存在而解析失败时显式报错点名列，SHALL NOT 静默回落外层首列。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::{CorrelatedParam, StubRowExecutor};
+    use std::collections::HashMap;
+
+    fn executor(database: Arc<Database>, outer_column: &str) -> SubqueryEvalExecutor {
+        SubqueryEvalExecutor::new(
+            Box::new(StubRowExecutor::new(vec![vec![
+                Value::Int(7),
+                Value::Int(9),
+            ]])),
+            PhysicalPlan::SingleRow,
+            "who".to_string(),
+            0,
+            vec![CorrelatedParam::new(
+                "o".to_string(),
+                outer_column.to_string(),
+                format!("o.{outer_column}"),
+            )],
+            HashMap::from([("id".to_string(), 0usize), ("ref".to_string(), 1usize)]),
+            database,
+            None,
+            std::sync::Arc::new(crate::pipeline::RoutedTables::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn missing_outer_column_reports_error_naming_column() {
+        let db = Arc::new(Database::open_in_memory().await.unwrap());
+        let mut exec = executor(db, "missing_col");
+        let err = exec
+            .next()
+            .await
+            .expect_err("绑参未命中应报错而非静默取外层首列");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing_col"),
+            "错误应点名未命中的外层列: {msg}"
+        );
     }
 }

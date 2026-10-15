@@ -1863,3 +1863,258 @@ fn e13_create_failure_zero_residual() {
     let out = run_cli(dir.path(), &["e13r", "INSERT INTO t VALUES (1)"]);
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
 }
+
+/// E14 子查询别名限定符绑定（ISS16/ISS17/ISS18 + 同类面审计新增形状）——真实
+/// CLI 子进程见证，change 2026-10-15-subquery-alias-binding-and-error-prefix T4。
+///
+/// 修复前（pre-fix RED）：内层 FROM 项的别名被丢弃，内层别名限定引用被误判为
+/// 相关外层引用，各形状退化为静默空集 / 按位截断 / 全放行。修复后各形状按
+/// 真实语义出结果，每个形状另带无别名对照。
+#[test]
+fn e14_subquery_alias_binding_where_scalar() {
+    let dir = fixture();
+    seed_people_dept(dir.path());
+
+    // ISS16：WHERE 相关标量比较——内层别名限定引用按外层每行收窄。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT p.id FROM people p WHERE (SELECT COUNT(*) FROM dept x WHERE x.did = p.id) = 1",
+        ],
+    );
+    assert_rows(
+        &out,
+        serde_json::json!(["id"]),
+        serde_json::json!([[1], [2]]),
+    );
+
+    // 无别名对照：同语义。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT p.id FROM people p WHERE (SELECT COUNT(*) FROM dept d WHERE d.did = p.id) = 1",
+        ],
+    );
+    assert_rows(
+        &out,
+        serde_json::json!(["id"]),
+        serde_json::json!([[1], [2]]),
+    );
+
+    // 零计数分支：内层无匹配的外层行（people id=3）按 COUNT=0 保留。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT p.id FROM people p WHERE (SELECT COUNT(*) FROM dept x WHERE x.did = p.id) = 0",
+        ],
+    );
+    assert_rows(&out, serde_json::json!(["id"]), serde_json::json!([[3]]));
+}
+
+/// ISS16 投影位形态：输出行数与外层一致，每行取本行匹配值（修复前塌缩或报多行错）。
+#[test]
+fn e14_subquery_alias_binding_select_list() {
+    let dir = fixture();
+    seed_people_dept(dir.path());
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT p.id, (SELECT x.name FROM dept x WHERE x.did = p.id) AS dn FROM people p",
+        ],
+    );
+    assert_rows(
+        &out,
+        serde_json::json!(["id", "dn"]),
+        serde_json::json!([[1, "eng"], [2, "ops"], [3, null]]),
+    );
+}
+
+/// ISS17 EXISTS 内层别名四形态 + 审计新增 NOT EXISTS 内层别名形状。
+#[test]
+fn e14_subquery_alias_binding_exists() {
+    let dir = fixture();
+    seed_people_dept(dir.path());
+
+    // 形态一：谓词落在内层非首列（修复前恒空集）。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT id FROM people WHERE EXISTS (SELECT 1 FROM dept x WHERE x.name = 'eng')",
+        ],
+    );
+    assert_rows(
+        &out,
+        serde_json::json!(["id"]),
+        serde_json::json!([[1], [2], [3]]),
+    );
+
+    // 形态二：谓词落在内层首列（修复前仅返回外层第一行）。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT id FROM people WHERE EXISTS (SELECT 1 FROM dept x WHERE x.did = 1)",
+        ],
+    );
+    assert_rows(
+        &out,
+        serde_json::json!(["id"]),
+        serde_json::json!([[1], [2], [3]]),
+    );
+
+    // 形态三：相关经外层非主键列——只有 ref 命中的行放行（修复前全部放行）。
+    let out = run_cli(
+        dir.path(),
+        &["hr", "CREATE TABLE link (id INT PRIMARY KEY, ref INT)"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &["hr", "INSERT INTO link VALUES (1, 9), (2, 1), (3, 7)"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT o.id FROM link o WHERE EXISTS (SELECT 1 FROM dept x WHERE x.did = o.ref)",
+        ],
+    );
+    assert_rows(&out, serde_json::json!(["id"]), serde_json::json!([[2]]));
+
+    // 形态四：无别名对照。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT id FROM people WHERE EXISTS (SELECT 1 FROM dept WHERE dept.name = 'eng')",
+        ],
+    );
+    assert_rows(
+        &out,
+        serde_json::json!(["id"]),
+        serde_json::json!([[1], [2], [3]]),
+    );
+
+    // 审计新增形状：NOT EXISTS 内层别名——内层无匹配时全部外层行保留。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT id FROM people WHERE NOT EXISTS (SELECT 1 FROM dept x WHERE x.name = 'nobody')",
+        ],
+    );
+    assert_rows(
+        &out,
+        serde_json::json!(["id"]),
+        serde_json::json!([[1], [2], [3]]),
+    );
+
+    // 审计新增形状：NOT EXISTS 内层别名——内层有匹配时全部外层行被滤除。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT id FROM people WHERE NOT EXISTS (SELECT 1 FROM dept x WHERE x.name = 'eng')",
+        ],
+    );
+    assert_rows(&out, serde_json::json!(["id"]), serde_json::json!([]));
+
+    // 审计新增形状：EXISTS 内层 JOIN 两臂都带别名（修复前恒空集）。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT id FROM people WHERE EXISTS \
+             (SELECT 1 FROM dept x JOIN people y ON x.did = y.id WHERE x.name = 'eng')",
+        ],
+    );
+    assert_rows(
+        &out,
+        serde_json::json!(["id"]),
+        serde_json::json!([[1], [2], [3]]),
+    );
+}
+
+/// ISS18：IN 内层别名 ∧ 谓词由二级索引服务——恒空集缺陷的端到端见证。
+#[test]
+fn e14_subquery_alias_binding_in_with_index() {
+    let dir = fixture();
+    seed_people_dept(dir.path());
+
+    // CREATE INDEX 仅支持单列 INT —— 取独立内层表，索引列非主键整数列。
+    let out = run_cli(
+        dir.path(),
+        &["hr", "CREATE TABLE c (id INT PRIMARY KEY, age INT)"],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(dir.path(), &["hr", "INSERT INTO c VALUES (1, 41), (2, 30)"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(dir.path(), &["hr", "CREATE INDEX idx_c_age ON c(age)"]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+
+    // 内层带别名 ∧ 索引谓词（修复前恒空集）。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT id FROM people p WHERE p.id IN (SELECT x.id FROM c x WHERE x.age = 41)",
+        ],
+    );
+    assert_rows(&out, serde_json::json!(["id"]), serde_json::json!([[1]]));
+
+    // 无别名对照：同形状同结果。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT id FROM people p WHERE p.id IN (SELECT c.id FROM c WHERE c.age = 41)",
+        ],
+    );
+    assert_rows(&out, serde_json::json!(["id"]), serde_json::json!([[1]]));
+}
+
+/// ISS19（R3 端到端）：执行器路径错误输出恰一层 `Execution error:` 前缀。
+#[test]
+fn e14_execution_error_single_prefix() {
+    let dir = fixture();
+    seed_people_dept(dir.path());
+
+    // 按非键列关联构造必然多行的标量子查询（`x.did >= 1` 命中内层两行）。
+    let out = run_cli(
+        dir.path(),
+        &[
+            "hr",
+            "SELECT p.name, (SELECT x.name FROM dept x WHERE x.did >= 1) AS dn FROM people p",
+        ],
+    );
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {} stderr: {}",
+        out.stdout,
+        out.stderr
+    );
+    let msg = json(&out.stderr)["error"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !msg.contains("Execution error: execution error:"),
+        "double prefix: {msg}"
+    );
+    assert!(
+        msg.contains("Execution error:"),
+        "single prefix kept: {msg}"
+    );
+    assert!(
+        msg.contains("Subquery returns multiple rows"),
+        "error body kept: {msg}"
+    );
+}
