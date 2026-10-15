@@ -98,9 +98,9 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 05a8d79（主批次：AntiJoin 关联参数绑定期加固批收尾归档统一入库；上一主批次 366caa7〔子查询别名绑定修复与错误前缀单层化批收尾〕——本行 hash 随收尾提交回填）
-- **ahead of origin**: 2（`git rev-list --count origin/master..master` 写入时实数——origin/master 为 2026-10-15 推送位 05a8d79；本批次提交随后推送同步）
-- **工作区**: 收尾批次待提交（AntiJoin 绑定期加固批实施面〔anti_join.rs〕+ 1 域 spec delta 合并 + change 归档移动 + tasks/SNAPSHOT 同步）
+- **提交基线**: 0b009b4（主批次：AntiJoin 关联参数绑定期加固批收尾归档统一入库；上一主批次 366caa7〔子查询别名绑定修复与错误前缀单层化批收尾〕）
+- **ahead of origin**: 2（`git rev-list --count origin/master..master` 回填时实数——主批次 0b009b4 + 本回填共 2 提交；origin/master 为 2026-10-15 推送位 05a8d79；本批次 2 提交随收尾指令一并推送后归零）
+- **工作区**: clean（AntiJoin 批收尾批次已全部入库：主批次 0b009b4 + 本回填提交；部署另计）
 - **最新 tag**: 无（仓库当前无任何 tag）
 - **测试**: 2030 tests pass, 0 failures, 2 ignored（2026-10-15 Iteration 000 Act 全量 Gate：lib 407 + 123 集成目标 13 批（每批 10 目标 `--test-threads=1` 批间串行）= 2030；2029 基线 + 本 change 净增 1〔anti_join 内联单测〕，对账吻合）
 - **OpenSpec**: 64 specs（域数不变；1 域 delta 合并——`correlated-subquery-cache` MODIFIED「关联参数外层绑定失败显式报错」执行器枚举扩至四含 AntiJoin〔现 6 Requirement〕）；**活跃 change**：无（最新归档 `archive/2026-10-15-antijoin-correlated-param-hardening/`，单 Iteration 全 accepted；上一归档 `archive/2026-10-15-subquery-alias-binding-and-error-prefix/`；下一里程碑 MS22 实测驱动性能批——候选范围量化定稿后转 ready）注：`validate --specs` 对 MS06–MS10 时代 spec 的占位 Purpose 产生 WARNING——既有状态，非本轮引入
