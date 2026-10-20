@@ -231,18 +231,20 @@
 ## R19: MS10-T03 文件格式头——打开链路、页寻址约束与放置方案
 
 - **类型**: analysis
-- **路径**: `.agents/analysis/ms10-t03-file-format-header.md`
+- **路径**: `git show a61891f:.agents/analysis/ms10-t03-file-format-header.md`
 - **日期**: 2026-09-08（revision `268fa4f`）
 - **用途**: MS10-T03（文件 magic/格式版本头）Plan 的实现调查输入——格式头校验插入点（`FileStorage::open` 锁后、页解析前）、`to_offset` 唯一偏移源与 catalog 保留页 0/1 约束、放置方案对比（前缀头偏移平移 vs 超级页）、非 RTsql 文件实测行为基线（8192B 垃圾文件 panic→abort exit 134）、CLI open 错误映射（exit 1/4）与 MS12-T01 头字段需求、测试影响面（storage_test / drop_table_free_test / file_storage_io_test 裸布局断言）
-- **状态**: active
+- **状态**: completed；[ARCHIVED 2026-10-20]（Artifact-Archive，原 `.agents/analysis/ms10-t03-file-format-header.md`）
+- **原因**: MS10-T03 已实施并沉淀于规格语料 `database-file-format-header` 与 SNAPSHOT 文件头模块边界；计划期调查输入已消费，方案原文经取回命令可解析
 
 ## R20: MS10-T05 生命周期子命令实现上下文
 
 - **类型**: analysis
-- **路径**: `.agents/analysis/ms10-t05-lifecycle-subcommands.md`
+- **路径**: `git show a61891f:.agents/analysis/ms10-t05-lifecycle-subcommands.md`
 - **日期**: 2026-09-09（revision `a5b0a5f`；实施代码基线 `8827700`）
 - **用途**: MS10-T05（`new/list/schema/dump/restore/import --csv`）Plan 的实现调查输入——`CliArgs` 扁平入口重构点与裸名/子命令名冲突边界、`execute_command_inner` 两阶段信号编排复用、`Database`/`Catalog` 可复用 API（系统表不可 SQL 查询、schema 必须走 `catalog().scan_tables/scan_columns`）、双 `ColumnType` 体系与 String(255) 固定转换决定的 dump 保真边界、csv 依赖缺口、`resolve_db_path` 目录 helper 提取点、测试模式与退出码矩阵零扩展结论
-- **状态**: active
+- **状态**: completed；[ARCHIVED 2026-10-20]（Artifact-Archive，原 `.agents/analysis/ms10-t05-lifecycle-subcommands.md`）
+- **原因**: MS10-T05 已实施并沉淀于规格语料与 SNAPSHOT 生命周期子命令面（后续演进见 MS17/MS19/MS28/MS29 各 change）；计划期调查输入已消费，原文经取回命令可解析
 
 ## R21: ISS01 min_create_tx_id=0 毒化 all-invisible 快路径
 
