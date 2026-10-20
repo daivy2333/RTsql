@@ -38,7 +38,7 @@
 | 库 API、并发与模块边界 | I012、I050、I066、I074、I084、I088、I093、I094 |
 | CLI 与长会话 | I067、I071、I076 |
 | 测试、兼容性与交付 | I045、I051、I052、I053、I058、I073、I091、I092 |
-| 已转入路线的来源 | I077（锁等待已交付，持锁窗口治理仍为性能候选）、I078、I079 |
+| 已转入路线的来源 | I077（锁等待已交付，持锁窗口治理仍为性能候选） |
 
 ## 优先级排序（2026-10-19 用户裁定）
 
@@ -432,26 +432,6 @@
 - **状态**: promoted（2026-10-01 用户批准重排纳入路线——① busy-timeout → MS28-T01、② import 攒批/持锁窗口治理 → MS22 候选池、③ I071 定位注记已随本条完成；`.agents/docs/tasks.md`）
 - **语义澄清（2026-10-18）**: 上述「单次调用原子」只表示文件锁覆盖的互斥执行窗口，不表示调用内多条 auto-commit 语句全有或全无；事务原子性仍由显式事务及各语句契约决定。批次事务候选沿 I021 保留，I083 不重复承诺；跨进程读写并行另见 I084。
 
-## I078: stdin 管道输入与免建表导入（CSV → 内存库/新表）
-
-- **分类**: 功能 / CLI 输入面（Unix 组合入口）
-- **问题**: 输入侧只有出口没有入口——`import` 是生命周期子命令（`:memory:` 拒绝，exit 2）、目标表必须已存在且表头精确匹配、不收 stdin（`restore` 有 `-` 通道而 import 无）；「echo CSV | rtsql :memory: import -」类 Unix 组合结构性不可能，一次性分析必须先落盘建库建表再清理
-- **证据**: 2026-10-01 外部评审 #7（基于 rtsql-docs/SKILL.md 显式内容），经 SKILL.md:128/255 与 SNAPSHOT 生命周期子命令面核实成立；台账此前无对应条目
-- **影响**: 与输出侧 `--format json/csv/tsv` 的管道友好度不对称；管道/临时分析场景被迫污染磁盘（new + import + delete 三步）
-- **方案**: 组合随调查定稿——import 收 `-` stdin（对齐 restore 先例）；目标表不存在时按 CSV 表头建表（类型推导复用 MS20 CTAS `infer_ctas_column_types` 矩阵先例）；`:memory:` 豁免面或主命令 CSV 通道的形态取舍；须与「主命令缺库显式拒绝、创建通道收敛 `rtsql new`」（`cli-noninteractive-shell`）既有语义协调边界
-- **状态**: promoted（2026-10-01 用户批准重排纳入路线——MS29-T01；`.agents/docs/tasks.md`）
-- **整理说明（2026-10-18）**: 本条问题描述保留转入路线前的现场；对应能力已交付，当前行为与完成依据见任务台账及规格，本次不再作为待实现缺口登记。
-
-## I079: 显式 checkpoint CLI 命令（用户主动落盘原语）
-
-- **分类**: 功能 / 生命周期控制（运维可观测面）
-- **问题**: checkpoint 触发面只有 close()（隐式）、WAL 字节水位（自动，MS26）与 lib `Database::checkpoint()`——无用户主动触发的 CLI 入口；「已提交数据落稳后再做外部备份/拷贝」类操作无法表达
-- **证据**: 2026-10-01 外部评审 #3，经 SNAPSHOT 触发面核查（MS07-T05 / MS18 零工作跳过 / MS26 水位）成立；与 MS27-T02（`rtsql check`/页校验和）同属「被自动化信任的运维原语」主题但相互独立
-- **影响**: 长会话中途的持久化确认、外部工具接管文件前的同步点，均只能靠断开会话表达；I072 备份边界实操序列缺一个干净落盘点
-- **方案**: `rtsql checkpoint <db>` 子命令（复用 `resolve_existing_db` + 开库 + `checkpoint()`，输出形态随调查）；`--readonly`/`:memory:` 组合拒绝面沿用既有 exit 2 先例
-- **状态**: promoted（2026-10-01 用户批准重排纳入路线——MS28-T02；`.agents/docs/tasks.md`）
-- **整理说明（2026-10-18）**: 本条问题描述保留转入路线前的现场；对应能力已交付，当前行为与完成依据见任务台账及规格，本次不再作为待实现缺口登记。
-
 ## I080: SQL 名字与类型的统一绑定阶段
 
 - **分类**: 正确性 / 规划器与语义模型
@@ -608,3 +588,5 @@
 <!-- arc: ARC-202609242151 --> 24 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609242151/proposal.md
 
 <!-- arc: 4e1944f --> 9 条已归档 (2026-10-01)：I001-I003（Phase 1 已完成段）/ I004-I008（Phase 2 已完成段）/ I075（promoted → MS25-T06 已实施，spec `order-by-alias-sorting`）
+
+<!-- arc: a61891f --> 2 条已归档 (2026-10-20)：I078（promoted → MS29-T01 已交付，change `2026-10-01-ms29-import-input-and-default-declaration` 归档）/ I079（promoted → MS28-T02 已交付，change `2026-10-01-ms28-cli-concurrency-checkpoint` 归档）；原文 `git show a61891f:.agents/memory/improvements.md`
