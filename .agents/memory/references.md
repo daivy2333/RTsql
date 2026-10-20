@@ -177,40 +177,22 @@
 - **类型**: change-archive
 - **路径**: `openspec/changes/archive/2026-08-26-2026-08-25-ms06-t02-plancache-dashmap/`
 - **状态**: archived
-- **内容**: MS06-T02 PlanCache DashMap + SQL 规范化（`HashMap + &mut self` → `DashMap + &self`；`normalize_sql_key` 公开函数：ASCII 折叠 + 空白折叠 + trim + 单引号 toggle 状态机；`Database.plan_cache: Arc<Mutex<PlanCache>>` → `Arc<PlanCache>`；`tests/plan_cache_test.rs` 7 集成测试 + 10 单测；T0 基线 clippy 归零 + 36 处表外 mechanical 修复）
-- **关联能力 spec**: `plancache-key-normalization`（R1-R4）
-- **基线**: 504 tests pass（487 基线 + 10 单测 + 7 集成测试）
+- **内容**: MS06-T02 PlanCache DashMap + SQL 规范化（关联能力 spec `plancache-key-normalization` R1-R4；实施明细、基线与测试构成见归档 carrier）
 
 ## R15: 2026-08-26-2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages
 
 - **类型**: change-archive
 - **路径**: `openspec/changes/archive/2026-08-26-2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages/`
 - **状态**: archived
-- **内容**: MS06-T03 + MS06-T04 一并实施——T03 `WalWriter` 持 `Arc<Mutex<File>>` 单一持久句柄（5 个 IO 方法去逐次 open，错误与 LSN 语义保持；`tests/wal_handle_test.rs` 4 测试）；T04 `pipeline::execute_inner` 279 行 → 编排器 + parse/plan/execute 三 pub stage + profiling 三段计时 + 8 阶段单测 + 三阶段 criterion bench（文件级明细见归档 carrier）
-- **关联能力 spec**:
-  - `wal-writer-handle-reuse`（R1-R4：句柄复用 / 错误语义 / LSN 语义 / fd 上界可验证）
-  - `pipeline-stage-decomposition`（R1-R8：parse 终止 / plan 终止 / execute 终止 / cache-hit 跳过 / DML 事务包裹 / DDL 缓存失效 / 阶段级可测 / 三段顶层计时 / 独立 bench）
-- **基线**: 516 tests pass（504 基线 + wal_handle 4 + pipeline 8 阶段单测）
+- **内容**: MS06-T03 `WalWriter` 持久句柄 + T04 pipeline 三阶段分解与 bench（关联能力 spec `wal-writer-handle-reuse` R1-R4、`pipeline-stage-decomposition` R1-R8；明细见归档 carrier）
 
 ## R16: 2026-08-26-2026-08-26-ms07-t01-schema-persistence
 
 - **类型**: change-archive
 - **路径**: `openspec/changes/archive/2026-08-26-2026-08-26-ms07-t01-schema-persistence/`
 - **状态**: archived
-- **关联里程碑**: MS07-T01（基础能力建设 / 系统表 `__tables` / `__columns` + Schema 页；最大单点）
-- **Plan Review**: `accepted`（openspec-plan / 2026-08-26 18:58；RTM A1–A10 全部满足；11 项偏差 0 阻塞）
-- **内容**: 新增 `src/storage/catalog.rs`（~908 行，7 方法 + 二进制行序列化 + 链式 SlottedPage，10 单测）+ `IndexManager::from_root`/`root_page_id` + `TableManager` 重写（async new/`open_or_init`/保留名检查/跨页 `write_tuple`）+ `Database::close()` + `InsertExecutor` `Option<Arc<TableManager>>` + `AsyncStorage::page_count` + `StorageError::ReservedTableName`（文件级明细见归档 carrier）；`tests/schema_persistence_test.rs` 8 测试 + 14 个其他测试文件批量签名适配
-- **关联能力 spec**: `schema-persistence`（7 Requirement / 14 Scenario：R1 系统表持久化 / R2 from_root / R3 保留名 / R4 tail 持久化 / R5 页 0/1 保留 / R6 catalog 写锁 / R7 系统表旁路 MVCC 与 WAL，明细见 spec）
-- **基线**: 534 tests pass（516 基线 + 10 catalog 单测 + 8 schema 集成测试）
-- **关键偏差**（已记录于 Act Response，0 阻塞）: InsertExecutor Option+fallback（~40 处旧调用零修改）、`update_table_tail` append+delete（SlottedPage 无 in-place API）、`Database::close()` 新增、tail 测试直写隔离 WAL buffer 干扰、`AsyncStorage::page_count` 新增——明细见归档 carrier
-- **遗留 Minor**（划归后续 change）:
-  - K05 recovery 静默吞错（`src/wal/recovery.rs:146-148/162-165/174-177`）— 下一 change 修复
-  - MS07-T02 drop_table 物理页释放 — 独立 change
-  - R-5：`IndexManager::from_root` 不验证 page 内容 — MS07-T02 处理
-  - R-4：SQL parser 层保留名拦截未做（`TableManager::create_table` 入口已覆盖）
-  - `tests/recovery_e2e_test.rs::test_data_pages_survive_restart` workaround 可去掉 — 随 K05 修复
-  - `rtsql.db` / `:memory:.wal` 旧文件不向后兼容 — pre-release 阶段可接受
-- **Persisted Evidence**: none（Plan 阶段声明；6 项验证命令均低成本可重跑；本审计已新鲜重跑）
+- **关联里程碑**: MS07-T01
+- **内容**: schema 持久化——`src/storage/catalog.rs` + TableManager 重写 + `Database::close()` 等（关联能力 spec `schema-persistence` 7 Requirement；Plan Review accepted；关键偏差与遗留 Minor 清单见归档 carrier）
 
 ## R17: MS08 bench 基线采集与前后对比判读 Runbook
 
