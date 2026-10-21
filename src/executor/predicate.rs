@@ -451,6 +451,18 @@ impl Debug for ParameterExpression {
 }
 
 impl Expression for ParameterExpression {
+    /// T03-D2: the owned evaluation entry point yields the parameter's real
+    /// value. The default `Expression::evaluate` routes through
+    /// `evaluate_ref`, whose `ValueRef` form has no borrow for `Value::String`
+    /// (M37 zero-copy TODO) and therefore degrades every String/Date
+    /// parameter to NULL — the owned channel lost the parameter's true value
+    /// as well. Composite expressions already recurse through the owned
+    /// `evaluate` path (each composite overrides it), so a parameter nested
+    /// under any composite reaches this entry point as well.
+    fn evaluate(&self, _row: &[Value]) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.value.lock().unwrap().clone())
+    }
+
     fn evaluate_ref<'a>(
         &'a self,
         _row: &'a [ValueRef<'_>],

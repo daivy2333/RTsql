@@ -803,3 +803,106 @@ async fn test_join_one_to_many() -> Result<()> {
 
     Ok(())
 }
+
+// =============================================================================
+// Keyless Base Table Test (T03-D1)
+// =============================================================================
+
+/// T03-D1（change 2026-10-20-ms30-semantic-binding-differential-net）：
+/// 无键基表（首列 TEXT → 隐式主键不可键控，行只落数据页不入 PK 索引）作为
+/// JOIN 基座时行完整可见——枚举通道回退数据页走查。
+///
+/// 现状（修复前）：`ScanExecutor` 只枚举 PK 索引，无键表索引为空 → 基座
+/// 零行 → JOIN 结果零行。
+#[tokio::test]
+async fn test_join_keyless_base_tables_visible() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FileStorage::open(&dir.path().join("test.db")).unwrap());
+    let buffer_pool = Arc::new(BufferPool::new(10, storage.clone()).unwrap());
+
+    // 左表首列 TEXT → 隐式主键不可键控 → 无键表
+    let left_table = create_and_populate_table(
+        "items_l",
+        vec![("k", ColumnType::String(100)), ("a", ColumnType::Int)],
+        "k",
+        vec![
+            vec![Value::String("a1".to_string()), Value::Int(1)],
+            vec![Value::String("a2".to_string()), Value::Int(2)],
+            vec![Value::String("a3".to_string()), Value::Int(3)],
+        ],
+        buffer_pool.clone(),
+    )
+    .await?;
+
+    // 右表同为无键表
+    let right_table = create_and_populate_table(
+        "items_r",
+        vec![("k", ColumnType::String(100)), ("b", ColumnType::Int)],
+        "k",
+        vec![
+            vec![Value::String("b1".to_string()), Value::Int(1)],
+            vec![Value::String("b2".to_string()), Value::Int(2)],
+        ],
+        buffer_pool.clone(),
+    )
+    .await?;
+
+    let left_scan = ScanExecutor::new(left_table, buffer_pool.clone(), None);
+    let right_scan = ScanExecutor::new(right_table, buffer_pool, None);
+
+    let mut left_indices = HashMap::new();
+    left_indices.insert("k".to_string(), 0);
+    left_indices.insert("a".to_string(), 1);
+
+    let mut right_indices = HashMap::new();
+    right_indices.insert("k".to_string(), 0);
+    right_indices.insert("b".to_string(), 1);
+
+    let conditions = vec![JoinCondition {
+        left_column: ColumnRef {
+            table: Some("items_l".to_string()),
+            column: "a".to_string(),
+        },
+        right_column: ColumnRef {
+            table: Some("items_r".to_string()),
+            column: "b".to_string(),
+        },
+    }];
+
+    let output_columns = vec![
+        OutputColumn {
+            table: Some("items_l".to_string()),
+            column: "k".to_string(),
+            table_alias: "items_l".to_string(),
+            column_index: 0,
+        },
+        OutputColumn {
+            table: Some("items_r".to_string()),
+            column: "b".to_string(),
+            table_alias: "items_r".to_string(),
+            column_index: 1,
+        },
+    ];
+
+    let mut join_executor = JoinExecutor::new(JoinConfig {
+        left_executor: Box::new(left_scan),
+        right_executor: Box::new(right_scan),
+        conditions,
+        output_columns,
+        left_column_indices: left_indices,
+        right_column_indices: right_indices,
+        output_sides: vec![JoinSide::Left, JoinSide::Right],
+        right_table_name: "items_r".to_string(),
+    });
+
+    let results = collect_rows(&mut join_executor).await?;
+
+    // 无键基座三行全部可见，与键表基座的 JOIN 语义同形：a=1 与 a=2 各命中一行
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0][0], Value::String("a1".to_string()));
+    assert_eq!(results[0][1], Value::Int(1));
+    assert_eq!(results[1][0], Value::String("a2".to_string()));
+    assert_eq!(results[1][1], Value::Int(2));
+
+    Ok(())
+}

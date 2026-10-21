@@ -61,6 +61,10 @@ pub struct AntiJoinExecutor {
     right_hashmap: Option<HashMap<Vec<Value>, Vec<Vec<Value>>>>,
     /// Whether the right table has any rows (for NOT EXISTS mode)
     right_has_rows: Option<bool>,
+    /// T03-D4: whether any right row's join key contains NULL. A NULL in the
+    /// right set makes every `x NOT IN (right set)` evaluate to UNKNOWN, so no
+    /// left row can qualify — the three-valued fold is not optional here.
+    right_has_null_key: bool,
     /// MS09 Iter002 (D6): statement-level correlated-result cache keyed by the
     /// correlated parameter value sequence. Stores the full right row set
     /// (including NULL-key rows, which count toward `right_has_rows`). Errors
@@ -88,6 +92,7 @@ impl AntiJoinExecutor {
             right_column_indices: config.right_column_indices,
             right_hashmap: None,
             right_has_rows: None,
+            right_has_null_key: false,
             correlated_rows_cache: HashMap::new(),
             phase: AntiJoinPhase::BuildRight,
             executed: false,
@@ -189,22 +194,29 @@ impl Executor for AntiJoinExecutor {
                         // Independent subquery: materialize right table once
                         let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> = HashMap::new();
                         let mut has_rows = false;
+                        let mut has_null_key = false;
 
                         while let Some(result) = self.right.next().await? {
                             if let ExecResult::Row(row) = result {
                                 has_rows = true;
-                                if let Some(hash_key) = self.build_right_key(&row) {
-                                    hashmap.entry(hash_key).or_default().push(row);
+                                match self.build_right_key(&row) {
+                                    Some(hash_key) => {
+                                        hashmap.entry(hash_key).or_default().push(row);
+                                    }
+                                    // T03-D4: 行键含 NULL → 置位且不入 hashmap。
+                                    None => has_null_key = true,
                                 }
                             }
                         }
 
                         self.right_hashmap = Some(hashmap);
                         self.right_has_rows = Some(has_rows);
+                        self.right_has_null_key = has_null_key;
                     } else {
                         // Correlated subquery: defer materialization to per-row ScanLeft
                         self.right_hashmap = Some(HashMap::new());
                         self.right_has_rows = Some(false);
+                        self.right_has_null_key = false;
                     }
                     self.phase = AntiJoinPhase::ScanLeft;
                 }
@@ -227,17 +239,23 @@ impl Executor for AntiJoinExecutor {
                                             // presence exactly as the miss path does.
                                             let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
                                                 HashMap::new();
+                                            let mut has_null_key = false;
                                             for row in rows {
-                                                if let Some(hash_key) = self.build_right_key(row) {
-                                                    hashmap
-                                                        .entry(hash_key)
-                                                        .or_default()
-                                                        .push(row.clone());
+                                                match self.build_right_key(row) {
+                                                    Some(hash_key) => {
+                                                        hashmap
+                                                            .entry(hash_key)
+                                                            .or_default()
+                                                            .push(row.clone());
+                                                    }
+                                                    // T03-D4: 行键含 NULL → 置位且不入 hashmap。
+                                                    None => has_null_key = true,
                                                 }
                                             }
                                             let has_rows = !rows.is_empty();
                                             self.right_hashmap = Some(hashmap);
                                             self.right_has_rows = Some(has_rows);
+                                            self.right_has_null_key = has_null_key;
                                         } else {
                                             let plan = right_plan.clone();
                                             crate::executor::inject_correlated_values(
@@ -256,17 +274,20 @@ impl Executor for AntiJoinExecutor {
                                             let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
                                                 HashMap::new();
                                             let mut has_rows = false;
+                                            let mut has_null_key = false;
                                             let mut collected: Vec<Vec<Value>> = Vec::new();
                                             while let Some(result) = right_exec.next().await? {
                                                 if let ExecResult::Row(row) = result {
                                                     has_rows = true;
-                                                    if let Some(hash_key) =
-                                                        self.build_right_key(&row)
-                                                    {
-                                                        hashmap
-                                                            .entry(hash_key)
-                                                            .or_default()
-                                                            .push(row.clone());
+                                                    match self.build_right_key(&row) {
+                                                        Some(hash_key) => {
+                                                            hashmap
+                                                                .entry(hash_key)
+                                                                .or_default()
+                                                                .push(row.clone());
+                                                        }
+                                                        // T03-D4: 行键含 NULL → 置位且不入 hashmap。
+                                                        None => has_null_key = true,
                                                     }
                                                     collected.push(row);
                                                 }
@@ -276,6 +297,7 @@ impl Executor for AntiJoinExecutor {
                                                 .insert(param_values, collected);
                                             self.right_hashmap = Some(hashmap);
                                             self.right_has_rows = Some(has_rows);
+                                            self.right_has_null_key = has_null_key;
                                         }
                                     }
                                 }
@@ -294,6 +316,21 @@ impl Executor for AntiJoinExecutor {
 
                                 // NOT IN mode: build left key and probe right hash map
                                 let hashmap = self.right_hashmap.as_ref().unwrap();
+
+                                // T03-D4 三值折叠：右集含 NULL 键 → 任一
+                                // `x NOT IN (right set)` 求值为 UNKNOWN → 无行可返回。
+                                if self.right_has_null_key {
+                                    continue;
+                                }
+
+                                // 右集空集 → `x NOT IN (∅)` 恒为 TRUE → 全行返回
+                                // （含左键含 NULL 的行：空集判定不产生 UNKNOWN）。
+                                if !has_rows {
+                                    return Ok(Some(ExecResult::Row(
+                                        self.build_output_row(&left_row),
+                                    )));
+                                }
+
                                 match self.build_left_key(&left_row) {
                                     Some(key) => {
                                         // Anti-Join: output when NOT matched
@@ -305,11 +342,9 @@ impl Executor for AntiJoinExecutor {
                                         continue;
                                     }
                                     None => {
-                                        // NULL in key, no match possible
-                                        // In anti-join, NULL key means no match, so output the row
-                                        return Ok(Some(ExecResult::Row(
-                                            self.build_output_row(&left_row),
-                                        )));
+                                        // T03-D4: 左键含 NULL 且右集非空 → 与右集
+                                        // 任一值的比较为 UNKNOWN → 该行不满足 NOT IN。
+                                        continue;
                                     }
                                 }
                             }

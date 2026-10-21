@@ -8,6 +8,7 @@ use super::aggregate::{
     contains_aggregate_expr, extract_aggregate_func, is_aggregate_expr, register_aggregate_calls,
     AggRowExprMode,
 };
+use super::binding::scope_window_layout;
 use super::ddl_dml::is_pure_equi_join_on;
 use super::expression::expr_to_column_name;
 use super::{CteDef, PlanBuilder};
@@ -49,6 +50,74 @@ pub(crate) fn projected_columns(columns: &[String], projection: &[usize]) -> Vec
 }
 
 impl PlanBuilder {
+    /// T03-D3：派生表 / CTE 基座的列源——direct 形态聚合的注册列按 SELECT 清单
+    /// 逐位取名。
+    ///
+    /// 聚合节点的 `output_columns` 是「分组键**规范名** ++ 聚合显示名」：分组
+    /// 键位在 SELECT 清单带别名时（`SELECT tag AS n, COUNT(*) AS c … GROUP BY
+    /// tag`），别名不在该公式内 → 基座只登记 `tag`，外层引用 `d.n` 计划期
+    /// 拒绝（`Column not found: n`）。
+    ///
+    /// 这里按 SELECT 清单逐位取名：键位取别名（无别名取列名），聚合位维持
+    /// `output_columns` 的显示名。位序与聚合输出行一致——direct 形态下 SELECT
+    /// 的键段序 = 分组键序、聚合段序 = 聚合注册序。
+    ///
+    /// 仅当解包 Limit/Sort/Having 后顶层为 Aggregate（direct 形态）时改写；
+    /// 包装形态（顶层为 Projection，其列已是 SELECT 清单名）与其余形态维持
+    /// `get_plan_output_columns`。
+    pub(crate) fn derived_output_columns(&self, query: &Query, plan: &PhysicalPlan) -> Vec<String> {
+        let base = self.get_plan_output_columns(plan);
+        let mut node = plan;
+        loop {
+            node = match node {
+                PhysicalPlan::Limit(n) => &n.input,
+                PhysicalPlan::Sort(n) => &n.input,
+                PhysicalPlan::Having(n) => &n.input,
+                _ => break,
+            };
+        }
+        let PhysicalPlan::Aggregate(agg) = node else {
+            return base;
+        };
+        let Ok(select) = extract_select_body(query) else {
+            return base;
+        };
+        // 键位数 = 分组键数；聚合位显示名取自聚合节点的输出列（同序）。
+        let key_count = agg.group_by.len();
+        let mut names: Vec<String> = Vec::with_capacity(select.projection.len());
+        let mut agg_index = 0usize;
+        for item in &select.projection {
+            let expr = match item {
+                sqlparser::ast::SelectItem::UnnamedExpr(e) => e,
+                sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => expr,
+                sqlparser::ast::SelectItem::Wildcard(_) => return base,
+                sqlparser::ast::SelectItem::QualifiedWildcard(_, _) => return base,
+            };
+            if is_aggregate_expr(expr) {
+                let Some(display) = agg.output_columns.get(key_count + agg_index) else {
+                    return base;
+                };
+                names.push(display.clone());
+                agg_index += 1;
+            } else {
+                // 键位：别名优先，否则列名（direct 形态下键项恒为纯列）。
+                let name = match item {
+                    sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(),
+                    _ => match expr_to_column_name(expr) {
+                        Ok(col) => col,
+                        Err(_) => return base,
+                    },
+                };
+                names.push(name);
+            }
+        }
+        // 位数与聚合输出列数不一致 → 维持既有列源（不得产生错位映射）。
+        if names.len() != agg.output_columns.len() {
+            return base;
+        }
+        names
+    }
+
     /// 从 PhysicalPlan 中提取输出列名（用于派生表的列注册）
     #[allow(clippy::only_used_in_recursion)]
     pub(crate) fn get_plan_output_columns(&self, plan: &PhysicalPlan) -> Vec<String> {
@@ -378,11 +447,17 @@ impl PlanBuilder {
             return Err(PlanError::MissingField("FROM clause".into()));
         }
 
+        // I080 一期（T02-C2）：布局作用域窗口入口——本 FROM 构造自此起的绑定
+        // 作用域段即本 FROM 的各臂段（声明序）。`entry` 之前的段不在窗口内：
+        // 外层作用域段、CTE 定义内部残留段、投影臂临时登记段。
+        let layout_scope_entry = self.binding_scopes.len();
+
         // 基础表 — 支持 TableFactor::Table（普通表）和 TableFactor::Derived（派生表）
         //
-        // design D4：第三元组是本 FROM 臂的**声明限定符**（声明了别名即别名，
-        // 否则真实表名）——JOIN 组合形状按它分段，自连接同表两别名各占一段。
-        let (base_plan, base_table, base_qualifier) = match &from[0].relation {
+        // design D4：第二元组是本 FROM 臂的**真实表键**；**声明限定符**（声明
+        // 别名即别名，否则 effective 表名）由绑定作用域表登记——JOIN 组合形状
+        // 按它分段，自连接同表两别名各占一段。
+        let (base_plan, base_table) = match &from[0].relation {
             TableFactor::Table { name, alias, .. } => {
                 let table_name = object_name_to_table_name(name);
                 // MS25 T5: CTE 查找钩子置于 `validate_table` 之前（CTE 名遮蔽
@@ -396,9 +471,9 @@ impl PlanBuilder {
                     // （`resolve_cte_reference` / `resolve_view_reference` 已按
                     // 别名注册 `self.tables`），无别名条目可登——登记恒等映射
                     // 不改变任何查找结果。
-                    Some((plan, effective)) => (plan, effective.clone(), effective),
+                    Some((plan, effective)) => (plan, effective.clone()),
                     None => match self.resolve_view_reference(&table_name, alias.as_ref())? {
-                        Some((plan, effective)) => (plan, effective.clone(), effective),
+                        Some((plan, effective)) => (plan, effective.clone()),
                         None => {
                             self.validate_table(&table_name)?;
                             // design D4：基表别名登记——`FROM people p` 的
@@ -417,12 +492,23 @@ impl PlanBuilder {
                             };
                             let base_columns =
                                 self.tables.get(&table_name).cloned().unwrap_or_default();
+                            // I080 一期（T02-C1）：基表段按声明限定符登记绑定
+                            // 作用域（类型/可空自既有加性通道取——键经小写归一；
+                            // 未注册即 None，诚实记录）。
+                            let (scope_types, scope_not_null) =
+                                self.table_binding_meta(&table_name);
+                            self.register_binding_scope(
+                                qualifier.clone(),
+                                base_columns.clone(),
+                                scope_types,
+                                scope_not_null,
+                            );
                             let plan = PhysicalPlan::Scan(ScanNode {
                                 table_name: table_name.clone(),
                                 columns: base_columns,
                                 projection: Vec::new(),
                             });
-                            (plan, table_name, qualifier)
+                            (plan, table_name)
                         }
                     },
                 }
@@ -435,6 +521,11 @@ impl PlanBuilder {
                 // 放行派生表源；save/restore 与 `building_subquery` 严格配对。
                 let saved_subquery_ctx = self.building_subquery;
                 let saved_from_derived = self.building_from_derived;
+                // I080 一期（T02-C1）：作用域快照/恢复——派生定义内层 FROM 段
+                // 在退出时截断（定义内部形状不外泄到外层分类面），界同步恢复。
+                let saved_scopes_len = self.binding_scopes.len();
+                let saved_scope_boundary = self.binding_scope_boundary;
+                self.binding_scope_boundary = saved_scopes_len;
                 self.building_subquery = true;
                 self.building_from_derived = true;
                 let subquery_plan = match self.build_query(subquery) {
@@ -442,19 +533,31 @@ impl PlanBuilder {
                     Err(e) => {
                         self.building_subquery = saved_subquery_ctx;
                         self.building_from_derived = saved_from_derived;
+                        self.binding_scope_boundary = saved_scope_boundary;
+                        self.restore_binding_scopes(saved_scopes_len);
                         return Err(e);
                     }
                 };
                 self.building_subquery = saved_subquery_ctx;
                 self.building_from_derived = saved_from_derived;
+                self.binding_scope_boundary = saved_scope_boundary;
+                self.restore_binding_scopes(saved_scopes_len);
                 let alias_name = alias
                     .as_ref()
                     .map(|a| a.name.value.to_lowercase())
+                    // T03-D4：无别名派生的隐式注册名 = `derived`——作用域登记侧
+                    // 的同一字面量见 `subquery.rs::declared_qualifiers`（两处互指，
+                    // 来源单源）。
                     .unwrap_or_else(|| "derived".to_string());
                 // 提取子查询输出列名
-                let columns = self.get_plan_output_columns(&subquery_plan);
+                // T03-D3: 聚合直出形态的键位按 SELECT 清单别名取名（聚合节点的
+                // 输出列只带分组键规范名）。
+                let columns = self.derived_output_columns(subquery, &subquery_plan);
                 // 注册派生表列信息（供后续 WHERE/ORDER BY 引用）
                 self.register_table(&alias_name, columns.clone(), "");
+                // I080 一期（T02-C1）：派生段按 effective 名登记（类型/可空
+                // 计划期未知 = None）。
+                self.register_binding_scope(alias_name.clone(), columns.clone(), None, None);
                 let plan = PhysicalPlan::DerivedScan(crate::executor::DerivedScanNode {
                     subquery: Box::new(subquery_plan),
                     alias: alias_name.clone(),
@@ -464,7 +567,7 @@ impl PlanBuilder {
                     projection: Vec::new(),
                 });
                 // design D4：派生表的别名即注册名，无需别名条目。
-                (plan, alias_name.clone(), alias_name)
+                (plan, alias_name.clone())
             }
             _ => {
                 return Err(PlanError::InvalidQuery(
@@ -476,9 +579,9 @@ impl PlanBuilder {
         // 递归处理 JOIN 链
         let mut current_plan = base_plan;
         let mut current_tables = vec![base_table.clone()];
-        // design D4：与 `current_tables` 同序的声明限定符（每臂一个），供组合
-        // 形状分段与 NLJ 布局构造。
-        let mut current_qualifiers = vec![base_qualifier];
+        // design D4：与 `current_tables` 同序的**声明限定符**（每臂一个）改由
+        // 绑定作用域表承载（I080 一期 T02-C2）——本处的平行记账移除，段键与
+        // 声明序的唯一事实源 = 作用域表窗口。
         // design D4：末次迭代的 `output_qualifiers`（与最终节点 `output_columns`
         // 同序同长）；无 JOIN 臂时保持空——调用方只在组合形状存在时消费。
         let mut combined_qualifiers: Vec<String> = Vec::new();
@@ -524,20 +627,14 @@ impl PlanBuilder {
             // MS25 T5: JOIN 右臂同款 CTE 钩子（置于 `validate_table` 之前）。
             // MS21 Iter005 (T5-c)：JOIN 右臂同款视图钩子（CTE 未命中后、
             // 基表前）。
-            let (right_table, right_columns, right_plan) = match self
+            let (right_table, right_plan) = match self
                 .resolve_cte_reference(&right_table, table_factor_alias(&join.relation))?
             {
-                Some((plan, effective)) => {
-                    let columns = self.tables.get(&effective).cloned().unwrap_or_default();
-                    (effective, columns, plan)
-                }
+                Some((plan, effective)) => (effective, plan),
                 None => match self
                     .resolve_view_reference(&right_table, table_factor_alias(&join.relation))?
                 {
-                    Some((plan, effective)) => {
-                        let columns = self.tables.get(&effective).cloned().unwrap_or_default();
-                        (effective, columns, plan)
-                    }
+                    Some((plan, effective)) => (effective, plan),
                     None => {
                         self.validate_table(&right_table)?;
                         // design D4：JOIN 右臂基表别名登记，与 FROM 基表臂
@@ -551,12 +648,21 @@ impl PlanBuilder {
                             }
                         }
                         let columns = self.tables.get(&right_table).cloned().unwrap_or_default();
+                        // I080 一期（T02-C1）：JOIN 右臂基表段按声明限定符登记
+                        // 绑定作用域（类型/可空同 FROM 基表臂）。
+                        let (scope_types, scope_not_null) = self.table_binding_meta(&right_table);
+                        self.register_binding_scope(
+                            right_qualifier.clone(),
+                            columns.clone(),
+                            scope_types,
+                            scope_not_null,
+                        );
                         let plan = PhysicalPlan::Scan(ScanNode {
                             table_name: right_table.clone(),
                             columns: columns.clone(),
                             projection: Vec::new(),
                         });
-                        (right_table, columns, plan)
+                        (right_table, plan)
                     }
                 },
             };
@@ -610,23 +716,23 @@ impl PlanBuilder {
                     column_index: idx,
                 });
             }
-            let all_qualifiers: Vec<String> = current_qualifiers
+            // I080 一期（T02-C2）：本步的作用域窗口——末段为本步右臂段（JOIN
+            // 装配点：右臂段在 ON 编译前登记），其余段为左链各臂段（声明序）。
+            // 段键与列清单的唯一事实源 = 绑定作用域表（`current_qualifiers`
+            // 平行记账移除）。窗口在此一次性物化为布局同形的段列表——与作用域
+            // 表的后续增删解耦（子查询臂构建期的作用域截断不影响已物化副本）。
+            let scope_window = scope_window_layout(self.binding_scope_window(layout_scope_entry));
+            let (right_segment, left_segments) = scope_window
+                .split_last()
+                .expect("JOIN scope window must contain the right arm segment");
+            let all_qualifiers: Vec<String> = left_segments
                 .iter()
-                .zip(&current_tables)
-                .flat_map(|(qualifier, t)| {
-                    let width = self
-                        .tables
-                        .get(t)
-                        .expect("validated table must exist in metadata")
-                        .len();
-                    std::iter::repeat_n(qualifier.clone(), width)
+                .flat_map(|(qualifier, columns)| {
+                    std::iter::repeat_n(qualifier.clone(), columns.len())
                 })
                 .chain(std::iter::repeat_n(
-                    right_qualifier.clone(),
-                    self.tables
-                        .get(&right_table)
-                        .expect("validated right_table must exist")
-                        .len(),
+                    right_segment.0.clone(),
+                    right_segment.1.len(),
                 ))
                 .collect();
             // design D9：输出列输入侧标志（与 `all_columns`/`all_qualifiers`
@@ -754,9 +860,8 @@ impl PlanBuilder {
             if matches!(outer, OuterJoinKind::None) && is_pure_equi_join_on(on_clause) {
                 let conditions = self.extract_join_conditions(
                     &current_tables,
-                    &current_qualifiers,
+                    &scope_window,
                     &right_table,
-                    &right_qualifier,
                     on_clause,
                 )?;
 
@@ -774,29 +879,18 @@ impl PlanBuilder {
                 // （`inner_table_names` 同型先例）；谓词 `column_index` 为
                 // 组合行绝对索引。RIGHT 交换重写时布局按交换后的输入序
                 // （原右表在前）——ON 谓词在交换后的组合行上求值。
-                let table_columns = |name: &String| -> Vec<String> {
-                    self.tables
-                        .get(name)
-                        .expect("validated table must exist in metadata")
-                        .clone()
-                };
+                // I080 一期（T02-C2）：布局段自作用域窗口派生——段键与列清单
+                // 同源（窗口除末段 = 左链各臂段，末段 = 本步右臂段）。RIGHT
+                // 交换变体在派生后重排（原右臂段在前），ON 谓词在交换后的
+                // 组合行上求值——同既有语义。
                 let layout: Vec<(String, Vec<String>)> = if outer == OuterJoinKind::Right {
                     // design D4：段键为声明限定符（自连接两别名各占一段）
-                    let mut swapped = vec![(right_qualifier.clone(), right_columns.clone())];
-                    swapped.extend(
-                        current_qualifiers
-                            .iter()
-                            .zip(&current_tables)
-                            .map(|(qualifier, t)| (qualifier.clone(), table_columns(t))),
-                    );
+                    let mut swapped = vec![right_segment.clone()];
+                    swapped.extend(left_segments.iter().cloned());
                     swapped
                 } else {
-                    let mut ordered: Vec<(String, Vec<String>)> = current_qualifiers
-                        .iter()
-                        .zip(&current_tables)
-                        .map(|(qualifier, t)| (qualifier.clone(), table_columns(t)))
-                        .collect();
-                    ordered.push((right_qualifier.clone(), table_columns(&right_table)));
+                    let mut ordered: Vec<(String, Vec<String>)> = left_segments.to_vec();
+                    ordered.push(right_segment.clone());
                     ordered
                 };
                 self.join_column_layout = Some(layout);
@@ -865,7 +959,6 @@ impl PlanBuilder {
             }
 
             current_tables.push(right_table);
-            current_qualifiers.push(right_qualifier);
             combined_qualifiers = output_qualifiers;
         }
 
@@ -1213,7 +1306,9 @@ impl PlanBuilder {
             self.pending_cte_names.pop();
             let plan = plan?;
 
-            let mut columns = self.get_plan_output_columns(&plan);
+            // T03-D3: 聚合直出形态的键位按 SELECT 清单别名取名（与派生表基座
+            // 同一列源——CTE 与派生表共用 DerivedScan 装配路径）。
+            let mut columns = self.derived_output_columns(&definition, &plan);
             if !cte.alias.columns.is_empty() {
                 let aliases: Vec<String> = cte
                     .alias
@@ -1276,6 +1371,8 @@ impl PlanBuilder {
             .map(|a| a.name.value.to_lowercase())
             .unwrap_or(normalized);
         self.register_table(&effective, columns.clone(), "");
+        // I080 一期（T02-C1）：CTE 引用段按 effective 名登记（类型/可空 = None）。
+        self.register_binding_scope(effective.clone(), columns.clone(), None, None);
         Ok(Some((
             PhysicalPlan::DerivedScan(crate::executor::DerivedScanNode {
                 subquery: Box::new(plan),
@@ -1320,16 +1417,25 @@ impl PlanBuilder {
         // 与 DISTINCT 经分类门全量放行（R4 三通道一致）；IN/EXISTS/标量
         // 入口的复位不受影响，save/restore 严格配对。
         let saved_from_derived = self.building_from_derived;
+        // I080 一期（T02-C1）：作用域快照/恢复——视图定义内层 FROM 段在
+        // 退出时截断（定义内部形状不外泄到外层分类面），界同步恢复。
+        let saved_scopes_len = self.binding_scopes.len();
+        let saved_scope_boundary = self.binding_scope_boundary;
+        self.binding_scope_boundary = saved_scopes_len;
         self.building_subquery = true;
         self.building_from_derived = true;
         let inner_result = self.build_query(inner_query);
         self.building_subquery = saved_subquery_ctx;
         self.building_from_derived = saved_from_derived;
+        self.binding_scope_boundary = saved_scope_boundary;
+        self.restore_binding_scopes(saved_scopes_len);
         let inner_plan = inner_result?;
         let effective = alias
             .map(|a| a.name.value.to_lowercase())
             .unwrap_or(normalized);
         self.register_table(&effective, columns.clone(), "");
+        // I080 一期（T02-C1）：视图引用段按 effective 名登记（类型/可空 = None）。
+        self.register_binding_scope(effective.clone(), columns.clone(), None, None);
         Ok(Some((
             PhysicalPlan::DerivedScan(crate::executor::DerivedScanNode {
                 subquery: Box::new(inner_plan),
@@ -1432,10 +1538,23 @@ impl PlanBuilder {
             // Detect correlated parameters before building the plan
             let inner_tables = Self::extract_subquery_table_names(expr);
             self.inner_table_names = Some(inner_tables.clone());
-            let correlated_params = self.extract_correlated_params(expr, &inner_tables)?;
             let saved_subquery_ctx = self.building_subquery;
             // T5：SELECT 投影位子查询是表达式型上下文——FROM 派生标志复位。
             let saved_from_derived = self.building_from_derived;
+            // I080 一期（T02-C1）：作用域快照/恢复——与 IN/EXISTS/标量绑定臂
+            // 同款纪律（外层累计段 = 界前，子查询自身 FROM 段退出截断）。
+            let saved_scopes_len = self.binding_scopes.len();
+            // 001-replan 投影臂补强：投影位循环先于外层 FROM 构建（本函数
+            // 后文才调 `build_from_clause_with_projection`），外层段尚不在作用
+            // 域表——按外层 FROM 声明限定符临时登记外层段（仅限定符参与
+            // 命中判定，列清单留空；001-replan 判定需要外层段存在性），与
+            // 内层段在退出时一并截断，界恢复进臂前原值。
+            let saved_outer_boundary = self.binding_scope_boundary;
+            for qualifier in Self::declared_from_qualifiers(&select.from) {
+                self.register_binding_scope(qualifier, Vec::new(), None, None);
+            }
+            let saved_scope_boundary = self.binding_scopes.len();
+            self.binding_scope_boundary = saved_scope_boundary;
             self.building_subquery = true;
             self.building_from_derived = false;
             let subquery_plan = match self.build_query(expr) {
@@ -1444,12 +1563,30 @@ impl PlanBuilder {
                     self.building_subquery = saved_subquery_ctx;
                     self.building_from_derived = saved_from_derived;
                     self.inner_table_names = None;
+                    self.binding_scope_boundary = saved_outer_boundary;
+                    self.restore_binding_scopes(saved_scopes_len);
                     return Err(e);
                 }
             };
+            // 001-replan Guidance ⑤：收集自构建前移至恢复前——快照可得性
+            // 要求。已接受边界：构建失败与预收集拒绝（多级相关）双无效输入
+            // 时构建错误先行。
+            let inner_scope: Vec<String> = self.binding_scopes[saved_scope_boundary..]
+                .iter()
+                .map(|e| e.qualifier.clone())
+                .collect();
+            let outer_scope: Vec<String> = self.binding_scopes
+                [saved_scopes_len..saved_scope_boundary]
+                .iter()
+                .map(|e| e.qualifier.clone())
+                .collect();
             self.building_subquery = saved_subquery_ctx;
             self.building_from_derived = saved_from_derived;
             self.inner_table_names = None;
+            self.binding_scope_boundary = saved_outer_boundary;
+            self.restore_binding_scopes(saved_scopes_len);
+            let correlated_params =
+                self.extract_correlated_params(expr, &inner_tables, &inner_scope, &outer_scope)?;
             subquery_evals.push((idx, subquery_plan, col_name, correlated_params));
         }
 

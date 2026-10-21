@@ -358,3 +358,60 @@ async fn s18_two_scalars_positioned() {
         ]]
     );
 }
+
+// === T03-D2: TEXT 相关参数的 owned 求值 ===
+
+/// T03-D2（change 2026-10-20-ms30-semantic-binding-differential-net）：
+/// TEXT 相关参数在 owned 求值通道上取真实值——`ParameterExpression::evaluate`
+/// 未被覆盖，参数真值经 `evaluate_ref` 的 `ValueRef::Null` 丢失，相关子查询
+/// 谓词恒 Unknown → 外层零行。
+///
+/// 差分白名单 Q5-05 最小复现形态：`s2.carrier = s.carrier`（TEXT 相关参数）。
+/// ups 承运商两行（days 5 与 2）→ AVG 3.5；只有 days=2 的行满足 `days < 3.5`。
+#[tokio::test]
+async fn t03_d2_text_correlated_parameter_uses_real_value() {
+    let db = open_db().await;
+    exec(&db, "CREATE TABLE ship (id INT, carrier TEXT, days INT)").await;
+    exec(&db, "INSERT INTO ship VALUES (1, 'ups', 5)").await;
+    exec(&db, "INSERT INTO ship VALUES (2, 'dhl', 3)").await;
+    exec(&db, "INSERT INTO ship VALUES (3, 'ups', 2)").await;
+
+    let r = rows(
+        exec(
+            &db,
+            "SELECT s.id FROM ship s WHERE s.days < \
+             (SELECT AVG(s2.days) FROM ship s2 WHERE s2.carrier = s.carrier)",
+        )
+        .await,
+    );
+    assert_eq!(
+        r,
+        vec![vec![serde_json::json!(3)]],
+        "TEXT 相关参数应取真实值：ups 承运商 AVG=3.5，只有 days=2 的行满足条件"
+    );
+}
+
+/// T03-D2 对照：TEXT 相关参数在计数型相关子查询中同样取真实值。
+#[tokio::test]
+async fn t03_d2_text_correlated_parameter_in_count_subquery() {
+    let db = open_db().await;
+    exec(&db, "CREATE TABLE ship (id INT, carrier TEXT, days INT)").await;
+    exec(&db, "INSERT INTO ship VALUES (1, 'ups', 5)").await;
+    exec(&db, "INSERT INTO ship VALUES (2, 'dhl', 3)").await;
+    exec(&db, "INSERT INTO ship VALUES (3, 'ups', 2)").await;
+
+    let mut r = rows(
+        exec(
+            &db,
+            "SELECT s.id FROM ship s WHERE \
+             (SELECT COUNT(*) FROM ship s2 WHERE s2.carrier = s.carrier) = 2",
+        )
+        .await,
+    );
+    r.sort_by_key(|row| row[0].as_i64().unwrap());
+    assert_eq!(
+        r,
+        vec![vec![serde_json::json!(1)], vec![serde_json::json!(3)]],
+        "两个 ups 行的同承运商计数为 2，dhl 行为 1"
+    );
+}

@@ -157,15 +157,14 @@ async fn test_where_not_in_subquery_with_null() {
     .await;
     let r = rows(resp);
 
-    // NOT IN with NULL: SQL semantics say NULL never matches, but in NOT IN,
-    // if the right side contains NULL, the result is NULL (not true), so
-    // all rows are excluded. But here subquery result has no NULL, so
-    // Frank (NULL dept) should NOT match IN and thus SHOULD appear in NOT IN
-    // Actually: NULL dept means the comparison is NULL, which is NOT true,
-    // so the row passes NOT IN. But per SQL semantics, NULL comparison
-    // returns NULL (unknown), and NOT IN requires the comparison to be false.
-    // In practice: NULL on left side of NOT IN -> row passes.
-    assert_eq!(r.len(), 3); // Bob, Eve, Frank
+    // NOT IN 的三值语义：左键为 NULL 时与右集任一值的比较为 UNKNOWN，
+    // NOT IN 要求比较为 FALSE 才成立 → NULL 键行不满足条件。
+    // 本例右集为 East 区 dept（10 与 30），无 NULL：
+    // Alice(10)/Carol(10)/Dave(30) 命中右集被排除；
+    // Bob(20)/Eve(20) 未命中 → 返回；Frank(NULL) → UNKNOWN → 不返回。
+    // T03-D4 修复前本断言为 3（含 Frank），固化的是缺陷行为——
+    // 与差分白名单 Q6-04 的归因一致（SQLite 同行形返回 2 行）。
+    assert_eq!(r.len(), 2); // Bob, Eve
 }
 
 // === T3: WHERE EXISTS / NOT EXISTS ===
@@ -1110,4 +1109,76 @@ async fn r8_in_subquery_join_rejection_unchanged() {
         msg.contains("IN subquery with JOIN is not supported"),
         "expected JOIN-naming rejection, got: {msg}"
     );
+}
+
+// === T03-D4: NOT IN 的 NULL 三值折叠 ===
+
+/// T03-D4（change 2026-10-20-ms30-semantic-binding-differential-net）：
+/// `x NOT IN (right set)` 的三值语义。
+///
+/// 最小复现（差分白名单 Q6-04）：orders(1,10),(2,NULL),(3,20),(4,NULL) +
+/// users(10,20) → NOT IN 返回 0 行（NULL 键行不满足；SQLite 同为 0 行）。
+/// 修复前 AntiJoin 保留「无匹配」的 NULL 键行，返回 ids 2,4。
+#[tokio::test]
+async fn t03_d4_not_in_null_outer_key_not_returned() {
+    let db = open_db().await;
+    exec(&db, "CREATE TABLE orders (id INT, user_id INT)").await;
+    exec(&db, "INSERT INTO orders VALUES (1, 10)").await;
+    exec(&db, "INSERT INTO orders VALUES (2, NULL)").await;
+    exec(&db, "INSERT INTO orders VALUES (3, 20)").await;
+    exec(&db, "INSERT INTO orders VALUES (4, NULL)").await;
+    exec(&db, "CREATE TABLE users (id INT)").await;
+    exec(&db, "INSERT INTO users VALUES (10)").await;
+    exec(&db, "INSERT INTO users VALUES (20)").await;
+
+    let resp = exec(
+        &db,
+        "SELECT id FROM orders WHERE user_id NOT IN (SELECT id FROM users)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r.len(), 0, "NULL 键行的 NOT IN 为 UNKNOWN，不应返回：{r:?}");
+}
+
+/// T03-D4 对照：右集含 NULL 键时，任一 `x NOT IN (right set)` 求值为 UNKNOWN
+/// ——右集非空且含 NULL → 无行可返回（不只 NULL 键行）。
+#[tokio::test]
+async fn t03_d4_not_in_right_set_with_null_key_returns_nothing() {
+    let db = open_db().await;
+    exec(&db, "CREATE TABLE orders (id INT, user_id INT)").await;
+    exec(&db, "INSERT INTO orders VALUES (1, 10)").await;
+    exec(&db, "INSERT INTO orders VALUES (2, NULL)").await;
+    exec(&db, "CREATE TABLE nulls (v INT)").await;
+    exec(&db, "INSERT INTO nulls VALUES (NULL)").await;
+
+    let resp = exec(
+        &db,
+        "SELECT id FROM orders WHERE user_id NOT IN (SELECT v FROM nulls)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(
+        r.len(),
+        0,
+        "右集含 NULL 键 → NOT IN 恒 UNKNOWN → 无行可返回：{r:?}"
+    );
+}
+
+/// T03-D4 对照：右集为空集时 `x NOT IN (∅)` 恒为 TRUE ——全行返回，含左键
+/// 含 NULL 的行（空集判定不产生 UNKNOWN）。
+#[tokio::test]
+async fn t03_d4_not_in_empty_right_set_returns_all_rows() {
+    let db = open_db().await;
+    exec(&db, "CREATE TABLE orders (id INT, user_id INT)").await;
+    exec(&db, "INSERT INTO orders VALUES (1, 10)").await;
+    exec(&db, "INSERT INTO orders VALUES (2, NULL)").await;
+    exec(&db, "CREATE TABLE users (id INT)").await;
+
+    let resp = exec(
+        &db,
+        "SELECT id FROM orders WHERE user_id NOT IN (SELECT id FROM users WHERE id < 0)",
+    )
+    .await;
+    let r = rows(resp);
+    assert_eq!(r.len(), 2, "右集空集 → NOT IN 恒 TRUE → 全行返回：{r:?}");
 }

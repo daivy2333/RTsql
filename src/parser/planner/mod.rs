@@ -11,6 +11,7 @@
 //!   - `ddl_dml`    — INSERT / UPDATE / DELETE / CREATE TABLE / DROP TABLE
 
 mod aggregate;
+mod binding;
 mod ddl_dml;
 mod expression;
 mod query;
@@ -222,6 +223,18 @@ pub struct PlanBuilder {
     /// （`"o.dept_map"`）等既有注册形态不被污染。四个限定名消费点经
     /// `resolve_table_qualifier` 单点归一，自连接同表两个别名天然各持一条。
     pub(crate) table_aliases: HashMap<String, String>,
+    /// I080 一期（T02-C1）：绑定作用域表——FROM/JOIN 装配点按声明限定符
+    /// 登记的段（列清单 + Option 类型/可空）。关联参数分类优先经作用域身份
+    /// 查找，`inner_table_names` 名单降级为未登记段兜底（D6）。
+    /// `binding_scope_boundary` 之前为外层累计段，之后为当前查询层的段。
+    pub(crate) binding_scopes: Vec<binding::ScopeEntry>,
+    /// I080 一期（T02-C1）：当前分类层的段起始界——子查询 / FROM 派生 /
+    /// 视图展开臂进入时置为当时长度、退出恢复；界后段即当前（内层）作用域。
+    pub(crate) binding_scope_boundary: usize,
+    /// I080 一期（T02-C1）：表名 -> per-column NOT NULL 标志（index-aligned
+    /// 与注册列清单）。加性通道同 `table_column_types` 先例，作用域段登记时
+    /// 经 `table_binding_meta` 消费。
+    pub(crate) table_not_null: HashMap<String, Vec<bool>>,
 }
 
 /// MS21 Iter005 (T5-b/D12)：一个已注册的持久化视图定义。列名清单 = 显式
@@ -267,6 +280,9 @@ impl PlanBuilder {
             pending_cte_names: Vec::new(),
             views: HashMap::new(),
             table_aliases: HashMap::new(),
+            binding_scopes: Vec::new(),
+            binding_scope_boundary: 0,
+            table_not_null: HashMap::new(),
         }
     }
 
@@ -355,6 +371,13 @@ impl PlanBuilder {
     /// channel, key lowercase like `register_table`).
     pub fn set_table_column_types(&mut self, name: &str, types: Vec<ColumnType>) {
         self.table_column_types.insert(name.to_lowercase(), types);
+    }
+
+    /// I080 一期（T02-C1）: Register the table's per-column NOT NULL flags
+    /// (index-aligned with the registered column list — additive channel,
+    /// key lowercase like `set_table_column_types`).
+    pub fn set_table_not_null(&mut self, name: &str, not_null: Vec<bool>) {
+        self.table_not_null.insert(name.to_lowercase(), not_null);
     }
 
     /// MS21 Iter002 (T2-c/T2-f/D14): Inject the library-wide secondary index

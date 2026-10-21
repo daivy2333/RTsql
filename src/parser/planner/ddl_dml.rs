@@ -178,12 +178,16 @@ impl PlanBuilder {
     /// （`left_column` 恒为左输入腿，书写反序形态在此归位）；两腿同侧
     /// `InvalidQuery` 点名拒绝零副作用；裸名腿按书写位置定侧，解析仍经
     /// 既有 `resolve_column_ref`（`ColumnRef.table` 真实名不变）。
+    ///
+    /// I080 一期（T02-C2）：声明限定符自绑定作用域窗口派生——`scope_window`
+    /// 末段 = 本步右臂段，其余段 = 左链各臂段（声明序）。段键与声明序的
+    /// 唯一事实源 = 作用域表；匹配语义不变（仍经 `qualifier_matches_declared`：
+    /// 原文相等或别名归一命中）。
     pub(crate) fn extract_join_conditions(
         &self,
         left_tables: &[String],
-        left_qualifiers: &[String],
+        scope_window: &[(String, Vec<String>)],
         right_table: &str,
-        right_qualifier: &str,
         on_expr: &Expr,
     ) -> Result<Vec<JoinCondition>, PlanError> {
         // 处理 AND 组合
@@ -193,20 +197,10 @@ impl PlanBuilder {
             right,
         } = on_expr
         {
-            let left_conditions = self.extract_join_conditions(
-                left_tables,
-                left_qualifiers,
-                right_table,
-                right_qualifier,
-                left,
-            )?;
-            let right_conditions = self.extract_join_conditions(
-                left_tables,
-                left_qualifiers,
-                right_table,
-                right_qualifier,
-                right,
-            )?;
+            let left_conditions =
+                self.extract_join_conditions(left_tables, scope_window, right_table, left)?;
+            let right_conditions =
+                self.extract_join_conditions(left_tables, scope_window, right_table, right)?;
             return Ok(left_conditions
                 .into_iter()
                 .chain(right_conditions)
@@ -220,13 +214,23 @@ impl PlanBuilder {
             right,
         } = on_expr
         {
+            // 侧别判定的段键自窗口派生：左链各臂段（声明序）先判，末段
+            // （本步右臂段）后判——同既有「左链优先」次序。
+            let (right_segment, left_segments) = scope_window
+                .split_last()
+                .expect("JOIN scope window must contain the right arm segment");
+            let left_qualifiers: Vec<String> = left_segments
+                .iter()
+                .map(|(qualifier, _)| qualifier.clone())
+                .collect();
+            let right_qualifier = right_segment.0.as_str();
             // 侧别判定（裸名腿 None → 按书写位置：左操作数左输入、右操作数
             // 右输入，与既有按侧解析上下文一致）。
             let first_side = self
-                .expr_join_side(left, left_qualifiers, right_qualifier)?
+                .expr_join_side(left, &left_qualifiers, right_qualifier)?
                 .unwrap_or(true);
             let second_side = self
-                .expr_join_side(right, left_qualifiers, right_qualifier)?
+                .expr_join_side(right, &left_qualifiers, right_qualifier)?
                 .unwrap_or(false);
 
             if first_side == second_side {

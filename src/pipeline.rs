@@ -1384,7 +1384,10 @@ pub(crate) fn create_executor_from_plan<'a>(
                 let table_meta = load_table_meta(routed, database, &node.table_name).await?;
                 Ok(Box::new(
                     ScanExecutor::new(table_meta, db.buffer_pool.clone(), snapshot)
-                        .with_projection(node.projection),
+                        .with_projection(node.projection)
+                        // T03-D1: 无键表回退数据页走查时与单表 DataScan 通道
+                        // 同一可见性语义（I033 墓碑删除者提交态抑制）。
+                        .with_tx_manager(Some(db.transaction_manager.clone())),
                 ) as Box<dyn Executor + Send>)
             }
 
@@ -2539,6 +2542,9 @@ fn register_table_schema(
             .map(|(_, ct)| ct.clone())
             .collect(),
     );
+    // I080 一期（T02-C1）：传递逐列 NOT NULL 标志，绑定作用域段登记时
+    // 经 `table_binding_meta` 消费。
+    builder.set_table_not_null(key, table_meta.not_null.clone());
     // MS21 Iter002 (T2-g/D6)：传递登记的二级索引（索引名, 列名），非 PK
     // 等值路由在计划期消费。
     builder.set_table_secondary_indexes(
