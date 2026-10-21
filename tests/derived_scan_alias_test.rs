@@ -547,3 +547,93 @@ fn run_cli(dir: &Path, args: &[&str]) -> CliOutput {
         }
     }
 }
+
+// ==== T03-D3：聚合派生表的外层列引用 ====
+
+/// T03-D3（change 2026-10-20-ms30-semantic-binding-differential-net）：
+/// 聚合派生表的 direct 形态（无顶层 Projection 包装）下，注册列取自
+/// `AggregateNode::output_columns`——分组键位是**规范名**（`tag`）而非
+/// SELECT 清单的别名（`n`），别名在派生表列源丢失 → 外层引用 `d.n` 计划期
+/// 拒绝（`Column not found: n`）。
+///
+/// RED（实施前实测）：计划期拒绝。
+#[tokio::test]
+async fn t03_d3_aggregate_derived_alias_key_visible() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    exec_ok(&db, "CREATE TABLE orders (id INT, tag STRING)").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (1, 'alpha')").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (2, 'alpha')").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (3, 'beta')").await;
+
+    let mut rows = rows_of(
+        db.execute_sql(
+            "SELECT d.n, d.c FROM (SELECT tag AS n, COUNT(*) AS c FROM orders GROUP BY tag) d",
+        )
+        .await,
+    );
+    rows.sort_by_key(|row| row[0].as_str().unwrap().to_string());
+    assert_eq!(
+        rows,
+        vec![
+            vec![json!("alpha"), json!(2)],
+            vec![json!("beta"), json!(1)]
+        ],
+        "聚合派生表的键位应按 SELECT 别名可见"
+    );
+}
+
+/// T03-D3 对照：无别名的键位维持规范名（`tag`），聚合位维持显示名。
+#[tokio::test]
+async fn t03_d3_aggregate_derived_plain_key_unchanged() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    exec_ok(&db, "CREATE TABLE orders (id INT, tag STRING)").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (1, 'alpha')").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (2, 'alpha')").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (3, 'beta')").await;
+
+    let mut rows = rows_of(
+        db.execute_sql(
+            "SELECT d.tag, d.c FROM (SELECT tag, COUNT(*) AS c FROM orders GROUP BY tag) d",
+        )
+        .await,
+    );
+    rows.sort_by_key(|row| row[0].as_str().unwrap().to_string());
+    assert_eq!(
+        rows,
+        vec![
+            vec![json!("alpha"), json!(2)],
+            vec![json!("beta"), json!(1)]
+        ],
+        "无别名键位维持规范名"
+    );
+}
+
+/// T03-D3 对照：同内容 CTE 形态维持既有行为（键位别名可见）。
+#[tokio::test]
+async fn t03_d3_aggregate_cte_alias_key_visible() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&db_path(&dir)).await.unwrap();
+    exec_ok(&db, "CREATE TABLE orders (id INT, tag STRING)").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (1, 'alpha')").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (2, 'alpha')").await;
+    exec_ok(&db, "INSERT INTO orders VALUES (3, 'beta')").await;
+
+    let mut rows = rows_of(
+        db.execute_sql(
+            "WITH g AS (SELECT tag AS n, COUNT(*) AS c FROM orders GROUP BY tag) \
+             SELECT g.n, g.c FROM g",
+        )
+        .await,
+    );
+    rows.sort_by_key(|row| row[0].as_str().unwrap().to_string());
+    assert_eq!(
+        rows,
+        vec![
+            vec![json!("alpha"), json!(2)],
+            vec![json!("beta"), json!(1)]
+        ],
+        "CTE 形态的聚合键位别名可见"
+    );
+}

@@ -261,11 +261,24 @@ impl PlanBuilder {
         column_name: &str,
     ) -> Result<ExpressionRef, PlanError> {
         // Check if this is an outer (correlated) reference
+        // I080 一期（T02-C1）：分类优先经作用域身份查找——当前（内层）段
+        // 命中即子查询自身引用，沿既有解析通道走；仅外层段命中 = 相关外层
+        // 引用；两级作用域均未登记（attach 复合键等一期未登记面）回落既有
+        // 名单判定（D6 兜底）。段匹配为原文大小写不敏感相等
+        // （`binding_scope_hit` 文档段说明别名归一为何不可用）。
+        // 001-replan：判定经 `is_outer_reference` 单源；碰撞形状（外层同名
+        // 未别名 + 内层别名声明同表 + 基名限定引用）解析为外层相关参数
+        // （2026-10-20 用户裁定，对齐 SQLite 别名遮蔽语义）——碰撞形状外
+        // 逐字节不变。
         if let Some(ref inner_tables) = self.inner_table_names {
-            if !inner_tables
+            let boundary = self.binding_scope_boundary;
+            let scope_end = self.binding_scopes.len();
+            let inner_hit = self.binding_scope_hit(table_ref, boundary, scope_end);
+            let outer_hit = self.binding_scope_hit(table_ref, 0, boundary);
+            let in_declared_list = inner_tables
                 .iter()
-                .any(|t| t.eq_ignore_ascii_case(table_ref))
-            {
+                .any(|t| t.eq_ignore_ascii_case(table_ref));
+            if super::binding::is_outer_reference(inner_hit, outer_hit, in_declared_list) {
                 let param_name = format!("{}.{}", table_ref, column_name);
                 return Ok(Arc::new(ParameterExpression::new(param_name)));
             }

@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-10-19（**底层设计批路线增补**：milestone-planner 经用户批准新增三个 planned 里程碑——MS30 SQL 语义绑定层一期（T1 I091 差分测试保护网 + T2 I080 JOIN/子查询收口）/ MS31 类型化库结果与参数绑定 API（T1 I088 + T2 I089，依赖 MS30）/ MS32 执行器批量接口与查询资源契约（T1 I081 量化先行 + T2 I082 JOIN 流水/Top-N/内存预算），建议执行序 MS30 → MS31 → MS32 → MS22——性能批殿后不变、候选池不动；六个 I 条目随批转 promoted；依据 `.agents/memory/improvements.md` 2026-10-19 用户裁定优先级排序）
+> 最后更新：2026-10-21（**MS30 完成收尾**：SQL 语义绑定层一期经单 change `2026-10-20-ms30-semantic-binding-differential-net` 交付归档——T01 rusqlite 差分与性质测试网 / T02 绑定作用域表基建 + 关联子查询分类单源（C1）+ JOIN 布局段源统一（C2）/ 用户裁定增补 T03 差分白名单四缺陷清偿 + T04 投影臂登记收口；四 Iteration 全部 accepted，全量终态 2057/0/2，差分白名单 6 → 1；行为规格新增 sql-differential-testing、sql-semantic-binding、sql-semantics-conformance 三域）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-33 个 Milestone：19 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 8 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档））。★初版达成★。
+33 个 Milestone：20 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 7 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档），MS30 于 2026-10-21 完成（change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration accepted 归档——单 change 承载两任务为 2026-10-20 用户指令，T03/T04 为裁定增补段））。★初版达成★。
 
 统一执行序（2026-10-01 用户裁定重排——功能补齐前置、性能优化殿后独立成批；沿用「批准执行序与编号无关」既定先例，编号只表规划先后，执行以本序为准）：**MS28 CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint）→ MS29 输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验）→ MS20-T02 跨文件 DML 二期 → MS27 存储演进批（超页溢出 + 完整性校验）→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据（2026-10-01）：外部评审实证的自动化使用摩擦先行收口——并发硬失败 exit 4 → 可配置等待是多 agent 并发使用的语义前提，也是 MS22 持锁窗口治理的前置；输入通道与声明语义同代码面相邻（lifecycle.rs import + ddl_dml.rs 建表/类型面）；存储格式演进体量最大放功能带末尾；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DETACH（I076）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）、WAL fsync 组提交（I049——串行单写者模型下无效，MS22 量化时剔除）等留 improvements 域未排期。
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
@@ -33,9 +33,9 @@
 - **Split signals**: 定稿项 ≥4 或出现跨域大项（如 I031 入选）时拆第二批
 - **Related changes**: None
 
-### MS30：SQL 语义绑定层一期（差分测试保护网 + JOIN/子查询收口） — planned
+### MS30：SQL 语义绑定层一期（差分测试保护网 + JOIN/子查询收口） — completed
 
-- **Status**: planned（2026-10-19 用户批准底层设计批增补；来源 I091/I080——improvements 2026-10-19 优先级排序第 1 位与配套保护位）
+- **Status**: completed（2026-10-21；change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration 全部 accepted 归档——Iteration 000 差分与性质测试网〔T01〕、001 绑定作用域表基建与关联子查询分类收口〔T02-C1，含 replan Cycle 碰撞形状 SQLite 语义〕、002 JOIN 布局段源自作用域表统一〔T02-C2〕、003 差分白名单缺陷清偿与登记收口〔用户裁定增补的 T03 四缺陷 + T04〕；全量终态 2057/0/2，差分白名单 6 → 1〔余 ORD-NULL-ORDERING 已知语义差异〕；单 change 承载两任务为 2026-10-20 用户指令）
 - **Dependencies**: None
 - **Outcome**: 规划器获得统一的名字/类型绑定阶段（AST → 名字/类型绑定 → 逻辑计划 → 物理计划边界），一期收口 JOIN 与关联子查询面——绑定结果携带关系身份、列身份、类型与可空信息；别名/子查询/投影组合语义的静默错误结果类缺陷经 rusqlite 差分测试网拦截
 - **Rationale**: 2026-10-04 至 2026-10-15 多个 change 反复修复别名、子查询、投影组合的同类缺陷（change `2026-10-15-subquery-alias-binding-and-error-prefix` T1/T2 限定符化与关联参数绑定加固、ISS16–ISS18），根因是名字解析依赖字符串限定符、列位置与构建上下文（I080 证据段）；差分网是绑定重构的直接保护网（I091 明示 I080 重构消费其产出），同段建立符合「高风险基础验证可单独承载」先例
@@ -52,7 +52,7 @@
 - **Verification boundary**: 差分套件对语义一致子集的通过与已知差异白名单 + 绑定收口面既有子查询/别名矩阵零回归 + 全量分批回归（M19）
 - **Diagnostic boundary**: `src/parser/planner/`（构建上下文与 query/subquery 消费面）+ 按名定位的执行期残留点（如 `src/executor/join.rs::condition_column_index`）+ 新增差分测试模块
 - **Split signals**: 绑定基建若需改变 PhysicalPlan 词表结构（触及 I074 第三刀单点）时拆出独立设计 change；差分网若牵动 rusqlite 版本升级（I093 域）时单独评估
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-10-20-ms30-semantic-binding-differential-net/`（2026-10-21 归档）
 
 ### MS31：类型化库结果与参数绑定 API — planned
 
@@ -127,7 +127,7 @@ MS32 执行资源契约（无硬前置，建议序 MS30 后避开 JOIN 同面并
 全部功能带（MS28/MS29/MS20-T02/MS27）──→ 底层设计批（MS30–MS32，2026-10-19 批准）──→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）
 ```
 
-建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 → MS31 → MS32 → MS22**（截至 2026-10-03 前十二项已完成；2026-10-19 批准底层设计批前置，下一项 MS30 SQL 语义绑定层一期，MS22 性能批仍殿后——候选范围量化定稿后转 ready）
+建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 → MS32 → MS22**（截至 2026-10-21 前十三项已完成；下一项 MS31 类型化库结果与参数绑定 API〔依赖 MS30 已满足〕，MS22 性能批仍殿后——候选范围量化定稿后转 ready）
 
 无环；所有依赖均已满足。初版后工作（MS18-MS32）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
 

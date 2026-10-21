@@ -43,6 +43,11 @@ impl PlanBuilder {
                 // T5：表达式型子查询上下文——FROM 派生标志复位（IN 子查询内
                 // 集合操作维持拒绝）。
                 let saved_from_derived = self.building_from_derived;
+                // I080 一期（T02-C1）：作用域快照/恢复——外层累计段 = 界前，
+                // 子查询自身 FROM 段退出截断（嵌套构建不外泄）。
+                let saved_scopes_len = self.binding_scopes.len();
+                let saved_scope_boundary = self.binding_scope_boundary;
+                self.binding_scope_boundary = saved_scopes_len;
                 self.building_subquery = true;
                 self.building_from_derived = false;
                 let right_plan = match self.build_query(subquery) {
@@ -51,12 +56,26 @@ impl PlanBuilder {
                         self.building_subquery = saved_subquery_ctx;
                         self.building_from_derived = saved_from_derived;
                         self.inner_table_names = None;
+                        self.binding_scope_boundary = saved_scope_boundary;
+                        self.restore_binding_scopes(saved_scopes_len);
                         return Err(e);
                     }
                 };
+                // 001-replan Guidance ④：段名快照在恢复前捕获——界后 = 子查询
+                // 自身（内层）段，界前 = 外层累计段；错误路径不收集、不需快照。
+                let inner_scope: Vec<String> = self.binding_scopes[saved_scopes_len..]
+                    .iter()
+                    .map(|e| e.qualifier.clone())
+                    .collect();
+                let outer_scope: Vec<String> = self.binding_scopes[..saved_scopes_len]
+                    .iter()
+                    .map(|e| e.qualifier.clone())
+                    .collect();
                 self.building_subquery = saved_subquery_ctx;
                 self.building_from_derived = saved_from_derived;
                 self.inner_table_names = None;
+                self.binding_scope_boundary = saved_scope_boundary;
+                self.restore_binding_scopes(saved_scopes_len);
 
                 let left_column = self.resolve_column_in_plan(left_expr, table_name)?;
                 let right_column = self.get_subquery_first_column(&right_plan)?;
@@ -73,7 +92,12 @@ impl PlanBuilder {
                 let output_columns = self.build_full_output_columns_for_table(table_name);
 
                 // Detect correlated parameters
-                let correlated_params = self.extract_correlated_params(subquery, &inner_tables)?;
+                let correlated_params = self.extract_correlated_params(
+                    subquery,
+                    &inner_tables,
+                    &inner_scope,
+                    &outer_scope,
+                )?;
 
                 if *negated {
                     Ok(Some(PhysicalPlan::AntiJoin(AntiJoinNode {
@@ -103,6 +127,10 @@ impl PlanBuilder {
                 // T5：表达式型子查询上下文——FROM 派生标志复位（EXISTS 子查询
                 // 内集合操作维持拒绝）。
                 let saved_from_derived = self.building_from_derived;
+                // I080 一期（T02-C1）：作用域快照/恢复——同 IN 臂纪律。
+                let saved_scopes_len = self.binding_scopes.len();
+                let saved_scope_boundary = self.binding_scope_boundary;
+                self.binding_scope_boundary = saved_scopes_len;
                 self.building_subquery = true;
                 self.building_from_derived = false;
                 let right_plan = match self.build_query(subquery) {
@@ -111,12 +139,25 @@ impl PlanBuilder {
                         self.building_subquery = saved_subquery_ctx;
                         self.building_from_derived = saved_from_derived;
                         self.inner_table_names = None;
+                        self.binding_scope_boundary = saved_scope_boundary;
+                        self.restore_binding_scopes(saved_scopes_len);
                         return Err(e);
                     }
                 };
+                // 001-replan Guidance ④：段名快照在恢复前捕获——同 IN 臂。
+                let inner_scope: Vec<String> = self.binding_scopes[saved_scopes_len..]
+                    .iter()
+                    .map(|e| e.qualifier.clone())
+                    .collect();
+                let outer_scope: Vec<String> = self.binding_scopes[..saved_scopes_len]
+                    .iter()
+                    .map(|e| e.qualifier.clone())
+                    .collect();
                 self.building_subquery = saved_subquery_ctx;
                 self.building_from_derived = saved_from_derived;
                 self.inner_table_names = None;
+                self.binding_scope_boundary = saved_scope_boundary;
+                self.restore_binding_scopes(saved_scopes_len);
 
                 // T5（change 2026-10-13-e2e-verification-and-defect-closure D8）：
                 // 同 IN 臂——基座承载左表全宽行。
@@ -125,7 +166,12 @@ impl PlanBuilder {
                 let conditions = vec![]; // EXISTS does not need equality conditions
 
                 // Detect correlated parameters
-                let correlated_params = self.extract_correlated_params(subquery, &inner_tables)?;
+                let correlated_params = self.extract_correlated_params(
+                    subquery,
+                    &inner_tables,
+                    &inner_scope,
+                    &outer_scope,
+                )?;
 
                 if *negated {
                     Ok(Some(PhysicalPlan::AntiJoin(AntiJoinNode {
@@ -179,6 +225,10 @@ impl PlanBuilder {
         // T5：表达式型子查询上下文——FROM 派生标志复位（标量子查询内集合
         // 操作维持拒绝）。
         let saved_from_derived = self.building_from_derived;
+        // I080 一期（T02-C1）：作用域快照/恢复——同 IN 臂纪律。
+        let saved_scopes_len = self.binding_scopes.len();
+        let saved_scope_boundary = self.binding_scope_boundary;
+        self.binding_scope_boundary = saved_scopes_len;
         self.building_subquery = true;
         self.building_from_derived = false;
         let plan = match self.build_query(subquery) {
@@ -187,13 +237,27 @@ impl PlanBuilder {
                 self.building_subquery = saved_subquery_ctx;
                 self.building_from_derived = saved_from_derived;
                 self.inner_table_names = None;
+                self.binding_scope_boundary = saved_scope_boundary;
+                self.restore_binding_scopes(saved_scopes_len);
                 return Err(e);
             }
         };
+        // 001-replan Guidance ④：段名快照在恢复前捕获——同 IN 臂。
+        let inner_scope: Vec<String> = self.binding_scopes[saved_scopes_len..]
+            .iter()
+            .map(|e| e.qualifier.clone())
+            .collect();
+        let outer_scope: Vec<String> = self.binding_scopes[..saved_scopes_len]
+            .iter()
+            .map(|e| e.qualifier.clone())
+            .collect();
         self.building_subquery = saved_subquery_ctx;
         self.building_from_derived = saved_from_derived;
         self.inner_table_names = None;
-        let correlated_params = self.extract_correlated_params(subquery, &inner_tables)?;
+        self.binding_scope_boundary = saved_scope_boundary;
+        self.restore_binding_scopes(saved_scopes_len);
+        let correlated_params =
+            self.extract_correlated_params(subquery, &inner_tables, &inner_scope, &outer_scope)?;
         Ok(ScalarSubqueryBinding {
             param_name: format!("__scalar_subquery_{index}"),
             subquery: Box::new(plan),
@@ -380,27 +444,37 @@ impl PlanBuilder {
     /// `collect_outer_column_refs` 双重误判为相关外层引用（ISS16–ISS18）。
     pub(crate) fn extract_subquery_table_names(subquery: &Query) -> Vec<String> {
         match subquery.body.as_ref() {
-            SetExpr::Select(select) => select
-                .from
-                .iter()
-                .flat_map(|twj| {
-                    let mut names = Self::declared_qualifiers(&twj.relation);
-                    for join in &twj.joins {
-                        names.extend(Self::declared_qualifiers(&join.relation));
-                    }
-                    names
-                })
-                .collect(),
+            SetExpr::Select(select) => Self::declared_from_qualifiers(&select.from),
             _ => Vec::new(),
         }
     }
 
+    /// FROM 子句全部声明限定符（基表/派生表/JOIN 右臂；别名优先，基名并列
+    /// 保留——与 `extract_subquery_table_names` 同一提取规则）。001-replan
+    /// 投影臂补强消费：投影位循环先于外层 FROM 构建，外层段按本提取规则
+    /// 临时登记进作用域表。
+    pub(crate) fn declared_from_qualifiers(from: &[sqlparser::ast::TableWithJoins]) -> Vec<String> {
+        from.iter()
+            .flat_map(|twj| {
+                let mut names = Self::declared_qualifiers(&twj.relation);
+                for join in &twj.joins {
+                    names.extend(Self::declared_qualifiers(&join.relation));
+                }
+                names
+            })
+            .collect()
+    }
+
     /// FROM 项的可解析限定符集——显式别名（`AS` 或隐式）优先，无别名取基表名；
-    /// 派生表取别名且无别名不产出；其余 TableFactor 变体不产出。
+    /// 派生表取别名，无别名取其隐式注册名 `derived`；其余 TableFactor 变体不产出。
     ///
     /// A1（2026-10-15 用户裁定豁免，见 Act Response Blocker Resolution）：别名与基
     /// 表名**并列入集**——别名入集消除幻影相关参数，基表名保留使「别名 + 基名
     /// 限定」子查询形状维持既有可达能力（本引擎顶层对同一写法本就宽松）。
+    ///
+    /// T03-D4：无别名派生的 `derived` 与该臂实际注册名同源（`query.rs` 派生臂
+    /// `unwrap_or_else(|| "derived".to_string())`）——两处字面量互指，避免登记
+    /// 段名与实际注册名分叉。
     fn declared_qualifiers(factor: &TableFactor) -> Vec<String> {
         match factor {
             TableFactor::Table { name, alias, .. } => {
@@ -410,24 +484,37 @@ impl PlanBuilder {
                     _ => vec![base],
                 }
             }
-            TableFactor::Derived { alias, .. } => alias
-                .as_ref()
-                .map(|a| vec![a.name.value.to_lowercase()])
-                .unwrap_or_default(),
+            TableFactor::Derived { alias, .. } => {
+                match alias.as_ref().map(|a| a.name.value.to_lowercase()) {
+                    Some(alias_name) => vec![alias_name],
+                    // T03-D4 无别名派生的隐式注册名 = `derived`（派生臂注册名同
+                    // 源，见 `query.rs` 派生臂 `unwrap_or_else(|| "derived"
+                    // .to_string())`）——登记段名与实际注册名一致，作用域身份判定
+                    // 不再落空。
+                    None => vec!["derived".to_string()],
+                }
+            }
             _ => Vec::new(),
         }
     }
 
     /// Extract correlated parameters from a subquery by scanning its WHERE clause
-    /// for column references to tables NOT in the subquery's own FROM clause.
+    /// for column references that resolve to the outer scope.
     ///
-    /// For each outer column reference (e.g., `emp.region` where `emp` is not in the
-    /// subquery's FROM), creates a CorrelatedParam that maps the outer table/column
+    /// For each outer column reference (e.g., `emp.region` bound to the outer
+    /// scope), creates a CorrelatedParam that maps the outer table/column
     /// to the inner column index where the value will be injected at execution time.
+    ///
+    /// 001-replan：外层判定经 `is_outer_reference` 单源（与分类同公式）；
+    /// `inner_scope`/`outer_scope` 为构建退出后、恢复前的段名小写快照
+    /// （调用点在 `restore_binding_scopes` 前捕获）——碰撞形状（内层别名
+    /// 遮蔽外层基名）由此与分类同侧解析为外层相关参数。
     pub(crate) fn extract_correlated_params(
         &self,
         subquery: &Query,
         inner_tables: &[String],
+        inner_scope: &[String],
+        outer_scope: &[String],
     ) -> Result<Vec<CorrelatedParam>, PlanError> {
         let where_expr = match subquery.body.as_ref() {
             SetExpr::Select(select) => select.selection.as_ref(),
@@ -438,18 +525,26 @@ impl PlanBuilder {
         };
 
         let mut params = Vec::new();
-        self.collect_outer_column_refs(where_expr, inner_tables, &mut params)?;
+        self.collect_outer_column_refs(
+            where_expr,
+            inner_tables,
+            inner_scope,
+            outer_scope,
+            &mut params,
+        )?;
         Ok(params)
     }
 
     /// Recursively walk an expression tree to find outer column references.
-    /// An outer column reference is a CompoundIdentifier (table.column) where
-    /// the table is NOT in the inner_tables list.
+    /// An outer column reference is a CompoundIdentifier (table.column) bound
+    /// to the outer scope (001-replan：`is_outer_reference` 单源判定).
     #[allow(clippy::only_used_in_recursion)]
     pub(crate) fn collect_outer_column_refs(
         &self,
         expr: &Expr,
         inner_tables: &[String],
+        inner_scope: &[String],
+        outer_scope: &[String],
         params: &mut Vec<CorrelatedParam>,
     ) -> Result<(), PlanError> {
         match expr {
@@ -457,8 +552,10 @@ impl PlanBuilder {
                 let table = parts[0].value.to_lowercase();
                 let column = parts[1].value.to_lowercase();
 
-                // If this table is NOT in the inner tables, it's an outer reference
-                if !inner_tables.iter().any(|t| t.eq_ignore_ascii_case(&table)) {
+                let inner_hit = inner_scope.iter().any(|t| t.eq_ignore_ascii_case(&table));
+                let outer_hit = outer_scope.iter().any(|t| t.eq_ignore_ascii_case(&table));
+                let in_declared_list = inner_tables.iter().any(|t| t.eq_ignore_ascii_case(&table));
+                if super::binding::is_outer_reference(inner_hit, outer_hit, in_declared_list) {
                     // Build qualified param name (e.g. "emp.dept") for matching
                     // ParameterExpression nodes at execution time
                     let param_name = format!("{}.{}", table, column);
@@ -468,32 +565,80 @@ impl PlanBuilder {
             }
             // Recurse into binary operations
             Expr::BinaryOp { left, right, .. } => {
-                self.collect_outer_column_refs(left, inner_tables, params)?;
-                self.collect_outer_column_refs(right, inner_tables, params)?;
+                self.collect_outer_column_refs(
+                    left,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
+                self.collect_outer_column_refs(
+                    right,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
                 Ok(())
             }
             // Recurse into unary operations
             Expr::UnaryOp { expr, .. } => {
-                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                self.collect_outer_column_refs(
+                    expr,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
                 Ok(())
             }
             // Recurse into nested expressions
             Expr::Nested(expr) => {
-                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                self.collect_outer_column_refs(
+                    expr,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
                 Ok(())
             }
             // Recurse into BETWEEN
             Expr::Between {
                 expr, low, high, ..
             } => {
-                self.collect_outer_column_refs(expr, inner_tables, params)?;
-                self.collect_outer_column_refs(low, inner_tables, params)?;
-                self.collect_outer_column_refs(high, inner_tables, params)?;
+                self.collect_outer_column_refs(
+                    expr,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
+                self.collect_outer_column_refs(
+                    low,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
+                self.collect_outer_column_refs(
+                    high,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
                 Ok(())
             }
             // Recurse into IN list
             Expr::InList { expr, .. } => {
-                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                self.collect_outer_column_refs(
+                    expr,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
                 Ok(())
             }
             // Recurse into IN subquery
@@ -514,7 +659,13 @@ impl PlanBuilder {
                         }
                     }
                 }
-                self.collect_outer_column_refs(expr, inner_tables, params)?;
+                self.collect_outer_column_refs(
+                    expr,
+                    inner_tables,
+                    inner_scope,
+                    outer_scope,
+                    params,
+                )?;
                 Ok(())
             }
             // Recurse into EXISTS / NOT EXISTS (subquery itself may have outer refs)
@@ -546,16 +697,40 @@ impl PlanBuilder {
                 ..
             } => {
                 if let Some(op) = operand {
-                    self.collect_outer_column_refs(op, inner_tables, params)?;
+                    self.collect_outer_column_refs(
+                        op,
+                        inner_tables,
+                        inner_scope,
+                        outer_scope,
+                        params,
+                    )?;
                 }
                 for cond in conditions {
-                    self.collect_outer_column_refs(cond, inner_tables, params)?;
+                    self.collect_outer_column_refs(
+                        cond,
+                        inner_tables,
+                        inner_scope,
+                        outer_scope,
+                        params,
+                    )?;
                 }
                 for res in results {
-                    self.collect_outer_column_refs(res, inner_tables, params)?;
+                    self.collect_outer_column_refs(
+                        res,
+                        inner_tables,
+                        inner_scope,
+                        outer_scope,
+                        params,
+                    )?;
                 }
                 if let Some(else_expr) = else_result {
-                    self.collect_outer_column_refs(else_expr, inner_tables, params)?;
+                    self.collect_outer_column_refs(
+                        else_expr,
+                        inner_tables,
+                        inner_scope,
+                        outer_scope,
+                        params,
+                    )?;
                 }
                 Ok(())
             }

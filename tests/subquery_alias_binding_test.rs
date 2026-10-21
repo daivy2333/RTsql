@@ -551,3 +551,169 @@ async fn join_form_in_subquery_rejection_unaffected_by_alias() {
         other => panic!("expected Error, got {other:?}"),
     }
 }
+
+/// 碰撞形状（change 2026-10-20-ms30-semantic-binding-differential-net
+/// 001-replan，2026-10-20 用户裁定）：外层未别名声明 + 子查询内层别名声明同表
+/// + 子查询内基表名限定引用——别名遮蔽基表名，解析为**外层相关参数**并注入
+/// 求值（对齐 SQLite 标准语义）。控制组：无外层同名时维持 A1 宽松内层解析
+/// （2026-10-15 豁免的非碰撞子集）。
+#[tokio::test]
+async fn collision_shape_alias_shadowing_resolves_outer() {
+    let db = open_db().await;
+    exec_ok(&db, "CREATE TABLE users (id INTEGER PRIMARY KEY, v INT)").await;
+    exec_ok(&db, "CREATE TABLE orders (k INT, m INT)").await;
+    for (i, v) in [(1, 10), (2, 20), (3, 30)] {
+        exec_ok(&db, &format!("INSERT INTO users VALUES ({i}, {v})")).await;
+    }
+    exec_ok(&db, "INSERT INTO orders VALUES (2, 5)").await;
+
+    // EXISTS 自相等：u.v = users.v → 外层相关（每行匹配自身）→ 全体。
+    assert_eq!(
+        int_ids(
+            exec(
+                &db,
+                "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM users u WHERE u.v = users.v)"
+            )
+            .await
+        ),
+        vec![1, 2, 3]
+    );
+    // EXISTS +10：u.v = users.v + 10 → 仅 v=10、20 行存在匹配。
+    assert_eq!(
+        int_ids(
+            exec(
+                &db,
+                "SELECT id FROM users WHERE EXISTS \
+                 (SELECT 1 FROM users u WHERE u.v = users.v + 10)"
+            )
+            .await
+        ),
+        vec![1, 2]
+    );
+    // 投影位标量子查询碰撞：每行取自身 v（未绑定参数现状为 NULL）。
+    let mut proj: Vec<(i64, i64)> = rows(
+        exec(
+            &db,
+            "SELECT id, (SELECT MAX(v) FROM users u WHERE u.id = users.id) FROM users",
+        )
+        .await,
+    )
+    .iter()
+    .map(|r| {
+        (
+            r[0].as_i64().expect("id 整型"),
+            r[1].as_i64().expect("碰撞参数注入后 MAX(v) 为整型"),
+        )
+    })
+    .collect();
+    proj.sort();
+    assert_eq!(proj, vec![(1, 10), (2, 20), (3, 30)]);
+    // IN 面：u.v = users.v 相关 → 每行自身命中 IN 集。
+    assert_eq!(
+        int_ids(
+            exec(
+                &db,
+                "SELECT id FROM users WHERE id IN \
+                 (SELECT u.id FROM users u WHERE u.v = users.v)"
+            )
+            .await
+        ),
+        vec![1, 2, 3]
+    );
+    // 控制组：无外层同名（orders）→ A1 宽松内层解析维持 → 2 = 5 假 → 空。
+    assert_eq!(
+        int_ids(
+            exec(
+                &db,
+                "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.k = orders.m)"
+            )
+            .await
+        ),
+        Vec::<i64>::new()
+    );
+}
+
+// === T04：投影位外层作用域段登记（无别名派生基座） ===
+
+/// T04（change 2026-10-20-ms30-semantic-binding-differential-net）：无别名派生
+/// 基座的隐式注册名 `derived` 必须在作用域登记里可达——登记段名与该臂实际
+/// 注册名单源一致。
+///
+/// 形态 A（契约形状）：外层 FROM 为无别名派生表，投影位标量子查询以
+/// `derived.k` 限定引用外层列 → 解析为外层相关参数并正确注入求值。
+#[tokio::test]
+async fn t04_projection_scalar_subquery_correlated_via_unnamed_derived() {
+    let db = open_db().await;
+    exec_ok(&db, "CREATE TABLE t (k INT, v INT)").await;
+    exec_ok(&db, "INSERT INTO t VALUES (1, 10)").await;
+    exec_ok(&db, "INSERT INTO t VALUES (2, 20)").await;
+    exec_ok(&db, "CREATE TABLE tt (x INT, y INT)").await;
+    exec_ok(&db, "INSERT INTO tt VALUES (100, 1)").await;
+    exec_ok(&db, "INSERT INTO tt VALUES (200, 1)").await;
+    exec_ok(&db, "INSERT INTO tt VALUES (300, 2)").await;
+
+    let got = rows(
+        exec(
+            &db,
+            "SELECT derived.v, \
+             (SELECT MAX(x) FROM tt WHERE tt.y = derived.k) \
+             FROM (SELECT k, v FROM t)",
+        )
+        .await,
+    );
+    assert_eq!(
+        got,
+        vec![
+            vec![serde_json::json!(10), serde_json::json!(200)],
+            vec![serde_json::json!(20), serde_json::json!(300)],
+        ],
+        "无别名派生基座的投影位相关引用应解析为外层相关参数并正确求值"
+    );
+}
+
+/// T04 形态 B：无别名派生表作为**子查询自身 FROM** 的基座时，其隐式注册名
+/// `derived` 同样必须可达——否则该限定引用被误判为外层相关参数，执行期报
+/// `correlated parameter column not found in outer row`。
+///
+/// 修复前：EXISTS 臂报执行期错误（登记缺口）；修复后按内层派生表求值。
+#[tokio::test]
+async fn t04_subquery_own_from_unnamed_derived_qualifier_resolves_inner() {
+    let db = open_db().await;
+    exec_ok(&db, "CREATE TABLE t (k INT, v INT)").await;
+    exec_ok(&db, "INSERT INTO t VALUES (1, 10)").await;
+    exec_ok(&db, "INSERT INTO t VALUES (2, 20)").await;
+    exec_ok(&db, "CREATE TABLE tt (x INT, y INT)").await;
+    exec_ok(&db, "INSERT INTO tt VALUES (100, 1)").await;
+    exec_ok(&db, "INSERT INTO tt VALUES (200, 1)").await;
+    exec_ok(&db, "INSERT INTO tt VALUES (300, 2)").await;
+
+    // 内层无别名派生表 (x, y)：`derived.y = 1` 命中两行 → EXISTS 对全部外层行为真
+    let got = rows(
+        exec(
+            &db,
+            "SELECT k FROM t WHERE EXISTS \
+             (SELECT 1 FROM (SELECT x, y FROM tt) WHERE derived.y = 1)",
+        )
+        .await,
+    );
+    assert_eq!(
+        got,
+        vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+        "无别名派生的隐式名应解析为子查询自身 FROM 的内层基座"
+    );
+
+    // 同一形态的标量子查询臂：内层 MAX(x)（y=1 的两行）= 200 → 不等于 100 → 空集
+    let got = rows(
+        exec(
+            &db,
+            "SELECT k FROM t WHERE \
+             (SELECT MAX(x) FROM (SELECT x, y FROM tt) WHERE derived.y = 1) = 100",
+        )
+        .await,
+    );
+    assert_eq!(
+        got,
+        Vec::<Vec<serde_json::Value>>::new(),
+        "同一形态的标量臂按内层派生表求值 → 200 ≠ 100 → 空集"
+    );
+}
