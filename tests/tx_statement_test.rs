@@ -9,7 +9,7 @@
 
 use rtsql::database::Database;
 use rtsql::network::handler::SqlHandler;
-use rtsql::network::protocol::{Request, Response};
+use rtsql::network::protocol::{to_response, Request, Response};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -51,12 +51,18 @@ fn expect_error_contains(resp: Response, needle: &str, what: &str) -> String {
 #[tokio::test]
 async fn execute_sql_rejects_begin_without_touching_plan_cache() {
     let (db, _dir) = open_db().await;
-    expect_ok(&db.execute_sql("CREATE TABLE t (id INT)").await, "create t");
-    expect_ok(&db.execute_sql("SELECT id FROM t").await, "prime cache");
+    expect_ok(
+        &to_response(db.execute_sql("CREATE TABLE t (id INT)").await),
+        "create t",
+    );
+    expect_ok(
+        &to_response(db.execute_sql("SELECT id FROM t").await),
+        "prime cache",
+    );
     let len_before = db.plan_cache_len();
     assert!(len_before > 0, "SELECT should populate the plan cache");
 
-    let resp = db.execute_sql("BEGIN").await;
+    let resp = to_response(db.execute_sql("BEGIN").await);
     expect_error_contains(
         resp,
         "only supported in an rtsql CLI session",
@@ -75,10 +81,13 @@ async fn execute_sql_rejects_begin_without_touching_plan_cache() {
 #[tokio::test]
 async fn execute_in_tx_rejects_commit_and_transaction_stays_usable() {
     let (db, _dir) = open_db().await;
-    expect_ok(&db.execute_sql("CREATE TABLE t (id INT)").await, "create t");
+    expect_ok(
+        &to_response(db.execute_sql("CREATE TABLE t (id INT)").await),
+        "create t",
+    );
     let tx = db.begin().await.unwrap();
 
-    let resp = db.execute_in_tx("COMMIT", &tx).await;
+    let resp = to_response(db.execute_in_tx("COMMIT", &tx).await);
     expect_error_contains(
         resp,
         "only supported in an rtsql CLI session",
@@ -86,12 +95,12 @@ async fn execute_in_tx_rejects_commit_and_transaction_stays_usable() {
     );
 
     expect_ok(
-        &db.execute_in_tx("INSERT INTO t VALUES (1)", &tx).await,
+        &to_response(db.execute_in_tx("INSERT INTO t VALUES (1)", &tx).await),
         "in-tx insert after rejection",
     );
     db.commit(tx).await.unwrap();
 
-    match db.execute_sql("SELECT id FROM t").await {
+    match to_response(db.execute_sql("SELECT id FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "committed write must be visible");
             assert_eq!(rows[0][0], serde_json::json!(1));
@@ -117,7 +126,7 @@ async fn sql_handler_rejects_commit_same_source_as_execute_sql() {
         "SqlHandler(COMMIT)",
     );
     let via_db = expect_error_contains(
-        db.execute_sql("COMMIT").await,
+        to_response(db.execute_sql("COMMIT").await),
         "only supported in an rtsql CLI session",
         "execute_sql(COMMIT)",
     );

@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::{tempdir, TempDir};
 
 const ROWS_PER_ROUND: i64 = 1_000;
@@ -49,7 +49,7 @@ fn insert_sql(first_id: i64, rows: i64) -> String {
 
 async fn count_rows(path: &Path) -> i64 {
     let db = Database::open(path).await.expect("open for count");
-    let count = match db.execute_sql("SELECT COUNT(*) FROM people").await {
+    let count = match to_response(db.execute_sql("SELECT COUNT(*) FROM people").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "COUNT(*) must return one row");
             rows[0][0].as_i64().expect("COUNT(*) is numeric")
@@ -62,7 +62,7 @@ async fn count_rows(path: &Path) -> i64 {
 
 /// A single-value aggregate query (`COUNT` / `MIN` / `MAX`).
 async fn scalar(db: &Database, sql: &str) -> i64 {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "{sql} must return one row");
             rows[0][0]
@@ -77,7 +77,7 @@ async fn scalar(db: &Database, sql: &str) -> i64 {
 /// next round can take the advisory lock.
 async fn insert_round(path: &Path, first_id: i64) {
     let db = Database::open(path).await.expect("open for insert");
-    match db.execute_sql(&insert_sql(first_id, ROWS_PER_ROUND)).await {
+    match to_response(db.execute_sql(&insert_sql(first_id, ROWS_PER_ROUND)).await) {
         Response::AffectedRows { count } => {
             assert_eq!(count as i64, ROWS_PER_ROUND, "all rows of the round commit")
         }
@@ -153,7 +153,7 @@ async fn lib_sessions_keep_every_committed_row_visible() {
 
     {
         let db = Database::open(&path).await.expect("open for create");
-        db.execute_sql(CREATE_SQL).await;
+        to_response(db.execute_sql(CREATE_SQL).await);
         db.close().await.expect("close after create");
         drop(db);
     }
@@ -193,10 +193,10 @@ async fn lib_sessions_keep_every_committed_row_visible() {
     // Point lookups across the whole key range.
     for id in [1, total / 2, total] {
         let db = Database::open(&path).await.expect("open for point query");
-        match db
-            .execute_sql(&format!("SELECT name FROM people WHERE id = {id}"))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("SELECT name FROM people WHERE id = {id}"))
+                .await,
+        ) {
             Response::QueryResult { rows } => {
                 assert_eq!(rows.len(), 1, "point lookup for id {id} must hit")
             }
@@ -281,7 +281,7 @@ async fn single_process_bulk_import_stays_correct() {
     let db = Database::open(&cli_db_path(home.path(), stem))
         .await
         .expect("open after import");
-    match db.execute_sql("SELECT COUNT(*) FROM people").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM people").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0].as_i64(), Some(IMPORT_ROWS));
         }
@@ -309,10 +309,12 @@ async fn index_root_write_backs_survive_reopen() {
     let uniq_path = dir.path().join("uniq.db");
     {
         let db = Database::open(&uniq_path).await.expect("open uniq");
-        db.execute_sql(
-            "CREATE TABLE uniq_rows (id INT PRIMARY KEY, code INT UNIQUE, tag VARCHAR(64))",
-        )
-        .await;
+        to_response(
+            db.execute_sql(
+                "CREATE TABLE uniq_rows (id INT PRIMARY KEY, code INT UNIQUE, tag VARCHAR(64))",
+            )
+            .await,
+        );
         insert_codes(&db, "uniq_rows", 1, FIRST_BATCH).await;
         db.close().await.expect("close uniq batch 1");
         drop(db);
@@ -328,11 +330,11 @@ async fn index_root_write_backs_survive_reopen() {
             .await
             .expect("reopen uniq after batch 2");
         for code in [1, TOTAL / 2, TOTAL] {
-            match db
+            match to_response(db
                 .execute_sql(&format!(
                     "INSERT INTO uniq_rows (id, code, tag) VALUES (999999, {code}, 'dup')"
                 ))
-                .await
+                .await)
             {
                 Response::Error { message, .. } => assert!(
                     !message.is_empty(),
@@ -343,10 +345,12 @@ async fn index_root_write_backs_survive_reopen() {
                 ),
             }
         }
-        match db
-            .execute_sql("INSERT INTO uniq_rows (id, code, tag) VALUES (999999, 8888888, 'fresh')")
-            .await
-        {
+        match to_response(
+            db.execute_sql(
+                "INSERT INTO uniq_rows (id, code, tag) VALUES (999999, 8888888, 'fresh')",
+            )
+            .await,
+        ) {
             Response::AffectedRows { count } => assert_eq!(count, 1),
             other => panic!("a new UNIQUE value must still insert, got {other:?}"),
         }
@@ -359,10 +363,14 @@ async fn index_root_write_backs_survive_reopen() {
     let sec_path = dir.path().join("secondary.db");
     {
         let db = Database::open(&sec_path).await.expect("open secondary");
-        db.execute_sql("CREATE TABLE idx_rows (id INT PRIMARY KEY, code INT, tag VARCHAR(64))")
-            .await;
-        db.execute_sql("CREATE INDEX idx_code ON idx_rows (code)")
-            .await;
+        to_response(
+            db.execute_sql("CREATE TABLE idx_rows (id INT PRIMARY KEY, code INT, tag VARCHAR(64))")
+                .await,
+        );
+        to_response(
+            db.execute_sql("CREATE INDEX idx_code ON idx_rows (code)")
+                .await,
+        );
         insert_codes(&db, "idx_rows", 1, FIRST_BATCH).await;
         db.close().await.expect("close secondary batch 1");
         drop(db);
@@ -378,10 +386,10 @@ async fn index_root_write_backs_survive_reopen() {
             .await
             .expect("reopen secondary after batch 2");
 
-        let plan = match db
-            .execute_sql("EXPLAIN SELECT id FROM idx_rows WHERE code = 4242")
-            .await
-        {
+        let plan = match to_response(
+            db.execute_sql("EXPLAIN SELECT id FROM idx_rows WHERE code = 4242")
+                .await,
+        ) {
             Response::QueryResult { rows } => rows
                 .iter()
                 .map(|r| {
@@ -400,10 +408,10 @@ async fn index_root_write_backs_survive_reopen() {
         );
 
         for code in [1, 4242, TOTAL] {
-            let indexed = match db
-                .execute_sql(&format!("SELECT id FROM idx_rows WHERE code = {code}"))
-                .await
-            {
+            let indexed = match to_response(
+                db.execute_sql(&format!("SELECT id FROM idx_rows WHERE code = {code}"))
+                    .await,
+            ) {
                 Response::QueryResult { rows } => rows,
                 other => panic!("expected QueryResult, got {other:?}"),
             };
@@ -412,17 +420,17 @@ async fn index_root_write_backs_survive_reopen() {
 
             // Same predicate without the plain-column shape → scan route; both
             // routes must agree.
-            let scanned = match db
-                .execute_sql(&format!("SELECT id FROM idx_rows WHERE code + 0 = {code}"))
-                .await
-            {
+            let scanned = match to_response(
+                db.execute_sql(&format!("SELECT id FROM idx_rows WHERE code + 0 = {code}"))
+                    .await,
+            ) {
                 Response::QueryResult { rows } => rows,
                 other => panic!("expected QueryResult, got {other:?}"),
             };
             assert_eq!(indexed, scanned, "index route must equal the scan route");
         }
 
-        drop(db.execute_sql("DROP INDEX idx_code").await);
+        drop(to_response(db.execute_sql("DROP INDEX idx_code").await));
         db.close().await.expect("close secondary 2");
         drop(db);
     }
@@ -439,7 +447,7 @@ async fn insert_codes(db: &Database, table: &str, first_code: i64, count: i64) {
         let code = first_code + i;
         sql.push_str(&format!("({code},{code},'c{code}')"));
     }
-    match db.execute_sql(&sql).await {
+    match to_response(db.execute_sql(&sql).await) {
         Response::AffectedRows { count: n } => assert_eq!(n as i64, count),
         other => panic!("expected AffectedRows, got {other:?}"),
     }

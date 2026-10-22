@@ -9,7 +9,7 @@
 //! immediately visible to subsequent statements.
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -56,18 +56,22 @@ fn affected_count(resp: Response) -> u64 {
 async fn test_visibility_all_visible_page_skips_per_row_checks() {
     let db = open_db().await;
 
-    db.execute_sql("CREATE TABLE t1 (id INT PRIMARY KEY, val INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t1 (id INT PRIMARY KEY, val INT)")
+            .await,
+    );
 
     for i in 1..=10 {
-        db.execute_sql(&format!("INSERT INTO t1 VALUES ({}, {})", i, i * 10))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t1 VALUES ({}, {})", i, i * 10))
+                .await,
+        );
     }
 
-    let resp = db.execute_sql("SELECT * FROM t1").await;
+    let resp = to_response(db.execute_sql("SELECT * FROM t1").await);
     assert_row_count(resp, 10);
 
-    let resp = db.execute_sql("SELECT COUNT(*) FROM t1").await;
+    let resp = to_response(db.execute_sql("SELECT COUNT(*) FROM t1").await);
     let r = rows(resp);
     assert_eq!(r[0][0].as_i64().unwrap(), 10);
 }
@@ -78,28 +82,34 @@ async fn test_visibility_all_visible_page_skips_per_row_checks() {
 async fn test_visibility_insert_clears_all_visible() {
     let db = open_db().await;
 
-    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, val INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, val INT)")
+            .await,
+    );
 
     // Phase 1: initial batch (page becomes all-visible)
     for i in 1..=5 {
-        db.execute_sql(&format!("INSERT INTO t2 VALUES ({}, {})", i, i * 10))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t2 VALUES ({}, {})", i, i * 10))
+                .await,
+        );
     }
 
-    let resp = db.execute_sql("SELECT * FROM t2").await;
+    let resp = to_response(db.execute_sql("SELECT * FROM t2").await);
     assert_row_count(resp, 5);
 
     // Phase 2: more inserts (page transitions from all-visible to partial)
     for i in 6..=10 {
-        db.execute_sql(&format!("INSERT INTO t2 VALUES ({}, {})", i, i * 10))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t2 VALUES ({}, {})", i, i * 10))
+                .await,
+        );
     }
 
-    let resp = db.execute_sql("SELECT * FROM t2").await;
+    let resp = to_response(db.execute_sql("SELECT * FROM t2").await);
     assert_row_count(resp, 10);
 
-    let resp = db.execute_sql("SELECT COUNT(*) FROM t2").await;
+    let resp = to_response(db.execute_sql("SELECT COUNT(*) FROM t2").await);
     let r = rows(resp);
     assert_eq!(r[0][0].as_i64().unwrap(), 10);
 }
@@ -110,30 +120,34 @@ async fn test_visibility_insert_clears_all_visible() {
 async fn test_visibility_delete_clears_all_visible() {
     let db = open_db().await;
 
-    db.execute_sql("CREATE TABLE t3 (id INT PRIMARY KEY, val INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t3 (id INT PRIMARY KEY, val INT)")
+            .await,
+    );
 
     for i in 1..=5 {
-        db.execute_sql(&format!("INSERT INTO t3 VALUES ({}, {})", i, i * 10))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t3 VALUES ({}, {})", i, i * 10))
+                .await,
+        );
     }
 
-    let resp = db.execute_sql("SELECT * FROM t3").await;
+    let resp = to_response(db.execute_sql("SELECT * FROM t3").await);
     assert_row_count(resp, 5);
 
     // Delete row id=3
-    let resp = db.execute_sql("DELETE FROM t3 WHERE id = 3").await;
+    let resp = to_response(db.execute_sql("DELETE FROM t3 WHERE id = 3").await);
     // Accept either: DELETE succeeds and returns affected count, OR
     // DELETE returns an error (not yet supported) — both are valid pre-TDD outcomes.
     match resp {
         Response::AffectedRows { count } => {
             assert!(count >= 1, "DELETE should affect at least 1 row");
-            let resp = db.execute_sql("SELECT * FROM t3 WHERE id = 3").await;
+            let resp = to_response(db.execute_sql("SELECT * FROM t3 WHERE id = 3").await);
             assert_row_count(resp, 0);
             // DataScan should not return deleted rows (mark_deleted on version header)
-            let resp = db.execute_sql("SELECT * FROM t3").await;
+            let resp = to_response(db.execute_sql("SELECT * FROM t3").await);
             assert_row_count(resp, 4);
-            let resp = db.execute_sql("SELECT COUNT(*) FROM t3").await;
+            let resp = to_response(db.execute_sql("SELECT COUNT(*) FROM t3").await);
             let r = rows(resp);
             assert_eq!(r[0][0].as_i64().unwrap(), 4);
         }
@@ -152,12 +166,16 @@ async fn test_visibility_concurrent_read_write() {
     let path = dir.path().join("test_conc_vis.db");
     let db = Arc::new(Database::open(&path).await.unwrap());
 
-    db.execute_sql("CREATE TABLE t4 (id INT PRIMARY KEY, val INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t4 (id INT PRIMARY KEY, val INT)")
+            .await,
+    );
 
     for i in 1..=20 {
-        db.execute_sql(&format!("INSERT INTO t4 VALUES ({}, {})", i, i * 10))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t4 VALUES ({}, {})", i, i * 10))
+                .await,
+        );
     }
 
     let db_reader = db.clone();
@@ -165,9 +183,11 @@ async fn test_visibility_concurrent_read_write() {
 
     let writer = tokio::spawn(async move {
         for i in 21..=100 {
-            db_writer
-                .execute_sql(&format!("INSERT INTO t4 VALUES ({}, {})", i, i * 10))
-                .await;
+            to_response(
+                db_writer
+                    .execute_sql(&format!("INSERT INTO t4 VALUES ({}, {})", i, i * 10))
+                    .await,
+            );
             tokio::task::yield_now().await;
         }
     });
@@ -175,7 +195,7 @@ async fn test_visibility_concurrent_read_write() {
     let reader = tokio::spawn(async move {
         let mut seen_max = 20;
         for _ in 0..30 {
-            let resp = db_reader.execute_sql("SELECT id, val FROM t4").await;
+            let resp = to_response(db_reader.execute_sql("SELECT id, val FROM t4").await);
             let r = rows(resp);
 
             for row in &r {
@@ -198,7 +218,7 @@ async fn test_visibility_concurrent_read_write() {
     writer.await.unwrap();
     reader.await.unwrap();
 
-    let resp = db.execute_sql("SELECT COUNT(*) FROM t4").await;
+    let resp = to_response(db.execute_sql("SELECT COUNT(*) FROM t4").await);
     let r = rows(resp);
     let count = r[0][0].as_i64().unwrap();
     assert_eq!(count, 100, "final count should be 100, got {count}");
@@ -210,18 +230,22 @@ async fn test_visibility_concurrent_read_write() {
 async fn test_visibility_full_scan_after_inserts() {
     let db = open_db().await;
 
-    db.execute_sql("CREATE TABLE t5 (id INT PRIMARY KEY, val INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t5 (id INT PRIMARY KEY, val INT)")
+            .await,
+    );
 
     for i in 1..=100 {
-        db.execute_sql(&format!("INSERT INTO t5 VALUES ({}, {})", i, i * 10))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t5 VALUES ({}, {})", i, i * 10))
+                .await,
+        );
     }
 
-    let resp = db.execute_sql("SELECT * FROM t5").await;
+    let resp = to_response(db.execute_sql("SELECT * FROM t5").await);
     assert_row_count(resp, 100);
 
-    let resp = db.execute_sql("SELECT COUNT(*) FROM t5").await;
+    let resp = to_response(db.execute_sql("SELECT COUNT(*) FROM t5").await);
     let r = rows(resp);
     assert_eq!(r[0][0].as_i64().unwrap(), 100);
 }

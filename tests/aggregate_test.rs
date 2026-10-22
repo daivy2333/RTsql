@@ -1,7 +1,7 @@
 //! End-to-end tests for aggregate functions, GROUP BY, and HAVING.
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;
 
 /// Helper: open an in-memory database.
@@ -13,7 +13,7 @@ async fn open_db() -> Database {
 
 /// Helper: execute SQL and return the Response.
 async fn exec(db: &Database, sql: &str) -> Response {
-    db.execute_sql(sql).await
+    to_response(db.execute_sql(sql).await)
 }
 
 /// Helper: extract rows from a QueryResult, panicking if not QueryResult.

@@ -26,7 +26,7 @@
 //!   R4-S3 删索引跨重启持久            drop_index_persists_across_restart
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::{tempdir, TempDir};
 
@@ -41,7 +41,7 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str, what: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "{what} failed: {sql:?} -> {resp:?}"
@@ -112,7 +112,7 @@ async fn create_index_backfills_existing_rows_equivalently() {
     seed_dup_table(&db).await;
 
     let before = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "before index",
     );
     assert_eq!(before.len(), 2, "duplicate age rows must both match");
@@ -120,7 +120,7 @@ async fn create_index_backfills_existing_rows_equivalently() {
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
 
     let after = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "after index",
     );
     assert_eq!(
@@ -149,7 +149,7 @@ async fn create_index_usable_after_clean_reopen() {
     )
     .await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "after reopen",
     );
     assert_eq!(rows.len(), 3, "index must stay usable across clean reopen");
@@ -175,7 +175,7 @@ async fn create_index_consistent_across_crash_recovery() {
         .await;
 
         let runtime = query_rows(
-            db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
             "runtime",
         );
         assert_eq!(runtime.len(), 3, "runtime equality must see all rows");
@@ -184,7 +184,7 @@ async fn create_index_consistent_across_crash_recovery() {
     }
     let db2 = Database::open(&path).await.unwrap();
     let recovered = query_rows(
-        db2.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db2.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "recovered",
     );
     assert_eq!(
@@ -200,7 +200,7 @@ async fn create_index_on_non_int_column_rejected() {
     let (db, _dir) = open_db().await;
     seed_dup_table(&db).await;
     expect_plan_error(
-        db.execute_sql("CREATE INDEX idx_name ON t(name)").await,
+        to_response(db.execute_sql("CREATE INDEX idx_name ON t(name)").await),
         "non-INT column",
         "Unsupported statement type",
     );
@@ -208,7 +208,7 @@ async fn create_index_on_non_int_column_rejected() {
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create after reject").await;
     exec_ok(&db, "INSERT INTO t VALUES (5, 25, 'e')", "insert").await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "query",
     );
     assert_eq!(rows.len(), 3);
@@ -227,13 +227,13 @@ async fn create_index_duplicate_name_rejected() {
     )
     .await;
     expect_plan_error(
-        db.execute_sql("CREATE INDEX idx_age ON other(age)").await,
+        to_response(db.execute_sql("CREATE INDEX idx_age ON other(age)").await),
         "duplicate index name",
         "already exists",
     );
     // 既有索引零变化：等值查询仍工作
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "query",
     );
     assert_eq!(rows.len(), 2);
@@ -245,12 +245,12 @@ async fn create_unique_and_composite_index_rejected() {
     let (db, _dir) = open_db().await;
     seed_dup_table(&db).await;
     expect_plan_error(
-        db.execute_sql("CREATE UNIQUE INDEX u ON t(age)").await,
+        to_response(db.execute_sql("CREATE UNIQUE INDEX u ON t(age)").await),
         "unique index",
         "Unsupported statement type",
     );
     expect_plan_error(
-        db.execute_sql("CREATE INDEX c ON t(age, id)").await,
+        to_response(db.execute_sql("CREATE INDEX c ON t(age, id)").await),
         "composite index",
         "Unsupported statement type",
     );
@@ -262,14 +262,18 @@ async fn create_index_modifier_forms_rejected() {
     let (db, _dir) = open_db().await;
     seed_dup_table(&db).await;
     expect_plan_error(
-        db.execute_sql("CREATE INDEX p ON t(age) WHERE age > 20")
-            .await,
+        to_response(
+            db.execute_sql("CREATE INDEX p ON t(age) WHERE age > 20")
+                .await,
+        ),
         "partial index",
         "Unsupported statement type",
     );
     expect_plan_error(
-        db.execute_sql("CREATE INDEX IF NOT EXISTS i ON t(age)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE INDEX IF NOT EXISTS i ON t(age)")
+                .await,
+        ),
         "if not exists",
         "Unsupported statement type",
     );
@@ -281,12 +285,12 @@ async fn create_index_missing_table_or_column_rejected() {
     let (db, _dir) = open_db().await;
     seed_dup_table(&db).await;
     expect_plan_error(
-        db.execute_sql("CREATE INDEX i1 ON nope(c)").await,
+        to_response(db.execute_sql("CREATE INDEX i1 ON nope(c)").await),
         "missing table",
         "not found",
     );
     expect_plan_error(
-        db.execute_sql("CREATE INDEX i2 ON t(nope)").await,
+        to_response(db.execute_sql("CREATE INDEX i2 ON t(nope)").await),
         "missing column",
         "not found",
     );
@@ -299,10 +303,10 @@ async fn create_index_inside_explicit_transaction_rejected() {
     let (db, _dir) = open_db().await;
     seed_dup_table(&db).await;
     let tx = db.begin().await.unwrap();
-    match db
-        .execute_in_tx("CREATE INDEX idx_age ON t(age)", &tx)
-        .await
-    {
+    match to_response(
+        db.execute_in_tx("CREATE INDEX idx_age ON t(age)", &tx)
+            .await,
+    ) {
         Response::Error { sqlstate, .. } => {
             assert_eq!(
                 sqlstate.as_deref(),
@@ -324,7 +328,7 @@ async fn create_index_on_pk_column_allowed() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_id ON t(id)", "create on pk").await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE id = 3").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE id = 3").await),
         "query",
     );
     assert_eq!(rows.len(), 1);
@@ -341,8 +345,10 @@ async fn explain_shows_named_index_scan_node() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let rows = query_rows(
-        db.execute_sql("EXPLAIN SELECT * FROM t WHERE age = 25")
-            .await,
+        to_response(
+            db.execute_sql("EXPLAIN SELECT * FROM t WHERE age = 25")
+                .await,
+        ),
         "explain",
     );
     let text: Vec<String> = rows
@@ -362,14 +368,18 @@ async fn query_results_equivalent_before_and_after_index() {
     let (db, _dir) = open_db().await;
     seed_dup_table(&db).await;
     let before = query_rows(
-        db.execute_sql("SELECT id, name FROM t WHERE age = 30")
-            .await,
+        to_response(
+            db.execute_sql("SELECT id, name FROM t WHERE age = 30")
+                .await,
+        ),
         "before",
     );
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let after = query_rows(
-        db.execute_sql("SELECT id, name FROM t WHERE age = 30")
-            .await,
+        to_response(
+            db.execute_sql("SELECT id, name FROM t WHERE age = 30")
+                .await,
+        ),
         "after",
     );
     assert_eq!(before, after);
@@ -383,7 +393,7 @@ async fn non_keyable_literal_falls_back_without_error() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = NULL").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = NULL").await),
         "null literal",
     );
     assert!(
@@ -391,7 +401,7 @@ async fn non_keyable_literal_falls_back_without_error() {
         "age = NULL must fall back to row evaluation"
     );
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = '25'").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = '25'").await),
         "string literal",
     );
     assert!(rows.is_empty(), "string literal must fall back (type gate)");
@@ -404,13 +414,15 @@ async fn unindexed_column_keeps_scan_semantics() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE name = 'a'").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE name = 'a'").await),
         "unindexed column",
     );
     assert_eq!(rows.len(), 1, "unindexed equality must keep scan semantics");
     let lines: Vec<String> = query_rows(
-        db.execute_sql("EXPLAIN SELECT * FROM t WHERE name = 'a'")
-            .await,
+        to_response(
+            db.execute_sql("EXPLAIN SELECT * FROM t WHERE name = 'a'")
+                .await,
+        ),
         "explain",
     )
     .iter()
@@ -434,7 +446,7 @@ async fn insert_is_reachable_via_index_query() {
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     exec_ok(&db, "INSERT INTO t VALUES (10, 25, 'x')", "insert").await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "query",
     );
     assert_eq!(rows.len(), 3, "new row must enter the index");
@@ -448,7 +460,7 @@ async fn delete_stops_matching_index_query() {
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     exec_ok(&db, "DELETE FROM t WHERE id = 1", "delete").await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "query",
     );
     assert_eq!(rows.len(), 1, "deleted row must leave the index");
@@ -463,12 +475,12 @@ async fn update_rekey_keeps_old_and_new_keys_consistent() {
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     exec_ok(&db, "UPDATE t SET age = 40 WHERE id = 3", "rekey update").await;
     let new_key = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 40").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 40").await),
         "new key",
     );
     assert_eq!(new_key.len(), 1, "new key must reach the row");
     let old_key = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 30").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 30").await),
         "old key",
     );
     assert!(old_key.is_empty(), "old key must no longer match");
@@ -490,23 +502,27 @@ async fn rollback_restores_index_entries_two_state() {
 
         let tx = db.begin().await.unwrap();
         expect_ok_resp(
-            db.execute_in_tx("INSERT INTO t VALUES (10, 25, 'x')", &tx)
-                .await,
+            to_response(
+                db.execute_in_tx("INSERT INTO t VALUES (10, 25, 'x')", &tx)
+                    .await,
+            ),
             "tx insert",
         );
         expect_ok_resp(
-            db.execute_in_tx("UPDATE t SET age = 99 WHERE id = 3", &tx)
-                .await,
+            to_response(
+                db.execute_in_tx("UPDATE t SET age = 99 WHERE id = 3", &tx)
+                    .await,
+            ),
             "tx update",
         );
         expect_ok_resp(
-            db.execute_in_tx("DELETE FROM t WHERE id = 2", &tx).await,
+            to_response(db.execute_in_tx("DELETE FROM t WHERE id = 2", &tx).await),
             "tx delete",
         );
         db.rollback(tx).await.unwrap();
 
         let rows = query_rows(
-            db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
             "after rollback",
         );
         assert_eq!(
@@ -515,12 +531,12 @@ async fn rollback_restores_index_entries_two_state() {
             "rollback must restore index entries to pre-transaction state"
         );
         let rows = query_rows(
-            db.execute_sql("SELECT * FROM t WHERE age = 30").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE age = 30").await),
             "after rollback",
         );
         assert_eq!(rows.len(), 1, "rolled-back rekey must leave old key intact");
         let rows = query_rows(
-            db.execute_sql("SELECT * FROM t WHERE age = 99").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE age = 99").await),
             "after rollback",
         );
         assert!(rows.is_empty(), "rolled-back new key must have no entry");
@@ -530,7 +546,7 @@ async fn rollback_restores_index_entries_two_state() {
     }
     let db2 = Database::open(&path).await.unwrap();
     let rows = query_rows(
-        db2.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db2.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "reopened",
     );
     assert_eq!(rows.len(), 2, "reopen two-state must agree with runtime");
@@ -551,24 +567,24 @@ async fn upsert_conflict_actions_maintain_index() {
     )
     .await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 99").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 99").await),
         "do update new key",
     );
     assert_eq!(rows.len(), 1, "DO UPDATE must enter the new key");
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "do update old key",
     );
     assert_eq!(rows.len(), 1, "only the untouched duplicate remains");
 
     exec_ok(&db, "REPLACE INTO t VALUES (2, 77, 'c')", "replace").await;
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 77").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 77").await),
         "replace new key",
     );
     assert_eq!(rows.len(), 1);
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "replace old key",
     );
     assert!(rows.is_empty(), "replaced row's old key entry must be gone");
@@ -585,12 +601,12 @@ async fn drop_index_falls_back_to_scan() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let before = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "with index",
     );
     exec_ok(&db, "DROP INDEX idx_age", "drop index").await;
     let after = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "after drop",
     );
     assert_eq!(
@@ -600,8 +616,10 @@ async fn drop_index_falls_back_to_scan() {
     );
 
     let lines: Vec<String> = query_rows(
-        db.execute_sql("EXPLAIN SELECT * FROM t WHERE age = 25")
-            .await,
+        to_response(
+            db.execute_sql("EXPLAIN SELECT * FROM t WHERE age = 25")
+                .await,
+        ),
         "explain",
     )
     .iter()
@@ -619,12 +637,12 @@ async fn drop_index_missing_or_if_exists_rejected() {
     let (db, _dir) = open_db().await;
     seed_dup_table(&db).await;
     expect_plan_error(
-        db.execute_sql("DROP INDEX nope").await,
+        to_response(db.execute_sql("DROP INDEX nope").await),
         "missing index",
         "nope",
     );
     expect_plan_error(
-        db.execute_sql("DROP INDEX IF EXISTS nope").await,
+        to_response(db.execute_sql("DROP INDEX IF EXISTS nope").await),
         "if exists",
         "Unsupported statement type",
     );
@@ -644,8 +662,10 @@ async fn drop_index_persists_across_restart() {
     }
     let db = Database::open(&path).await.unwrap();
     let lines: Vec<String> = query_rows(
-        db.execute_sql("EXPLAIN SELECT * FROM t WHERE age = 25")
-            .await,
+        to_response(
+            db.execute_sql("EXPLAIN SELECT * FROM t WHERE age = 25")
+                .await,
+        ),
         "explain",
     )
     .iter()
@@ -656,7 +676,7 @@ async fn drop_index_persists_across_restart() {
         "dropped index must stay gone across restart: {lines:?}"
     );
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 25").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 25").await),
         "query",
     );
     assert_eq!(rows.len(), 2);
@@ -675,7 +695,7 @@ async fn secondary_index_scan_late_column_projection_no_panic() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let rows = query_rows(
-        db.execute_sql("SELECT name FROM t WHERE age = 30").await,
+        to_response(db.execute_sql("SELECT name FROM t WHERE age = 30").await),
         "late column projection",
     );
     assert_eq!(rows, vec![vec![serde_json::json!("c")]]);
@@ -689,8 +709,10 @@ async fn secondary_index_scan_out_of_order_projection_rows() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let rows = query_rows(
-        db.execute_sql("SELECT name, id FROM t WHERE age = 30")
-            .await,
+        to_response(
+            db.execute_sql("SELECT name, id FROM t WHERE age = 30")
+                .await,
+        ),
         "out-of-order projection",
     );
     assert_eq!(
@@ -707,8 +729,10 @@ async fn explain_secondary_index_projection_shape_no_panic() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let lines: Vec<String> = query_rows(
-        db.execute_sql("EXPLAIN SELECT name FROM t WHERE age = 30")
-            .await,
+        to_response(
+            db.execute_sql("EXPLAIN SELECT name FROM t WHERE age = 30")
+                .await,
+        ),
         "explain",
     )
     .iter()
@@ -730,19 +754,19 @@ async fn secondary_index_scan_pk_range_wildcard_zero_regression() {
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     // PK 等值路由（IndexScan，「已收窄」契约）零变化
     let rows = query_rows(
-        db.execute_sql("SELECT name FROM t WHERE id = 3").await,
+        to_response(db.execute_sql("SELECT name FROM t WHERE id = 3").await),
         "pk route",
     );
     assert_eq!(rows, vec![vec![serde_json::json!("c")]]);
     // 范围谓词回落扫描
     let rows = query_rows(
-        db.execute_sql("SELECT name FROM t WHERE age > 24").await,
+        to_response(db.execute_sql("SELECT name FROM t WHERE age > 24").await),
         "range fallback",
     );
     assert_eq!(rows.len(), 3);
     // 通配投影经二级索引扫描
     let rows = query_rows(
-        db.execute_sql("SELECT * FROM t WHERE age = 30").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE age = 30").await),
         "wildcard",
     );
     assert_eq!(
@@ -762,8 +786,10 @@ async fn aggregate_over_secondary_index_scan_maps_correctly() {
     seed_dup_table(&db).await;
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
     let rows = query_rows(
-        db.execute_sql("SELECT COUNT(*), MAX(id) FROM t WHERE age = 25")
-            .await,
+        to_response(
+            db.execute_sql("SELECT COUNT(*), MAX(id) FROM t WHERE age = 25")
+                .await,
+        ),
         "aggregate over index scan",
     );
     assert_eq!(rows, vec![vec![serde_json::json!(2), serde_json::json!(2)]]);

@@ -14,7 +14,7 @@
 //! Checkpoint 记录，其后的 INSERT 追加新格式帧，构成混合格式流。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -30,14 +30,17 @@ async fn large_wal_recovers_after_unclean_shutdown() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
     db.checkpoint().await.unwrap();
 
     let values: Vec<String> = (0..500u64).map(|i| format!("({},{})", i, i * 2)).collect();
-    let resp = db
-        .execute_sql(&format!("INSERT INTO t VALUES {}", values.join(",")))
-        .await;
+    let resp = to_response(
+        db.execute_sql(&format!("INSERT INTO t VALUES {}", values.join(",")))
+            .await,
+    );
     assert!(
         matches!(resp, Response::AffectedRows { count: 500 }),
         "INSERT 需成功写入 500 行，实际 {:?}",
@@ -57,7 +60,7 @@ async fn large_wal_recovers_after_unclean_shutdown() {
 
     // 修复前此处 Err(Incomplete WAL record) → unwrap panic（RED）
     let db2 = Database::open(&path).await.unwrap();
-    let resp = db2.execute_sql("SELECT COUNT(*) FROM t").await;
+    let resp = to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await);
     match resp {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "COUNT(*) 必须返回单行");
@@ -79,17 +82,19 @@ async fn small_wal_recovers_unchanged() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     db.checkpoint().await.unwrap();
     for i in 0..5u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
     db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
-    let resp = db2.execute_sql("SELECT COUNT(*) FROM t").await;
+    let resp = to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await);
     match resp {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(5));
@@ -115,7 +120,7 @@ async fn eviction_scale_recovery_row_integrity() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     // 契约：create_table 后不 checkpoint（catalog 走 buffer_pool.flush_all
     // 落盘，非 checkpoint 路径 — 夹具先例 checkpoint_redo_reduction_test.rs）
     db.buffer_pool.flush_all().await.unwrap();
@@ -125,8 +130,10 @@ async fn eviction_scale_recovery_row_integrity() {
         let tx = db.begin().await.unwrap();
         for i in 0..50u64 {
             let id = (batch * 50 + i) as i64;
-            db.execute_in_tx(&format!("INSERT INTO t VALUES ({})", id), &tx)
-                .await;
+            to_response(
+                db.execute_in_tx(&format!("INSERT INTO t VALUES ({})", id), &tx)
+                    .await,
+            );
         }
         db.commit(tx).await.unwrap();
     }
@@ -138,7 +145,7 @@ async fn eviction_scale_recovery_row_integrity() {
     let db2 = Database::open(&path).await.unwrap();
 
     // 主断言：COUNT 精确 10000
-    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -150,17 +157,17 @@ async fn eviction_scale_recovery_row_integrity() {
     }
 
     // 探针 1：重复 PK → DuplicateKey（索引必须完整覆盖已恢复 1 万条）
-    match db2.execute_sql("INSERT INTO t VALUES (42)").await {
+    match to_response(db2.execute_sql("INSERT INTO t VALUES (42)").await) {
         Response::Error { .. } => { /* 期望 DuplicateKey */ }
         other => panic!("重复 PK INSERT 应被拒，实际 {:?}", other),
     }
 
     // 探针 2：新 PK → 成功（行数变为 10001）
-    match db2.execute_sql("INSERT INTO t VALUES (20000)").await {
+    match to_response(db2.execute_sql("INSERT INTO t VALUES (20000)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("新 PK INSERT 应成功，实际 {:?}", other),
     }
-    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(10001));
         }
@@ -190,8 +197,10 @@ async fn mixed_dml_recovery_semantics() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
     db.checkpoint().await.unwrap();
 
     // 前半段 5k（中位点 checkpoint 前）
@@ -199,8 +208,10 @@ async fn mixed_dml_recovery_semantics() {
         let tx = db.begin().await.unwrap();
         for i in 0..50u64 {
             let id = (batch * 50 + i) as i64;
-            db.execute_in_tx(&format!("INSERT INTO t VALUES ({}, {})", id, id * 10), &tx)
-                .await;
+            to_response(
+                db.execute_in_tx(&format!("INSERT INTO t VALUES ({}, {})", id, id * 10), &tx)
+                    .await,
+            );
         }
         db.commit(tx).await.unwrap();
     }
@@ -212,8 +223,10 @@ async fn mixed_dml_recovery_semantics() {
         let tx = db.begin().await.unwrap();
         for i in 0..50u64 {
             let id = (batch * 50 + i) as i64;
-            db.execute_in_tx(&format!("INSERT INTO t VALUES ({}, {})", id, id * 10), &tx)
-                .await;
+            to_response(
+                db.execute_in_tx(&format!("INSERT INTO t VALUES ({}, {})", id, id * 10), &tx)
+                    .await,
+            );
         }
         db.commit(tx).await.unwrap();
     }
@@ -224,10 +237,10 @@ async fn mixed_dml_recovery_semantics() {
     let update_ranges: [std::ops::Range<i64>; 3] = [0..50, 4970..5000, 9980..10000];
     for range in update_ranges {
         for id in range.clone() {
-            match db
-                .execute_sql(&format!("UPDATE t SET v = 9999 WHERE id = {}", id))
-                .await
-            {
+            match to_response(
+                db.execute_sql(&format!("UPDATE t SET v = 9999 WHERE id = {}", id))
+                    .await,
+            ) {
                 Response::AffectedRows { count: 1 } => updated += 1,
                 other => panic!("UPDATE id={} 应成功，实际 {:?}", id, other),
             }
@@ -237,10 +250,10 @@ async fn mixed_dml_recovery_semantics() {
 
     // DELETE 50 行（200..250）
     for id in 200..250i64 {
-        match db
-            .execute_sql(&format!("DELETE FROM t WHERE id = {}", id))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("DELETE FROM t WHERE id = {}", id))
+                .await,
+        ) {
             Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
             other => panic!("DELETE id={} 应成功，实际 {:?}", id, other),
         }
@@ -253,7 +266,7 @@ async fn mixed_dml_recovery_semantics() {
     let db2 = Database::open(&path).await.unwrap();
 
     // ① COUNT 精确 9950 = 10000 − 50（R6 后 UPDATE 不改变行数，零容差）
-    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -266,10 +279,10 @@ async fn mixed_dml_recovery_semantics() {
 
     // ② 被更新行 v=9999：点查（索引路径，覆盖最小键/中部/尾部采样点）
     for id in [0i64, 25, 49, 4970, 4999, 9980, 9999] {
-        match db2
-            .execute_sql(&format!("SELECT v FROM t WHERE id = {}", id))
-            .await
-        {
+        match to_response(
+            db2.execute_sql(&format!("SELECT v FROM t WHERE id = {}", id))
+                .await,
+        ) {
             Response::QueryResult { rows } => {
                 assert_eq!(rows.len(), 1, "id={} 必须命中", id);
                 assert_eq!(rows[0][0], serde_json::json!(9999), "id={} v 应为 9999", id);
@@ -280,10 +293,10 @@ async fn mixed_dml_recovery_semantics() {
 
     // ③ 全量口径抽查：v=9999 恰好 100 行（v 无索引 → DataScan + 谓词路径；
     // 值正确性守护——判别双计的主断言是 ① 的 COUNT(*)==9950）
-    match db2
-        .execute_sql("SELECT COUNT(*) FROM t WHERE v = 9999")
-        .await
-    {
+    match to_response(
+        db2.execute_sql("SELECT COUNT(*) FROM t WHERE v = 9999")
+            .await,
+    ) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -296,10 +309,10 @@ async fn mixed_dml_recovery_semantics() {
 
     // ④ 被删行 0 行
     for id in [200i64, 220, 249] {
-        match db2
-            .execute_sql(&format!("SELECT * FROM t WHERE id = {}", id))
-            .await
-        {
+        match to_response(
+            db2.execute_sql(&format!("SELECT * FROM t WHERE id = {}", id))
+                .await,
+        ) {
             Response::QueryResult { rows } => {
                 assert_eq!(rows.len(), 0, "Delete 后 id={} 不可见", id);
             }
@@ -308,10 +321,10 @@ async fn mixed_dml_recovery_semantics() {
     }
 
     // ⑤ 存活区间精确：id ∈ [100, 200) 共 100 行（既有 loose ≥90 精确化）
-    match db2
-        .execute_sql("SELECT COUNT(*) FROM t WHERE id >= 100 AND id < 200")
-        .await
-    {
+    match to_response(
+        db2.execute_sql("SELECT COUNT(*) FROM t WHERE id >= 100 AND id < 200")
+            .await,
+    ) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -324,10 +337,10 @@ async fn mixed_dml_recovery_semantics() {
 
     // ⑥ 唯一性：重复 INSERT 最小键与中位点前键均 DuplicateKey
     for id in [0i64, 300] {
-        match db2
-            .execute_sql(&format!("INSERT INTO t VALUES ({}, 0)", id))
-            .await
-        {
+        match to_response(
+            db2.execute_sql(&format!("INSERT INTO t VALUES ({}, 0)", id))
+                .await,
+        ) {
             Response::Error { .. } => { /* 期望 DuplicateKey */ }
             other => panic!("恢复后重复 INSERT id={} 应被拒，实际 {:?}", id, other),
         }
@@ -351,14 +364,16 @@ async fn count_after_update_exact() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
 
     for i in 0..100i64 {
-        match db
-            .execute_sql(&format!("INSERT INTO t VALUES ({}, {})", i, i))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({}, {})", i, i))
+                .await,
+        ) {
             Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
             other => panic!("INSERT id={} 应成功，实际 {:?}", i, other),
         }
@@ -367,17 +382,17 @@ async fn count_after_update_exact() {
     // 10 行 UPDATE（覆盖最小键/中部/尾部）
     let update_targets = [0i64, 5, 10, 25, 50, 60, 75, 88, 95, 99];
     for id in update_targets {
-        match db
-            .execute_sql(&format!("UPDATE t SET v = 9999 WHERE id = {}", id))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("UPDATE t SET v = 9999 WHERE id = {}", id))
+                .await,
+        ) {
             Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
             other => panic!("UPDATE id={} 应成功，实际 {:?}", id, other),
         }
     }
 
     // 主断言：COUNT 精确 100（RED：110——被更新行新旧版本双计）
-    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -390,10 +405,10 @@ async fn count_after_update_exact() {
 
     // 点查新值（索引路径）
     for id in [0i64, 50, 99] {
-        match db
-            .execute_sql(&format!("SELECT v FROM t WHERE id = {}", id))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("SELECT v FROM t WHERE id = {}", id))
+                .await,
+        ) {
             Response::QueryResult { rows } => {
                 assert_eq!(rows.len(), 1, "id={} 必须命中", id);
                 assert_eq!(rows[0][0], serde_json::json!(9999), "id={} v 应为 9999", id);
@@ -404,10 +419,10 @@ async fn count_after_update_exact() {
 
     // 全量口径抽查：v=9999 恰好 10 行（v 无索引 → DataScan + 谓词路径；
     // 值正确性守护——判别双计的主断言是上方 COUNT(*)）
-    match db
-        .execute_sql("SELECT COUNT(*) FROM t WHERE v = 9999")
-        .await
-    {
+    match to_response(
+        db.execute_sql("SELECT COUNT(*) FROM t WHERE v = 9999")
+            .await,
+    ) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(10));
         }
@@ -415,7 +430,7 @@ async fn count_after_update_exact() {
     }
 
     // 未更新行守护：v 保持原值且只出现一次（id=1 → v=1）
-    match db.execute_sql("SELECT v FROM t WHERE id = 1").await {
+    match to_response(db.execute_sql("SELECT v FROM t WHERE id = 1").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0][0], serde_json::json!(1));
@@ -436,32 +451,36 @@ async fn count_after_cross_page_update_exact() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
 
     // 300 行：50/显式事务 × 6 批（页容量 ~87 行 → 分属 4 页）
     for batch in 0..6u64 {
         let tx = db.begin().await.unwrap();
         for i in 0..50u64 {
             let id = (batch * 50 + i) as i64;
-            db.execute_in_tx(&format!("INSERT INTO t VALUES ({}, {})", id, id), &tx)
-                .await;
+            to_response(
+                db.execute_in_tx(&format!("INSERT INTO t VALUES ({}, {})", id, id), &tx)
+                    .await,
+            );
         }
         db.commit(tx).await.unwrap();
     }
 
     // 更新行分属 ≥3 数据页：id=0（第 1 页）、id=100（第 2 页）、id=250（第 3+ 页）
     for id in [0i64, 100, 250] {
-        match db
-            .execute_sql(&format!("UPDATE t SET v = 9999 WHERE id = {}", id))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("UPDATE t SET v = 9999 WHERE id = {}", id))
+                .await,
+        ) {
             Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
             other => panic!("UPDATE id={} 应成功，实际 {:?}", id, other),
         }
     }
 
-    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -474,10 +493,10 @@ async fn count_after_cross_page_update_exact() {
 
     // 跨页更新行的点查新值
     for id in [0i64, 100, 250] {
-        match db
-            .execute_sql(&format!("SELECT v FROM t WHERE id = {}", id))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("SELECT v FROM t WHERE id = {}", id))
+                .await,
+        ) {
             Response::QueryResult { rows } => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0][0], serde_json::json!(9999));
@@ -500,15 +519,17 @@ async fn recovery_rerun_is_idempotent() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     db.buffer_pool.flush_all().await.unwrap();
 
     for batch in 0..200u64 {
         let tx = db.begin().await.unwrap();
         for i in 0..50u64 {
             let id = (batch * 50 + i) as i64;
-            db.execute_in_tx(&format!("INSERT INTO t VALUES ({})", id), &tx)
-                .await;
+            to_response(
+                db.execute_in_tx(&format!("INSERT INTO t VALUES ({})", id), &tx)
+                    .await,
+            );
         }
         db.commit(tx).await.unwrap();
     }
@@ -518,7 +539,7 @@ async fn recovery_rerun_is_idempotent() {
 
     // 第一次重开
     let db1 = Database::open(&path).await.unwrap();
-    match db1.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db1.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -533,7 +554,7 @@ async fn recovery_rerun_is_idempotent() {
 
     // 第二次重开（WAL 仍在，无 checkpoint 截断）— 修复前会再 append 1 万
     let db2 = Database::open(&path).await.unwrap();
-    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],

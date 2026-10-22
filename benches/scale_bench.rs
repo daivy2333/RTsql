@@ -41,7 +41,8 @@ fn scale_select(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     for i in 0..n {
-                        db.execute_sql(&format!("SELECT * FROM bench WHERE id = {}", i))
+                        let _ = db
+                            .execute_sql(&format!("SELECT * FROM bench WHERE id = {}", i))
                             .await;
                     }
                 });
@@ -69,7 +70,7 @@ fn scale_scan(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("full_scan", n), &n, |b, _| {
             b.iter(|| {
                 rt.block_on(async {
-                    db.execute_sql("SELECT * FROM bench").await;
+                    let _ = db.execute_sql("SELECT * FROM bench").await;
                 });
             });
         });
@@ -95,7 +96,7 @@ fn scale_join(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("inner_join", n), &n, |b, _| {
             b.iter(|| {
                 rt.block_on(async {
-                    db.execute_sql(
+                    let _ = db.execute_sql(
                         "SELECT * FROM orders INNER JOIN customers ON orders.customer_id = customers.id",
                     )
                     .await;

@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::transaction::IsolationLevel;
 use tempfile::TempDir;
 
@@ -27,19 +27,19 @@ async fn seed_pending_wal(path: &Path, key: Option<&str>) {
     let db = Database::open_with_key(path, IsolationLevel::RepeatableRead, key)
         .await
         .unwrap();
-    match db
-        .execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
-        .await
-    {
+    match to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
+            .await,
+    ) {
         Response::AffectedRows { .. } => {}
         other => panic!("create table failed: {other:?}"),
     }
     db.checkpoint().await.unwrap();
     for i in 0..300 {
-        match db
-            .execute_sql(&format!("INSERT INTO t VALUES ({}, {})", i, i * 10))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({}, {})", i, i * 10))
+                .await,
+        ) {
             Response::AffectedRows { .. } => {}
             other => panic!("insert {i} failed: {other:?}"),
         }

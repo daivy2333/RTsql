@@ -20,29 +20,33 @@ pub fn cleanup_db(path: &Path) {
 
 /// 创建标准测试表 (id INT PK, name STRING, value INT)
 pub async fn create_test_table(db: &Database) {
-    db.execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, name STRING, value INT)")
+    let _ = db
+        .execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, name STRING, value INT)")
         .await;
 }
 
 /// 插入 n 行数据到 bench 表
 pub async fn insert_rows(db: &Database, start: i64, n: i64) {
     for i in start..start + n {
-        db.execute_sql(&format!(
-            "INSERT INTO bench VALUES ({}, 'user_{}', {})",
-            i,
-            i,
-            i * 10
-        ))
-        .await;
+        let _ = db
+            .execute_sql(&format!(
+                "INSERT INTO bench VALUES ({}, 'user_{}', {})",
+                i,
+                i,
+                i * 10
+            ))
+            .await;
     }
 }
 
 /// 创建 JOIN 测试表 (orders + customers)
 #[allow(dead_code)] // kept as a shared fixture for future join benchmarks
 pub async fn create_join_tables(db: &Database) {
-    db.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name STRING)")
+    let _ = db
+        .execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name STRING)")
         .await;
-    db.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, amount INT)")
+    let _ = db
+        .execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, amount INT)")
         .await;
 }
 
@@ -50,17 +54,19 @@ pub async fn create_join_tables(db: &Database) {
 #[allow(dead_code)] // kept as a shared fixture for future join benchmarks
 pub async fn insert_join_data(db: &Database, n: i64) {
     for i in 0..n {
-        db.execute_sql(&format!(
-            "INSERT INTO customers VALUES ({}, 'customer_{}')",
-            i, i
-        ))
-        .await;
-        db.execute_sql(&format!(
-            "INSERT INTO orders VALUES ({}, {}, {})",
-            i,
-            i,
-            i * 100
-        ))
-        .await;
+        let _ = db
+            .execute_sql(&format!(
+                "INSERT INTO customers VALUES ({}, 'customer_{}')",
+                i, i
+            ))
+            .await;
+        let _ = db
+            .execute_sql(&format!(
+                "INSERT INTO orders VALUES ({}, {}, {})",
+                i,
+                i,
+                i * 100
+            ))
+            .await;
     }
 }

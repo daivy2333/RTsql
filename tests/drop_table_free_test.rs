@@ -5,7 +5,7 @@
 //! 使同进程内后续 `create_table` 复用 free-list（`file_len` 不再单调递增）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::page_format::ColumnType;
 use rtsql::storage::{Page, HEADER_SIZE};
 use std::path::Path;
@@ -35,7 +35,7 @@ async fn create_users(db: &Database) {
 
 async fn insert_one(db: &Database, id: i64, name: &str) {
     let sql = format!("INSERT INTO users VALUES ({}, '{}')", id, name);
-    if let Response::Error { message, .. } = db.execute_sql(&sql).await {
+    if let Response::Error { message, .. } = to_response(db.execute_sql(&sql).await) {
         panic!("INSERT failed: {}", message);
     }
 }
@@ -160,7 +160,7 @@ async fn test_same_process_free_list_reuse() {
     );
 
     // And the recreated table is fully usable.
-    match db.execute_sql("SELECT COUNT(*) FROM users").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM users").await) {
         Response::QueryResult { rows } => assert!(
             !rows.is_empty(),
             "recreated users table should be queryable"
@@ -202,7 +202,7 @@ async fn test_cross_restart_after_drop_safe() {
     .await
     .unwrap();
     insert_one(&db2, 7, "bob").await;
-    match db2.execute_sql("SELECT COUNT(*) FROM users").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM users").await) {
         Response::QueryResult { rows } => assert!(
             !rows.is_empty(),
             "recreated users must be usable after restart"

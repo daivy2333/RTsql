@@ -17,12 +17,12 @@
 //! catalog 缺表形态，不误伤正常恢复。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::tempdir;
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -121,7 +121,7 @@ async fn close_then_reopen_succeeds() {
         db.close().await.unwrap();
     }
     let db = Database::open(&path).await.unwrap();
-    let rows = match db.execute_sql("SELECT id, v FROM t").await {
+    let rows = match to_response(db.execute_sql("SELECT id, v FROM t").await) {
         Response::QueryResult { rows } => rows,
         other => panic!("Expected QueryResult, got {other:?}"),
     };

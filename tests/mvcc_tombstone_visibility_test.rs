@@ -8,7 +8,7 @@
 //! pre-update version; flushed uncommitted rows resurrect after restart).
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;
 
 async fn open_db_at(path: &std::path::Path) -> Database {
@@ -32,9 +32,10 @@ fn rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
 }
 
 async fn create_t(db: &Database) {
-    let resp = db
-        .execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
-        .await;
+    let resp = to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
+            .await,
+    );
     assert!(
         !matches!(resp, Response::Error { .. }),
         "create table failed: {resp:?}"
@@ -54,28 +55,28 @@ async fn i033_update_delete_scan_is_empty() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
     assert_affected(
-        db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await),
         "update",
         1,
     );
     assert_affected(
-        db.execute_sql("DELETE FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("DELETE FROM t WHERE id = 1").await),
         "delete",
         1,
     );
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert!(
         scan.is_empty(),
         "R2-S1: committed update→delete chain must scan empty (pre-fix resurrects [[1,10]]), got {scan:?}"
     );
     let point = rows(
-        db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
         "point query",
     );
     assert!(
@@ -93,17 +94,17 @@ async fn i033_update_delete_scan_empty_after_restart() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
     assert_affected(
-        db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await),
         "update",
         1,
     );
     assert_affected(
-        db.execute_sql("DELETE FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("DELETE FROM t WHERE id = 1").await),
         "delete",
         1,
     );
@@ -112,13 +113,13 @@ async fn i033_update_delete_scan_empty_after_restart() {
     drop(db);
     let db = open_db_at(&path).await;
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert!(
         scan.is_empty(),
         "R4-S1: restart must not resurrect the pre-update version, got {scan:?}"
     );
     let point = rows(
-        db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
         "point query",
     );
     assert!(
@@ -136,24 +137,24 @@ async fn uncommitted_delete_scan_sees_pre_delete_version() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
     assert_affected(
-        db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await),
         "update",
         1,
     );
 
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        to_response(db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await),
         "uncommitted delete",
         1,
     );
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert_eq!(
         scan,
         vec![row(1, 99)],
@@ -172,12 +173,12 @@ async fn uncommitted_delete_leaves_version_header_intact() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
     assert_affected(
-        db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await),
         "update",
         1,
     );
@@ -201,7 +202,7 @@ async fn uncommitted_delete_leaves_version_header_intact() {
 
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        to_response(db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await),
         "uncommitted delete",
         1,
     );
@@ -234,25 +235,25 @@ async fn tombstone_rollback_scan_recovers() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
     assert_affected(
-        db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await),
         "update",
         1,
     );
 
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        to_response(db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await),
         "delete",
         1,
     );
     db.rollback(tx).await.unwrap();
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert_eq!(
         scan,
         vec![row(1, 99)],
@@ -270,22 +271,22 @@ async fn rekey_update_delete_scan_is_empty() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
     assert_affected(
-        db.execute_sql("UPDATE t SET id = 2 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET id = 2 WHERE id = 1").await),
         "rekey update",
         1,
     );
     assert_affected(
-        db.execute_sql("DELETE FROM t WHERE id = 2").await,
+        to_response(db.execute_sql("DELETE FROM t WHERE id = 2").await),
         "delete",
         1,
     );
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert!(
         scan.is_empty(),
         "R2-S2 Z1: rekey update→delete chain must scan empty, got {scan:?}"
@@ -301,27 +302,27 @@ async fn delete_then_reinsert_update_yields_latest_version() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
     assert_affected(
-        db.execute_sql("DELETE FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("DELETE FROM t WHERE id = 1").await),
         "delete",
         1,
     );
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 20)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 20)").await),
         "re-insert",
         1,
     );
     assert_affected(
-        db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await),
         "update",
         1,
     );
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert_eq!(
         scan,
         vec![row(1, 99)],
@@ -339,19 +340,19 @@ async fn uncommitted_delete_not_applied_after_restart() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
     assert_affected(
-        db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET n = 99 WHERE id = 1").await),
         "update",
         1,
     );
 
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        to_response(db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await),
         "uncommitted delete",
         1,
     );
@@ -364,7 +365,7 @@ async fn uncommitted_delete_not_applied_after_restart() {
     drop(db);
     let db = open_db_at(&path).await;
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert_eq!(
         scan,
         vec![row(1, 99)],
@@ -384,7 +385,7 @@ async fn flushed_uncommitted_insert_does_not_resurrect() {
 
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("INSERT INTO t VALUES (7, 70)", &tx).await,
+        to_response(db.execute_in_tx("INSERT INTO t VALUES (7, 70)", &tx).await),
         "uncommitted insert",
         1,
     );
@@ -397,7 +398,7 @@ async fn flushed_uncommitted_insert_does_not_resurrect() {
     drop(db);
 
     let db = open_db_at(&path).await;
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert!(
         scan.is_empty(),
         "R4-S3: uncommitted row that reached disk must not resurrect after restart (pre-fix yields [[7,70]]), got {scan:?}"
@@ -415,12 +416,12 @@ async fn default_path_uncommitted_insert_visible_baseline() {
 
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("INSERT INTO t VALUES (7, 70)", &tx).await,
+        to_response(db.execute_in_tx("INSERT INTO t VALUES (7, 70)", &tx).await),
         "uncommitted insert",
         1,
     );
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "scan");
+    let scan = rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan");
     assert_eq!(
         scan,
         vec![row(7, 70)],
@@ -442,7 +443,7 @@ async fn tx_id_allocator_advances_past_recovered_ids_after_restart() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "committed insert",
         1,
     );
@@ -452,7 +453,7 @@ async fn tx_id_allocator_advances_past_recovered_ids_after_restart() {
     // tx id on the next open.
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("INSERT INTO t VALUES (7, 70)", &tx).await,
+        to_response(db.execute_in_tx("INSERT INTO t VALUES (7, 70)", &tx).await),
         "uncommitted insert",
         1,
     );

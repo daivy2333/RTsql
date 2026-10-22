@@ -15,7 +15,7 @@
 //! `RTSQL_HOME` 同指独立 TempDir 断言目录零新文件——那是真实的落盘面。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -80,7 +80,7 @@ fn ints(resp: Response, what: &str) -> Vec<i64> {
 }
 
 async fn exec_ok(db: &Database, sql: &str, what: &str) {
-    assert_ok(db.execute_sql(sql).await, what);
+    assert_ok(to_response(db.execute_sql(sql).await), what);
 }
 
 /// CWD 下是否存在以 `prefix` 开头的条目（`:memory:` 落盘回归见证）。
@@ -124,12 +124,16 @@ async fn t3_crud_chain_in_memory_db() {
     .await;
 
     assert_eq!(
-        ints(db.execute_sql("SELECT n FROM t").await, "select all").len(),
+        ints(
+            to_response(db.execute_sql("SELECT n FROM t").await),
+            "select all"
+        )
+        .len(),
         3
     );
     assert_eq!(
         ints(
-            db.execute_sql("SELECT n FROM t WHERE n > 15").await,
+            to_response(db.execute_sql("SELECT n FROM t WHERE n > 15").await),
             "filtered select"
         ),
         vec![20, 30]
@@ -138,7 +142,7 @@ async fn t3_crud_chain_in_memory_db() {
     exec_ok(&db, "UPDATE t SET n = 99 WHERE id = 2", "update row").await;
     assert_eq!(
         scalar(
-            db.execute_sql("SELECT n FROM t WHERE id = 2").await,
+            to_response(db.execute_sql("SELECT n FROM t WHERE id = 2").await),
             "select updated row"
         ),
         Value::from(99)
@@ -147,7 +151,7 @@ async fn t3_crud_chain_in_memory_db() {
     exec_ok(&db, "DELETE FROM t WHERE id = 3", "delete row").await;
     assert_eq!(
         ints(
-            db.execute_sql("SELECT n FROM t").await,
+            to_response(db.execute_sql("SELECT n FROM t").await),
             "select after delete"
         )
         .len(),
@@ -177,7 +181,7 @@ async fn t3_secondary_index_eq_routing_in_memory_db() {
     .await;
 
     let before = ints(
-        db.execute_sql("SELECT id FROM t WHERE age = 20").await,
+        to_response(db.execute_sql("SELECT id FROM t WHERE age = 20").await),
         "scan before index",
     );
     assert_eq!(before.len(), 2, "duplicate age rows must both match");
@@ -185,7 +189,7 @@ async fn t3_secondary_index_eq_routing_in_memory_db() {
     exec_ok(&db, "CREATE INDEX idx_age ON t(age)", "create index").await;
 
     let after = ints(
-        db.execute_sql("SELECT id FROM t WHERE age = 20").await,
+        to_response(db.execute_sql("SELECT id FROM t WHERE age = 20").await),
         "indexed eq query",
     );
     assert_eq!(after.len(), 2, "indexed eq query must keep both rows");
@@ -204,7 +208,7 @@ async fn t3_secondary_index_eq_routing_in_memory_db() {
     .await;
     assert_eq!(
         ints(
-            db.execute_sql("SELECT id FROM t WHERE age = 20").await,
+            to_response(db.execute_sql("SELECT id FROM t WHERE age = 20").await),
             "eq query after insert"
         )
         .len(),
@@ -228,13 +232,21 @@ async fn t3_view_alter_truncate_in_memory_db() {
     // 视图：catalog kind=View 行写入内存 catalog，会话内可查。
     exec_ok(&db, "CREATE VIEW v AS SELECT id, n FROM t", "create view").await;
     assert_eq!(
-        rows(db.execute_sql("SELECT * FROM v").await, "select from view").len(),
+        rows(
+            to_response(db.execute_sql("SELECT * FROM v").await),
+            "select from view"
+        )
+        .len(),
         2
     );
     // 视图非物化：基表写入后视图读到新值。
     exec_ok(&db, "INSERT INTO t VALUES (3, 30)", "insert after view").await;
     assert_eq!(
-        rows(db.execute_sql("SELECT * FROM v").await, "view sees new row").len(),
+        rows(
+            to_response(db.execute_sql("SELECT * FROM v").await),
+            "view sees new row"
+        )
+        .len(),
         3
     );
 
@@ -242,7 +254,7 @@ async fn t3_view_alter_truncate_in_memory_db() {
     exec_ok(&db, "ALTER TABLE t ADD COLUMN tag INT", "add column").await;
     assert_eq!(
         scalar(
-            db.execute_sql("SELECT tag FROM t WHERE id = 1").await,
+            to_response(db.execute_sql("SELECT tag FROM t WHERE id = 1").await),
             "read added column"
         ),
         Value::Null
@@ -252,7 +264,7 @@ async fn t3_view_alter_truncate_in_memory_db() {
     exec_ok(&db, "CREATE INDEX idx_n ON t(n)", "index before truncate").await;
     exec_ok(&db, "TRUNCATE TABLE t", "truncate").await;
     assert!(rows(
-        db.execute_sql("SELECT n FROM t").await,
+        to_response(db.execute_sql("SELECT n FROM t").await),
         "select after truncate"
     )
     .is_empty());
@@ -264,7 +276,7 @@ async fn t3_view_alter_truncate_in_memory_db() {
     .await;
     assert_eq!(
         ints(
-            db.execute_sql("SELECT n FROM t WHERE n = 90").await,
+            to_response(db.execute_sql("SELECT n FROM t WHERE n = 90").await),
             "indexed eq after truncate"
         ),
         vec![90]
@@ -287,13 +299,17 @@ async fn t3_explicit_tx_rollback_restores_unique_occupancy() {
     let tx = db.begin().await.unwrap();
     // 唯一冲突在事务内被拒绝，事务保持活跃。
     expect_err(
-        db.execute_in_tx("INSERT INTO t VALUES (2, 100, 2)", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t VALUES (2, 100, 2)", &tx)
+                .await,
+        ),
         "duplicate unique in tx",
     );
     assert_ok(
-        db.execute_in_tx("INSERT INTO t VALUES (2, 200, 2)", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t VALUES (2, 200, 2)", &tx)
+                .await,
+        ),
         "insert in tx",
     );
     db.rollback(tx).await.unwrap();
@@ -301,28 +317,30 @@ async fn t3_explicit_tx_rollback_restores_unique_occupancy() {
     // 回滚后事务内写入的行消失。
     assert_eq!(
         ints(
-            db.execute_sql("SELECT id FROM t").await,
+            to_response(db.execute_sql("SELECT id FROM t").await),
             "select after rollback"
         ),
         vec![1]
     );
     // 唯一键占用还原：回滚事务插入过的唯一值可再次插入。
     assert_ok(
-        db.execute_sql("INSERT INTO t VALUES (3, 200, 3)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (3, 200, 3)").await),
         "reinsert released unique value",
     );
 
     // 提交路径同样成立。
     let tx = db.begin().await.unwrap();
     assert_ok(
-        db.execute_in_tx("INSERT INTO t VALUES (4, 400, 4)", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t VALUES (4, 400, 4)", &tx)
+                .await,
+        ),
         "insert for commit",
     );
     db.commit(tx).await.unwrap();
     assert_eq!(
         ints(
-            db.execute_sql("SELECT id FROM t").await,
+            to_response(db.execute_sql("SELECT id FROM t").await),
             "select after commit"
         )
         .len(),
@@ -359,7 +377,7 @@ async fn t3_no_wal_or_checkpoint_channels() {
     // 显式 checkpoint 之后数据仍在会话内可读（no-op 不破坏内存态）。
     assert_eq!(
         ints(
-            db.execute_sql("SELECT id FROM t").await,
+            to_response(db.execute_sql("SELECT id FROM t").await),
             "select after checkpoint"
         ),
         vec![1]
@@ -378,7 +396,7 @@ async fn t3_fresh_session_is_empty() {
 
     let reopened = Database::open_in_memory().await.unwrap();
     let message = expect_err(
-        reopened.execute_sql("SELECT id FROM t").await,
+        to_response(reopened.execute_sql("SELECT id FROM t").await),
         "table from a discarded session",
     );
     assert!(
@@ -407,7 +425,7 @@ async fn t3_constraint_rejections_match_file_db() {
     .await;
 
     let null_msg = expect_err(
-        db.execute_sql("INSERT INTO t (id, u) VALUES (1, 1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id, u) VALUES (1, 1)").await),
         "NOT NULL violation",
     );
     assert!(
@@ -417,7 +435,7 @@ async fn t3_constraint_rejections_match_file_db() {
 
     exec_ok(&db, "INSERT INTO t VALUES (1, 1, 1)", "seed row").await;
     let dup_msg = expect_err(
-        db.execute_sql("INSERT INTO t VALUES (2, 1, 2)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (2, 1, 2)").await),
         "UNIQUE violation",
     );
     assert!(
@@ -426,7 +444,7 @@ async fn t3_constraint_rejections_match_file_db() {
     );
 
     let type_msg = expect_err(
-        db.execute_sql("INSERT INTO t VALUES ('x', 3, 3)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES ('x', 3, 3)").await),
         "key column type mismatch",
     );
     assert!(
@@ -437,7 +455,7 @@ async fn t3_constraint_rejections_match_file_db() {
     // 被拒绝的写入零副作用。
     assert_eq!(
         ints(
-            db.execute_sql("SELECT id FROM t").await,
+            to_response(db.execute_sql("SELECT id FROM t").await),
             "select after rejections"
         ),
         vec![1]
@@ -470,7 +488,7 @@ async fn t3_ctas_materializes_into_memory_main_db() {
     .await;
     assert_eq!(
         ints(
-            db.execute_sql("SELECT n FROM copy").await,
+            to_response(db.execute_sql("SELECT n FROM copy").await),
             "select materialized"
         ),
         vec![20]
@@ -479,7 +497,7 @@ async fn t3_ctas_materializes_into_memory_main_db() {
     exec_ok(&db, "INSERT INTO src VALUES (3, 30)", "insert after ctas").await;
     assert_eq!(
         ints(
-            db.execute_sql("SELECT n FROM copy").await,
+            to_response(db.execute_sql("SELECT n FROM copy").await),
             "copy is independent"
         )
         .len(),

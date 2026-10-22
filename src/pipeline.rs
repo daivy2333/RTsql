@@ -6,16 +6,16 @@ use crate::executor::{
     DropViewExecutor, ExecResult, Executor, ExplainExecutor, FilterExecutor, HavingExecutor,
     IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, InsertNode, InsertSelectNode,
     JoinConfig, JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor,
-    PhysicalPlan, ProjectionExecutor, ScalarSubqueryFilterExecutor, ScanExecutor,
+    OutputColumn, PhysicalPlan, ProjectionExecutor, ScalarSubqueryFilterExecutor, ScanExecutor,
     SemiJoinExecutorV2, SetOperationExecutor, SingleRowExecutor, SortExecutor,
     SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor, UpsertExecutor, UpsertNode, Value,
 };
-use crate::network::protocol::Response;
 use crate::parser::planner::ViewDef;
 use crate::parser::{parse_sql, PlanBuilder, PlanError};
 use crate::profiling::{
     init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope,
 };
+use crate::result::{ColumnMeta, SqlError, SqlOutcome};
 use crate::storage::page_format::ColumnType as StorageColumnType;
 use crate::storage::{Result, StorageError};
 use crate::transaction::Snapshot;
@@ -94,7 +94,9 @@ impl TableRef {
     }
 }
 
-pub async fn execute(database: &Database, sql: &str) -> Response {
+/// MS31-T01：库公共执行入口（`Database::execute_sql` 的实现体）——返回类型化
+/// 结果与类型化错误，不再以协议词表 `Response` 承载。
+pub async fn execute(database: &Database, sql: &str) -> std::result::Result<SqlOutcome, SqlError> {
     let profiling = is_profiling_enabled();
 
     if profiling {
@@ -302,7 +304,11 @@ pub async fn plan_stage_routed(
 /// - 其余（Query 路径）：`create_executor(None) → execute`
 ///
 /// `profiling: true` 时，`executor_creation` 与 `executor_execution` 子指标在该阶段内记录。
-pub async fn execute_stage(database: &Database, plan: PhysicalPlan, profiling: bool) -> Response {
+pub async fn execute_stage(
+    database: &Database,
+    plan: PhysicalPlan,
+    profiling: bool,
+) -> std::result::Result<SqlOutcome, SqlError> {
     execute_stage_routed(database, plan, profiling, &RoutedTables::new()).await
 }
 
@@ -313,15 +319,20 @@ pub async fn execute_stage_routed(
     plan: PhysicalPlan,
     profiling: bool,
     routed: &RoutedTables,
-) -> Response {
+) -> std::result::Result<SqlOutcome, SqlError> {
     // MS26 T2：只读拒绝面——6 个执行入口（`execute` / `execute_stage` /
     // `execute_stage_routed` / `execute_in_tx` / `execute_stage_in_tx` /
     // `execute_stage_in_tx_routed`）的委托链都收敛到本函数与
     // `execute_stage_in_tx_routed` 两个叶子，故在此与该叶子各挂一次即
     // 覆盖全部入口。
     if let Some(rejection) = readonly_rejection(database, &plan) {
-        return rejection;
+        return Err(rejection);
     }
+    // MS31-T01：查询结果的列元数据在执行面装配——列名单源为既有计划输出列
+    // （`get_plan_output_columns`，与 CLI 表头同源同序）；列类型经计划 walk
+    // 取声明类型（不可得者由结果行值推导兜底）。
+    let output_columns = PlanBuilder::new().get_plan_output_columns(&plan);
+    let output_types = resolve_type_slots(database, routed, plan_type_slots(&plan)).await;
     match &plan {
         PhysicalPlan::CreateTable(_) | PhysicalPlan::DropTable(_) => {
             let executor: Box<dyn Executor + Send> = match &plan {
@@ -419,19 +430,19 @@ pub async fn execute_stage_routed(
                 {
                     Ok(rows) => rows,
                     Err(message) => {
-                        return Response::Error {
+                        return Err(SqlError {
                             message,
                             sqlstate: None,
-                        }
+                        })
                     }
                 };
             let normalized = match normalize_insert_select(node, rows) {
                 Ok(plan) => plan,
                 Err(message) => {
-                    return Response::Error {
+                    return Err(SqlError {
                         message,
                         sqlstate: None,
-                    }
+                    })
                 }
             };
             Box::pin(execute_stage_routed(
@@ -458,7 +469,7 @@ pub async fn execute_stage_routed(
             // record_version / WAL 记录的表名一致。
             let (target_db, local_name) = routed_db(routed, database, &target_name);
             if let Some(rejection) = readonly_rejection(target_db, &plan) {
-                return rejection;
+                return Err(rejection);
             }
 
             // DML must run inside a real transaction (MS06-T01 spec) — the
@@ -488,10 +499,10 @@ pub async fn execute_stage_routed(
                                 .abort(tx, &target_db.buffer_pool, abort_tables)
                                 .await;
                         }
-                        return Response::Error {
+                        return Err(SqlError {
                             message: e.to_string(),
                             sqlstate: None,
-                        };
+                        });
                     }
                 };
             if let Some(start) = executor_creation_start {
@@ -509,17 +520,17 @@ pub async fn execute_stage_routed(
             }
 
             match &response {
-                Response::Error { .. } => {
+                Err(SqlError { .. }) => {
                     if let Some(abort_tables) = &abort_tables {
                         if let Err(abort_err) = target_db
                             .transaction_manager
                             .abort(tx, &target_db.buffer_pool, abort_tables)
                             .await
                         {
-                            return Response::Error {
+                            return Err(SqlError {
                                 message: format!("Abort failed: {}", abort_err),
                                 sqlstate: None,
-                            };
+                            });
                         }
                     }
                 }
@@ -529,10 +540,10 @@ pub async fn execute_stage_routed(
                     // 不变——内层错误已点名 `checkpoint failed`
                     // （`wal-auto-checkpoint` R4）；本臂不做破坏性清理。
                     if let Err(commit_err) = target_db.commit(tx).await {
-                        return Response::Error {
+                        return Err(SqlError {
                             message: format!("Commit failed: {}", commit_err),
                             sqlstate: None,
-                        };
+                        });
                     }
                 }
             }
@@ -556,10 +567,10 @@ pub async fn execute_stage_routed(
                 {
                     Ok(e) => e,
                     Err(e) => {
-                        return Response::Error {
+                        return Err(SqlError {
                             message: e.to_string(),
                             sqlstate: None,
-                        };
+                        });
                     }
                 };
             if let Some(start) = executor_creation_start {
@@ -575,7 +586,12 @@ pub async fn execute_stage_routed(
             if let Some(start) = exec_start {
                 record_time("executor_execution", start.elapsed());
             }
-            response
+            // MS31-T01：查询臂装配列元数据（列名单源同 CLI 表头）。
+            Ok(attach_column_metadata(
+                response?,
+                output_columns,
+                output_types,
+            ))
         }
     }
 }
@@ -585,7 +601,7 @@ pub async fn execute_stage_routed(
 /// 计划形状是语句语义的权威判据：13 个写变体在只读会话中于执行入口顶部
 /// （解析后、任何写入生效前）点名拒绝，SQLSTATE `25006`
 /// （read_only_sql_transaction）。`is_readonly()` 为假时零成本直通。
-pub(crate) fn readonly_rejection(db: &Database, plan: &PhysicalPlan) -> Option<Response> {
+pub(crate) fn readonly_rejection(db: &Database, plan: &PhysicalPlan) -> Option<SqlError> {
     if !db.is_readonly() {
         return None;
     }
@@ -610,7 +626,7 @@ pub(crate) fn readonly_rejection(db: &Database, plan: &PhysicalPlan) -> Option<R
         // Plan Review 侧核对枚举完备性）。
         _ => return None,
     };
-    Some(Response::Error {
+    Some(SqlError {
         message: format!("cannot execute {kind} in a read-only session"),
         sqlstate: Some(READ_ONLY_SQLSTATE.to_string()),
     })
@@ -623,7 +639,7 @@ const READ_ONLY_SQLSTATE: &str = "25006";
 /// 本语句路由表即点名拒绝（SQLSTATE `0A000`），发生于执行器构造 / 源求值 /
 /// begin 之前。只判目标：主库目标 + 附加源的语句不受影响（`routed` 非空不
 /// 误拒主库写）；lib 路径路由表恒空，零变化。
-fn attached_write_in_tx_rejection(plan: &PhysicalPlan, routed: &RoutedTables) -> Option<Response> {
+fn attached_write_in_tx_rejection(plan: &PhysicalPlan, routed: &RoutedTables) -> Option<SqlError> {
     let target = match plan {
         PhysicalPlan::Insert(n) => &n.table_name,
         PhysicalPlan::Upsert(n) => &n.table_name,
@@ -635,7 +651,7 @@ fn attached_write_in_tx_rejection(plan: &PhysicalPlan, routed: &RoutedTables) ->
         _ => return None,
     };
     if routed.contains_key(target) {
-        return Some(Response::Error {
+        return Some(SqlError {
             message: format!(
                 "WRITE TO ATTACHED DATABASE is not supported inside a transaction: '{target}'"
             ),
@@ -647,13 +663,13 @@ fn attached_write_in_tx_rejection(plan: &PhysicalPlan, routed: &RoutedTables) ->
 
 /// MS10-T04：单结果执行路径（网络 / 显式事务）的多语句显式拒绝——
 /// 两条路径共用同一文案；拒绝必须发生在 plan_stage / cache put 之前。
-fn multi_statement_rejected(count: usize) -> Response {
-    Response::Error {
+fn multi_statement_rejected(count: usize) -> std::result::Result<SqlOutcome, SqlError> {
+    Err(SqlError {
         message: format!(
             "only a single statement is supported on this path (got {count} statements); use the CLI (rtsql) to run multi-statement scripts"
         ),
         sqlstate: None,
-    }
+    })
 }
 
 /// MS20-T02 Iter001（design D4）：把 `InsertSelect` 源完整物化为原生 Value
@@ -735,15 +751,15 @@ async fn execute_ctas_routed(
     node: &CreateTableAsSelectNode,
     profiling: bool,
     routed: &RoutedTables,
-) -> Response {
+) -> std::result::Result<SqlOutcome, SqlError> {
     // 0. 目标已存在 → 与建表通道同型（`DuplicateTable`）拒绝。提前于物化，
     //    免去为注定失败的语句跑完整个源结果集；错误面与「物化后建表被拒」
     //    一致，既有表零变化。
     if database.table_manager.table_exists(&node.table_name) {
-        return Response::Error {
+        return Err(SqlError {
             message: StorageError::DuplicateTable(node.table_name.clone()).to_string(),
             sqlstate: None,
-        };
+        });
     }
 
     // 1. 物化源 SELECT（语句级快照，与查询路径同款；源可指向附加库）。
@@ -764,10 +780,10 @@ async fn execute_ctas_routed(
     {
         Ok(executor) => executor,
         Err(e) => {
-            return Response::Error {
+            return Err(SqlError {
                 message: e.to_string(),
                 sqlstate: None,
-            }
+            })
         }
     };
     if let Some(start) = create_start {
@@ -787,10 +803,10 @@ async fn execute_ctas_routed(
             // 输出；RowId / AffectedRows 是写面信号，视为物化结束。
             Ok(Some(_)) | Ok(None) => break,
             Err(e) => {
-                return Response::Error {
+                return Err(SqlError {
                     message: e.to_string(),
                     sqlstate: None,
-                }
+                })
             }
         }
     }
@@ -802,10 +818,10 @@ async fn execute_ctas_routed(
     let schema = match infer_ctas_column_types(&node.columns, &rows) {
         Ok(schema) => schema,
         Err(failure) => {
-            return Response::Error {
+            return Err(SqlError {
                 message: failure.to_string(),
                 sqlstate: Some(failure.sqlstate().to_string()),
-            }
+            })
         }
     };
 
@@ -827,19 +843,19 @@ async fn execute_ctas_routed(
         .create_table_with_constraints(&node.table_name, columns, &pk)
         .await
     {
-        return Response::Error {
+        return Err(SqlError {
             message: e.to_string(),
             sqlstate: None,
-        };
+        });
     }
 
     // 5. catalog 落盘（先于任何数据 WAL 记录——见函数文档的崩溃一致性约束）。
     if let Err(e) = database.buffer_pool.flush_all().await {
         let _ = database.table_manager.drop_table(&node.table_name).await;
-        return Response::Error {
+        return Err(SqlError {
             message: format!("Flush failed after CTAS create: {e}"),
             sqlstate: None,
-        };
+        });
     }
 
     // 6. 隐式事务落行。
@@ -853,10 +869,10 @@ async fn execute_ctas_routed(
                 .abort(tx, &database.buffer_pool, &HashMap::new())
                 .await;
             let _ = database.table_manager.drop_table(&node.table_name).await;
-            return Response::Error {
+            return Err(SqlError {
                 message: e.to_string(),
                 sqlstate: None,
-            };
+            });
         }
     };
     let count = rows.len() as u64;
@@ -889,10 +905,10 @@ async fn execute_ctas_routed(
             .abort(tx, &database.buffer_pool, &abort_tables)
             .await;
         let _ = database.table_manager.drop_table(&node.table_name).await;
-        return Response::Error {
+        return Err(SqlError {
             message,
             sqlstate: None,
-        };
+        });
     }
     // 8. 收口：事务提交失败 → 尽力 drop_table（零副作用：同名可重试）。
     //    MS26 T5：水位检查**不在**本段内——它失败时事务已提交（WAL 已
@@ -905,18 +921,18 @@ async fn execute_ctas_routed(
         .await
     {
         let _ = database.table_manager.drop_table(&node.table_name).await;
-        return Response::Error {
+        return Err(SqlError {
             message: format!("Commit failed: {e}"),
             sqlstate: None,
-        };
+        });
     }
     if let Err(e) = database.maybe_auto_checkpoint().await {
-        return Response::Error {
+        return Err(SqlError {
             message: e.to_string(),
             sqlstate: None,
-        };
+        });
     }
-    Response::AffectedRows { count }
+    Ok(SqlOutcome::AffectedRows(count))
 }
 
 /// MS20 T4：CTAS 输出列类型推导（design D5 step 3）。
@@ -991,14 +1007,18 @@ fn ctas_type_name(column_type: &StorageColumnType) -> &'static str {
 /// Reuses the same parse/plan stages as the implicit pipeline; execution
 /// goes through `execute_stage_in_tx`, which threads the user's `tx_id`
 /// into DML executors and skips the implicit begin/commit/abort wrapping.
-pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Response {
+pub async fn execute_in_tx(
+    database: &Database,
+    sql: &str,
+    tx_id: u64,
+) -> std::result::Result<SqlOutcome, SqlError> {
     let statements = match parse_stage(sql).await {
         Ok(s) => s,
         Err(message) => {
-            return Response::Error {
+            return Err(SqlError {
                 message: format!("Parse error: {message}"),
                 sqlstate: Some(PARSE_SQLSTATE.to_string()),
-            }
+            })
         }
     };
     if statements.len() > 1 {
@@ -1007,19 +1027,19 @@ pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Respon
     let stmt = match statements.first() {
         Some(s) => s,
         None => {
-            return Response::Error {
+            return Err(SqlError {
                 message: "No statement executed".to_string(),
                 sqlstate: None,
-            }
+            })
         }
     };
     let plan = match plan_stage(database, sql, stmt, false).await {
         Ok(p) => p,
         Err(failure) => {
-            return Response::Error {
+            return Err(SqlError {
                 message: failure.to_string(),
                 sqlstate: Some(failure.sqlstate.to_string()),
-            }
+            })
         }
     };
     execute_stage_in_tx(database, plan, tx_id).await
@@ -1034,7 +1054,11 @@ pub async fn execute_in_tx(database: &Database, sql: &str, tx_id: u64) -> Respon
 /// DDL executes immediately and clears the plan cache, mirroring the
 /// implicit path. A failed statement returns an error response and leaves
 /// the transaction alive for the caller to commit or roll back.
-pub async fn execute_stage_in_tx(database: &Database, plan: PhysicalPlan, tx_id: u64) -> Response {
+pub async fn execute_stage_in_tx(
+    database: &Database,
+    plan: PhysicalPlan,
+    tx_id: u64,
+) -> std::result::Result<SqlOutcome, SqlError> {
     execute_stage_in_tx_routed(database, plan, tx_id, &RoutedTables::new()).await
 }
 
@@ -1045,19 +1069,22 @@ pub async fn execute_stage_in_tx_routed(
     plan: PhysicalPlan,
     tx_id: u64,
     routed: &RoutedTables,
-) -> Response {
+) -> std::result::Result<SqlOutcome, SqlError> {
     // MS26 T2：只读拒绝面（与 `execute_stage_routed` 同点，理由见该处）。
     // 优先级高于既有的「显式事务内不支持」0A000 拒绝——只读会话的写语句
     // 先按只读状态点名，事务保持活跃（沿既有语句级失败语义）。
     if let Some(rejection) = readonly_rejection(database, &plan) {
-        return rejection;
+        return Err(rejection);
     }
     // MS20-T02（design D2）：显式事务内附加库写入点名拒绝（0A000），先于
     // 执行器构造 / 源求值 / begin——会话事务（主库）保持活跃，由 CLI 失败
     // 收口回滚。
     if let Some(rejection) = attached_write_in_tx_rejection(&plan, routed) {
-        return rejection;
+        return Err(rejection);
     }
+    // MS31-T01：列元数据装配（与 `execute_stage_routed` 同点、同单源）。
+    let output_columns = PlanBuilder::new().get_plan_output_columns(&plan);
+    let output_types = resolve_type_slots(database, routed, plan_type_slots(&plan)).await;
     match &plan {
         PhysicalPlan::CreateTable(_)
         | PhysicalPlan::DropTable(_)
@@ -1093,33 +1120,33 @@ pub async fn execute_stage_in_tx_routed(
             // 显式事务内的会话态（含用户已执行的写）不能被中途 abort /
             // drop_table 破坏 —— 点名拒绝。拒绝点在 execute 之前、会话事务
             // 之外，CLI 与 lib 两条在途路径共用同一文案。
-            Response::Error {
+            Err(SqlError {
                 message: "CREATE TABLE AS SELECT is not supported inside a transaction".to_string(),
                 sqlstate: Some("0A000".to_string()),
-            }
+            })
         }
         // MS21 Iter002 (D13/T2-c)：显式事务内 CREATE/DROP INDEX 点名拒绝
         // （0A000，CTAS 先例同型——回填与登记一致性依赖无并发未提交写窗口）。
-        PhysicalPlan::CreateIndex(_) => Response::Error {
+        PhysicalPlan::CreateIndex(_) => Err(SqlError {
             message: "CREATE INDEX is not supported inside a transaction".to_string(),
             sqlstate: Some("0A000".to_string()),
-        },
-        PhysicalPlan::DropIndex(_) => Response::Error {
+        }),
+        PhysicalPlan::DropIndex(_) => Err(SqlError {
             message: "DROP INDEX is not supported inside a transaction".to_string(),
             sqlstate: Some("0A000".to_string()),
-        },
+        }),
         // MS21 Iter003 (T3-b/D13)：显式事务内 ALTER 执行期点名拒绝（0A000，
         // D13——ADD/DROP 的重写一致性依赖无并发未提交写窗口）。
-        PhysicalPlan::AlterTable(_) => Response::Error {
+        PhysicalPlan::AlterTable(_) => Err(SqlError {
             message: "ALTER TABLE is not supported inside a transaction".to_string(),
             sqlstate: Some("0A000".to_string()),
-        },
+        }),
         // MS21 Iter004 (T4-a/D13)：显式事务内 TRUNCATE 执行期点名拒绝（0A000，
         // 物理页释放不可回滚；拒绝先于执行器产生任何副作用）。
-        PhysicalPlan::Truncate(_) => Response::Error {
+        PhysicalPlan::Truncate(_) => Err(SqlError {
             message: "TRUNCATE TABLE is not supported inside a transaction".to_string(),
             sqlstate: Some("0A000".to_string()),
-        },
+        }),
         PhysicalPlan::InsertSelect(node) => {
             // MS20-T02 Iter001（design D4）：显式事务内**主库目标**的 INSERT
             // SELECT——只读（25006）与附加目标（0A000）拒绝已在本函数顶部
@@ -1132,19 +1159,19 @@ pub async fn execute_stage_in_tx_routed(
                 {
                     Ok(rows) => rows,
                     Err(message) => {
-                        return Response::Error {
+                        return Err(SqlError {
                             message,
                             sqlstate: None,
-                        }
+                        })
                     }
                 };
             let normalized = match normalize_insert_select(node, rows) {
                 Ok(plan) => plan,
                 Err(message) => {
-                    return Response::Error {
+                    return Err(SqlError {
                         message,
                         sqlstate: None,
-                    }
+                    })
                 }
             };
             // 归一后的 Insert/Upsert 落 `_` 通用臂：会话事务保持活跃，提交/
@@ -1160,17 +1187,24 @@ pub async fn execute_stage_in_tx_routed(
             match create_executor_from_plan(plan, database, Some(tx_id), statement_snapshot, routed)
                 .await
             {
-                Ok(executor) => execute_executor(executor).await,
-                Err(e) => Response::Error {
+                Ok(executor) => {
+                    let response = execute_executor(executor).await;
+                    // MS31-T01：列元数据装配（与隐式事务路径同点、同单源）。
+                    Ok(attach_column_metadata(response?, output_columns, output_types))
+                }
+                Err(e) => Err(SqlError {
                     message: e.to_string(),
                     sqlstate: None,
-                },
+                }),
             }
         }
     }
 }
 
-async fn execute_inner(database: &Database, sql: &str) -> Response {
+async fn execute_inner(
+    database: &Database,
+    sql: &str,
+) -> std::result::Result<SqlOutcome, SqlError> {
     let profiling = is_profiling_enabled();
 
     if profiling {
@@ -1217,10 +1251,10 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
             if let Some(start) = parse_start {
                 record_time("parse", start.elapsed());
             }
-            return Response::Error {
+            return Err(SqlError {
                 message: format!("Parse error: {message}"),
                 sqlstate: Some(PARSE_SQLSTATE.to_string()),
-            };
+            });
         }
     };
     if let Some(start) = parse_start {
@@ -1234,10 +1268,10 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
     let stmt = match statements.first() {
         Some(s) => s,
         None => {
-            return Response::Error {
+            return Err(SqlError {
                 message: "No statement executed".to_string(),
                 sqlstate: None,
-            };
+            });
         }
     };
 
@@ -1253,10 +1287,10 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
             if let Some(start) = plan_start {
                 record_time("plan", start.elapsed());
             }
-            return Response::Error {
+            return Err(SqlError {
                 message: failure.to_string(),
                 sqlstate: Some(failure.sqlstate.to_string()),
-            };
+            });
         }
     };
     if let Some(start) = plan_start {
@@ -1281,14 +1315,17 @@ async fn execute_inner(database: &Database, sql: &str) -> Response {
 }
 
 /// Execute an executor and return the response
-async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
-    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+async fn execute_executor(
+    mut executor: Box<dyn Executor + Send>,
+) -> std::result::Result<SqlOutcome, SqlError> {
+    // MS31-T01：执行面收集原生 `Value` 行——JSON 转换退到 CLI / 协议边界。
+    let mut rows: Vec<Vec<Value>> = Vec::new();
     let mut affected_rows: Option<u64> = None;
 
     loop {
         match executor.next().await {
             Ok(Some(ExecResult::Row(values))) => {
-                rows.push(values.into_iter().map(value_to_json).collect());
+                rows.push(values);
             }
             Ok(Some(ExecResult::AffectedRows(count))) => {
                 affected_rows = Some(count);
@@ -1296,18 +1333,451 @@ async fn execute_executor(mut executor: Box<dyn Executor + Send>) -> Response {
             Ok(Some(ExecResult::RowId(_))) => {}
             Ok(None) => break,
             Err(e) => {
-                return Response::Error {
+                return Err(SqlError {
                     message: format!("Execution error: {}", e),
                     sqlstate: None,
-                }
+                })
             }
         }
     }
 
     if let Some(count) = affected_rows {
-        Response::AffectedRows { count }
+        Ok(SqlOutcome::AffectedRows(count))
     } else {
-        Response::QueryResult { rows }
+        Ok(SqlOutcome::Rows {
+            columns: Vec::new(),
+            rows,
+        })
+    }
+}
+
+/// MS31-T01：查询结果装配逐列元数据。
+///
+/// 列名单源为既有计划输出列（`get_plan_output_columns`——与 CLI 表头同源同序）；
+/// 列类型经 `plan_type_slots` + `resolve_type_slots` 取得（声明类型），仍不可得者
+/// 由结果行值推导兜底（`derive_types_from_rows`）。
+fn attach_column_metadata(
+    outcome: SqlOutcome,
+    names: Vec<String>,
+    types: Vec<ResolvedType>,
+) -> SqlOutcome {
+    match outcome {
+        SqlOutcome::Rows { rows, .. } => {
+            let mut columns: Vec<ColumnMeta> = names
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| ColumnMeta {
+                    name,
+                    column_type: match types.get(index) {
+                        Some(ResolvedType::Declared(column_type)) => Some(column_type.clone()),
+                        _ => None,
+                    },
+                })
+                .collect();
+            // 值推导兜底只作用于「类型不可推导」的槽；声明候选冲突的槽保持未知
+            // ——不以值形状冒充声明类型。
+            let derivable: Vec<bool> = types
+                .iter()
+                .map(|resolved| matches!(resolved, ResolvedType::Unknown))
+                .collect();
+            derive_types_from_rows(&mut columns, &rows, &derivable);
+            SqlOutcome::Rows { columns, rows }
+        }
+        other => other,
+    }
+}
+
+/// MS31-T01：不可推导槽的值推导兜底（`ctas_value_type` 矩阵）。
+///
+/// 同列取值一致 → 该类型；`Int` 与 `Float` 混列 → `Float`；无行 / 全 NULL /
+/// 类型冲突 → 保持 `None`（诚实表示，不虚构类型）。
+///
+/// `derivable` 掩码标出参与推导的槽——声明候选冲突的槽（`ResolvedType::Conflicted`）
+/// 不参与：冲突意味着该列的声明来源不唯一，以值形状反推会给出「看似确定」的
+/// 错误类型。
+///
+/// 与 `infer_ctas_column_types` 的差异：后者产出**建表 schema**（带
+/// `String(255)` 兜底与冲突报错），此处产出**列元数据**——冲突保持未知。
+fn derive_types_from_rows(columns: &mut [ColumnMeta], rows: &[Vec<Value>], derivable: &[bool]) {
+    for (index, column) in columns.iter_mut().enumerate() {
+        if column.column_type.is_some() {
+            continue;
+        }
+        // 声明候选冲突的槽不参与值推导——冲突意味着该列的声明来源不唯一，
+        // 以值形状反推会给出「看似确定」的错误类型。
+        if !derivable.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        let mut derived: Option<StorageColumnType> = None;
+        let mut conflict = false;
+        for row in rows {
+            let Some(value) = row.get(index) else {
+                continue;
+            };
+            // NULL 不参与推导——全 NULL 列的类型不可得。
+            let Some(value_type) = ctas_value_type(value) else {
+                continue;
+            };
+            match derived.clone() {
+                None => derived = Some(value_type),
+                Some(existing) if existing == value_type => {}
+                Some(existing)
+                    if existing == StorageColumnType::Int
+                        && value_type == StorageColumnType::Float =>
+                {
+                    derived = Some(StorageColumnType::Float)
+                }
+                Some(existing)
+                    if existing == StorageColumnType::Float
+                        && value_type == StorageColumnType::Int => {}
+                Some(_) => {
+                    conflict = true;
+                    break;
+                }
+            }
+        }
+        if !conflict {
+            column.column_type = derived;
+        }
+    }
+}
+
+/// MS31-T01：列类型的来源槽位。
+///
+/// `Table` —— 表名 + 列名，解析期查 `TableMeta` 声明类型；`fallback` 是限定符
+/// 不可解析（表别名）时的候选表集合（按列名匹配兜底）。
+/// `Unknown` —— 类型不由声明承载（聚合 / 表达式 / 派生表 / 子查询求值）。
+#[derive(Debug, Clone)]
+enum TypeSlot {
+    Table {
+        table: String,
+        column: String,
+        fallback: Vec<String>,
+    },
+    Unknown,
+}
+
+/// MS31-T01：声明类型解析的结论。
+///
+/// `Declared` —— 取到声明类型（限定符直查，或候选表同名列类型一致）。
+/// `Unknown` —— 类型不可得（表达式列 / 无声明来源）——参与结果行值推导兜底。
+/// `Conflicted` —— 限定符不可解析且候选表的同名列**声明类型不一致**——声明
+/// 来源不唯一，保持未知且**不参与值推导**（不以值形状冒充声明类型）。
+#[derive(Debug, Clone)]
+enum ResolvedType {
+    Declared(StorageColumnType),
+    Unknown,
+    Conflicted,
+}
+
+/// MS31-T01：计划输出列的类型来源 walk（与 `get_plan_output_columns` 臂结构
+/// 对称，纯同步——不触库）。
+///
+/// 扫描族臂按表名 + 列名取槽（projection 裁剪跟随列名）；Join 族按
+/// `output_columns` 逐 (table, column) 取槽；透传臂递归输入；聚合 / 派生表
+/// / 子查询求值 / 表达式列 → 未知槽。
+fn plan_type_slots(plan: &PhysicalPlan) -> Vec<TypeSlot> {
+    match plan {
+        PhysicalPlan::Scan(node) => table_slots(
+            &node.table_name,
+            &projected_column_names(&node.columns, &node.projection),
+        ),
+        PhysicalPlan::DataScan(node) => table_slots(
+            &node.table_name,
+            &projected_column_names(&node.columns, &node.projection),
+        ),
+        PhysicalPlan::IndexScan(node) => {
+            // IndexScan 的 `columns` 已是投影后形状（构造期收窄）——不二次裁剪。
+            table_slots(&node.table_name, &node.columns)
+        }
+        PhysicalPlan::IndexScanAll(node) => table_slots(
+            &node.table_name,
+            &projected_column_names(&node.columns, &node.projection),
+        ),
+        PhysicalPlan::ScalarSubqueryFilter(node) => {
+            // `columns` 即裁剪后实际输出形状（与 IndexScan 同型）。
+            table_slots(&node.table_name, &node.columns)
+        }
+        PhysicalPlan::Filter(node) => {
+            let mut slots = plan_type_slots(&node.input);
+            if !node.projection.is_empty() {
+                slots = node
+                    .projection
+                    .iter()
+                    .filter_map(|&i| slots.get(i).cloned())
+                    .collect();
+            }
+            slots
+        }
+        PhysicalPlan::Sort(node) => {
+            let mut slots = plan_type_slots(&node.input);
+            if !node.projection.is_empty() {
+                slots = node
+                    .projection
+                    .iter()
+                    .filter_map(|&i| slots.get(i).cloned())
+                    .collect();
+            }
+            slots
+        }
+        PhysicalPlan::Limit(node) => plan_type_slots(&node.input),
+        PhysicalPlan::Having(node) => plan_type_slots(&node.input),
+        PhysicalPlan::Distinct(node) => plan_type_slots(&node.input),
+        PhysicalPlan::SetOperation(node) => {
+            // 复合输出列名 = 左侧列名——类型取左输入（列数由计划期校验相等）。
+            let slots = plan_type_slots(&node.left);
+            if slots.len() == node.columns.len() {
+                slots
+            } else {
+                vec![TypeSlot::Unknown; node.columns.len()]
+            }
+        }
+        PhysicalPlan::Join(node) => {
+            join_type_slots(&node.left, &node.right, &node.output_columns, &[])
+        }
+        PhysicalPlan::NestedLoopJoin(node) => {
+            join_type_slots(&node.left, &node.right, &node.output_columns, &[])
+        }
+        PhysicalPlan::SemiJoin(node) => join_type_slots(
+            &node.left,
+            &node.right,
+            &node.output_columns,
+            &node.projection,
+        ),
+        PhysicalPlan::AntiJoin(node) => join_type_slots(
+            &node.left,
+            &node.right,
+            &node.output_columns,
+            &node.projection,
+        ),
+        // 聚合 / 投影 / 派生表 / 子查询求值：类型不由声明承载——保持未知，
+        // 由结果行值推导兜底。
+        PhysicalPlan::Aggregate(node) => vec![TypeSlot::Unknown; node.output_columns.len()],
+        PhysicalPlan::Projection(node) => vec![TypeSlot::Unknown; node.columns.len()],
+        PhysicalPlan::DerivedScan(node) => {
+            vec![TypeSlot::Unknown; projected_column_names(&node.columns, &node.projection).len()]
+        }
+        PhysicalPlan::SubqueryEval(node) => {
+            let mut count = plan_type_slots(&node.input).len();
+            if node.output_width > 0 {
+                count = count.min(node.output_width);
+            }
+            vec![TypeSlot::Unknown; count + 1]
+        }
+        PhysicalPlan::Explain(_) => vec![TypeSlot::Unknown; 1],
+        PhysicalPlan::CreateTableAsSelect(node) => vec![TypeSlot::Unknown; node.columns.len()],
+        PhysicalPlan::SingleRow => Vec::new(),
+        // 写面与 DDL：无输出列。
+        PhysicalPlan::Insert(_)
+        | PhysicalPlan::Upsert(_)
+        | PhysicalPlan::InsertSelect(_)
+        | PhysicalPlan::Update(_)
+        | PhysicalPlan::Delete(_)
+        | PhysicalPlan::CreateTable(_)
+        | PhysicalPlan::CreateIndex(_)
+        | PhysicalPlan::DropIndex(_)
+        | PhysicalPlan::AlterTable(_)
+        | PhysicalPlan::Truncate(_)
+        | PhysicalPlan::CreateView(_)
+        | PhysicalPlan::DropView(_)
+        | PhysicalPlan::DropTable(_) => Vec::new(),
+    }
+}
+
+/// 扫描族臂的槽：表名 + 每个输出列名。
+fn table_slots(table: &str, names: &[String]) -> Vec<TypeSlot> {
+    names
+        .iter()
+        .map(|name| TypeSlot::Table {
+            table: table.to_string(),
+            column: name.clone(),
+            fallback: Vec::new(),
+        })
+        .collect()
+}
+
+/// Join 族臂的槽：按 `output_columns` 逐 (table, column) 取槽。
+///
+/// `OutputColumn.table` 是声明限定符——无别名形态即真实表名，直接命中；
+/// 别名形态不可直接查表，此时按列名在左右输入的表集合中匹配兜底。
+fn join_type_slots(
+    left: &PhysicalPlan,
+    right: &PhysicalPlan,
+    output_columns: &[OutputColumn],
+    projection: &[usize],
+) -> Vec<TypeSlot> {
+    let selected: Vec<&OutputColumn> = if projection.is_empty() {
+        output_columns.iter().collect()
+    } else {
+        projection
+            .iter()
+            .filter_map(|&i| output_columns.get(i))
+            .collect()
+    };
+    if selected.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    collect_scan_tables(left, &mut candidates);
+    collect_scan_tables(right, &mut candidates);
+    selected
+        .iter()
+        .map(|column| TypeSlot::Table {
+            table: column.table.clone().unwrap_or_default(),
+            column: column.column.clone(),
+            fallback: candidates.clone(),
+        })
+        .collect()
+}
+
+/// 收集计划子树中的扫描族表名（去重，保持首次出现序）——Join 限定符别名
+/// 形态的列名兜底候选。
+fn collect_scan_tables(plan: &PhysicalPlan, out: &mut Vec<String>) {
+    let mut push = |table: &str| {
+        if !table.is_empty() && !out.iter().any(|existing| existing == table) {
+            out.push(table.to_string());
+        }
+    };
+    match plan {
+        PhysicalPlan::Scan(node) => push(&node.table_name),
+        PhysicalPlan::DataScan(node) => push(&node.table_name),
+        PhysicalPlan::IndexScan(node) => push(&node.table_name),
+        PhysicalPlan::IndexScanAll(node) => push(&node.table_name),
+        PhysicalPlan::ScalarSubqueryFilter(node) => push(&node.table_name),
+        PhysicalPlan::Filter(node) => collect_scan_tables(&node.input, out),
+        PhysicalPlan::Sort(node) => collect_scan_tables(&node.input, out),
+        PhysicalPlan::Limit(node) => collect_scan_tables(&node.input, out),
+        PhysicalPlan::Having(node) => collect_scan_tables(&node.input, out),
+        PhysicalPlan::Distinct(node) => collect_scan_tables(&node.input, out),
+        PhysicalPlan::Projection(node) => collect_scan_tables(&node.input, out),
+        PhysicalPlan::SubqueryEval(node) => collect_scan_tables(&node.input, out),
+        PhysicalPlan::SetOperation(node) => {
+            collect_scan_tables(&node.left, out);
+            collect_scan_tables(&node.right, out);
+        }
+        PhysicalPlan::Join(node) => {
+            collect_scan_tables(&node.left, out);
+            collect_scan_tables(&node.right, out);
+        }
+        PhysicalPlan::NestedLoopJoin(node) => {
+            collect_scan_tables(&node.left, out);
+            collect_scan_tables(&node.right, out);
+        }
+        PhysicalPlan::SemiJoin(node) => {
+            collect_scan_tables(&node.left, out);
+            collect_scan_tables(&node.right, out);
+        }
+        PhysicalPlan::AntiJoin(node) => {
+            collect_scan_tables(&node.left, out);
+            collect_scan_tables(&node.right, out);
+        }
+        _ => {}
+    }
+}
+
+/// MS31-T01：类型槽解析——按表名查 `TableMeta` 声明类型（同一表只查一次）。
+///
+/// 限定符可解析（无别名形态）→ 直取该表声明类型。
+/// 限定符不可解析（表别名 / 无限定）→ 按列名在候选表集合匹配：**含该列的
+/// 全部候选表声明类型一致**才取该类型；类型不一致 → 冲突（保持未知，不以
+/// 首个候选冒充声明来源）。
+async fn resolve_type_slots(
+    database: &Database,
+    routed: &RoutedTables,
+    slots: Vec<TypeSlot>,
+) -> Vec<ResolvedType> {
+    let mut meta_cache: HashMap<String, Option<std::sync::Arc<crate::storage::data::TableMeta>>> =
+        HashMap::new();
+    let mut resolved = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let TypeSlot::Table {
+            table,
+            column,
+            fallback,
+        } = slot
+        else {
+            resolved.push(ResolvedType::Unknown);
+            continue;
+        };
+        // 限定符可解析 → 直取声明类型。
+        if !table.is_empty() {
+            if let Some(meta) = load_cached_meta(&mut meta_cache, database, routed, &table).await {
+                let declared = meta
+                    .columns
+                    .iter()
+                    .find(|(name, _)| name == &column)
+                    .map(|(_, column_type)| column_type.clone());
+                resolved.push(match declared {
+                    Some(column_type) => ResolvedType::Declared(column_type),
+                    None => ResolvedType::Unknown,
+                });
+                continue;
+            }
+        }
+        // 限定符不可解析（别名 / 无限定）→ 按列名在候选表集合匹配。
+        let mut agreed: Option<StorageColumnType> = None;
+        let mut conflicted = false;
+        for candidate in fallback.iter() {
+            if candidate.is_empty() {
+                continue;
+            }
+            let Some(meta) = load_cached_meta(&mut meta_cache, database, routed, candidate).await
+            else {
+                continue;
+            };
+            let Some(found) = meta
+                .columns
+                .iter()
+                .find(|(name, _)| name == &column)
+                .map(|(_, column_type)| column_type.clone())
+            else {
+                continue;
+            };
+            match &agreed {
+                None => agreed = Some(found),
+                Some(existing) if *existing == found => {}
+                Some(_) => {
+                    conflicted = true;
+                    break;
+                }
+            }
+        }
+        resolved.push(if conflicted {
+            ResolvedType::Conflicted
+        } else {
+            match agreed {
+                Some(column_type) => ResolvedType::Declared(column_type),
+                None => ResolvedType::Unknown,
+            }
+        });
+    }
+    resolved
+}
+
+/// 取表元数据并按表名缓存（同一表只查一次）。
+async fn load_cached_meta(
+    cache: &mut HashMap<String, Option<std::sync::Arc<crate::storage::data::TableMeta>>>,
+    database: &Database,
+    routed: &RoutedTables,
+    table: &str,
+) -> Option<std::sync::Arc<crate::storage::data::TableMeta>> {
+    if !cache.contains_key(table) {
+        let loaded = load_table_meta(routed, database, table).await.ok();
+        cache.insert(table.to_string(), loaded);
+    }
+    cache.get(table).and_then(|entry| entry.clone())
+}
+
+/// 按投影裁剪列名（与 `planner::query::projected_columns` 同语义：空投影 =
+/// 恒等全列）。
+fn projected_column_names(columns: &[String], projection: &[usize]) -> Vec<String> {
+    if projection.is_empty() {
+        columns.to_vec()
+    } else {
+        projection
+            .iter()
+            .filter_map(|&i| columns.get(i).cloned())
+            .collect()
     }
 }
 
@@ -1931,31 +2401,8 @@ pub(crate) fn create_executor_from_plan<'a>(
     })
 }
 
-pub(crate) fn value_to_json(value: Value) -> serde_json::Value {
-    match value {
-        Value::Int(n) => serde_json::Value::Number(n.into()),
-        Value::String(s) => serde_json::Value::String(s),
-        Value::Null => serde_json::Value::Null,
-        Value::Float(f) => {
-            // serde_json doesn't support special float values (NaN, Inf)
-            // so we need to handle them carefully
-            if f.is_finite() {
-                serde_json::Number::from_f64(f)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null)
-            } else {
-                // NaN, Infinity -> Null (not representable in JSON)
-                serde_json::Value::Null
-            }
-        }
-        Value::Bool(b) => serde_json::Value::Bool(b),
-        // MS13: 日期族按 DA5 字符串形态渲染
-        Value::Date(d) => serde_json::Value::String(crate::executor::datetime::format_date(d)),
-        Value::Timestamp(t) => {
-            serde_json::Value::String(crate::executor::datetime::format_timestamp(t))
-        }
-    }
-}
+/// MS31-T01：`value_to_json` 已迁入 `crate::result`（核心/协议解耦的载体
+/// 模块）——本文件不再持有值转换实现。
 
 /// T4（change 2026-10-04-external-review-gaps）：计划的输出列名序（仅覆盖
 /// SubqueryEval 消费面可达的形状——扫描类/聚合/排序/链式标量节点；其余形状
@@ -2772,7 +3219,7 @@ mod tests {
         let db = Database::open(&dir.path().join("test.db")).await.unwrap();
         let resp = db.execute_sql(create_sql).await;
         assert!(
-            !matches!(resp, Response::Error { .. }),
+            !matches!(resp, Err(SqlError { .. })),
             "setup CREATE TABLE failed: {:?}",
             resp
         );
@@ -2893,7 +3340,7 @@ mod tests {
             .execute_sql("CREATE TABLE u (id INT PRIMARY KEY)")
             .await;
         assert!(
-            !matches!(resp, Response::Error { .. }),
+            !matches!(resp, Err(SqlError { .. })),
             "setup failed: {resp:?}"
         );
 
@@ -2956,13 +3403,107 @@ mod tests {
         );
     }
 
+    // ---- 列类型装配：声明来源解析（MS31-T01 R-b） ----
+
+    /// 限定符不可解析时的候选表匹配：**含该列的全部候选表声明类型一致**才取
+    /// 该类型；类型不一致 → 冲突（保持未知），不取首个候选冒充声明来源。
+    #[tokio::test]
+    async fn type_slot_resolution_requires_candidate_agreement() {
+        let (db, _dir) = open_db_with_table("CREATE TABLE t1 (k INTEGER)").await;
+        let _ = db.execute_sql("CREATE TABLE t2 (k TEXT)").await;
+        let _ = db.execute_sql("CREATE TABLE t3 (k INTEGER)").await;
+
+        // 候选表同名列声明类型不一致 → 冲突。
+        let conflicting = vec![TypeSlot::Table {
+            table: "alias_x".to_string(),
+            column: "k".to_string(),
+            fallback: vec!["t1".to_string(), "t2".to_string()],
+        }];
+        let resolved = resolve_type_slots(&db, &RoutedTables::new(), conflicting).await;
+        assert!(
+            matches!(resolved.as_slice(), [ResolvedType::Conflicted]),
+            "conflicting candidate types must not resolve to a declared type: {resolved:?}"
+        );
+
+        // 候选表同名列声明类型一致 → 取该类型。
+        let agreeing = vec![TypeSlot::Table {
+            table: "alias_x".to_string(),
+            column: "k".to_string(),
+            fallback: vec!["t1".to_string(), "t3".to_string()],
+        }];
+        let resolved = resolve_type_slots(&db, &RoutedTables::new(), agreeing).await;
+        assert!(
+            matches!(
+                resolved.as_slice(),
+                [ResolvedType::Declared(StorageColumnType::Int)]
+            ),
+            "agreeing candidate types must resolve to the declared type: {resolved:?}"
+        );
+
+        // 限定符可解析 → 直取该表声明类型（不走候选集）。
+        let direct = vec![TypeSlot::Table {
+            table: "t2".to_string(),
+            column: "k".to_string(),
+            fallback: vec!["t1".to_string()],
+        }];
+        let resolved = resolve_type_slots(&db, &RoutedTables::new(), direct).await;
+        assert!(
+            matches!(
+                resolved.as_slice(),
+                [ResolvedType::Declared(StorageColumnType::String(_))]
+            ),
+            "resolvable qualifier must resolve directly: {resolved:?}"
+        );
+    }
+
+    /// 冲突槽保持未知且不参与结果行值推导——不以值形状冒充声明类型；
+    /// 不可推导槽仍由值推导兜底。
+    #[tokio::test]
+    async fn conflicted_column_type_is_not_derived_from_values() {
+        let rows = vec![vec![Value::Int(7)]];
+
+        let conflicted = attach_column_metadata(
+            SqlOutcome::Rows {
+                columns: Vec::new(),
+                rows: rows.clone(),
+            },
+            vec!["k".to_string()],
+            vec![ResolvedType::Conflicted],
+        );
+        match conflicted {
+            SqlOutcome::Rows { columns, .. } => assert_eq!(
+                columns[0].column_type, None,
+                "conflicted declaration source must stay unknown"
+            ),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+
+        let unknown = attach_column_metadata(
+            SqlOutcome::Rows {
+                columns: Vec::new(),
+                rows,
+            },
+            vec!["k".to_string()],
+            vec![ResolvedType::Unknown],
+        );
+        match unknown {
+            SqlOutcome::Rows { columns, .. } => assert_eq!(
+                columns[0].column_type,
+                Some(StorageColumnType::Int),
+                "undeducible slot must fall back to value derivation"
+            ),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
     // ---- execute_stage ----
 
     #[tokio::test]
     async fn execute_stage_simple_query_plan_returns_rows() {
         let (db, _dir) =
             open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
-        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
+        let _ = db
+            .execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
             .await;
         let stmts = parse_stage("SELECT * FROM t").await.unwrap();
         let stmt = stmts.first().unwrap();
@@ -2976,8 +3517,8 @@ mod tests {
 
         let resp = execute_stage(&db, plan, false).await;
         match resp {
-            Response::QueryResult { rows } => assert_eq!(rows.len(), 1),
-            other => panic!("Expected QueryResult, got {:?}", other),
+            Ok(SqlOutcome::Rows { rows, .. }) => assert_eq!(rows.len(), 1),
+            other => panic!("Expected Rows, got {:?}", other),
         }
     }
 
@@ -2985,7 +3526,7 @@ mod tests {
     async fn execute_stage_ddl_plan_clears_cache_on_success() {
         let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY)").await;
         // Prime the cache with a SELECT plan so we can observe clearing.
-        db.execute_sql("SELECT * FROM t").await;
+        let _ = db.execute_sql("SELECT * FROM t").await;
         assert!(
             db.plan_cache_len() > 0,
             "Cache should have an entry after SELECT"
@@ -3001,7 +3542,7 @@ mod tests {
             .unwrap();
         let resp = execute_stage(&db, plan, false).await;
         assert!(
-            !matches!(resp, Response::Error { .. }),
+            !matches!(resp, Err(SqlError { .. })),
             "DDL execution should succeed: {:?}",
             resp
         );
@@ -3022,7 +3563,7 @@ mod tests {
         let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY)").await;
         let resp = db.execute_sql("SELECT 1; SELECT 2").await;
         match resp {
-            Response::Error { message, .. } => {
+            Err(SqlError { message, .. }) => {
                 assert!(
                     message.contains("single statement"),
                     "error must state the single-statement policy: {}",
@@ -3048,7 +3589,7 @@ mod tests {
             .execute_in_tx("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)", &tx)
             .await;
         match resp {
-            Response::Error { message, .. } => {
+            Err(SqlError { message, .. }) => {
                 assert!(
                     message.contains("single statement"),
                     "error must state the single-statement policy: {}",
@@ -3061,7 +3602,7 @@ mod tests {
         // 事务未终结：单语句继续可用并成功提交
         let resp = db.execute_in_tx("INSERT INTO t VALUES (1)", &tx).await;
         assert!(
-            !matches!(resp, Response::Error { .. }),
+            !matches!(resp, Err(SqlError { .. })),
             "tx must remain usable after multi-statement rejection: {:?}",
             resp
         );

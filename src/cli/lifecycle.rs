@@ -8,9 +8,9 @@ use super::resolve;
 use super::{emit_stderr, emit_stdout, kind, sigint_future, sigterm_future, ExitStatus, FormatArg};
 use crate::database::Database;
 use crate::executor::Value;
-use crate::network::protocol::Response;
 use crate::parser::PlanError;
 use crate::pipeline::{execute_stage, infer_ctas_column_types, parse_stage, plan_stage};
+use crate::result::{value_to_json, SqlOutcome};
 use crate::storage::catalog::{CatalogColumnRow, CatalogKind, CatalogRow};
 use crate::storage::integrity::{check_integrity, FindingSeverity};
 use crate::storage::page_format::ColumnType;
@@ -513,12 +513,17 @@ async fn select_all_rows(
         }
     };
     match execute_stage(db, plan, false).await {
-        Response::QueryResult { rows } => Ok(rows),
-        Response::Error { message, .. } => Err(ExitStatus::General(format!(
+        // MS31-T01：查询结果携原生 `Value` 行——dump 的 SQL 字面量面消费 JSON
+        // 值，边界转换用与既有执行链同源的 `value_to_json`（逐字节一致）。
+        Ok(SqlOutcome::Rows { rows, .. }) => Ok(rows
+            .into_iter()
+            .map(|row| row.into_iter().map(value_to_json).collect())
+            .collect()),
+        Err(error) => Err(ExitStatus::General(format!(
             "failed to dump table {}: {}",
-            table, message
+            table, error.message
         ))),
-        other => Err(ExitStatus::General(format!(
+        Ok(other) => Err(ExitStatus::General(format!(
             "unexpected response while dumping table {}: {:?}",
             table, other
         ))),
@@ -630,20 +635,19 @@ pub(super) async fn restore(
                         }
                     };
                     match execute_stage(db, plan, false).await {
-                        Response::Error { message, .. } => {
+                        Err(error) => {
                             return super::sql_failure_status(
                                 index + 1,
                                 total,
-                                &message,
+                                &error.message,
                                 &statement_text,
                                 false,
                                 None,
                             )
                         }
                         // restore 不渲染：dump 文本面只有 CREATE/INSERT，
-                        // 其余响应静默忽略
-                        Response::AffectedRows { .. } | Response::QueryResult { .. } => {}
-                        Response::Pong => {}
+                        // 其余结果静默忽略
+                        Ok(_) => {}
                     }
                 }
                 ExitStatus::Success
@@ -835,14 +839,14 @@ pub(super) async fn import_csv(
                         columns.join(", ")
                     );
                     match db.execute_sql(&ddl).await {
-                        Response::AffectedRows { .. } => {}
-                        Response::Error { message, .. } => {
+                        Ok(SqlOutcome::AffectedRows(_)) => {}
+                        Err(error) => {
                             return ExitStatus::Sql(
-                                format!("failed to auto-create table {}: {}", table, message),
+                                format!("failed to auto-create table {}: {}", table, error.message),
                                 None,
                             )
                         }
-                        other => {
+                        Ok(other) => {
                             return ExitStatus::Sql(
                                 format!(
                                     "failed to auto-create table {}: unexpected response {:?}",
@@ -886,14 +890,17 @@ pub(super) async fn import_csv(
                         values.join(", ")
                     );
                     match db.execute_sql(&insert).await {
-                        Response::AffectedRows { count } => imported += count,
-                        Response::Error { message, .. } => {
+                        Ok(SqlOutcome::AffectedRows(count)) => imported += count,
+                        Err(error) => {
                             return ExitStatus::Sql(
-                                format!("import row {} of {} failed: {}", row_no, total, message),
+                                format!(
+                                    "import row {} of {} failed: {}",
+                                    row_no, total, error.message
+                                ),
                                 None,
                             )
                         }
-                        other => {
+                        Ok(other) => {
                             return ExitStatus::Sql(
                                 format!(
                                     "import row {} of {} failed: unexpected response {:?}",
@@ -1000,7 +1007,7 @@ pub(crate) fn create_table_sql(table: &CatalogRow, columns: &[CatalogColumnRow])
                 part.push_str(" UNIQUE");
             }
             if let Some(default) = &col.default_value {
-                let json = crate::pipeline::value_to_json(default.clone());
+                let json = crate::result::value_to_json(default.clone());
                 let literal = match col.column_type {
                     ColumnType::Date | ColumnType::Timestamp => {
                         typed_datetime_literal(&json, &col.column_type)
@@ -1083,11 +1090,17 @@ async fn fetch_table_rows(
         .await
         .map_err(|e| format!("failed to fetch rows from {table}: {e}"))?;
     match execute_stage(db, plan, false).await {
-        Response::QueryResult { rows } => Ok((col_pairs, rows)),
-        Response::Error { message, .. } => {
-            Err(format!("failed to fetch rows from {table}: {message}"))
-        }
-        other => Err(format!(
+        Ok(SqlOutcome::Rows { rows, .. }) => Ok((
+            col_pairs,
+            rows.into_iter()
+                .map(|row| row.into_iter().map(value_to_json).collect())
+                .collect(),
+        )),
+        Err(error) => Err(format!(
+            "failed to fetch rows from {table}: {}",
+            error.message
+        )),
+        Ok(other) => Err(format!(
             "failed to fetch rows from {table}: unexpected response {:?}",
             other
         )),

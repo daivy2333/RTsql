@@ -22,7 +22,7 @@
 //!         (and inside a transaction)      execute_in_tx_rejects_attach_and_transaction_stays_usable
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::transaction::IsolationLevel;
 use std::io::Read;
 use std::path::Path;
@@ -283,7 +283,7 @@ async fn attach_invalid_key_rejected_with_exit_5() {
         let db = Database::open_with_key(&path, IsolationLevel::RepeatableRead, Some("k1"))
             .await
             .unwrap();
-        db.execute_sql("CREATE TABLE u (id INT)").await;
+        to_response(db.execute_sql("CREATE TABLE u (id INT)").await);
         db.close().await.unwrap();
     }
 
@@ -338,15 +338,12 @@ fn expect_error_contains(resp: Response, needle: &str, what: &str) {
 async fn execute_sql_rejects_attach_without_touching_plan_cache() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("lib.db")).await.unwrap();
-    assert!(db
-        .execute_sql("CREATE TABLE t (id INT)")
-        .await
-        .is_ok_or_success());
-    assert!(db.execute_sql("SELECT id FROM t").await.is_ok_or_success());
+    assert!(to_response(db.execute_sql("CREATE TABLE t (id INT)").await).is_ok_or_success());
+    assert!(to_response(db.execute_sql("SELECT id FROM t").await).is_ok_or_success());
     let len_before = db.plan_cache_len();
     assert!(len_before > 0, "SELECT should populate the plan cache");
 
-    let resp = db.execute_sql("ATTACH 'other.db' AS o").await;
+    let resp = to_response(db.execute_sql("ATTACH 'other.db' AS o").await);
     expect_error_contains(
         resp,
         "only supported in an rtsql CLI session",
@@ -364,13 +361,10 @@ async fn execute_sql_rejects_attach_without_touching_plan_cache() {
 async fn execute_in_tx_rejects_attach_and_transaction_stays_usable() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("lib.db")).await.unwrap();
-    assert!(db
-        .execute_sql("CREATE TABLE t (id INT)")
-        .await
-        .is_ok_or_success());
+    assert!(to_response(db.execute_sql("CREATE TABLE t (id INT)").await).is_ok_or_success());
     let tx = db.begin().await.unwrap();
 
-    let resp = db.execute_in_tx("ATTACH 'other.db' AS o", &tx).await;
+    let resp = to_response(db.execute_in_tx("ATTACH 'other.db' AS o", &tx).await);
     expect_error_contains(
         resp,
         "only supported in an rtsql CLI session",
@@ -378,14 +372,12 @@ async fn execute_in_tx_rejects_attach_and_transaction_stays_usable() {
     );
 
     assert!(
-        db.execute_in_tx("INSERT INTO t VALUES (1)", &tx)
-            .await
-            .is_ok_or_success(),
+        to_response(db.execute_in_tx("INSERT INTO t VALUES (1)", &tx).await).is_ok_or_success(),
         "in-tx insert after rejection"
     );
     db.commit(tx).await.unwrap();
 
-    match db.execute_sql("SELECT id FROM t").await {
+    match to_response(db.execute_sql("SELECT id FROM t").await) {
         Response::QueryResult { rows } => assert_eq!(rows.len(), 1, "committed write visible"),
         other => panic!("expected QueryResult, got {:?}", other),
     }

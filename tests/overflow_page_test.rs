@@ -155,7 +155,7 @@ async fn just_over_boundary_goes_overflow() {
 // ===========================================================================
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::transaction::IsolationLevel;
 use serde_json::Value as Json;
 
@@ -164,7 +164,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "statement failed: {sql:?} -> {resp:?}"
@@ -193,7 +193,9 @@ async fn sql_boundary_4073_4074_4075_roundtrip() {
         exec_ok(&db, &format!("INSERT INTO t VALUES ({i}, {payload})")).await;
     }
 
-    let rows = query_rows(db.execute_sql("SELECT k, v FROM t ORDER BY k").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT k, v FROM t ORDER BY k").await,
+    ));
     assert_eq!(rows.len(), 3, "all three boundary rows must scan back");
     for (i, row) in rows.iter().enumerate() {
         assert_eq!(row[0].as_i64(), Some(i as i64));
@@ -223,7 +225,9 @@ async fn sql_chunk_boundary_sizes_roundtrip() {
         exec_ok(&db, &format!("INSERT INTO t VALUES ({i}, {payload})")).await;
     }
 
-    let rows = query_rows(db.execute_sql("SELECT k, v FROM t ORDER BY k").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT k, v FROM t ORDER BY k").await,
+    ));
     assert_eq!(rows.len(), sizes.len());
     for (i, row) in rows.iter().enumerate() {
         assert_eq!(row[1].as_str().map(|s| s.len()), Some(sizes[i]), "row {i}");
@@ -243,11 +247,15 @@ async fn update_grow_into_overflow_and_shrink_back() {
 
     let big = "x".repeat(5000);
     exec_ok(&db, &format!("UPDATE t SET v = '{big}' WHERE k = 1")).await;
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE k = 1").await,
+    ));
     assert_eq!(rows[0][0].as_str().map(|s| s.len()), Some(5000));
 
     exec_ok(&db, "UPDATE t SET v = 'tiny' WHERE k = 1").await;
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE k = 1").await,
+    ));
     assert_eq!(rows[0][0].as_str(), Some("tiny"));
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -267,10 +275,10 @@ async fn mixed_inline_and_oversized_rows_scan() {
         exec_ok(&db, &format!("INSERT INTO t VALUES ({k}, {payload})")).await;
     }
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT k, length(v) FROM t ORDER BY k")
             .await,
-    );
+    ));
     assert_eq!(rows.len(), 6, "all rows must scan back exactly once");
     for (i, row) in rows.iter().enumerate() {
         let k = i as i64 + 1;
@@ -293,12 +301,16 @@ async fn pk_point_lookup_hits_oversized_row() {
     exec_ok(&db, &format!("INSERT INTO t VALUES (7, '{big}')")).await;
     exec_ok(&db, "INSERT INTO t VALUES (8, 'inline')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 7").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE k = 7").await,
+    ));
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0].as_str().map(|s| s.len()), Some(9000));
 
     // 点查内联邻居不受扰
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 8").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE k = 8").await,
+    ));
     assert_eq!(rows[0][0].as_str(), Some("inline"));
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -456,7 +468,9 @@ async fn oversized_insert_survives_crash_recovery() {
     // RED：重放 slot_data = 22 + 9003 无法经 add_slot_with_logical_id 落位
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 1").await);
+        let rows = query_rows(to_response(
+            db.execute_sql("SELECT v FROM t WHERE k = 1").await,
+        ));
         assert_eq!(rows.len(), 1, "recovered row must be visible via PK lookup");
         assert_eq!(rows[0][0].as_str().map(|s| s.len()), Some(9000));
         db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -465,7 +479,9 @@ async fn oversized_insert_survives_crash_recovery() {
     // 幂等：重复恢复不重放失败、不重复分配链页，行保持一致
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 1").await);
+        let rows = query_rows(to_response(
+            db.execute_sql("SELECT v FROM t WHERE k = 1").await,
+        ));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0].as_str().map(|s| s.len()), Some(9000));
         db.close().await.unwrap();
@@ -493,7 +509,9 @@ async fn oversized_update_crash_recovery_two_states() {
 
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 1").await);
+        let rows = query_rows(to_response(
+            db.execute_sql("SELECT v FROM t WHERE k = 1").await,
+        ));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0].as_str().map(|s| s.len()), Some(5000));
         exec_ok(&db, "UPDATE t SET v = 'tiny' WHERE k = 1").await;
@@ -502,7 +520,9 @@ async fn oversized_update_crash_recovery_two_states() {
 
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 1").await);
+        let rows = query_rows(to_response(
+            db.execute_sql("SELECT v FROM t WHERE k = 1").await,
+        ));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0].as_str(), Some("tiny"));
         db.close().await.unwrap();
@@ -526,16 +546,16 @@ async fn keyless_oversized_row_crash_recovery() {
 
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT COUNT(*) FROM t").await);
+        let rows = query_rows(to_response(db.execute_sql("SELECT COUNT(*) FROM t").await));
         assert_eq!(
             rows[0][0],
             serde_json::json!(1),
             "keyless oversized row must replay"
         );
-        let rows = query_rows(
+        let rows = query_rows(to_response(
             db.execute_sql("SELECT length(v) FROM t WHERE k IS NULL")
                 .await,
-        );
+        ));
         assert_eq!(rows[0][0], serde_json::json!(9000));
         db.close().await.unwrap();
     }
@@ -560,14 +580,18 @@ async fn create_index_backfill_with_oversized_rows() {
     // RED：回填页闭包内对 9B locator 直接 deserialize_row → unknown tag 报错
     exec_ok(&db, "CREATE INDEX idx_n ON t (n)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT k FROM t WHERE n = 5").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT k FROM t WHERE n = 5").await,
+    ));
     assert_eq!(
         rows.len(),
         1,
         "index-routed lookup must reach the oversized row"
     );
     assert_eq!(rows[0][0], serde_json::json!(1));
-    let rows = query_rows(db.execute_sql("SELECT k FROM t WHERE n = 6").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT k FROM t WHERE n = 6").await,
+    ));
     assert_eq!(rows[0][0], serde_json::json!(2));
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -618,10 +642,10 @@ async fn write_channel_matrix_oversized() {
     let big5 = "g".repeat(6000);
     exec_ok(&db, &format!("UPDATE w SET v = '{big5}' WHERE k = 1")).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT k, length(v) FROM w ORDER BY k")
             .await,
-    );
+    ));
     assert_eq!(rows.len(), 3, "all rows must scan back exactly once");
     assert_eq!(rows[0][0], serde_json::json!(1));
     assert_eq!(rows[0][1], serde_json::json!(6000), "UPDATE-grown row");
@@ -646,10 +670,10 @@ async fn long_string_tag_switch_point_sql_layer() {
     exec_ok(&db, &format!("INSERT INTO b VALUES (1, '{a}')")).await;
     exec_ok(&db, &format!("INSERT INTO b VALUES (2, '{c}')")).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT k, length(v) FROM b ORDER BY k")
             .await,
-    );
+    ));
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0][1], serde_json::json!(65535), "TAG_STRING boundary");
     assert_eq!(
@@ -671,10 +695,10 @@ async fn ctas_materializes_oversized_source_rows() {
     exec_ok(&db, &format!("INSERT INTO src VALUES (1, '{big}')")).await;
 
     exec_ok(&db, "CREATE TABLE dst AS SELECT * FROM src").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT length(v) FROM dst WHERE k = 1")
             .await,
-    );
+    ));
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], serde_json::json!(7000));
 
@@ -736,14 +760,15 @@ async fn non_string_oversized_value_keeps_rejection() {
     exec_ok(&db, "CREATE TABLE d (k INT PRIMARY KEY, day DATE)").await;
 
     let not_a_date = "z".repeat(5000);
-    let resp = db
-        .execute_sql(&format!("INSERT INTO d VALUES (1, '{not_a_date}')"))
-        .await;
+    let resp = to_response(
+        db.execute_sql(&format!("INSERT INTO d VALUES (1, '{not_a_date}')"))
+            .await,
+    );
     assert!(
         matches!(resp, Response::Error { .. }),
         "oversized invalid date literal must be rejected, got {resp:?}"
     );
-    let rows = query_rows(db.execute_sql("SELECT COUNT(*) FROM d").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT COUNT(*) FROM d").await));
     assert_eq!(
         rows[0][0],
         serde_json::json!(0),
@@ -774,7 +799,9 @@ async fn encrypted_oversized_write_read_and_crash_recovery() {
         let db = Database::open_with_key(&path, IsolationLevel::RepeatableRead, Some("k1"))
             .await
             .unwrap();
-        let rows = query_rows(db.execute_sql("SELECT length(v) FROM t WHERE k = 1").await);
+        let rows = query_rows(to_response(
+            db.execute_sql("SELECT length(v) FROM t WHERE k = 1").await,
+        ));
         assert_eq!(rows.len(), 1, "encrypted oversized row must recover");
         assert_eq!(rows[0][0], serde_json::json!(8500));
         db.close().await.unwrap();
@@ -788,7 +815,9 @@ async fn memory_db_oversized_roundtrip() {
     exec_ok(&db, "CREATE TABLE t (k INT PRIMARY KEY, v STRING(65535))").await;
     let big = "q".repeat(6500);
     exec_ok(&db, &format!("INSERT INTO t VALUES (1, '{big}')")).await;
-    let rows = query_rows(db.execute_sql("SELECT length(v) FROM t WHERE k = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT length(v) FROM t WHERE k = 1").await,
+    ));
     assert_eq!(rows[0][0], serde_json::json!(6500));
     db.close().await.unwrap();
 }
@@ -806,7 +835,9 @@ async fn readonly_session_selects_oversized_row() {
         db.close().await.unwrap();
     }
     let db = Database::open_readonly(&path).await.unwrap();
-    let rows = query_rows(db.execute_sql("SELECT length(v) FROM t WHERE k = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT length(v) FROM t WHERE k = 1").await,
+    ));
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], serde_json::json!(7000));
 }
@@ -823,14 +854,16 @@ async fn one_megabyte_row_crash_recovery_baseline() {
         db.checkpoint().await.unwrap();
         let big = "M".repeat(1_000_000);
         exec_ok(&db, &format!("INSERT INTO t VALUES (1, '{big}')")).await;
-        let rows = query_rows(db.execute_sql("SELECT length(v) FROM t").await);
+        let rows = query_rows(to_response(db.execute_sql("SELECT length(v) FROM t").await));
         assert_eq!(rows[0][0], serde_json::json!(1_000_000));
         db.wal_buffer.as_ref().unwrap().shutdown().await;
     } // crash
 
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT length(v) FROM t WHERE k = 1").await);
+        let rows = query_rows(to_response(
+            db.execute_sql("SELECT length(v) FROM t WHERE k = 1").await,
+        ));
         assert_eq!(rows.len(), 1, "1MB row must recover from WAL replay");
         assert_eq!(rows[0][0], serde_json::json!(1_000_000));
         db.close().await.unwrap();
@@ -852,7 +885,9 @@ async fn oversized_rows_survive_clean_reopen() {
     }
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE k = 1").await);
+        let rows = query_rows(to_response(
+            db.execute_sql("SELECT v FROM t WHERE k = 1").await,
+        ));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0].as_str().map(|s| s.len()), Some(12000));
         db.close().await.unwrap();

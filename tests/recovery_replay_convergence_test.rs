@@ -12,7 +12,7 @@
 //! 落盘（DDL 无 WAL 记录，引擎持久化模型——wal_recovery_large_test.rs 先例）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -26,7 +26,7 @@ async fn seed_schema(db: &Database) {
         "CREATE TABLE c (id INT PRIMARY KEY, n INT NOT NULL, uniq INT UNIQUE)",
         "CREATE INDEX idx_c_n ON c (n)",
     ] {
-        let resp = db.execute_sql(sql).await;
+        let resp = to_response(db.execute_sql(sql).await);
         assert!(
             !matches!(resp, Response::Error { .. }),
             "schema setup failed for {sql}: {resp:?}"
@@ -50,7 +50,7 @@ async fn committed_writes(db: &Database) {
         ("DELETE FROM c WHERE id = 8", true),
     ];
     for (sql, should_commit) in steps {
-        let resp = db.execute_sql(sql).await;
+        let resp = to_response(db.execute_sql(sql).await);
         assert!(
             matches!(resp, Response::Error { .. }) != should_commit,
             "write step {sql:?} unexpected response: {resp:?}"
@@ -61,9 +61,10 @@ async fn committed_writes(db: &Database) {
 /// 多行 INSERT：前行 (2,11,101) 已写、后行 (3,12,100) 唯一值 100 与键位 5 的
 /// 行冲突 → 语句失败（abort，前行原位中性化、页逻辑 id 已消耗）。
 async fn aborting_multi_row_insert(db: &Database) {
-    let resp = db
-        .execute_sql("INSERT INTO c VALUES (2, 11, 101), (3, 12, 100)")
-        .await;
+    let resp = to_response(
+        db.execute_sql("INSERT INTO c VALUES (2, 11, 101), (3, 12, 100)")
+            .await,
+    );
     assert!(
         matches!(&resp, Response::Error { message, .. } if message.contains("Duplicate key")),
         "multi-row INSERT must fail on the unique conflict, got {resp:?}"
@@ -72,7 +73,7 @@ async fn aborting_multi_row_insert(db: &Database) {
 
 /// 恢复后的提交终态断言：键位 5（n=12, uniq=100）与键位 2（n=11, uniq=101）。
 async fn assert_committed_terminal_state(db: &Database) {
-    let count = db.execute_sql("SELECT COUNT(*) FROM c").await;
+    let count = to_response(db.execute_sql("SELECT COUNT(*) FROM c").await);
     match count {
         Response::QueryResult { rows } => {
             assert_eq!(rows, vec![vec![serde_json::json!(2)]], "recovered count");
@@ -101,7 +102,7 @@ async fn assert_committed_terminal_state(db: &Database) {
         ("SELECT * FROM c WHERE id = 1", vec![]),
         ("SELECT * FROM c WHERE id = 8", vec![]),
     ] {
-        let resp = db.execute_sql(sql).await;
+        let resp = to_response(db.execute_sql(sql).await);
         match resp {
             Response::QueryResult { rows } => {
                 assert_eq!(rows, expected, "PK probe {sql:?}");
@@ -121,7 +122,7 @@ async fn assert_committed_terminal_state(db: &Database) {
             vec![vec![serde_json::json!(2)]],
         ),
     ] {
-        let resp = db.execute_sql(sql).await;
+        let resp = to_response(db.execute_sql(sql).await);
         match resp {
             Response::QueryResult { rows } => {
                 assert_eq!(rows, expected, "unique probe {sql:?}");
@@ -129,14 +130,14 @@ async fn assert_committed_terminal_state(db: &Database) {
             other => panic!("unique probe {sql:?}: {other:?}"),
         }
     }
-    let dup = db.execute_sql("INSERT INTO c VALUES (9, 9, 100)").await;
+    let dup = to_response(db.execute_sql("INSERT INTO c VALUES (9, 9, 100)").await);
     assert!(
         matches!(&dup, Response::Error { message, .. } if message.contains("Duplicate key")),
         "unique enforcement must survive recovery, got {dup:?}"
     );
 
     // 二级索引查询（idx_c_n）：n=12 仅键位 5 的行。
-    let sec = db.execute_sql("SELECT id FROM c WHERE n = 12").await;
+    let sec = to_response(db.execute_sql("SELECT id FROM c WHERE n = 12").await);
     match sec {
         Response::QueryResult { rows } => {
             assert_eq!(
@@ -161,7 +162,7 @@ async fn aborted_insert_reinsert_crash_recovery_succeeds() {
     aborting_multi_row_insert(&db).await;
 
     // 重插同键提交（被中性化的版本不占用键位）。
-    let resp = db.execute_sql("INSERT INTO c VALUES (2, 11, 101)").await;
+    let resp = to_response(db.execute_sql("INSERT INTO c VALUES (2, 11, 101)").await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "reinsert after abort must commit, got {resp:?}"
@@ -179,7 +180,7 @@ async fn aborted_insert_reinsert_crash_recovery_succeeds() {
     db2.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db2);
     let db3 = Database::open(&path).await.unwrap();
-    let count = db3.execute_sql("SELECT COUNT(*) FROM c").await;
+    let count = to_response(db3.execute_sql("SELECT COUNT(*) FROM c").await);
     match count {
         Response::QueryResult { rows } => {
             assert_eq!(
@@ -207,7 +208,7 @@ async fn committed_writes_without_abort_recover_unchanged() {
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
-    let count = db2.execute_sql("SELECT COUNT(*) FROM c").await;
+    let count = to_response(db2.execute_sql("SELECT COUNT(*) FROM c").await);
     match count {
         Response::QueryResult { rows } => {
             assert_eq!(
@@ -218,7 +219,7 @@ async fn committed_writes_without_abort_recover_unchanged() {
         }
         other => panic!("control COUNT(*): {other:?}"),
     }
-    let row = db2.execute_sql("SELECT * FROM c WHERE id = 5").await;
+    let row = to_response(db2.execute_sql("SELECT * FROM c WHERE id = 5").await);
     match row {
         Response::QueryResult { rows } => {
             assert_eq!(
@@ -251,7 +252,7 @@ async fn abort_without_reinsert_recovers_cleanly() {
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
-    let count = db2.execute_sql("SELECT COUNT(*) FROM c").await;
+    let count = to_response(db2.execute_sql("SELECT COUNT(*) FROM c").await);
     match count {
         Response::QueryResult { rows } => {
             assert_eq!(
@@ -263,7 +264,7 @@ async fn abort_without_reinsert_recovers_cleanly() {
         other => panic!("control COUNT(*): {other:?}"),
     }
     // 中止行 (2,11,101) 不得复活。
-    let probe = db2.execute_sql("SELECT * FROM c WHERE id = 2").await;
+    let probe = to_response(db2.execute_sql("SELECT * FROM c WHERE id = 2").await);
     match probe {
         Response::QueryResult { rows } => {
             assert!(

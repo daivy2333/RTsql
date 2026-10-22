@@ -13,7 +13,7 @@
 //! checkpoint-clean database.
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::{BufferPool, ColumnType, FileStorage};
 use rtsql::wal::{CheckpointManager, WalWriter};
 use std::path::Path;
@@ -58,19 +58,19 @@ async fn create_table(db: &Database, name: &str) {
 }
 
 async fn insert_user(db: &Database, id: i64) {
-    match db
-        .execute_sql(&format!(
+    match to_response(
+        db.execute_sql(&format!(
             "INSERT INTO users (id, name) VALUES ({id}, 'u{id}')"
         ))
-        .await
-    {
+        .await,
+    ) {
         Response::AffectedRows { .. } => {}
         other => panic!("insert must succeed, got {other:?}"),
     }
 }
 
 async fn count_users(db: &Database) -> i64 {
-    match db.execute_sql("SELECT COUNT(*) FROM users").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM users").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "COUNT(*) must yield exactly one row");
             rows[0][0].as_i64().expect("integer count")
@@ -152,7 +152,7 @@ async fn fresh_db_zero_work_close_creates_no_site() {
 
     // Reopen stays clean (existing \"never checkpointed\" path: no site).
     let db = Database::open(&path).await.unwrap();
-    match db.execute_sql("SELECT 1").await {
+    match to_response(db.execute_sql("SELECT 1").await) {
         Response::QueryResult { rows } => assert_eq!(rows.len(), 1),
         other => panic!("expected QueryResult, got {other:?}"),
     }

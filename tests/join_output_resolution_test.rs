@@ -22,7 +22,7 @@
 //!   组合布局）→ JOIN 上别名排序真实生效。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use std::io::Read;
 use std::path::Path;
@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -78,10 +78,10 @@ async fn agg_arg_outside_select_reachable() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT max(v) FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("b")]],
@@ -98,10 +98,10 @@ async fn qualified_group_key_precise() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let mut rows = query_rows(
+    let mut rows = query_rows(to_response(
         db.execute_sql("SELECT t1.k, count(*) FROM t1 JOIN t2 ON t1.k = t2.k GROUP BY t1.k")
             .await,
-    );
+    ));
     // 行序无关比较（Hash Join 的分组序不承诺稳定）
     rows.sort_by_key(|r| r[0].to_string());
     assert_eq!(
@@ -119,10 +119,10 @@ async fn agg_arg_reachable_with_where() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT max(v) FROM t1 JOIN t2 ON t1.k = t2.k WHERE t1.k > 1")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("a")]]);
 }
 
@@ -136,10 +136,10 @@ async fn bare_group_by_ambiguous_rejected() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT k, count(*) FROM t1 JOIN t2 ON t1.k = t2.k GROUP BY k")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Ambiguous column") && msg.contains('k'),
         "bare GROUP BY key over two matching columns must name the ambiguity: {msg}"
@@ -154,10 +154,10 @@ async fn bare_agg_arg_ambiguous_rejected() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT count(k) FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Ambiguous column") && msg.contains('k'),
         "bare aggregate arg over two matching columns must name the ambiguity: {msg}"
@@ -172,10 +172,10 @@ async fn bare_projection_ambiguous_rejected() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT k FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Ambiguous column") && msg.contains('k'),
         "bare projection item over two matching columns must name the ambiguity: {msg}"
@@ -191,10 +191,10 @@ async fn unknown_column_named_rejected() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT nosuch FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Column not found") && msg.contains("nosuch"),
         "unknown column over JOIN base must be named: {msg}"
@@ -207,10 +207,10 @@ async fn unknown_qualified_column_named_rejected() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT t1.nosuch FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Column not found") && msg.contains("nosuch"),
         "unknown qualified column over JOIN base must be named: {msg}"
@@ -255,10 +255,10 @@ async fn expression_item_join_still_rejected() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT upper(t1.v) FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert!(
         msg.contains("expression") || msg.contains("not supported"),
         "expression item over JOIN base must keep the existing rejection: {msg}"
@@ -328,10 +328,10 @@ async fn unknown_bare_agg_arg_rejected() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT count(nosuch) FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Column not found") && msg.contains("nosuch"),
         "unknown bare aggregate arg over JOIN base must be named: {msg}"
@@ -347,10 +347,10 @@ async fn unknown_qualified_agg_arg_rejected() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT sum(t1.nosuch) FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Column not found") && msg.contains("nosuch"),
         "unknown qualified aggregate arg over JOIN base must be named: {msg}"
@@ -445,10 +445,10 @@ fn run_cli(dir: &Path, args: &[&str]) -> CliOutput {
 async fn select_order_bare_path() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT t2.w, t1.v FROM t1 JOIN t2 ON t1.k = t2.k")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("x"), json!("b")], vec![json!("y"), json!("a")]],
@@ -462,10 +462,10 @@ async fn select_order_bare_path() {
 async fn select_order_where_path() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT t2.w, t1.v FROM t1 JOIN t2 ON t1.k = t2.k WHERE t2.k = 2")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("y"), json!("a")]], "rows: {rows:?}");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -476,10 +476,10 @@ async fn select_order_where_path() {
 async fn select_order_order_by_path() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT t2.w, t1.v FROM t1 JOIN t2 ON t1.k = t2.k ORDER BY t1.v")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("y"), json!("a")], vec![json!("x"), json!("b")]],
@@ -493,15 +493,15 @@ async fn select_order_order_by_path() {
 async fn select_order_duplicates_and_star() {
     let dir = tempdir().unwrap();
     let db = join_base(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT t1.v, t1.v FROM t1 JOIN t2 ON t1.k = t2.k WHERE t1.k = 1")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("b"), json!("b")]], "rows: {rows:?}");
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT * FROM t1 JOIN t2 ON t1.k = t2.k ORDER BY t1.k")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -525,7 +525,7 @@ async fn select_order_ctas_column_names() {
     .await;
     // SELECT * 直接暴露物化列序——表头随 SELECT 输出序（修复前表序
     // [v, w]，行随之错序）。
-    let rows = query_rows(db.execute_sql("SELECT * FROM ct").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT * FROM ct").await));
     assert_eq!(
         rows,
         vec![vec![json!("x"), json!("b")], vec![json!("y"), json!("a")]],

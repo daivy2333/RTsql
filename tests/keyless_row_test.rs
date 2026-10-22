@@ -27,7 +27,7 @@
 //! 恢复侧语义保持）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -44,18 +44,18 @@ async fn string_first_column_table_accepts_inserts() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (s STRING, v INT)").await;
+    to_response(db.execute_sql("CREATE TABLE t (s STRING, v INT)").await);
 
-    match db.execute_sql("INSERT INTO t VALUES ('x', 1)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES ('x', 1)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("String 键位 INSERT 应 affected 1，实际 {:?}", other),
     }
-    match db.execute_sql("INSERT INTO t VALUES ('y', 2)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES ('y', 2)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("String 键位 INSERT 应 affected 1，实际 {:?}", other),
     }
 
-    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -67,7 +67,7 @@ async fn string_first_column_table_accepts_inserts() {
     }
 
     // 非 PK 谓词走 DataScan 下推（M19 pushdown），可达无键行
-    match db.execute_sql("SELECT s FROM t WHERE v = 1").await {
+    match to_response(db.execute_sql("SELECT s FROM t WHERE v = 1").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "WHERE v = 1 必须命中无键行");
             assert_eq!(rows[0][0], serde_json::json!("x"));
@@ -86,14 +86,14 @@ async fn null_key_position_row_insert_visible() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (a INT, b INT)").await;
+    to_response(db.execute_sql("CREATE TABLE t (a INT, b INT)").await);
 
-    match db.execute_sql("INSERT INTO t VALUES (NULL, 7)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (NULL, 7)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("NULL 键位 INSERT 应 affected 1，实际 {:?}", other),
     }
 
-    match db.execute_sql("SELECT a, b FROM t").await {
+    match to_response(db.execute_sql("SELECT a, b FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -114,13 +114,13 @@ async fn keyed_duplicate_still_rejected() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT)").await);
 
-    match db.execute_sql("INSERT INTO t VALUES (1)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (1)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("INSERT INTO t VALUES (1)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (1)").await) {
         Response::Error { .. } => { /* 期望 DuplicateKey */ }
         other => panic!("重复键位 INSERT 应被拒，实际 {:?}", other),
     }
@@ -148,34 +148,34 @@ async fn keyless_row_update_recovery_after_crash() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (a INT, v INT)").await;
+    to_response(db.execute_sql("CREATE TABLE t (a INT, v INT)").await);
     // DDL 无 WAL 记录：catalog 经 buffer_pool 落盘（夹具先例
     // wal_recovery_large_test.rs），否则重开 redo 必 table not found
     db.buffer_pool.flush_all().await.unwrap();
 
-    match db.execute_sql("INSERT INTO t VALUES (NULL, 1)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (NULL, 1)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库（T8-R1） */ }
         other => panic!("无键行 INSERT 应 affected 1，实际 {:?}", other),
     }
-    match db.execute_sql("INSERT INTO t VALUES (5, 0)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 0)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("可键控行 INSERT 应 affected 1，实际 {:?}", other),
     }
-    match db.execute_sql("INSERT INTO t VALUES (7, 100)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (7, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("可键控行 INSERT 应 affected 1，实际 {:?}", other),
     }
 
     // 键行 → 无键：v2 (NULL, 0)；I037 修复后旧键 5 条目删除（new_tuple
     // 无键 → 恢复侧 keyless 桶 NEW 版本重放见证）
-    match db.execute_sql("UPDATE t SET a = NULL WHERE a = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET a = NULL WHERE a = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("UPDATE SET a = NULL 应成功，实际 {:?}", other),
     }
     // 对无键版本的再次键位等值 UPDATE：残留条目已消除，执行器 Step 1
     // search(5) → None → KeyNotFound（I037 修复语义——键位无键行对键位
     // 等值不可达，R1 新场景直接见证）
-    match db.execute_sql("UPDATE t SET v = 42 WHERE a = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET v = 42 WHERE a = 5").await) {
         Response::Error { message, .. } => {
             assert!(
                 message.contains("Key not found"),
@@ -192,7 +192,7 @@ async fn keyless_row_update_recovery_after_crash() {
     let db2 = Database::open(&path).await.unwrap();
 
     // 行数精确：无键插入行 + 更新后的无键行 + 可键控行
-    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(3), "恢复后 COUNT 必须精确 3");
         }
@@ -201,7 +201,7 @@ async fn keyless_row_update_recovery_after_crash() {
 
     // 键位转无键行 (NULL,0) 可见（v 无索引 → DataScan + 谓词全扫描，
     // keyless NEW_tuple 重放见证；第二次 UPDATE 已 KeyNotFound，无 v=42 行）
-    match db2.execute_sql("SELECT COUNT(*) FROM t WHERE v = 0").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t WHERE v = 0").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -213,7 +213,7 @@ async fn keyless_row_update_recovery_after_crash() {
     }
 
     // 无键插入行可见（v=1 唯一，对照行 v=100）
-    match db2.execute_sql("SELECT COUNT(*) FROM t WHERE v = 1").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t WHERE v = 1").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(1), "无键插入行必须可见");
         }
@@ -221,24 +221,24 @@ async fn keyless_row_update_recovery_after_crash() {
     }
 
     // 可键控行恢复不受影响：点查 + 索引判重守卫
-    match db2.execute_sql("SELECT v FROM t WHERE a = 7").await {
+    match to_response(db2.execute_sql("SELECT v FROM t WHERE a = 7").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "可键控行点查必须命中");
             assert_eq!(rows[0][0], serde_json::json!(100));
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    match db2.execute_sql("INSERT INTO t VALUES (7, 0)").await {
+    match to_response(db2.execute_sql("INSERT INTO t VALUES (7, 0)").await) {
         Response::Error { .. } => { /* 期望 DuplicateKey（重建索引完整性） */ }
         other => panic!("恢复后重复键 INSERT 应被拒，实际 {:?}", other),
     }
-    match db2.execute_sql("INSERT INTO t VALUES (8, 0)").await {
+    match to_response(db2.execute_sql("INSERT INTO t VALUES (8, 0)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("恢复后新键 INSERT 应成功，实际 {:?}", other),
     }
     // 旧键 5 重开 INSERT 成功：恢复侧索引无残留条目（与运行期 delete
     // 分支一致——R1-S3 一致性收口）
-    match db2.execute_sql("INSERT INTO t VALUES (5, 200)").await {
+    match to_response(db2.execute_sql("INSERT INTO t VALUES (5, 200)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("重开后旧键 5 INSERT 应成功，实际 {:?}", other),
     }

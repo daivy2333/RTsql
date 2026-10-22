@@ -15,7 +15,7 @@ fn bench_pk_lookup_cached(c: &mut Criterion) {
 
     // Warm up cache: execute the same SQL once so it gets cached
     rt.block_on(async {
-        db.execute_sql("SELECT * FROM bench WHERE id = 42").await;
+        let _ = db.execute_sql("SELECT * FROM bench WHERE id = 42").await;
     });
 
     let mut group = c.benchmark_group("pk_lookup_cached");
@@ -24,7 +24,7 @@ fn bench_pk_lookup_cached(c: &mut Criterion) {
             let db = db.clone();
             async move {
                 // Same SQL every time — should hit plan cache
-                db.execute_sql("SELECT * FROM bench WHERE id = 42").await;
+                let _ = db.execute_sql("SELECT * FROM bench WHERE id = 42").await;
             }
         });
     });
@@ -47,7 +47,7 @@ fn bench_pk_lookup_uncached(c: &mut Criterion) {
             let db = db.clone();
             async move {
                 // Same SQL every time but no cache warm-up
-                db.execute_sql("SELECT * FROM bench WHERE id = 42").await;
+                let _ = db.execute_sql("SELECT * FROM bench WHERE id = 42").await;
             }
         });
     });

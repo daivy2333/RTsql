@@ -18,7 +18,7 @@
 //! （R2-S6）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -48,7 +48,7 @@ fn query_rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
 }
 
 async fn assert_count(db: &Database, sql: &str, expected: serde_json::Value, what: &str) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], expected, "{what}");
         }
@@ -70,13 +70,15 @@ async fn insert_int_column_rejects_string_value_zero_side_effects() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (1, 'abc')").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 'abc')").await),
         "非键 INT 列 INSERT String 值",
     );
     assert!(
@@ -105,17 +107,19 @@ async fn update_int_column_rejects_string_value_zero_side_effects() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await),
         "首次 INSERT",
     );
 
     let message = expect_error(
-        db.execute_sql("UPDATE t SET v = 'abc' WHERE id = 5").await,
+        to_response(db.execute_sql("UPDATE t SET v = 'abc' WHERE id = 5").await),
         "非键 INT 列 UPDATE String 值",
     );
     assert!(
@@ -123,7 +127,7 @@ async fn update_int_column_rejects_string_value_zero_side_effects() {
         "错误文案必须点名列名、期望 INT 与实际 String，实际: {message}"
     );
 
-    match db.execute_sql("SELECT id, v FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT id, v FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -150,13 +154,15 @@ async fn insert_string_column_rejects_int_value() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, s STRING)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, s STRING)")
+                .await,
+        ),
         "建表",
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (1, 42)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 42)").await),
         "非键 STRING 列 INSERT Int 值",
     );
     assert!(
@@ -165,7 +171,7 @@ async fn insert_string_column_rejects_int_value() {
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (2, 4.5)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (2, 4.5)").await),
         "非键 STRING 列 INSERT Float 值",
     );
     assert!(
@@ -197,17 +203,19 @@ async fn insert_float_column_upgrades_int_value_losslessly() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, f FLOAT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, f FLOAT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 5)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 5)").await),
         "FLOAT 列 INSERT Int 值",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT f FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT f FROM t WHERE id = 1").await),
         "升格读回",
     );
     assert_eq!(
@@ -228,21 +236,23 @@ async fn update_float_column_upgrades_int_value_losslessly() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, f FLOAT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, f FLOAT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 1.5)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 1.5)").await),
         "首次 INSERT",
     );
     expect_affected(
-        db.execute_sql("UPDATE t SET f = 5 WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET f = 5 WHERE id = 1").await),
         "FLOAT 列 UPDATE Int 值",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT f FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT f FROM t WHERE id = 1").await),
         "升格读回",
     );
     assert_eq!(
@@ -268,18 +278,22 @@ async fn insert_date_column_string_coerces_and_illegal_date_still_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, d DATE)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, d DATE)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, '2026-09-25')")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t VALUES (1, '2026-09-25')")
+                .await,
+        ),
         "DATE 列 INSERT 合法 String",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT d FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT d FROM t WHERE id = 1").await),
         "coerce 读回",
     );
     assert_eq!(
@@ -289,8 +303,10 @@ async fn insert_date_column_string_coerces_and_illegal_date_still_rejected() {
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (2, '2023-02-29')")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t VALUES (2, '2023-02-29')")
+                .await,
+        ),
         "DATE 列 INSERT 非法日期 String",
     );
     assert!(
@@ -321,13 +337,15 @@ async fn int_pk_gate_takes_precedence_over_general_type_gate() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES ('abc', 1)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES ('abc', 1)").await),
         "Int 键列 INSERT String 值",
     );
     assert!(
@@ -353,17 +371,19 @@ async fn update_pk_gate_takes_precedence_over_general_type_gate() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await),
         "首次 INSERT",
     );
 
     let message = expect_error(
-        db.execute_sql("UPDATE t SET id = 'x' WHERE id = 5").await,
+        to_response(db.execute_sql("UPDATE t SET id = 'x' WHERE id = 5").await),
         "UPDATE SET 键列为 String",
     );
     assert!(
@@ -382,14 +402,16 @@ async fn unique_f1_guard_takes_precedence_over_general_type_gate() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, u INT UNIQUE, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, u INT UNIQUE, v INT)")
+                .await,
+        ),
         "建表",
     );
 
     // 唯一列越界：F1 守卫先行（既有文本）
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (1, 'abc', 2)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 'abc', 2)").await),
         "INT 唯一列 INSERT String 值",
     );
     assert!(
@@ -399,7 +421,7 @@ async fn unique_f1_guard_takes_precedence_over_general_type_gate() {
 
     // 唯一列合法、非键列越界：一般类型门触发
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (1, 5, 'xyz')").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 5, 'xyz')").await),
         "非键列 INSERT String 值（唯一列合法）",
     );
     assert!(
@@ -426,14 +448,16 @@ async fn not_null_gate_unchanged_and_null_exempt() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT, s STRING NOT NULL)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT, s STRING NOT NULL)")
+                .await,
+        ),
         "建表",
     );
 
     // NOT NULL 既有门：文本不变
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (1, NULL, NULL)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, NULL, NULL)").await),
         "NOT NULL 列 INSERT NULL",
     );
     assert!(
@@ -443,12 +467,12 @@ async fn not_null_gate_unchanged_and_null_exempt() {
 
     // NULL 豁免：可空列收 NULL 成功
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, NULL, 'x')").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, NULL, 'x')").await),
         "可空列 INSERT NULL",
     );
     // UPDATE SET 可空列 = NULL 既有语义保持
     expect_affected(
-        db.execute_sql("UPDATE t SET v = NULL WHERE id = 1").await,
+        to_response(db.execute_sql("UPDATE t SET v = NULL WHERE id = 1").await),
         "可空列 UPDATE NULL",
     );
 
@@ -471,17 +495,19 @@ async fn duplicate_key_precedes_general_type_gate() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "首次 INSERT",
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (1, 'abc')").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 'abc')").await),
         "重复 PK + 跨类型值 INSERT",
     );
     assert!(
@@ -513,25 +539,25 @@ async fn dump_shaped_typed_literals_insert_without_false_positive() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "CREATE TABLE t (id INT PRIMARY KEY, v INT, f FLOAT, b BOOL, d DATE, ts TIMESTAMP, s STRING)",
         )
-        .await,
+        .await),
         "建表",
     );
 
     // dump 生成的 INSERT 文本形态：Int→`2`、Float→`3.5`、Bool→`TRUE`、
     // Date/Timestamp→typed 字面量、String→单引号字面量
     expect_affected(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "INSERT INTO t VALUES (1, 2, 3.5, TRUE, DATE '2026-09-25', TIMESTAMP '2026-09-25 10:30:00.000000', 'hi')",
         )
-        .await,
+        .await),
         "dump 形态 INSERT",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, v, f, b, d, ts, s FROM t").await,
+        to_response(db.execute_sql("SELECT id, v, f, b, d, ts, s FROM t").await),
         "全列读回",
     );
     assert_eq!(
@@ -559,25 +585,25 @@ async fn import_shaped_values_insert_without_false_positive() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "CREATE TABLE t (id INT PRIMARY KEY, v INT, f FLOAT, b BOOL, d DATE, ts TIMESTAMP, s STRING)",
         )
-        .await,
+        .await),
         "建表",
     );
 
     // import 生成的 INSERT 文本形态：日期族裸 String（写入时 coerce）、
     // 空字段 → NULL（Bool 位）
     expect_affected(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "INSERT INTO t VALUES (2, 7, 2.5, NULL, '2026-09-25', '2026-09-25 10:30:00.000000', 'txt')",
         )
-        .await,
+        .await),
         "import 形态 INSERT",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, v, f, b, d, ts, s FROM t").await,
+        to_response(db.execute_sql("SELECT id, v, f, b, d, ts, s FROM t").await),
         "全列读回",
     );
     assert_eq!(

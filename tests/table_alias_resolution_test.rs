@@ -19,7 +19,7 @@
 //! - `join-output-shape-resolution` 严格解析域：别名限定列可达，裸名歧义仍点名。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
 
@@ -28,7 +28,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -78,13 +78,13 @@ async fn self_join_two_aliases_across_clauses() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT a.name, b.name FROM people a JOIN people b ON a.id = b.id \
              WHERE a.team_id = 10 ORDER BY b.id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -103,10 +103,10 @@ async fn self_join_projection_is_single_column() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT a.name FROM people a JOIN people b ON a.id = b.id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("ann")], vec![json!("bob")], vec![json!("amy")]],
@@ -121,13 +121,13 @@ async fn mixed_alias_and_real_name_qualifiers() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT p.name, team.team_name FROM people p JOIN team \
              ON p.team_id = team.id WHERE p.team_id = 10 ORDER BY p.name",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -145,10 +145,10 @@ async fn bare_name_across_aliased_join_is_ambiguous() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT id FROM people p JOIN team ON p.team_id = team.id")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Ambiguous") || msg.contains("ambiguous"),
         "expected ambiguity error, got: {msg}"
@@ -163,22 +163,22 @@ async fn on_and_where_resolve_aliases() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT p.name FROM people p JOIN team t ON t.id = p.team_id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("ann")], vec![json!("bob")], vec![json!("amy")]],
         "rows: {rows:?}"
     );
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT * FROM people p JOIN team t ON t.id = p.team_id WHERE p.team_id = 10",
         )
         .await,
-    );
+    ));
     assert_eq!(rows.len(), 2, "rows: {rows:?}");
 }
 
@@ -189,13 +189,13 @@ async fn aggregate_and_group_by_resolve_aliases() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT a.team_id, COUNT(*) FROM people a JOIN people b ON a.id = b.id \
              GROUP BY a.team_id ORDER BY a.team_id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(10), json!(2)], vec![json!(20), json!(1)]],
@@ -211,10 +211,10 @@ async fn single_table_alias_projection_and_where() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT p.name FROM people p WHERE p.id = 1")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("ann")]], "rows: {rows:?}");
 }
 
@@ -226,13 +226,15 @@ async fn unknown_qualifier_is_named() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let msg = error_msg(db.execute_sql("SELECT x.name FROM people").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT x.name FROM people").await,
+    ));
     assert!(msg.contains('x'), "expected qualifier in error, got: {msg}");
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT x.name FROM people p JOIN team t ON p.team_id = t.id")
             .await,
-    );
+    ));
     assert!(msg.contains('x'), "expected qualifier in error, got: {msg}");
 }
 
@@ -243,7 +245,9 @@ async fn local_three_segment_qualifier_is_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let msg = error_msg(db.execute_sql("SELECT demo.people.name FROM people").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT demo.people.name FROM people").await,
+    ));
     assert!(
         msg.contains("demo.people"),
         "expected 3-segment qualifier in error, got: {msg}"
@@ -266,10 +270,10 @@ async fn order_by_qualified_key_sorts_by_right_table() {
     exec_ok(&db, "INSERT INTO dept VALUES (20, 'b', 2)").await;
 
     // 右侧表的 id 序 = a, b, c；输入序为 c, a, b。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT d.label FROM dept d ORDER BY d.id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a")], vec![json!("b")], vec![json!("c")]],
@@ -277,10 +281,10 @@ async fn order_by_qualified_key_sorts_by_right_table() {
     );
 
     // 同一查询的 DESC 臂。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT d.label FROM dept d ORDER BY d.id DESC")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("c")], vec![json!("b")], vec![json!("a")]],
@@ -302,10 +306,10 @@ async fn order_by_qualified_and_bare_keys_combine() {
     exec_ok(&db, "INSERT INTO dept VALUES (2, 1, 'y')").await;
     exec_ok(&db, "INSERT INTO dept VALUES (3, 0, 'z')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT grp, label FROM dept d ORDER BY d.grp, label")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -325,14 +329,14 @@ async fn alias_and_real_name_produce_isomorphic_plans() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let real = query_rows(
+    let real = query_rows(to_response(
         db.execute_sql("EXPLAIN SELECT people.name FROM people WHERE people.team_id = 10")
             .await,
-    );
-    let alias = query_rows(
+    ));
+    let alias = query_rows(to_response(
         db.execute_sql("EXPLAIN SELECT p.name FROM people p WHERE p.team_id = 10")
             .await,
-    );
+    ));
     assert!(!real.is_empty(), "EXPLAIN must produce plan rows");
     assert_eq!(real, alias, "alias form must not alter the plan shape");
 }
@@ -349,35 +353,39 @@ async fn unknown_qualifier_in_group_by_and_aggregate_args_is_named() {
     seed(&db).await;
 
     // ① 单表基座 GROUP BY 未知限定符。
-    let msg = error_msg(db.execute_sql("SELECT id FROM people GROUP BY x.id").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT id FROM people GROUP BY x.id").await,
+    ));
     assert!(msg.contains('x'), "expected qualifier in error, got: {msg}");
 
     // ② 单表基座聚合参数未知限定符。
-    let msg = error_msg(db.execute_sql("SELECT COUNT(x.id) FROM people").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT COUNT(x.id) FROM people").await,
+    ));
     assert!(msg.contains('x'), "expected qualifier in error, got: {msg}");
 
     // ③ JOIN 基座 GROUP BY 未知限定符（含聚合形态——契约 RED 记录：
     // `Non-aggregated column 'id'`）与无聚合形态（GROUP BY 静默被忽略）。
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql(
             "SELECT p.id, COUNT(*) FROM people p JOIN team t ON p.team_id = t.id \
              GROUP BY x.id",
         )
         .await,
-    );
+    ));
     assert!(msg.contains('x'), "expected qualifier in error, got: {msg}");
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT p.id FROM people p JOIN team t ON p.team_id = t.id GROUP BY x.id")
             .await,
-    );
+    ));
     assert!(msg.contains('x'), "expected qualifier in error, got: {msg}");
 
     // ④ JOIN 基座聚合参数未知限定符。
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT COUNT(x.id) FROM people p JOIN team t ON p.id = t.id")
             .await,
-    );
+    ));
     assert!(msg.contains('x'), "expected qualifier in error, got: {msg}");
 }
 
@@ -389,10 +397,10 @@ async fn in_scope_alias_group_by_and_aggregate_args_reachable() {
     seed(&db).await;
 
     // 单表基座：别名限定 GROUP BY 键。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT p.id, COUNT(*) FROM people p GROUP BY p.id ORDER BY p.id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -404,13 +412,13 @@ async fn in_scope_alias_group_by_and_aggregate_args_reachable() {
     );
 
     // 自连接基座：别名限定 GROUP BY 键（聚合参数 COUNT(*) 无列参数臂）。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT a.team_id, COUNT(*) FROM people a JOIN people b ON a.id = b.id \
              GROUP BY a.team_id ORDER BY a.team_id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(10), json!(2)], vec![json!(20), json!(1)]],
@@ -418,7 +426,9 @@ async fn in_scope_alias_group_by_and_aggregate_args_reachable() {
     );
 
     // 单表基座：别名限定聚合参数。
-    let rows = query_rows(db.execute_sql("SELECT COUNT(p.id) FROM people p").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT COUNT(p.id) FROM people p").await,
+    ));
     assert_eq!(rows, vec![vec![json!(3)]], "rows: {rows:?}");
 }
 
@@ -430,30 +440,30 @@ async fn order_by_alias_priority_and_unknown_qualified_key() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id AS k FROM people p ORDER BY k")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)], vec![json!(2)], vec![json!(3)]],
         "rows: {rows:?}"
     );
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT p.zzz FROM people p ORDER BY p.zzz")
             .await,
-    );
+    ));
     assert!(
         msg.contains("zzz"),
         "expected key name in error, got: {msg}"
     );
 
     // 限定符不在作用域 → 42P01 携带限定符（与 R2 同款）。
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT name FROM people p ORDER BY q.name")
             .await,
-    );
+    ));
     assert!(msg.contains('q'), "expected qualifier in error, got: {msg}");
 }
 
@@ -470,13 +480,13 @@ async fn left_join_alias_projection_and_null_padding() {
     // 未匹配行 NULL 补齐 + 别名限定投影两侧可达（行序 = 基表扫描序，
     // 与本文件既有断言约定一致；排序键不在此见证——JOIN 基座排序键校验集
     // 为投影输出列，属 order-by-alias-sorting R3 既有语义）。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT p.name, t.team_name FROM people p LEFT JOIN team t \
              ON t.id = p.team_id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -489,13 +499,13 @@ async fn left_join_alias_projection_and_null_padding() {
     );
 
     // 反连接形态：WHERE 右侧别名列 IS NULL 只保留未匹配行。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT p.name FROM people p LEFT JOIN team t \
              ON t.id = p.team_id WHERE t.id IS NULL",
         )
         .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("cat")]], "rows: {rows:?}");
 }
 
@@ -531,10 +541,10 @@ async fn join_order_by_qualified_key_sorts_without_where() {
     seed_join_order(&db).await;
 
     // 别名限定键：按左表 id 排序
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY e.id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a1")], vec![json!("b2")], vec![json!("c3")]],
@@ -542,10 +552,10 @@ async fn join_order_by_qualified_key_sorts_without_where() {
     );
 
     // 全表名限定键同语义
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY emp.id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a1")], vec![json!("b2")], vec![json!("c3")]],
@@ -553,12 +563,12 @@ async fn join_order_by_qualified_key_sorts_without_where() {
     );
 
     // 非主键限定键 + DESC
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY e.salary DESC",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("c3")], vec![json!("b2")], vec![json!("a1")]],
@@ -566,12 +576,12 @@ async fn join_order_by_qualified_key_sorts_without_where() {
     );
 
     // 右表限定键优先 + 左表限定键次键
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY d.id DESC, e.id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("b2")], vec![json!("a1")], vec![json!("c3")]],
@@ -601,12 +611,12 @@ async fn self_join_same_name_columns_resolve_by_qualifier() {
     exec_ok(&db, "INSERT INTO emp VALUES (4, 'r2', 2, 400, 2)").await;
 
     // ORDER BY e1.salary：按经理薪 100(m2) < 300(m1) → r2, r1
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e2.name FROM emp e1 JOIN emp e2 ON e1.id = e2.manager_id ORDER BY e1.salary",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("r2")], vec![json!("r1")]],
@@ -614,12 +624,12 @@ async fn self_join_same_name_columns_resolve_by_qualifier() {
     );
 
     // ORDER BY e2.salary：按汇报者薪 200(r1) < 400(r2) → r1, r2
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e2.name FROM emp e1 JOIN emp e2 ON e1.id = e2.manager_id ORDER BY e2.salary",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("r1")], vec![json!("r2")]],
@@ -636,7 +646,9 @@ async fn order_by_existing_surfaces_zero_regression() {
     seed_join_order(&db).await;
 
     // 单表限定键既有语义
-    let rows = query_rows(db.execute_sql("SELECT name FROM emp e ORDER BY e.id").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT name FROM emp e ORDER BY e.id").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a1")], vec![json!("b2")], vec![json!("c3")]],
@@ -644,12 +656,12 @@ async fn order_by_existing_surfaces_zero_regression() {
     );
 
     // 带 WHERE JOIN 限定键（Filter 承载全列，既有）
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e.name FROM emp e JOIN dept d ON e.dept_id = d.id WHERE d.id > 1 ORDER BY e.id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a1")], vec![json!("b2")]],
@@ -658,10 +670,10 @@ async fn order_by_existing_surfaces_zero_regression() {
 
     // 聚合基座：GROUP BY 限定键 + ORDER BY 同键
     let rows = query_rows(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "SELECT d.id, COUNT(*) FROM emp e JOIN dept d ON e.dept_id = d.id GROUP BY d.id ORDER BY d.id",
         )
-        .await,
+        .await),
     );
     assert_eq!(
         rows,
@@ -674,12 +686,12 @@ async fn order_by_existing_surfaces_zero_regression() {
     );
 
     // DISTINCT + ORDER BY 输出列
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT DISTINCT d.id FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY d.id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)], vec![json!(2)], vec![json!(3)]],
@@ -687,10 +699,10 @@ async fn order_by_existing_surfaces_zero_regression() {
     );
 
     // 集合操作尾 ORDER BY 限定键维持 TableNotFound 既有拒绝边界
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT name FROM emp UNION SELECT label FROM dept ORDER BY e.id")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Table not found: e"),
         "set-op tail qualified key must stay TableNotFound: {msg}"

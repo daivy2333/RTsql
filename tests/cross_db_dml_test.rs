@@ -31,7 +31,7 @@
 //!   （信号关闭 / close 失败状态保持见 `src/cli/mod.rs` 单元测试）
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::parser::parse_sql;
 use rtsql::pipeline::{
     execute_stage_in_tx_routed, execute_stage_routed, plan_stage_routed, AttachRoute, RoutedTables,
@@ -569,13 +569,17 @@ async fn attached_routed_writes_crash_recovery() {
     {
         let other = Database::open(&other_path).await.unwrap();
         assert_ok(
-            other
-                .execute_sql("CREATE TABLE c (id INT PRIMARY KEY, n INT NOT NULL, uniq INT UNIQUE)")
-                .await,
+            to_response(
+                other
+                    .execute_sql(
+                        "CREATE TABLE c (id INT PRIMARY KEY, n INT NOT NULL, uniq INT UNIQUE)",
+                    )
+                    .await,
+            ),
             "create attached c",
         );
         assert_ok(
-            other.execute_sql("CREATE INDEX idx_c_n ON c (n)").await,
+            to_response(other.execute_sql("CREATE INDEX idx_c_n ON c (n)").await),
             "create secondary index",
         );
         other.checkpoint().await.unwrap();
@@ -584,15 +588,17 @@ async fn attached_routed_writes_crash_recovery() {
 
     let main = Database::open(&main_path).await.unwrap();
     assert_ok(
-        main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
-            .await,
+        to_response(
+            main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
+                .await,
+        ),
         "create main t",
     );
     // DDL 不写 WAL：先 checkpoint 落盘 schema，再写数据（重开恢复重放）。
     main.checkpoint().await.unwrap();
     // 主库种子行：恢复后主库不变断言的基线。
     assert_ok(
-        main.execute_sql("INSERT INTO t VALUES (1)").await,
+        to_response(main.execute_sql("INSERT INTO t VALUES (1)").await),
         "seed main t",
     );
 
@@ -687,9 +693,11 @@ async fn attached_routed_writes_crash_recovery() {
         "recovered rows must match committed routed writes"
     );
     // 唯一占用恢复：100 仍被 id=10 占用。
-    let dup = reopened
-        .execute_sql("INSERT INTO c (id, n, uniq) VALUES (9, 9, 100)")
-        .await;
+    let dup = to_response(
+        reopened
+            .execute_sql("INSERT INTO c (id, n, uniq) VALUES (9, 9, 100)")
+            .await,
+    );
     assert!(
         matches!(dup, Response::Error { .. }),
         "unique occupancy must survive recovery: {dup:?}"
@@ -740,9 +748,11 @@ async fn attached_commit_uses_own_checkpoint_threshold() {
 
     let other = Arc::new(Database::open(&other_path).await.unwrap());
     assert_ok(
-        other
-            .execute_sql("CREATE TABLE c (id INT PRIMARY KEY, pad VARCHAR)")
-            .await,
+        to_response(
+            other
+                .execute_sql("CREATE TABLE c (id INT PRIMARY KEY, pad VARCHAR)")
+                .await,
+        ),
         "create attached c",
     );
     other.checkpoint().await.unwrap();
@@ -750,8 +760,10 @@ async fn attached_commit_uses_own_checkpoint_threshold() {
 
     let main = Database::open(&main_path).await.unwrap();
     assert_ok(
-        main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, pad VARCHAR)")
-            .await,
+        to_response(
+            main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, pad VARCHAR)")
+                .await,
+        ),
         "create main t",
     );
     main.set_checkpoint_bytes_threshold(0);
@@ -762,8 +774,10 @@ async fn attached_commit_uses_own_checkpoint_threshold() {
 
     for i in 0..300 {
         assert_ok(
-            main.execute_sql(&format!("INSERT INTO t (id, pad) VALUES ({i}, 'p{i}')"))
-                .await,
+            to_response(
+                main.execute_sql(&format!("INSERT INTO t (id, pad) VALUES ({i}, 'p{i}')"))
+                    .await,
+            ),
             "main insert",
         );
     }
@@ -807,13 +821,15 @@ async fn attached_commit_checkpoint_failure_preserves_data() {
 
     let other = Arc::new(Database::open(&other_path).await.unwrap());
     assert_ok(
-        other
-            .execute_sql("CREATE TABLE c (id INT PRIMARY KEY, n INT NOT NULL, uniq INT UNIQUE)")
-            .await,
+        to_response(
+            other
+                .execute_sql("CREATE TABLE c (id INT PRIMARY KEY, n INT NOT NULL, uniq INT UNIQUE)")
+                .await,
+        ),
         "create attached c",
     );
     assert_ok(
-        other.execute_sql("CREATE INDEX idx_c_n ON c (n)").await,
+        to_response(other.execute_sql("CREATE INDEX idx_c_n ON c (n)").await),
         "create secondary index",
     );
     other.checkpoint().await.unwrap();
@@ -822,12 +838,14 @@ async fn attached_commit_checkpoint_failure_preserves_data() {
 
     let main = Database::open(&main_path).await.unwrap();
     assert_ok(
-        main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
-            .await,
+        to_response(
+            main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
+                .await,
+        ),
         "create main t",
     );
     assert_ok(
-        main.execute_sql("INSERT INTO t VALUES (1)").await,
+        to_response(main.execute_sql("INSERT INTO t VALUES (1)").await),
         "seed main t",
     );
 
@@ -868,9 +886,11 @@ async fn attached_commit_checkpoint_failure_preserves_data() {
         ]],
         "committed row must survive checkpoint failure"
     );
-    let dup = other
-        .execute_sql("INSERT INTO c (id, n, uniq) VALUES (2, 11, 100)")
-        .await;
+    let dup = to_response(
+        other
+            .execute_sql("INSERT INTO c (id, n, uniq) VALUES (2, 11, 100)")
+            .await,
+    );
     assert!(
         matches!(dup, Response::Error { .. }),
         "unique occupancy must be kept: {dup:?}"
@@ -919,13 +939,15 @@ async fn routed_write_rejections_carry_sqlstate() {
     {
         let other = Database::open(&other_path).await.unwrap();
         assert_ok(
-            other
-                .execute_sql("CREATE TABLE u (id INT PRIMARY KEY, tag VARCHAR)")
-                .await,
+            to_response(
+                other
+                    .execute_sql("CREATE TABLE u (id INT PRIMARY KEY, tag VARCHAR)")
+                    .await,
+            ),
             "create attached u",
         );
         assert_ok(
-            other.execute_sql("INSERT INTO u VALUES (1, 'x')").await,
+            to_response(other.execute_sql("INSERT INTO u VALUES (1, 'x')").await),
             "seed u",
         );
         other.checkpoint().await.unwrap();
@@ -937,8 +959,10 @@ async fn routed_write_rejections_carry_sqlstate() {
     {
         let main = Database::open(&main_path).await.unwrap();
         assert_ok(
-            main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
-                .await,
+            to_response(
+                main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
+                    .await,
+            ),
             "create main t",
         );
         let other = Arc::new(Database::open(&other_path).await.unwrap());
@@ -949,7 +973,7 @@ async fn routed_write_rejections_carry_sqlstate() {
         // 显式事务 + 附加写 → 0A000。
         let tx = main.begin().await.unwrap();
         let (plan, routed) = routed_plan(&main, &route, "INSERT INTO o.u VALUES (5, 'z')").await;
-        let resp = execute_stage_in_tx_routed(&main, plan, tx.id(), &routed).await;
+        let resp = to_response(execute_stage_in_tx_routed(&main, plan, tx.id(), &routed).await);
         match resp {
             Response::Error { message, sqlstate } => {
                 assert_eq!(sqlstate.as_deref(), Some("0A000"), "sqlstate: {message}");
@@ -965,7 +989,7 @@ async fn routed_write_rejections_carry_sqlstate() {
         // 主库事务 + 附加源 SELECT 成功（既有组合保持）。
         let tx = main.begin().await.unwrap();
         let (plan, routed) = routed_plan(&main, &route, "SELECT id FROM o.u").await;
-        let resp = execute_stage_in_tx_routed(&main, plan, tx.id(), &routed).await;
+        let resp = to_response(execute_stage_in_tx_routed(&main, plan, tx.id(), &routed).await);
         match resp {
             Response::QueryResult { rows } => {
                 assert_eq!(
@@ -994,7 +1018,7 @@ async fn routed_write_rejections_carry_sqlstate() {
     let route = AttachRoute::new(dbs);
 
     let (plan, routed) = routed_plan(&ro, &route, "INSERT INTO o.u VALUES (5, 'z')").await;
-    let resp = execute_stage_routed(&ro, plan, false, &routed).await;
+    let resp = to_response(execute_stage_routed(&ro, plan, false, &routed).await);
     match resp {
         Response::Error { message, sqlstate } => {
             assert_eq!(sqlstate.as_deref(), Some("25006"), "sqlstate: {message}");
@@ -1006,7 +1030,7 @@ async fn routed_write_rejections_carry_sqlstate() {
     // 只读 + 显式事务形态 → 25006 优先于附加写 0A000。
     let tx = ro.begin().await.unwrap();
     let (plan, routed) = routed_plan(&ro, &route, "DELETE FROM o.u WHERE id = 1").await;
-    let resp = execute_stage_in_tx_routed(&ro, plan, tx.id(), &routed).await;
+    let resp = to_response(execute_stage_in_tx_routed(&ro, plan, tx.id(), &routed).await);
     match resp {
         Response::Error { message, sqlstate } => {
             assert_eq!(
@@ -1063,7 +1087,7 @@ async fn encrypted_attached_same_key_write_and_reopen() {
             .await
             .unwrap();
         assert_ok(
-            app.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await,
+            to_response(app.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await),
             "create encrypted app t",
         );
         app.close().await.unwrap();
@@ -1071,8 +1095,10 @@ async fn encrypted_attached_same_key_write_and_reopen() {
             .await
             .unwrap();
         assert_ok(
-            sec.execute_sql("CREATE TABLE u (id INT PRIMARY KEY, tag VARCHAR)")
-                .await,
+            to_response(
+                sec.execute_sql("CREATE TABLE u (id INT PRIMARY KEY, tag VARCHAR)")
+                    .await,
+            ),
             "create encrypted sec u",
         );
         sec.close().await.unwrap();
@@ -1152,15 +1178,19 @@ async fn insert_select_plan_registers_source_tables() {
     let dir = tempdir().unwrap();
     let main = Database::open(&dir.path().join("main.db")).await.unwrap();
     assert_ok(
-        main.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, tag VARCHAR)")
-            .await,
+        to_response(
+            main.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, tag VARCHAR)")
+                .await,
+        ),
         "create main t2",
     );
     let other = Arc::new(Database::open(&dir.path().join("o.db")).await.unwrap());
     assert_ok(
-        other
-            .execute_sql("CREATE TABLE u (id INT, tag VARCHAR)")
-            .await,
+        to_response(
+            other
+                .execute_sql("CREATE TABLE u (id INT, tag VARCHAR)")
+                .await,
+        ),
         "create attached u",
     );
     let mut dbs = HashMap::new();
@@ -1210,7 +1240,7 @@ async fn routed_exec(main: &Database, route: &AttachRoute, sql: &str) -> Respons
     let plan = plan_stage_routed(main, sql, stmt, false, Some(route), &mut routed)
         .await
         .unwrap_or_else(|e| panic!("plan {sql}: {e}"));
-    execute_stage_routed(main, plan, false, &routed).await
+    to_response(execute_stage_routed(main, plan, false, &routed).await)
 }
 
 /// 计划期路由判定（不执行）：返回计划与路由表，供需要显式选择执行入口
@@ -1238,7 +1268,7 @@ async fn routed_ok(main: &Database, route: &AttachRoute, sql: &str) {
 }
 
 async fn query(db: &Database, sql: &str) -> Vec<Vec<serde_json::Value>> {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => rows,
         other => panic!("{sql}: expected QueryResult, got {other:?}"),
     }

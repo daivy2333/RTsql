@@ -19,7 +19,7 @@
 //! 去重与匹配共用 `HashSet<Vec<Value>>`（与 `DistinctExecutor` 同一内核）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
 
@@ -28,7 +28,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -66,10 +66,10 @@ async fn union_dedup() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_two_int_tables(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t1 UNION SELECT v FROM t2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)], vec![json!(2)], vec![json!(3)]],
@@ -86,10 +86,10 @@ async fn union_all_preserves() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_two_int_tables(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t1 UNION ALL SELECT v FROM t2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -114,10 +114,10 @@ async fn union_null_folds() {
     exec_ok(&db, "CREATE TABLE n2 (k INT PRIMARY KEY, v INT)").await;
     exec_ok(&db, "INSERT INTO n2 VALUES (1, NULL)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM n1 UNION SELECT v FROM n2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(null)]],
@@ -140,10 +140,10 @@ async fn intersect_basic() {
     exec_ok(&db, "INSERT INTO t2 VALUES (1, 2)").await;
     exec_ok(&db, "INSERT INTO t2 VALUES (2, 3)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t1 INTERSECT SELECT v FROM t2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(2)]],
@@ -165,10 +165,10 @@ async fn except_basic() {
     exec_ok(&db, "CREATE TABLE t2 (k INT PRIMARY KEY, v INT)").await;
     exec_ok(&db, "INSERT INTO t2 VALUES (1, 2)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t1 EXCEPT SELECT v FROM t2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)]],
@@ -189,10 +189,10 @@ async fn except_null_matching() {
     exec_ok(&db, "CREATE TABLE t2 (k INT PRIMARY KEY, v INT)").await;
     exec_ok(&db, "INSERT INTO t2 VALUES (1, NULL)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t1 EXCEPT SELECT v FROM t2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)]],
@@ -216,10 +216,10 @@ async fn chained_three_way() {
     exec_ok(&db, "CREATE TABLE t3 (k INT PRIMARY KEY, v INT)").await;
     exec_ok(&db, "INSERT INTO t3 VALUES (1, 3)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t1 UNION SELECT v FROM t2 UNION SELECT v FROM t3")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)], vec![json!(2)], vec![json!(3)]],
@@ -243,10 +243,10 @@ async fn intersect_precedence() {
     exec_ok(&db, "CREATE TABLE c (k INT PRIMARY KEY, v INT)").await;
     exec_ok(&db, "INSERT INTO c VALUES (1, 3)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM a UNION SELECT v FROM b INTERSECT SELECT v FROM c")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)], vec![json!(2)], vec![json!(3)]],
@@ -264,19 +264,19 @@ async fn intersect_all_and_parens_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_two_int_tables(&db).await;
 
-    let all_msg = error_msg(
+    let all_msg = error_msg(to_response(
         db.execute_sql("SELECT v FROM t1 INTERSECT ALL SELECT v FROM t2")
             .await,
-    );
+    ));
     assert!(
         all_msg.contains("INTERSECT ALL"),
         "INTERSECT ALL 必须点名拒绝，实际: {all_msg}"
     );
 
-    let paren_msg = error_msg(
+    let paren_msg = error_msg(to_response(
         db.execute_sql("(SELECT v FROM t1) UNION (SELECT v FROM t2)")
             .await,
-    );
+    ));
     assert!(
         paren_msg.to_lowercase().contains("parenthesized"),
         "括号化侧臂必须点名拒绝，实际: {paren_msg}"
@@ -292,38 +292,38 @@ async fn compound_other_forms_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_two_int_tables(&db).await;
 
-    let by_name = error_msg(
+    let by_name = error_msg(to_response(
         db.execute_sql("SELECT v FROM t1 UNION BY NAME SELECT v FROM t2")
             .await,
-    );
+    ));
     assert!(
         by_name.contains("BY NAME"),
         "BY NAME 量化词必须点名拒绝，实际: {by_name}"
     );
 
-    let with_distinct = error_msg(
+    let with_distinct = error_msg(to_response(
         db.execute_sql("SELECT DISTINCT v FROM t1 UNION SELECT v FROM t2")
             .await,
-    );
+    ));
     assert!(
         with_distinct.contains("DISTINCT"),
         "DISTINCT × 复合必须点名拒绝，实际: {with_distinct}"
     );
 
     // 嵌套分支上的 DISTINCT 同样拒绝（否则该分支被静默去重）
-    let nested_distinct = error_msg(
+    let nested_distinct = error_msg(to_response(
         db.execute_sql("SELECT v FROM t1 UNION SELECT DISTINCT v FROM t2 UNION SELECT v FROM t1")
             .await,
-    );
+    ));
     assert!(
         nested_distinct.contains("DISTINCT"),
         "嵌套分支的 DISTINCT 必须点名拒绝，实际: {nested_distinct}"
     );
 
-    let in_subquery = error_msg(
+    let in_subquery = error_msg(to_response(
         db.execute_sql("SELECT v FROM t1 WHERE v IN (SELECT v FROM t2 UNION SELECT v FROM t1)")
             .await,
-    );
+    ));
     assert!(
         in_subquery.to_lowercase().contains("subquer"),
         "子查询内复合必须点名拒绝，实际: {in_subquery}"
@@ -343,10 +343,10 @@ async fn compound_order_by() {
     exec_ok(&db, "CREATE TABLE t2 (k INT PRIMARY KEY, v INT)").await;
     exec_ok(&db, "INSERT INTO t2 VALUES (1, 3)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t1 UNION SELECT v FROM t2 ORDER BY v DESC")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(3)], vec![json!(2)], vec![json!(1)]],
@@ -366,10 +366,10 @@ async fn column_count_mismatch_rejected() {
     exec_ok(&db, "CREATE TABLE t2 (k INT PRIMARY KEY, v INT)").await;
     exec_ok(&db, "INSERT INTO t2 VALUES (1, 9)").await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT a, b FROM t1 UNION SELECT v FROM t2")
             .await,
-    );
+    ));
     assert!(
         msg.to_lowercase().contains("column count"),
         "列数不匹配的复合必须点名拒绝并说明列数，实际: {msg}"
@@ -385,7 +385,7 @@ async fn single_query_unchanged() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_two_int_tables(&db).await;
 
-    let rows = query_rows(db.execute_sql("SELECT v FROM t1").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT v FROM t1").await));
     assert_eq!(
         rows,
         vec![vec![json!(1)], vec![json!(2)]],
@@ -411,13 +411,13 @@ async fn compound_arms_with_join_and_where() {
     exec_ok(&db, "INSERT INTO r VALUES (1, 1, 'p')").await;
     exec_ok(&db, "INSERT INTO r VALUES (2, 9, 'q')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT l.id FROM l JOIN r ON l.id = r.rid WHERE r.tag = 'p' \
              UNION SELECT rid FROM r WHERE tag = 'q'",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)], vec![json!(9)]],
@@ -449,10 +449,10 @@ async fn derived_union_dedup_source() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_derived_set_tables(&db).await;
-    let r = query_rows(
+    let r = query_rows(to_response(
         db.execute_sql("SELECT COUNT(*) FROM (SELECT v FROM s1 UNION SELECT v FROM s2)")
             .await,
-    );
+    ));
     assert_eq!(r, vec![vec![json!(3)]]);
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -463,10 +463,10 @@ async fn derived_union_all_source() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_derived_set_tables(&db).await;
-    let r = query_rows(
+    let r = query_rows(to_response(
         db.execute_sql("SELECT COUNT(*) FROM (SELECT v FROM s1 UNION ALL SELECT v FROM s2)")
             .await,
-    );
+    ));
     assert_eq!(r, vec![vec![json!(4)]]);
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -477,15 +477,15 @@ async fn derived_intersect_except_source() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_derived_set_tables(&db).await;
-    let r = query_rows(
+    let r = query_rows(to_response(
         db.execute_sql("SELECT v FROM (SELECT v FROM s1 INTERSECT SELECT v FROM s2)")
             .await,
-    );
+    ));
     assert_eq!(r, vec![vec![json!(2)]]);
-    let r = query_rows(
+    let r = query_rows(to_response(
         db.execute_sql("SELECT v FROM (SELECT v FROM s1 EXCEPT SELECT v FROM s2)")
             .await,
-    );
+    ));
     assert_eq!(r, vec![vec![json!(1)]]);
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -496,13 +496,13 @@ async fn derived_set_source_outer_composition() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_derived_set_tables(&db).await;
-    let r = query_rows(
+    let r = query_rows(to_response(
         db.execute_sql(
             "SELECT v FROM (SELECT v FROM s1 UNION SELECT v FROM s2) \
              WHERE v > 1 ORDER BY v DESC",
         )
         .await,
-    );
+    ));
     assert_eq!(r, vec![vec![json!(3)], vec![json!(2)]]);
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -513,10 +513,10 @@ async fn set_op_inside_in_subquery_still_rejected() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_derived_set_tables(&db).await;
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT k FROM s1 WHERE v IN (SELECT v FROM s1 UNION SELECT v FROM s2)")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Set operations are not supported inside subqueries"),
         "unexpected error: {msg}"
@@ -530,10 +530,10 @@ async fn set_op_inside_exists_subquery_still_rejected() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_derived_set_tables(&db).await;
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT k FROM s1 WHERE EXISTS (SELECT v FROM s1 UNION SELECT v FROM s2)")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Set operations are not supported inside subqueries"),
         "unexpected error: {msg}"
@@ -547,10 +547,10 @@ async fn set_op_inside_scalar_comparison_still_rejected() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_derived_set_tables(&db).await;
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT k FROM s1 WHERE v = (SELECT v FROM s1 UNION SELECT v FROM s2)")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Set operations are not supported inside subqueries"),
         "unexpected error: {msg}"

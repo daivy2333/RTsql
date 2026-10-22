@@ -27,11 +27,12 @@ fn bench_concurrent_read(c: &mut Criterion) {
                         let db = db.clone();
                         handles.push(tokio::spawn(async move {
                             for i in 0..50i64 {
-                                db.execute_sql(&format!(
-                                    "SELECT * FROM bench WHERE id = {}",
-                                    i % 1000
-                                ))
-                                .await;
+                                let _ = db
+                                    .execute_sql(&format!(
+                                        "SELECT * FROM bench WHERE id = {}",
+                                        i % 1000
+                                    ))
+                                    .await;
                             }
                         }));
                     }
@@ -68,13 +69,14 @@ fn bench_concurrent_write(c: &mut Criterion) {
                         let start = base + (t as i64) * 50;
                         handles.push(tokio::spawn(async move {
                             for i in 0..50i64 {
-                                db.execute_sql(&format!(
-                                    "INSERT INTO bench VALUES ({}, 'user_{}', {})",
-                                    start + i,
-                                    start + i,
-                                    (start + i) * 10
-                                ))
-                                .await;
+                                let _ = db
+                                    .execute_sql(&format!(
+                                        "INSERT INTO bench VALUES ({}, 'user_{}', {})",
+                                        start + i,
+                                        start + i,
+                                        (start + i) * 10
+                                    ))
+                                    .await;
                             }
                         }));
                     }
@@ -112,20 +114,22 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
                         let write_start = base + (t as i64) * 20;
                         handles.push(tokio::spawn(async move {
                             for i in 0..80i64 {
-                                db.execute_sql(&format!(
-                                    "SELECT * FROM bench WHERE id = {}",
-                                    i % 500
-                                ))
-                                .await;
+                                let _ = db
+                                    .execute_sql(&format!(
+                                        "SELECT * FROM bench WHERE id = {}",
+                                        i % 500
+                                    ))
+                                    .await;
                             }
                             for i in 0..20i64 {
-                                db.execute_sql(&format!(
-                                    "INSERT INTO bench VALUES ({}, 'user_{}', {})",
-                                    write_start + i,
-                                    write_start + i,
-                                    (write_start + i) * 10
-                                ))
-                                .await;
+                                let _ = db
+                                    .execute_sql(&format!(
+                                        "INSERT INTO bench VALUES ({}, 'user_{}', {})",
+                                        write_start + i,
+                                        write_start + i,
+                                        (write_start + i) * 10
+                                    ))
+                                    .await;
                             }
                         }));
                     }
@@ -162,11 +166,12 @@ fn bench_concurrent_conflict(c: &mut Criterion) {
                         handles.push(tokio::spawn(async move {
                             for i in 0..50i64 {
                                 let row_id = i % 10;
-                                db.execute_sql(&format!(
-                                    "UPDATE bench SET value = value + 1 WHERE id = {}",
-                                    row_id
-                                ))
-                                .await;
+                                let _ = db
+                                    .execute_sql(&format!(
+                                        "UPDATE bench SET value = value + 1 WHERE id = {}",
+                                        row_id
+                                    ))
+                                    .await;
                             }
                         }));
                     }

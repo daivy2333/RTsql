@@ -10,7 +10,7 @@
 //! S26 TRUNCATE 与带 WHERE 形态零变化（第二重门文案逐字节、子查询拒绝面）
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -27,7 +27,7 @@ async fn open_db() -> (Database, TempDir) {
 
 /// Helper: execute SQL and return the Response.
 async fn exec(db: &Database, sql: &str) -> Response {
-    db.execute_sql(sql).await
+    to_response(db.execute_sql(sql).await)
 }
 
 /// Helper: extract rows from a QueryResult, panicking otherwise.
@@ -336,7 +336,7 @@ async fn s24_full_table_rekey_mid_statement_rollback_all_written() {
 
     // 显式事务：全表 UPDATE 成功后 ROLLBACK，全部行还原。
     let tx = db.begin().await.unwrap();
-    let resp = db.execute_in_tx("UPDATE t SET v = v + 1", &tx).await;
+    let resp = to_response(db.execute_in_tx("UPDATE t SET v = v + 1", &tx).await);
     assert_eq!(
         affected(resp),
         3,

@@ -18,7 +18,8 @@ async fn setup_committed_rows(n: i64) -> Database {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("bench_vis.db");
     let db = Database::open(&db_path).await.unwrap();
-    db.execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, val INT)")
+    let _ = db
+        .execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, val INT)")
         .await;
 
     const CHUNK: i64 = 1000;
@@ -31,7 +32,7 @@ async fn setup_committed_rows(n: i64) -> Database {
             }
             sql.push_str(&format!("({}, {})", i, i * 10));
         }
-        db.execute_sql(&sql).await;
+        let _ = db.execute_sql(&sql).await;
     }
     std::mem::forget(dir);
     db

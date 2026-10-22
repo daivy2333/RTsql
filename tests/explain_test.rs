@@ -20,7 +20,7 @@
 //! 都不触发）；渲染器 `render_plan_tree` 为逐变体纯函数（节点字段直出）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -31,7 +31,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -80,10 +80,10 @@ async fn explain_simple_tree() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let lines = plan_lines(&query_rows(
+    let lines = plan_lines(&query_rows(to_response(
         db.execute_sql("EXPLAIN SELECT name FROM t WHERE id = 1")
             .await,
-    ));
+    )));
     assert_eq!(lines[0], "EXPLAIN", "根行标识 EXPLAIN: {lines:?}");
     // `WHERE id = 1` 走既有 PK 等值路由：谓词以扫描节点的键参数呈现
     // （非等值谓词的 Filter 节点形态由 explain_compound_nodes 见证）。
@@ -111,13 +111,13 @@ async fn explain_compound_nodes() {
     exec_ok(&db, "INSERT INTO l VALUES (1), (2)").await;
     exec_ok(&db, "INSERT INTO r VALUES (1), (2)").await;
 
-    let lines = plan_lines(&query_rows(
+    let lines = plan_lines(&query_rows(to_response(
         db.execute_sql(
             "EXPLAIN SELECT l.id FROM l JOIN r ON l.id = r.rid \
              WHERE l.id > 1 ORDER BY id LIMIT 5",
         )
         .await,
-    ));
+    )));
     assert_eq!(lines[0], "EXPLAIN", "{lines:?}");
     for (node, needle) in [
         ("Limit", "5"),
@@ -141,10 +141,10 @@ async fn explain_compound_nodes() {
 
     // MS25 Iteration 000/001 交付的节点臂同样可渲染（外连接 / DISTINCT /
     // 集合操作）
-    let outer = plan_lines(&query_rows(
+    let outer = plan_lines(&query_rows(to_response(
         db.execute_sql("EXPLAIN SELECT DISTINCT l.id FROM l LEFT JOIN r ON l.id > r.rid")
             .await,
-    ));
+    )));
     for node in ["Distinct", "NestedLoopJoin [Left]", "Scan l", "Scan r"] {
         assert!(
             outer.iter().any(|l| l.trim_start().starts_with(node)),
@@ -152,10 +152,10 @@ async fn explain_compound_nodes() {
         );
     }
 
-    let compound = plan_lines(&query_rows(
+    let compound = plan_lines(&query_rows(to_response(
         db.execute_sql("EXPLAIN SELECT id FROM l UNION SELECT rid FROM r")
             .await,
-    ));
+    )));
     for node in ["SetOperation [UNION]", "DataScan l", "DataScan r"] {
         assert!(
             compound.iter().any(|l| l.trim_start().starts_with(node)),
@@ -173,7 +173,9 @@ async fn explain_no_execution() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let lines = plan_lines(&query_rows(db.execute_sql("EXPLAIN SELECT * FROM t").await));
+    let lines = plan_lines(&query_rows(to_response(
+        db.execute_sql("EXPLAIN SELECT * FROM t").await,
+    )));
     assert!(
         lines.iter().any(|l| l.contains("t")),
         "计划树应含被观测的表: {lines:?}"
@@ -185,7 +187,7 @@ async fn explain_no_execution() {
         "EXPLAIN 不产出数据行: {lines:?}"
     );
 
-    let after = query_rows(db.execute_sql("SELECT id, name FROM t").await);
+    let after = query_rows(to_response(db.execute_sql("SELECT id, name FROM t").await));
     assert_eq!(
         after,
         vec![vec![json!(1), json!("Alice")], vec![json!(2), json!("Bob")]],
@@ -201,7 +203,9 @@ async fn explain_plan_error_not_exempt() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    let msg = error_msg(db.execute_sql("EXPLAIN SELECT x FROM nosuch_table").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("EXPLAIN SELECT x FROM nosuch_table").await,
+    ));
     assert!(
         msg.contains("nosuch_table"),
         "缺失表按既有错误面点名: {msg}"
@@ -222,13 +226,13 @@ async fn explain_dml_rejected() {
         "EXPLAIN UPDATE t SET name = 'x' WHERE id = 1",
         "EXPLAIN DELETE FROM t WHERE id = 1",
     ] {
-        let msg = error_msg(db.execute_sql(sql).await);
+        let msg = error_msg(to_response(db.execute_sql(sql).await));
         assert!(
             msg.contains("EXPLAIN of non-SELECT statements"),
             "{sql}: DML 点名拒绝, got {msg}"
         );
     }
-    let rows = query_rows(db.execute_sql("SELECT COUNT(*) FROM t").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT COUNT(*) FROM t").await));
     assert_eq!(rows, vec![vec![json!(2)]], "拒绝路径零副作用");
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -240,17 +244,19 @@ async fn explain_ddl_rejected() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    let msg = error_msg(db.execute_sql("EXPLAIN CREATE TABLE t2 (id INT)").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("EXPLAIN CREATE TABLE t2 (id INT)").await,
+    ));
     assert!(
         msg.contains("EXPLAIN of non-SELECT statements"),
         "DDL 点名拒绝, got {msg}"
     );
     assert!(
-        error_msg(db.execute_sql("SELECT * FROM t2").await).contains("t2"),
+        error_msg(to_response(db.execute_sql("SELECT * FROM t2").await)).contains("t2"),
         "被拒 DDL 零副作用（t2 不应存在）"
     );
 
-    let msg = error_msg(db.execute_sql("EXPLAIN DROP TABLE t2").await);
+    let msg = error_msg(to_response(db.execute_sql("EXPLAIN DROP TABLE t2").await));
     assert!(
         msg.contains("EXPLAIN of non-SELECT statements"),
         "DROP 点名拒绝, got {msg}"
@@ -272,22 +278,26 @@ async fn explain_modifiers_rejected_and_desc_accepted() {
         ("EXPLAIN VERBOSE SELECT * FROM t", "EXPLAIN VERBOSE"),
         ("EXPLAIN FORMAT json SELECT * FROM t", "EXPLAIN FORMAT"),
     ] {
-        let msg = error_msg(db.execute_sql(sql).await);
+        let msg = error_msg(to_response(db.execute_sql(sql).await));
         assert!(msg.contains(needle), "{sql}: 修饰点名拒绝, got {msg}");
     }
 
     // 嵌套 EXPLAIN 由 sqlparser 在解析期点名拒绝（`Explain must be root of
     // the plan`）；两条路径都以点名错误收敛，不静默接受。
-    let msg = error_msg(db.execute_sql("EXPLAIN EXPLAIN SELECT * FROM t").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("EXPLAIN EXPLAIN SELECT * FROM t").await,
+    ));
     assert!(
         msg.to_lowercase().contains("explain"),
         "嵌套 EXPLAIN 点名拒绝, got {msg}"
     );
 
-    let explain = plan_lines(&query_rows(
+    let explain = plan_lines(&query_rows(to_response(
         db.execute_sql("EXPLAIN SELECT name FROM t").await,
-    ));
-    let desc = plan_lines(&query_rows(db.execute_sql("DESC SELECT name FROM t").await));
+    )));
+    let desc = plan_lines(&query_rows(to_response(
+        db.execute_sql("DESC SELECT name FROM t").await,
+    )));
     assert_eq!(explain, desc, "DESC 与 EXPLAIN 同语义");
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -303,16 +313,20 @@ async fn non_explain_unchanged() {
     exec_ok(&db, "INSERT INTO kw VALUES (7, 8)").await;
 
     assert_eq!(
-        query_rows(db.execute_sql("SELECT name FROM t WHERE id = 1").await),
+        query_rows(to_response(
+            db.execute_sql("SELECT name FROM t WHERE id = 1").await
+        )),
         vec![vec![json!("Alice")]],
         "既有查询结果不变"
     );
     assert_eq!(
-        query_rows(db.execute_sql("SELECT explain, plain FROM kw").await),
+        query_rows(to_response(
+            db.execute_sql("SELECT explain, plain FROM kw").await
+        )),
         vec![vec![json!(7), json!(8)]],
         "`explain` 作列名的既有解析不受影响"
     );
-    let affected = db.execute_sql("INSERT INTO t VALUES (3, 'Carol')").await;
+    let affected = to_response(db.execute_sql("INSERT INTO t VALUES (3, 'Carol')").await);
     assert!(
         matches!(affected, Response::AffectedRows { count: 1 }),
         "既有 DML 行为不变: {affected:?}"
@@ -328,8 +342,12 @@ async fn explain_repeatable() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let first = query_rows(db.execute_sql("EXPLAIN SELECT name FROM t").await);
-    let second = query_rows(db.execute_sql("EXPLAIN SELECT name FROM t").await);
+    let first = query_rows(to_response(
+        db.execute_sql("EXPLAIN SELECT name FROM t").await,
+    ));
+    let second = query_rows(to_response(
+        db.execute_sql("EXPLAIN SELECT name FROM t").await,
+    ));
     assert_eq!(first, second, "EXPLAIN 输出确定性可重复");
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;

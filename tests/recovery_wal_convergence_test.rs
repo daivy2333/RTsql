@@ -19,7 +19,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;
 
 fn db_path(dir: &TempDir) -> PathBuf {
@@ -27,7 +27,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "statement failed: {sql:?} -> {resp:?}"
@@ -50,7 +50,7 @@ async fn seed_uncommitted_crash(path: &Path) {
     db.checkpoint().await.unwrap();
     let tx = db.begin().await.unwrap();
     if let Response::Error { message, .. } =
-        db.execute_in_tx("INSERT INTO t VALUES (1, 1)", &tx).await
+        to_response(db.execute_in_tx("INSERT INTO t VALUES (1, 1)", &tx).await)
     {
         panic!("tx insert failed: {message:?}");
     }

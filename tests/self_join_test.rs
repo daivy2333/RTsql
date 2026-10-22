@@ -15,7 +15,7 @@
 //!   自连接投影各读对应侧行；非自连接全部形态零回归。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
 
@@ -24,7 +24,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -86,12 +86,12 @@ async fn hash_forward_self_join_pairs_correctly() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_emp2(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e1.name, e2.name FROM emp2 e1 JOIN emp2 e2 ON e1.id = e2.manager_id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -112,12 +112,12 @@ async fn hash_reversed_self_join_same_pairing() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_emp2(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e1.name, e2.name FROM emp2 e1 JOIN emp2 e2 ON e2.manager_id = e1.id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -148,10 +148,10 @@ async fn self_join_projection_reads_declared_side() {
     seed_emp2(&db).await;
 
     // 同名双列：左 id 读左行、右 id 读右行（修复前两列同读左行）。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT e1.id, e2.id FROM emp2 e1 JOIN emp2 e2 ON e1.id = e2.manager_id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!(10)], vec![json!(2), json!(11)]],
@@ -161,13 +161,13 @@ async fn self_join_projection_reads_declared_side() {
     // 三列混排：e1.name / e2.manager_id / e2.name——输出按 SELECT 序
     //（T10 校准：表序 [name, name, manager_id] → SELECT 序 [name,
     // manager_id, name]），归属各读对应侧。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e1.name, e2.manager_id, e2.name FROM emp2 e1 JOIN emp2 e2 \
              ON e1.id = e2.manager_id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -189,13 +189,13 @@ async fn self_join_outer_and_nonequi_attribution() {
     seed_emp2(&db).await;
 
     // LEFT JOIN：未匹配的 r1/r2 行右侧补 NULL。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e1.name, e2.name FROM emp2 e1 LEFT JOIN emp2 e2 \
              ON e1.id = e2.manager_id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -208,13 +208,13 @@ async fn self_join_outer_and_nonequi_attribution() {
     );
 
     // FULL JOIN：追加右侧未匹配的 m1/m2 行左侧补 NULL。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT e1.name, e2.name FROM emp2 e1 FULL JOIN emp2 e2 \
              ON e1.id = e2.manager_id",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -229,10 +229,10 @@ async fn self_join_outer_and_nonequi_attribution() {
     );
 
     // 非等值自连接（NLJ 谓词路径）：id 小于 id 的组合，两列各读对应侧。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT e1.id, e2.id FROM emp2 e1 JOIN emp2 e2 ON e1.id < e2.id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -257,9 +257,10 @@ async fn self_join_same_side_on_rejected() {
     seed_emp2(&db).await;
 
     // 双腿同左侧。
-    let resp = db
-        .execute_sql("SELECT e1.name FROM emp2 e1 JOIN emp2 e2 ON e1.id = e1.manager_id")
-        .await;
+    let resp = to_response(
+        db.execute_sql("SELECT e1.name FROM emp2 e1 JOIN emp2 e2 ON e1.id = e1.manager_id")
+            .await,
+    );
     let msg = error_msg(resp);
     assert!(
         msg.contains("both sides"),
@@ -267,9 +268,10 @@ async fn self_join_same_side_on_rejected() {
     );
 
     // 双腿同右侧。
-    let resp = db
-        .execute_sql("SELECT e1.name FROM emp2 e1 JOIN emp2 e2 ON e2.id = e2.manager_id")
-        .await;
+    let resp = to_response(
+        db.execute_sql("SELECT e1.name FROM emp2 e1 JOIN emp2 e2 ON e2.id = e2.manager_id")
+            .await,
+    );
     let msg = error_msg(resp);
     assert!(
         msg.contains("both sides"),
@@ -277,7 +279,9 @@ async fn self_join_same_side_on_rejected() {
     );
 
     // 零副作用：表数据不受拒绝语句影响。
-    let rows = query_rows(db.execute_sql("SELECT COUNT(*) FROM emp2").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT COUNT(*) FROM emp2").await,
+    ));
     assert_eq!(rows, vec![vec![json!(4)]], "rows: {rows:?}");
 }
 
@@ -290,10 +294,10 @@ async fn non_self_join_forms_unchanged() {
     seed_dept_emp3(&db).await;
 
     // 正向限定。
-    let forward = query_rows(
+    let forward = query_rows(to_response(
         db.execute_sql("SELECT e.ename, d.dname FROM emp3 e JOIN dept d ON e.dept_id = d.id")
             .await,
-    );
+    ));
     assert_eq!(
         forward,
         vec![
@@ -305,34 +309,34 @@ async fn non_self_join_forms_unchanged() {
     );
 
     // 反向限定：同结果。
-    let reversed = query_rows(
+    let reversed = query_rows(to_response(
         db.execute_sql("SELECT e.ename, d.dname FROM emp3 e JOIN dept d ON d.id = e.dept_id")
             .await,
-    );
+    ));
     assert_eq!(reversed, forward, "reversed rows: {reversed:?}");
 
     // 裸名左腿 + 限定右腿：按位置解析（裸名 dept_id 属左输入 emp3）。
-    let bare = query_rows(
+    let bare = query_rows(to_response(
         db.execute_sql("SELECT e.ename, d.dname FROM emp3 e JOIN dept d ON dept_id = d.id")
             .await,
-    );
+    ));
     assert_eq!(bare, forward, "bare rows: {bare:?}");
 
     // 无别名（声明限定符即真实表名）。
-    let no_alias = query_rows(
+    let no_alias = query_rows(to_response(
         db.execute_sql(
             "SELECT emp3.ename, dept.dname FROM emp3 JOIN dept \
              ON emp3.dept_id = dept.id",
         )
         .await,
-    );
+    ));
     assert_eq!(no_alias, forward, "no-alias rows: {no_alias:?}");
 
     // LEFT JOIN 补齐行归属（d 行 dept_id NULL 不命中，右侧补 NULL）。
-    let left = query_rows(
+    let left = query_rows(to_response(
         db.execute_sql("SELECT e.ename, d.dname FROM emp3 e LEFT JOIN dept d ON e.dept_id = d.id")
             .await,
-    );
+    ));
     assert_eq!(
         left,
         vec![

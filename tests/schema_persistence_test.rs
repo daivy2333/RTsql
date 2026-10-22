@@ -6,6 +6,7 @@
 //! `TableManager` cache from the catalog on restart.
 
 use rtsql::database::Database;
+use rtsql::network::protocol::to_response;
 use rtsql::storage::page_format::ColumnType;
 use rtsql::storage::FileStorage;
 use std::sync::Arc;
@@ -86,13 +87,13 @@ async fn test_restart_dml_works() {
             .await
             .unwrap();
         // Use SQL path to ensure WAL/transaction plumbing also works.
-        let _ = db.execute_sql("INSERT INTO users VALUES (1)").await;
+        let _ = to_response(db.execute_sql("INSERT INTO users VALUES (1)").await);
         db.close().await.unwrap();
     }
 
     // Second session: SELECT should return 1 row.
     let db2 = Database::open(&path).await.unwrap();
-    let result = db2.execute_sql("SELECT * FROM users").await;
+    let result = to_response(db2.execute_sql("SELECT * FROM users").await);
     // Validate the response doesn't error; exact row count depends on
     // WAL redo behavior with the new persistence layer (covered by
     // recovery_e2e_test). The key behavior here is that the SELECT

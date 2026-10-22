@@ -18,7 +18,7 @@
 //! `group_concat_{col}`。多组行序经 HashMap 分桶非确定：多组断言带 ORDER BY。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use std::process::Command;
 use tempfile::{tempdir, TempDir};
@@ -28,7 +28,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -60,7 +60,9 @@ async fn count_distinct_basic() {
     exec_ok(&db, "INSERT INTO t VALUES (3, 2)").await;
     exec_ok(&db, "INSERT INTO t VALUES (4, NULL)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT count(DISTINCT v) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT count(DISTINCT v) FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(2)]],
@@ -79,7 +81,9 @@ async fn count_distinct_all_null_zero() {
     exec_ok(&db, "INSERT INTO t VALUES (1, NULL)").await;
     exec_ok(&db, "INSERT INTO t VALUES (2, NULL)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT count(DISTINCT v) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT count(DISTINCT v) FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![json!(0)]], "全 NULL 去重计数必须为 0");
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -92,7 +96,9 @@ async fn count_distinct_multi_arg_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     exec_ok(&db, "CREATE TABLE t (k INT PRIMARY KEY, a INT, b INT)").await;
 
-    let msg = error_msg(db.execute_sql("SELECT count(DISTINCT a, b) FROM t").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT count(DISTINCT a, b) FROM t").await,
+    ));
     assert!(
         msg.contains("COUNT"),
         "多参数 COUNT(DISTINCT a, b) 必须点名拒绝并提及 COUNT，实际: {msg}"
@@ -111,7 +117,9 @@ async fn sum_distinct() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 1)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 2)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT sum(DISTINCT v) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT sum(DISTINCT v) FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(3)]],
@@ -131,7 +139,9 @@ async fn avg_distinct() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 1)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 3)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT avg(DISTINCT v) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT avg(DISTINCT v) FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(2.0)]],
@@ -151,8 +161,10 @@ async fn min_distinct_eq_plain() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 1)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 1)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT min(DISTINCT v) FROM t").await);
-    let plain = query_rows(db.execute_sql("SELECT min(v) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT min(DISTINCT v) FROM t").await,
+    ));
+    let plain = query_rows(to_response(db.execute_sql("SELECT min(v) FROM t").await));
     assert_eq!(rows, vec![vec![json!(1)]], "MIN(DISTINCT v) 必须输出 1");
     assert_eq!(
         rows, plain,
@@ -173,10 +185,10 @@ async fn distinct_with_group_by() {
     exec_ok(&db, "INSERT INTO t VALUES (3, 'a', 2)").await;
     exec_ok(&db, "INSERT INTO t VALUES (4, 'b', 5)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT g, count(DISTINCT v) FROM t GROUP BY g ORDER BY g")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a"), json!(2)], vec![json!("b"), json!(1)]],
@@ -196,7 +208,9 @@ async fn group_concat_default_sep() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 'b')").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 'c')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT group_concat(v) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT group_concat(v) FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a,b,c")]],
@@ -215,7 +229,9 @@ async fn group_concat_custom_sep() {
     exec_ok(&db, "INSERT INTO t VALUES (1, 'a')").await;
     exec_ok(&db, "INSERT INTO t VALUES (2, 'b')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT group_concat(v, '|') FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT group_concat(v, '|') FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a|b")]],
@@ -239,10 +255,10 @@ async fn group_concat_null_skip_and_all_null_group() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 'a', 'x')").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 'b', NULL)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT g, group_concat(v) FROM t GROUP BY g ORDER BY g")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a"), json!("x")], vec![json!("b"), json!(null)]],
@@ -260,10 +276,10 @@ async fn group_concat_non_literal_sep_rejected() {
     exec_ok(&db, "CREATE TABLE t (k INT PRIMARY KEY, v VARCHAR)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1, 'a')").await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT group_concat(v, upper('|')) FROM t")
             .await,
-    );
+    ));
     assert!(
         msg.to_lowercase().contains("separator"),
         "非字面量分隔符必须点名拒绝并提及 separator，实际: {msg}"
@@ -282,12 +298,12 @@ async fn existing_aggregates_unchanged() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 'a', 3)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 'b', NULL)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT g, count(*), count(v), sum(v), min(v), max(v) FROM t GROUP BY g ORDER BY g",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -406,7 +422,7 @@ async fn seed_expr_table(dir: &TempDir) -> Database {
 async fn nested_aggregate_max_plus_one() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(db.execute_sql("SELECT MAX(id)+1 FROM t").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT MAX(id)+1 FROM t").await));
     assert_eq!(rows, vec![vec![json!(4)]], "MAX(id)+1 必须单行返回 next-id");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -416,14 +432,18 @@ async fn nested_aggregate_max_plus_one() {
 async fn nested_aggregate_coalesce_empty_and_data() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(db.execute_sql("SELECT COALESCE(MAX(id),0)+1 FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT COALESCE(MAX(id),0)+1 FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(4)]],
         "COALESCE(MAX(id),0)+1 数据表 → 4"
     );
     exec_ok(&db, "CREATE TABLE e (id INT)").await;
-    let rows = query_rows(db.execute_sql("SELECT COALESCE(MAX(id),0)+1 FROM e").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT COALESCE(MAX(id),0)+1 FROM e").await,
+    ));
     assert_eq!(rows, vec![vec![json!(1)]], "空表 COALESCE(MAX(id),0)+1 → 1");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -433,7 +453,9 @@ async fn nested_aggregate_coalesce_empty_and_data() {
 async fn constant_mixing_with_aggregate() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(db.execute_sql("SELECT MAX(id), 1 FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT MAX(id), 1 FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(3), json!(1)]],
@@ -447,10 +469,10 @@ async fn constant_mixing_with_aggregate() {
 async fn constant_mixing_typed_string_date() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT MAX(id), DATE '2024-01-01' FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(3), json!("2024-01-01")]],
@@ -466,7 +488,7 @@ async fn constant_mixing_insert_select_source() {
     let db = seed_expr_table(&dir).await;
     exec_ok(&db, "CREATE TABLE t2 (a INT, b INT)").await;
     exec_ok(&db, "INSERT INTO t2 SELECT MAX(id), 1 FROM t").await;
-    let rows = query_rows(db.execute_sql("SELECT a, b FROM t2").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT a, b FROM t2").await));
     assert_eq!(
         rows,
         vec![vec![json!(3), json!(1)]],
@@ -481,7 +503,9 @@ async fn sum_distinct_inside_expression() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
     exec_ok(&db, "INSERT INTO t VALUES (4, 10)").await;
-    let rows = query_rows(db.execute_sql("SELECT SUM(DISTINCT v)+1 FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT SUM(DISTINCT v)+1 FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(61)]],
@@ -495,10 +519,10 @@ async fn sum_distinct_inside_expression() {
 async fn grouped_nested_aggregate_expression() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v, MAX(id)+1 FROM t GROUP BY v ORDER BY v")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -522,10 +546,10 @@ async fn grouped_nested_aggregate_expression() {
 async fn having_arithmetic_filter() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v, MAX(id) FROM t GROUP BY v HAVING MAX(id)+1 > 2 ORDER BY v")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(20), json!(2)], vec![json!(30), json!(3)]],
@@ -542,22 +566,22 @@ async fn having_and_or_legs() {
     // MIN(v) 须在 SELECT 清单内注册（HAVING 不解锁新聚合——既有
     // HavingNonAggregatedReference 通道保持，仅表达式编译解锁）。
     let rows = query_rows(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "SELECT v, MAX(id), MIN(v) FROM t GROUP BY v HAVING MAX(id) > 1 AND MIN(v) < 30 ORDER BY v",
         )
-        .await,
+        .await),
     );
     assert_eq!(
         rows,
         vec![vec![json!(20), json!(2), json!(20)]],
         "AND 组合腿过滤"
     );
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT v, MAX(id) FROM t GROUP BY v HAVING MAX(id) = 1 OR MAX(id) = 3 ORDER BY v",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(10), json!(1)], vec![json!(30), json!(3)]],
@@ -571,12 +595,12 @@ async fn having_and_or_legs() {
 async fn having_composite_legs_both_sides() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT v, MAX(id), MIN(v) FROM t GROUP BY v HAVING MAX(id) + MIN(v) >= 31 ORDER BY v",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(30), json!(3), json!(30)]],
@@ -591,10 +615,10 @@ async fn having_coalesce_leg() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
     exec_ok(&db, "CREATE TABLE e (id INT)").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT COUNT(*), MAX(id) FROM e HAVING COALESCE(MAX(id), 0) = 0")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(0), json!(null)]],
@@ -609,10 +633,10 @@ async fn having_case_leg() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
     let rows = query_rows(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "SELECT v, MAX(id) FROM t GROUP BY v HAVING CASE WHEN MAX(id) > 2 THEN 1 ELSE 0 END = 1 ORDER BY v",
         )
-        .await,
+        .await),
     );
     assert_eq!(rows, vec![vec![json!(30), json!(3)]], "CASE 腿按组求值过滤");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -626,12 +650,12 @@ async fn having_scalar_function_leg() {
     exec_ok(&db, "CREATE TABLE s (k INT PRIMARY KEY, name STRING)").await;
     exec_ok(&db, "INSERT INTO s VALUES (1, 'a')").await;
     exec_ok(&db, "INSERT INTO s VALUES (2, 'B')").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT name, COUNT(*) FROM s GROUP BY name HAVING upper(name) = 'A' ORDER BY name",
         )
         .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("a"), json!(1)]], "标量函数腿可达");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -647,10 +671,10 @@ async fn having_scalar_function_leg() {
 async fn order_by_aggregate_expression_asc() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v, MAX(id) FROM t GROUP BY v ORDER BY MAX(id)+1")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -668,10 +692,10 @@ async fn order_by_aggregate_expression_asc() {
 async fn order_by_aggregate_expression_desc_mixed_keys() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v, MAX(id) FROM t GROUP BY v ORDER BY MAX(id)+1 DESC")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -681,10 +705,10 @@ async fn order_by_aggregate_expression_desc_mixed_keys() {
         ],
         "ORDER BY MAX(id)+1 降序"
     );
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v, MAX(id) FROM t GROUP BY v ORDER BY v, MAX(id)+1")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -702,10 +726,10 @@ async fn order_by_aggregate_expression_desc_mixed_keys() {
 async fn order_by_aggregate_not_in_select() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v, COUNT(*) FROM t GROUP BY v ORDER BY MAX(v) DESC")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -729,7 +753,9 @@ async fn order_by_aggregate_not_in_select() {
 async fn where_aggregate_rejected() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let msg = error_msg(db.execute_sql("SELECT id FROM t WHERE MAX(id) > 1").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT id FROM t WHERE MAX(id) > 1").await,
+    ));
     assert!(
         msg.contains("Unsupported expression type: MAX"),
         "WHERE 内聚合必须经既有通道点名，实际: {msg}"
@@ -744,10 +770,10 @@ async fn join_on_aggregate_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     exec_ok(&db, "CREATE TABLE a (id INT PRIMARY KEY)").await;
     exec_ok(&db, "CREATE TABLE b (id INT PRIMARY KEY, a_id INT)").await;
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT a.id FROM a JOIN b ON MAX(a.id) = b.id")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Unsupported expression type: MAX"),
         "JOIN ON 内聚合必须经既有通道点名，实际: {msg}"
@@ -760,12 +786,16 @@ async fn join_on_aggregate_rejected() {
 async fn nested_aggregate_rejected() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let msg = error_msg(db.execute_sql("SELECT MAX(MIN(id)) FROM t").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT MAX(MIN(id)) FROM t").await,
+    ));
     assert!(
         msg.contains("Invalid aggregate argument"),
         "嵌套聚合必须经既有参数校验通道点名，实际: {msg}"
     );
-    let msg = error_msg(db.execute_sql("SELECT MAX(id)+MIN(MIN(v)) FROM t").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT MAX(id)+MIN(MIN(v)) FROM t").await,
+    ));
     assert!(
         msg.contains("Invalid aggregate argument"),
         "表达式内嵌套聚合同样点名拒绝，实际: {msg}"
@@ -778,7 +808,9 @@ async fn nested_aggregate_rejected() {
 async fn nonagg_column_without_group_by_rejected() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let msg = error_msg(db.execute_sql("SELECT v, MAX(id) FROM t").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT v, MAX(id) FROM t").await,
+    ));
     assert!(
         msg.contains("Non-aggregated column 'v'"),
         "无 GROUP BY 非聚合列引用必须点名，实际: {msg}"
@@ -791,7 +823,7 @@ async fn nonagg_column_without_group_by_rejected() {
 async fn nested_nonagg_column_in_expression_rejected() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let msg = error_msg(db.execute_sql("SELECT MAX(id)+v FROM t").await);
+    let msg = error_msg(to_response(db.execute_sql("SELECT MAX(id)+v FROM t").await));
     assert!(
         msg.contains("Non-aggregated column 'v'"),
         "表达式内非聚合列引用必须点名，实际: {msg}"
@@ -826,10 +858,10 @@ async fn seed_dup_name_table(dir: &TempDir) -> Database {
 async fn duplicate_alias_resolves_to_own_output() {
     let dir = tempdir().unwrap();
     let db = seed_dup_name_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT MAX(a) AS m, g, MAX(b) AS m FROM s GROUP BY g ORDER BY g")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -848,10 +880,10 @@ async fn duplicate_alias_resolves_to_own_output() {
 async fn alias_shadowing_result_name_resolves_correctly() {
     let dir = tempdir().unwrap();
     let db = seed_dup_name_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT MAX(a) AS max_b, g, MAX(b) FROM s GROUP BY g ORDER BY g")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -869,12 +901,12 @@ async fn alias_shadowing_result_name_resolves_correctly() {
 async fn having_disambiguates_shadowed_call() {
     let dir = tempdir().unwrap();
     let db = seed_dup_name_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT MAX(a) AS max_b, g, MAX(b) FROM s GROUP BY g HAVING MAX(b) > 150 ORDER BY g",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -892,10 +924,10 @@ async fn having_disambiguates_shadowed_call() {
 async fn embedded_reference_disambiguates_shadowed_call() {
     let dir = tempdir().unwrap();
     let db = seed_dup_name_table(&dir).await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT MAX(a) AS max_b, g, MAX(b)+1 FROM s GROUP BY g ORDER BY g")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -913,7 +945,9 @@ async fn embedded_reference_disambiguates_shadowed_call() {
 async fn shared_output_column_for_same_call() {
     let dir = tempdir().unwrap();
     let db = seed_expr_table(&dir).await;
-    let rows = query_rows(db.execute_sql("SELECT MAX(id), MAX(id)+1 FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT MAX(id), MAX(id)+1 FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(3), json!(4)]],

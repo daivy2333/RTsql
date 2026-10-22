@@ -20,7 +20,7 @@
 //!   R3-S4 既有面零回归                          （全量分批承载，不单列）
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::{tempdir, TempDir};
 
@@ -35,7 +35,7 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str, what: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "{what} failed: {sql:?} -> {resp:?}"
@@ -80,7 +80,7 @@ async fn add_column_tail_null_backfill() {
     exec_ok(&db, "ALTER TABLE t ADD COLUMN note VARCHAR", "add column").await;
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, note FROM t").await,
+        to_response(db.execute_sql("SELECT id, note FROM t").await),
         "existing rows note",
     );
     assert_eq!(rows.len(), 3);
@@ -95,7 +95,7 @@ async fn add_column_tail_null_backfill() {
     )
     .await;
     let rows = query_rows(
-        db.execute_sql("SELECT id, note FROM t WHERE id = 9").await,
+        to_response(db.execute_sql("SELECT id, note FROM t WHERE id = 9").await),
         "new row note",
     );
     assert_eq!(rows[0][1], serde_json::json!("x"));
@@ -111,7 +111,7 @@ async fn add_column_with_default_backfills() {
     exec_ok(&db, "ALTER TABLE t ADD COLUMN flag INT DEFAULT 0", "add").await;
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, flag FROM t").await,
+        to_response(db.execute_sql("SELECT id, flag FROM t").await),
         "existing rows flag",
     );
     for r in rows {
@@ -120,7 +120,7 @@ async fn add_column_with_default_backfills() {
 
     exec_ok(&db, "INSERT INTO t (id, v) VALUES (5, 50)", "subset insert").await;
     let rows = query_rows(
-        db.execute_sql("SELECT flag FROM t WHERE id = 5").await,
+        to_response(db.execute_sql("SELECT flag FROM t WHERE id = 5").await),
         "subset insert flag",
     );
     assert_eq!(
@@ -142,7 +142,10 @@ async fn add_column_not_null_default_on_non_empty() {
         "add",
     )
     .await;
-    let rows = query_rows(db.execute_sql("SELECT req FROM t").await, "read back");
+    let rows = query_rows(
+        to_response(db.execute_sql("SELECT req FROM t").await),
+        "read back",
+    );
     for r in rows {
         assert_eq!(r[0], serde_json::json!(7));
     }
@@ -150,7 +153,7 @@ async fn add_column_not_null_default_on_non_empty() {
     // 新写入：省略该列走 DEFAULT；显式 NULL 被 NOT NULL 拒绝
     exec_ok(&db, "INSERT INTO t (id, v) VALUES (4, 40)", "subset").await;
     expect_plan_error(
-        db.execute_sql("INSERT INTO t VALUES (6, 60, NULL)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (6, 60, NULL)").await),
         "not null insert",
         "NOT NULL",
     );
@@ -163,14 +166,19 @@ async fn add_column_not_null_without_default_rejected() {
     seed_two_col(&db).await;
 
     expect_plan_error(
-        db.execute_sql("ALTER TABLE t ADD COLUMN req VARCHAR NOT NULL")
-            .await,
+        to_response(
+            db.execute_sql("ALTER TABLE t ADD COLUMN req VARCHAR NOT NULL")
+                .await,
+        ),
         "not-null without default on non-empty",
         "NOT NULL",
     );
     // 零副作用：列未加入，合法加列仍可用
     exec_ok(&db, "ALTER TABLE t ADD COLUMN note VARCHAR", "add after").await;
-    let rows = query_rows(db.execute_sql("SELECT note FROM t").await, "note");
+    let rows = query_rows(
+        to_response(db.execute_sql("SELECT note FROM t").await),
+        "note",
+    );
     assert_eq!(rows.len(), 3);
 }
 
@@ -184,7 +192,7 @@ async fn add_column_constraint_declarations_rejected() {
         ("ALTER TABLE t ADD COLUMN u INT UNIQUE", "unique"),
         ("ALTER TABLE t ADD COLUMN p INT PRIMARY KEY", "primary key"),
     ] {
-        expect_plan_error(db.execute_sql(sql).await, what, "Unsupported");
+        expect_plan_error(to_response(db.execute_sql(sql).await), what, "Unsupported");
     }
 }
 
@@ -201,7 +209,10 @@ async fn add_column_persists_and_dump_restore_roundtrip() {
     }
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT flag FROM t").await, "reopen");
+        let rows = query_rows(
+            to_response(db.execute_sql("SELECT flag FROM t").await),
+            "reopen",
+        );
         for r in rows {
             assert_eq!(r[0], serde_json::json!(0), "default must survive reopen");
         }
@@ -247,7 +258,10 @@ async fn add_column_persists_and_dump_restore_roundtrip() {
     );
 
     let db2 = Database::open(&restore_path).await.unwrap();
-    let rows = query_rows(db2.execute_sql("SELECT flag FROM t").await, "restored");
+    let rows = query_rows(
+        to_response(db2.execute_sql("SELECT flag FROM t").await),
+        "restored",
+    );
     for r in rows {
         assert_eq!(r[0], serde_json::json!(0), "restored default must hold");
     }
@@ -272,7 +286,10 @@ async fn drop_column_output_shape_conforms() {
 
     exec_ok(&db, "ALTER TABLE t DROP COLUMN b", "drop column").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t").await, "select *");
+    let rows = query_rows(
+        to_response(db.execute_sql("SELECT * FROM t").await),
+        "select *",
+    );
     assert_eq!(rows.len(), 2);
     for r in &rows {
         assert_eq!(r.len(), 2, "row shape must be (a, c): {r:?}");
@@ -282,8 +299,10 @@ async fn drop_column_output_shape_conforms() {
 
     exec_ok(&db, "INSERT INTO t (a, c) VALUES (3, 'z')", "insert narrow").await;
     expect_plan_error(
-        db.execute_sql("INSERT INTO t (a, b, c) VALUES (4, 4, 'w')")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t (a, b, c) VALUES (4, 4, 'w')")
+                .await,
+        ),
         "insert dropped column",
         "not found",
     );
@@ -296,7 +315,7 @@ async fn drop_index_referenced_column_rejected() {
     seed_two_col(&db).await;
 
     expect_plan_error(
-        db.execute_sql("ALTER TABLE t DROP COLUMN id").await,
+        to_response(db.execute_sql("ALTER TABLE t DROP COLUMN id").await),
         "pk column",
         "PRIMARY KEY",
     );
@@ -308,14 +327,14 @@ async fn drop_index_referenced_column_rejected() {
     )
     .await;
     expect_plan_error(
-        db.execute_sql("ALTER TABLE u DROP COLUMN tag").await,
+        to_response(db.execute_sql("ALTER TABLE u DROP COLUMN tag").await),
         "unique column",
         "UNIQUE",
     );
 
     exec_ok(&db, "CREATE INDEX idx_v ON t(v)", "create index").await;
     expect_plan_error(
-        db.execute_sql("ALTER TABLE t DROP COLUMN v").await,
+        to_response(db.execute_sql("ALTER TABLE t DROP COLUMN v").await),
         "secondary-indexed column",
         "index",
     );
@@ -327,7 +346,7 @@ async fn drop_last_column_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE solo (a INT PRIMARY KEY)", "create").await;
     expect_plan_error(
-        db.execute_sql("ALTER TABLE solo DROP COLUMN a").await,
+        to_response(db.execute_sql("ALTER TABLE solo DROP COLUMN a").await),
         "last column",
         "last column",
     );
@@ -352,7 +371,10 @@ async fn drop_column_persists_and_dump_restore_roundtrip() {
     }
     {
         let db = Database::open(&path).await.unwrap();
-        let rows = query_rows(db.execute_sql("SELECT * FROM t").await, "reopen");
+        let rows = query_rows(
+            to_response(db.execute_sql("SELECT * FROM t").await),
+            "reopen",
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 2);
     } // close：释放锁
@@ -379,7 +401,7 @@ async fn drop_missing_column_rejected() {
     let (db, _dir) = open_db().await;
     seed_two_col(&db).await;
     expect_plan_error(
-        db.execute_sql("ALTER TABLE t DROP COLUMN nope").await,
+        to_response(db.execute_sql("ALTER TABLE t DROP COLUMN nope").await),
         "missing column",
         "not found",
     );
@@ -408,7 +430,10 @@ async fn drop_column_consistent_across_crash_recovery() {
         drop(db);
     }
     let db2 = Database::open(&path).await.unwrap();
-    let rows = query_rows(db2.execute_sql("SELECT * FROM t").await, "recovered");
+    let rows = query_rows(
+        to_response(db2.execute_sql("SELECT * FROM t").await),
+        "recovered",
+    );
     assert_eq!(rows.len(), 4);
     for r in rows {
         assert_eq!(r.len(), 2, "recovered rows must be two-column: {r:?}");
@@ -425,8 +450,10 @@ async fn alter_table_multi_operation_rejected() {
     let (db, _dir) = open_db().await;
     seed_two_col(&db).await;
     expect_plan_error(
-        db.execute_sql("ALTER TABLE t ADD COLUMN x INT, DROP COLUMN v")
-            .await,
+        to_response(
+            db.execute_sql("ALTER TABLE t ADD COLUMN x INT, DROP COLUMN v")
+                .await,
+        ),
         "multi operation",
         "ALTER TABLE",
     );
@@ -437,7 +464,7 @@ async fn alter_table_multi_operation_rejected() {
 async fn alter_table_missing_table_rejected() {
     let (db, _dir) = open_db().await;
     expect_plan_error(
-        db.execute_sql("ALTER TABLE nope ADD COLUMN x INT").await,
+        to_response(db.execute_sql("ALTER TABLE nope ADD COLUMN x INT").await),
         "missing table",
         "not found",
     );
@@ -449,8 +476,10 @@ async fn alter_table_reserved_name_rejected() {
     let (db, _dir) = open_db().await;
     for target in ["__tables", "__columns"] {
         expect_plan_error(
-            db.execute_sql(&format!("ALTER TABLE {target} ADD COLUMN x INT"))
-                .await,
+            to_response(
+                db.execute_sql(&format!("ALTER TABLE {target} ADD COLUMN x INT"))
+                    .await,
+            ),
             target,
             "not found",
         );
@@ -463,10 +492,10 @@ async fn alter_table_inside_explicit_transaction_rejected() {
     let (db, _dir) = open_db().await;
     seed_two_col(&db).await;
     let tx = db.begin().await.unwrap();
-    match db
-        .execute_in_tx("ALTER TABLE t ADD COLUMN x INT", &tx)
-        .await
-    {
+    match to_response(
+        db.execute_in_tx("ALTER TABLE t ADD COLUMN x INT", &tx)
+            .await,
+    ) {
         Response::Error { sqlstate, .. } => {
             assert_eq!(
                 sqlstate.as_deref(),

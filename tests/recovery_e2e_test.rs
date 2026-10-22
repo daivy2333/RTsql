@@ -9,7 +9,7 @@
 //! 3. When tables are recreated after restart, data pages are accessible
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::wal::{RecoveryManager, WalReader, WalRecord};
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -25,10 +25,12 @@ async fn test_wal_records_survive_shutdown() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir).await;
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
-        .await;
-    db.execute_sql("INSERT INTO t VALUES (1, 'alice')").await;
-    db.execute_sql("INSERT INTO t VALUES (2, 'bob')").await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
+            .await,
+    );
+    to_response(db.execute_sql("INSERT INTO t VALUES (1, 'alice')").await);
+    to_response(db.execute_sql("INSERT INTO t VALUES (2, 'bob')").await);
 
     // Graceful shutdown
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -63,9 +65,9 @@ async fn test_recovery_classifies_committed_transactions() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir).await;
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
-    db.execute_sql("INSERT INTO t VALUES (1)").await;
-    db.execute_sql("INSERT INTO t VALUES (2)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
+    to_response(db.execute_sql("INSERT INTO t VALUES (1)").await);
+    to_response(db.execute_sql("INSERT INTO t VALUES (2)").await);
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
@@ -87,16 +89,20 @@ async fn test_data_pages_survive_restart() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir).await;
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)")
+            .await,
+    );
 
     for i in 0..5u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({}, {})", i, i * 10))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({}, {})", i, i * 10))
+                .await,
+        );
     }
 
     // Verify initial state
-    let resp = db.execute_sql("SELECT * FROM t").await;
+    let resp = to_response(db.execute_sql("SELECT * FROM t").await);
     match resp {
         Response::QueryResult { rows } => assert_eq!(rows.len(), 5),
         other => panic!("Expected QueryResult, got {:?}", other),
@@ -111,16 +117,18 @@ async fn test_data_pages_survive_restart() {
 
     // Reopen — triggers recovery, then recreate table
     let db2 = open_db(&dir).await;
-    db2.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)")
-        .await;
+    to_response(
+        db2.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)")
+            .await,
+    );
 
     // Data pages still exist in FileStorage; tuples are persistent.
     // However, index entries are lost because IndexManager is in-memory.
     // Recovery redo will re-insert committed tuples into data pages.
     // After table recreation, new INSERTs will work fine.
-    db2.execute_sql("INSERT INTO t VALUES (100, 1000)").await;
+    to_response(db2.execute_sql("INSERT INTO t VALUES (100, 1000)").await);
 
-    let resp2 = db2.execute_sql("SELECT * FROM t").await;
+    let resp2 = to_response(db2.execute_sql("SELECT * FROM t").await);
     match resp2 {
         Response::QueryResult { rows } => {
             // At least the new insert should be visible
@@ -138,11 +146,15 @@ async fn test_wal_update_records_written() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir).await;
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val TEXT)")
-        .await;
-    db.execute_sql("INSERT INTO t VALUES (1, 'original')").await;
-    db.execute_sql("UPDATE t SET val = 'updated' WHERE id = 1")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val TEXT)")
+            .await,
+    );
+    to_response(db.execute_sql("INSERT INTO t VALUES (1, 'original')").await);
+    to_response(
+        db.execute_sql("UPDATE t SET val = 'updated' WHERE id = 1")
+            .await,
+    );
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 
@@ -163,10 +175,12 @@ async fn test_wal_delete_records_written() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir).await;
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)")
-        .await;
-    db.execute_sql("INSERT INTO t VALUES (1, 100)").await;
-    db.execute_sql("DELETE FROM t WHERE id = 1").await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)")
+            .await,
+    );
+    to_response(db.execute_sql("INSERT INTO t VALUES (1, 100)").await);
+    to_response(db.execute_sql("DELETE FROM t WHERE id = 1").await);
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 
@@ -193,6 +207,6 @@ async fn test_empty_wal_recovery() {
 
     // Reopen should succeed without errors
     let db2 = open_db(&dir).await;
-    db2.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db2.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     db2.wal_buffer.as_ref().unwrap().shutdown().await;
 }

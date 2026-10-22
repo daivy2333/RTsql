@@ -19,7 +19,7 @@
 //! 链位冲突）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
 
@@ -28,7 +28,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -59,7 +59,9 @@ async fn distinct_single_col() {
     exec_ok(&db, "INSERT INTO t VALUES ('a')").await;
     exec_ok(&db, "INSERT INTO t VALUES ('b')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT DISTINCT v FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT DISTINCT v FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a")], vec![json!("b")]],
@@ -79,7 +81,9 @@ async fn distinct_multi_col() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 1, 'x')").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 1, 'y')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT DISTINCT a, b FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT DISTINCT a, b FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!("x")], vec![json!(1), json!("y")]],
@@ -99,7 +103,9 @@ async fn distinct_null_folds() {
     exec_ok(&db, "INSERT INTO t VALUES (2, NULL)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 1)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT DISTINCT v FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT DISTINCT v FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(null)], vec![json!(1)]],
@@ -119,7 +125,9 @@ async fn distinct_expression_dedup() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 'AB')").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 'cd')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT DISTINCT upper(name) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT DISTINCT upper(name) FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("AB")], vec![json!("CD")]],
@@ -139,7 +147,9 @@ async fn distinct_order_by_output() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 'a')").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 'a')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT DISTINCT v FROM t ORDER BY v").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT DISTINCT v FROM t ORDER BY v").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a")], vec![json!("b")]],
@@ -157,7 +167,9 @@ async fn distinct_order_by_non_output_rejected() {
     exec_ok(&db, "CREATE TABLE t (k INT PRIMARY KEY, a INT, b INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1, 1, 1)").await;
 
-    let msg = error_msg(db.execute_sql("SELECT DISTINCT a FROM t ORDER BY b").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT DISTINCT a FROM t ORDER BY b").await,
+    ));
     assert!(
         msg.to_lowercase().contains("distinct"),
         "DISTINCT 查询的 ORDER BY 非输出项必须点名拒绝，实际: {msg}"
@@ -186,11 +198,13 @@ async fn distinct_aggregate_output() {
     exec_ok(&db, "INSERT INTO t VALUES (3, 'b')").await;
     exec_ok(&db, "INSERT INTO t VALUES (4, 'b')").await;
 
-    let plain = query_rows(db.execute_sql("SELECT count(*) FROM t GROUP BY g").await);
-    let distinct = query_rows(
+    let plain = query_rows(to_response(
+        db.execute_sql("SELECT count(*) FROM t GROUP BY g").await,
+    ));
+    let distinct = query_rows(to_response(
         db.execute_sql("SELECT DISTINCT count(*) FROM t GROUP BY g")
             .await,
-    );
+    ));
 
     // 聚合分组经 HashMap 分桶，多组行序非确定（每次执行独立随机种子）→ 按
     // 行文本排序后比较集合。
@@ -216,7 +230,9 @@ async fn distinct_aggregate_output() {
     );
 
     // MS25 T9 校准见证：未入选分组键不进输出行——两组各 1 值、聚合值同为 2。
-    let shape = query_rows(db.execute_sql("SELECT count(*) FROM t GROUP BY g").await);
+    let shape = query_rows(to_response(
+        db.execute_sql("SELECT count(*) FROM t GROUP BY g").await,
+    ));
     assert_eq!(
         shape,
         vec![vec![json!(2)], vec![json!(2)]],
@@ -236,7 +252,9 @@ async fn distinct_limit_above_dedup() {
     exec_ok(&db, "INSERT INTO t VALUES ('a')").await;
     exec_ok(&db, "INSERT INTO t VALUES ('b')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT DISTINCT v FROM t LIMIT 2").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT DISTINCT v FROM t LIMIT 2").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("a")], vec![json!("b")]],
@@ -262,10 +280,10 @@ async fn distinct_over_join_result() {
     exec_ok(&db, "INSERT INTO r VALUES (1, 1, 'a')").await;
     exec_ok(&db, "INSERT INTO r VALUES (2, 1, 'b')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT DISTINCT l.id FROM l JOIN r ON l.id = r.rid")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)]],
@@ -282,7 +300,9 @@ async fn distinct_on_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     exec_ok(&db, "CREATE TABLE t (k INT PRIMARY KEY, a INT, b INT)").await;
 
-    let msg = error_msg(db.execute_sql("SELECT DISTINCT ON(a) a, b FROM t").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT DISTINCT ON(a) a, b FROM t").await,
+    ));
     assert!(
         msg.to_lowercase().contains("distinct"),
         "DISTINCT ON 必须点名拒绝，实际: {msg}"
@@ -301,8 +321,8 @@ async fn all_quantifier_identity() {
     exec_ok(&db, "INSERT INTO t VALUES ('a')").await;
     exec_ok(&db, "INSERT INTO t VALUES ('b')").await;
 
-    let all = query_rows(db.execute_sql("SELECT ALL v FROM t").await);
-    let plain = query_rows(db.execute_sql("SELECT v FROM t").await);
+    let all = query_rows(to_response(db.execute_sql("SELECT ALL v FROM t").await));
+    let plain = query_rows(to_response(db.execute_sql("SELECT v FROM t").await));
     assert_eq!(
         all,
         vec![vec![json!("a")], vec![json!("a")], vec![json!("b")]],
@@ -323,7 +343,7 @@ async fn non_distinct_queries_unchanged() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 'a')").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 'b')").await;
 
-    let plain = query_rows(db.execute_sql("SELECT v FROM t").await);
+    let plain = query_rows(to_response(db.execute_sql("SELECT v FROM t").await));
     assert_eq!(
         plain,
         vec![vec![json!("a")], vec![json!("a")], vec![json!("b")]],

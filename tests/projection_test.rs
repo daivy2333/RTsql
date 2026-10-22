@@ -10,7 +10,7 @@
 //! 3. ORDER BY keys outside the projection still sort.
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -35,7 +35,7 @@ async fn open_db() -> (Database, tempfile::TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -53,7 +53,7 @@ fn query_rows(resp: Response) -> Vec<Vec<serde_json::Value>> {
 #[tokio::test]
 async fn data_scan_subset_projection() {
     let (db, _dir) = open_db().await;
-    let rows = query_rows(db.execute_sql("SELECT name FROM s").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT name FROM s").await));
     assert_eq!(
         rows,
         vec![
@@ -68,7 +68,9 @@ async fn data_scan_subset_projection() {
 #[tokio::test]
 async fn index_scan_point_projection() {
     let (db, _dir) = open_db().await;
-    let rows = query_rows(db.execute_sql("SELECT name FROM s WHERE id = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT name FROM s WHERE id = 1").await,
+    ));
     assert_eq!(rows, vec![vec![json!("Alice")]]);
 }
 
@@ -76,7 +78,7 @@ async fn index_scan_point_projection() {
 #[tokio::test]
 async fn select_star_unchanged() {
     let (db, _dir) = open_db().await;
-    let rows = query_rows(db.execute_sql("SELECT * FROM s").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT * FROM s").await));
     assert_eq!(
         rows,
         vec![
@@ -92,10 +94,10 @@ async fn select_star_unchanged() {
 #[tokio::test]
 async fn filter_shape_subset_projection() {
     let (db, _dir) = open_db().await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT name FROM s WHERE id = 1 OR id = 3")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("Alice")], vec![json!("Carol")]]);
 }
 
@@ -104,10 +106,10 @@ async fn filter_shape_subset_projection() {
 #[tokio::test]
 async fn pk_point_aggregate_real_value() {
     let (db, _dir) = open_db().await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT SUM(price) FROM s WHERE id = 2")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(20)]]);
 }
 
@@ -117,9 +119,9 @@ async fn pk_point_aggregate_real_value() {
 async fn order_by_key_outside_projection() {
     let (db, _dir) = open_db().await;
     // price > 15 -> id 2 (Bob), id 3 (Carol); ORDER BY name DESC -> Carol, Bob.
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id FROM s WHERE price > 15 ORDER BY name DESC")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(3)], vec![json!(2)]]);
 }

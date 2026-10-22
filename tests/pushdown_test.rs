@@ -8,7 +8,7 @@
 
 use rtsql::database::Database;
 use rtsql::executor::PhysicalPlan;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::pipeline::{parse_stage, plan_stage};
 use serde_json::json;
 use tempfile::tempdir;
@@ -40,7 +40,7 @@ async fn open_db() -> (Database, tempfile::TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -74,7 +74,9 @@ async fn non_pk_where_numeric_rows_identical() {
     // a > 15 → ids 2, 3; the NULL-a row (id 5) must be excluded (NULL > 15
     // is false under SQL semantics, evaluated by the same ComparisonPredicate
     // that Filter used pre-pushdown).
-    let rows = query_rows(db.execute_sql("SELECT * FROM t WHERE a > 15").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t WHERE a > 15").await,
+    ));
     assert_eq!(
         rows,
         vec![
@@ -87,7 +89,9 @@ async fn non_pk_where_numeric_rows_identical() {
 #[tokio::test]
 async fn non_pk_where_string_rows_identical() {
     let (db, _dir) = open_db().await;
-    let rows = query_rows(db.execute_sql("SELECT * FROM t WHERE b = 'x'").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t WHERE b = 'x'").await,
+    ));
     assert_eq!(
         rows,
         vec![
@@ -101,10 +105,10 @@ async fn non_pk_where_string_rows_identical() {
 #[tokio::test]
 async fn non_pk_where_and_chain_rows_identical() {
     let (db, _dir) = open_db().await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT * FROM t WHERE a >= 10 AND a <= 30")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -114,10 +118,10 @@ async fn non_pk_where_and_chain_rows_identical() {
         ]
     );
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT * FROM t WHERE b = 'x' AND a > 6")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -132,7 +136,9 @@ async fn null_comparison_excludes_row_under_pushdown() {
     let (db, _dir) = open_db().await;
     // NULL != 10 is false (NULL-aware ComparisonPredicate) — the pushed-down
     // path must keep this semantics, so id 5 is absent.
-    let rows = query_rows(db.execute_sql("SELECT * FROM t WHERE a != 10").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t WHERE a != 10").await,
+    ));
     assert_eq!(
         rows,
         vec![
@@ -181,10 +187,10 @@ async fn or_where_keeps_filter_over_datascand() {
         other => panic!("Expected Filter to remain for OR predicate, got {other:?}"),
     }
     // Result equality for the retained Filter path.
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT * FROM t WHERE a < 8 OR b = 'y'")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -228,7 +234,7 @@ async fn complex_pk_equality_still_filter_over_scan() {
 #[tokio::test]
 async fn limit_rows_identical() {
     let (db, _dir) = open_db().await;
-    let rows = query_rows(db.execute_sql("SELECT * FROM t LIMIT 2").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT * FROM t LIMIT 2").await));
     assert_eq!(
         rows,
         vec![
@@ -237,7 +243,9 @@ async fn limit_rows_identical() {
         ]
     );
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t LIMIT 2 OFFSET 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t LIMIT 2 OFFSET 1").await,
+    ));
     assert_eq!(
         rows,
         vec![
@@ -251,19 +259,25 @@ async fn limit_rows_identical() {
 async fn limit_boundaries_rows_identical() {
     let (db, _dir) = open_db().await;
     // LIMIT beyond row count → all rows.
-    let rows = query_rows(db.execute_sql("SELECT * FROM t LIMIT 100").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t LIMIT 100").await,
+    ));
     assert_eq!(rows.len(), 5);
 
     // OFFSET beyond row count → empty.
-    let rows = query_rows(db.execute_sql("SELECT * FROM t LIMIT 10 OFFSET 100").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t LIMIT 10 OFFSET 100").await,
+    ));
     assert_eq!(rows, Vec::<Vec<serde_json::Value>>::new());
 
     // LIMIT 0 → empty.
-    let rows = query_rows(db.execute_sql("SELECT * FROM t LIMIT 0").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT * FROM t LIMIT 0").await));
     assert_eq!(rows, Vec::<Vec<serde_json::Value>>::new());
 
     // OFFSET lands on the last row.
-    let rows = query_rows(db.execute_sql("SELECT * FROM t LIMIT 10 OFFSET 4").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t LIMIT 10 OFFSET 4").await,
+    ));
     assert_eq!(rows, vec![vec![json!(5), json!(null), json!("z")]]);
 }
 
@@ -272,7 +286,9 @@ async fn where_and_limit_cap_counts_passed_rows() {
     let (db, _dir) = open_db().await;
     // Predicate-passing rows are ids 1, 2, 3 — the cap counts only rows that
     // passed the inline predicate, so LIMIT 2 yields ids 1, 2 (not fewer).
-    let rows = query_rows(db.execute_sql("SELECT * FROM t WHERE a > 6 LIMIT 2").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t WHERE a > 6 LIMIT 2").await,
+    ));
     assert_eq!(
         rows,
         vec![
@@ -354,7 +370,7 @@ async fn sort_limit_no_scan_cap() {
         other => panic!("Expected top-level Limit node, got {other:?}"),
     }
     // Rows: sorted DESC by id, take first 2.
-    let rows = query_rows(db.execute_sql(sql).await);
+    let rows = query_rows(to_response(db.execute_sql(sql).await));
     assert_eq!(
         rows,
         vec![
@@ -382,7 +398,9 @@ async fn aggregate_limit_no_scan_cap() {
     }
     // The aggregate must see the full input (COUNT = 5), proving the cap
     // was not pushed through it.
-    let rows = query_rows(db.execute_sql("SELECT COUNT(*) FROM t LIMIT 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT COUNT(*) FROM t LIMIT 1").await,
+    ));
     assert_eq!(rows, vec![vec![json!(5)]]);
 }
 
@@ -405,10 +423,10 @@ async fn or_filter_limit_no_cap_under_filter() {
         },
         other => panic!("Expected top-level Limit node, got {other:?}"),
     }
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT * FROM t WHERE a < 8 OR b = 'y' LIMIT 1")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(2), json!(20), json!("y")]]);
 }
 
@@ -425,15 +443,15 @@ async fn between_pushdown_and_filter_paths_equivalent() {
     }
 
     // DataScan 下推路径：纯 BETWEEN（无 OR、非 PK 等值形态）
-    let rows_pushed = query_rows(
+    let rows_pushed = query_rows(to_response(
         db.execute_sql("SELECT id FROM e WHERE v BETWEEN 10 AND 30")
             .await,
-    );
+    ));
     // Filter 等价路径：OR 组合保留 Filter 包装（同一 BETWEEN 比较经共享内核求值）
-    let rows_filter = query_rows(
+    let rows_filter = query_rows(to_response(
         db.execute_sql("SELECT id FROM e WHERE v BETWEEN 10 AND 20 OR v = 30")
             .await,
-    );
+    ));
     assert_eq!(
         rows_pushed,
         vec![vec![json!(1)], vec![json!(2)], vec![json!(3)]]
@@ -442,10 +460,10 @@ async fn between_pushdown_and_filter_paths_equivalent() {
 
     // PK 等值 AND 组合保留 Filter（谓词在 FilterNode 内），NULL 语义不变：
     // id=1 且 v BETWEEN → 仅 id 1
-    let rows_pk = query_rows(
+    let rows_pk = query_rows(to_response(
         db.execute_sql("SELECT id FROM e WHERE id = 1 AND v BETWEEN 10 AND 30")
             .await,
-    );
+    ));
     assert_eq!(rows_pk, vec![vec![json!(1)]]);
 
     // plan 断言：谓词分别位于 DataScanNode.predicate 与 FilterNode

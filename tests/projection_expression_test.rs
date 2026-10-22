@@ -12,7 +12,7 @@
 //! 返回全 schema 行。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;
 
 async fn open_db() -> (Database, TempDir) {
@@ -22,7 +22,7 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -55,10 +55,10 @@ async fn derived_column_with_alias() {
     exec_ok(&db, "INSERT INTO t VALUES ('Alice', 95)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('Bob', 40)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT name, CASE WHEN score >= 60 THEN 'Y' ELSE 'N' END AS passed FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -75,10 +75,10 @@ async fn derived_column_without_alias_values() {
     exec_ok(&db, "CREATE TABLE t (name STRING, score INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('Alice', 95)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT name, CASE WHEN score >= 60 THEN 'Y' ELSE 'N' END FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!("Alice"), serde_json::json!("Y")]]
@@ -97,7 +97,9 @@ async fn mixed_column_and_expression() {
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
     exec_ok(&db, "INSERT INTO t VALUES (2)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT id, COALESCE(NULL, id) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id, COALESCE(NULL, id) FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![
@@ -115,7 +117,7 @@ async fn mixed_column_and_constant() {
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
     exec_ok(&db, "INSERT INTO t VALUES (2)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT id, 42 FROM t").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT id, 42 FROM t").await));
     assert_eq!(
         rows,
         vec![
@@ -133,7 +135,7 @@ async fn constant_item_single_column() {
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
     exec_ok(&db, "INSERT INTO t VALUES (2)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT 42 FROM t").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT 42 FROM t").await));
     assert_eq!(rows, vec![vec![serde_json::json!(42); 1]; 2]);
 }
 
@@ -149,10 +151,10 @@ async fn searched_case_default_else_in_select() {
     exec_ok(&db, "INSERT INTO t VALUES (95)").await;
     exec_ok(&db, "INSERT INTO t VALUES (40)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT CASE WHEN score >= 60 THEN 'pass' END FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -170,10 +172,10 @@ async fn simple_case_null_operand_in_select() {
     exec_ok(&db, "INSERT INTO t VALUES (NULL)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT CASE v WHEN 1 THEN 'one' ELSE 'other' END FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -192,10 +194,10 @@ async fn coalesce_in_select() {
     exec_ok(&db, "INSERT INTO t VALUES ('y', 'z')").await;
     exec_ok(&db, "INSERT INTO t VALUES (NULL, NULL)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT COALESCE(a, b, 'fallback') FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -213,18 +215,24 @@ async fn cast_in_select() {
     exec_ok(&db, "CREATE TABLE t (s STRING, f FLOAT)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('42', 1.7)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT CAST(s AS INT) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT CAST(s AS INT) FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(42)]]);
 
-    let rows = query_rows(db.execute_sql("SELECT CAST(f AS INT) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT CAST(f AS INT) FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(1)]]);
 
-    let rows = query_rows(db.execute_sql("SELECT CAST(42 AS STRING) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT CAST(42 AS STRING) FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("42")]]);
 
     // 非法转换执行期报错（'abc' 不可解析为 Int）
     exec_ok(&db, "INSERT INTO t VALUES ('abc', 2.5)").await;
-    let resp = db.execute_sql("SELECT CAST(s AS INT) FROM t").await;
+    let resp = to_response(db.execute_sql("SELECT CAST(s AS INT) FROM t").await);
     assert!(
         matches!(resp, Response::Error { .. }),
         "CAST('abc' AS INT) must fail at execution, got {resp:?}"
@@ -238,7 +246,9 @@ async fn cast_null_in_select() {
     exec_ok(&db, "CREATE TABLE t (v INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (NULL)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT CAST(v AS STRING) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT CAST(v AS STRING) FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::Value::Null]]);
 }
 
@@ -254,7 +264,7 @@ async fn select_star_unchanged() {
     exec_ok(&db, "INSERT INTO t VALUES (1, 'Alice')").await;
     exec_ok(&db, "INSERT INTO t VALUES (2, 'Bob')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT * FROM t").await));
     assert_eq!(
         rows,
         vec![
@@ -275,10 +285,10 @@ async fn aggregate_expression_error_preserved() {
     // `CASE WHEN 1 = 1 THEN 'x' END` 不含列引用）现按 R2/S9 与聚合混排合法
     // （见证见 aggregate_extension_test::constant_mixing_with_aggregate），
     // 本用例改用含列引用的未分组表达式保持原拒绝语义。
-    let message = error_message(
+    let message = error_message(to_response(
         db.execute_sql("SELECT COUNT(*), CASE WHEN id = 1 THEN 'x' END FROM t")
             .await,
-    );
+    ));
     // MS13 T8 校准（BH-1 同型）：混合投影解锁后，未分组表达式项仍显式拒绝，
     // 但错误通道由旧「Invalid aggregate argument」改为 spec 规定的
     // NonAggregatedColumn（group-by-expression R2）。
@@ -299,10 +309,10 @@ async fn wildcard_mixed_with_expression_rejected() {
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
-    let message = error_message(
+    let message = error_message(to_response(
         db.execute_sql("SELECT *, CASE WHEN 1 = 1 THEN 'x' END FROM t")
             .await,
-    );
+    ));
     assert!(
         message.contains("expression"),
         "wildcard + expression must be rejected with an explicit message, got: {message}"
@@ -316,10 +326,10 @@ async fn subquery_mixed_with_expression_rejected() {
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
-    let message = error_message(
+    let message = error_message(to_response(
         db.execute_sql("SELECT (SELECT MAX(id) FROM t), CASE WHEN 1 = 1 THEN 'x' END FROM t")
             .await,
-    );
+    ));
     assert!(
         message.to_lowercase().contains("expression"),
         "scalar subquery + expression must be rejected with an explicit message, got: {message}"
@@ -335,10 +345,10 @@ async fn join_with_expression_rejected() {
     exec_ok(&db, "INSERT INTO a VALUES (1)").await;
     exec_ok(&db, "INSERT INTO b VALUES (1)").await;
 
-    let message = error_message(
+    let message = error_message(to_response(
         db.execute_sql("SELECT a.id, CASE WHEN 1 = 1 THEN 'x' END FROM a JOIN b ON a.id = b.id")
             .await,
-    );
+    ));
     assert!(
         message.to_lowercase().contains("expression") || message.contains("Unsupported"),
         "JOIN + expression must be rejected explicitly, got: {message}"
@@ -358,12 +368,12 @@ async fn order_by_base_column_with_expression() {
     exec_ok(&db, "INSERT INTO t VALUES (2)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "SELECT id, CASE WHEN id >= 2 THEN 'hi' ELSE 'lo' END AS tag FROM t ORDER BY id DESC",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![

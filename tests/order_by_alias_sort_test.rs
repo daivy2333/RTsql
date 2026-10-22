@@ -20,7 +20,7 @@
 //! 传播）→ 按键序比较 → undecorate 回输入行形态，再施加既有投影裁剪。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
 
@@ -29,7 +29,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -66,10 +66,10 @@ async fn alias_sorts_expression() {
     exec_ok(&db, "INSERT INTO t VALUES ('b')").await;
     exec_ok(&db, "INSERT INTO t VALUES ('a')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT upper(name) AS u FROM t ORDER BY u")
             .await,
-    );
+    ));
     assert_eq!(
         col(&rows, 0),
         vec![json!("A"), json!("B")],
@@ -86,10 +86,10 @@ async fn alias_sorts_plain_desc() {
     exec_ok(&db, "INSERT INTO t VALUES (1, 'x')").await;
     exec_ok(&db, "INSERT INTO t VALUES (2, 'y')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id, name AS n FROM t ORDER BY n DESC")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(2), json!("y")], vec![json!(1), json!("x")]],
@@ -110,10 +110,10 @@ async fn mixed_keys() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 1, 2)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, 1, 1)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT a, b AS second FROM t ORDER BY a, second")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -141,7 +141,9 @@ async fn alias_shadows_source_column() {
     exec_ok(&db, "INSERT INTO t VALUES (3)").await;
     exec_ok(&db, "INSERT INTO t VALUES (20)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT 10 - x AS x FROM t ORDER BY x").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT 10 - x AS x FROM t ORDER BY x").await,
+    ));
     // 按 10-x 排序（输出列）→ x=20,5,3 → [-10,5,7]；
     // 按基列 x 排序（列名键）→ x=3,5,20 → [7,5,-10]。两序可区分。
     assert_eq!(
@@ -160,7 +162,9 @@ async fn input_column_key_unchanged() {
     exec_ok(&db, "INSERT INTO t VALUES ('b')").await;
     exec_ok(&db, "INSERT INTO t VALUES ('a')").await;
 
-    let rows = query_rows(db.execute_sql("SELECT name FROM t ORDER BY name").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT name FROM t ORDER BY name").await,
+    ));
     assert_eq!(
         col(&rows, 0),
         vec![json!("a"), json!("b")],
@@ -175,7 +179,9 @@ async fn unknown_key_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
 
-    let msg = error_msg(db.execute_sql("SELECT name FROM t ORDER BY nosuch").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("SELECT name FROM t ORDER BY nosuch").await,
+    ));
     assert!(
         msg.contains("Column not found: nosuch"),
         "unexpected message: {msg}"
@@ -195,20 +201,20 @@ async fn distinct_alias_sort_combo() {
     exec_ok(&db, "INSERT INTO t VALUES ('a')").await;
     exec_ok(&db, "INSERT INTO t VALUES ('b')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT DISTINCT v AS val FROM t ORDER BY val")
             .await,
-    );
+    ));
     assert_eq!(
         col(&rows, 0),
         vec![json!("a"), json!("b")],
         "rows: {rows:?}"
     );
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT DISTINCT upper(v) AS ug FROM t ORDER BY ug")
             .await,
-    );
+    ));
     assert_eq!(
         col(&rows, 0),
         vec![json!("A"), json!("B")],

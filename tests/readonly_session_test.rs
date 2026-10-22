@@ -13,7 +13,7 @@
 //! 见证。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::StorageError;
 use rtsql::transaction::IsolationLevel;
 use std::path::{Path, PathBuf};
@@ -73,13 +73,17 @@ async fn seed(dir: &TempDir) -> PathBuf {
     let path = db_path(dir);
     let db = Database::open(&path).await.unwrap();
     assert_ok(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
+                .await,
+        ),
         "create table",
     );
     assert_ok(
-        db.execute_sql("INSERT INTO t VALUES (1, 10), (2, 20)")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t VALUES (1, 10), (2, 20)")
+                .await,
+        ),
         "insert rows",
     );
     db.close().await.unwrap();
@@ -98,14 +102,23 @@ async fn r1_two_readonly_sessions_open_and_query() {
 
     let expected = vec![vec![serde_json::json!(1), serde_json::json!(10)]];
     for (db, tag) in [(&a, "a"), (&b, "b")] {
-        let got = rows(db.execute_sql("SELECT * FROM t WHERE id = 1").await, tag);
+        let got = rows(
+            to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
+            tag,
+        );
         assert_eq!(got, expected, "session {tag} row mismatch");
     }
-    let all = rows(a.execute_sql("SELECT * FROM t").await, "full scan");
+    let all = rows(
+        to_response(a.execute_sql("SELECT * FROM t").await),
+        "full scan",
+    );
     assert_eq!(all.len(), 2, "full scan should see both committed rows");
 
     drop(a);
-    let after = rows(b.execute_sql("SELECT * FROM t").await, "b after a closed");
+    let after = rows(
+        to_response(b.execute_sql("SELECT * FROM t").await),
+        "b after a closed",
+    );
     assert_eq!(
         after.len(),
         2,
@@ -186,12 +199,14 @@ async fn r1_encrypted_database_readonly() {
             .await
             .unwrap();
         assert_ok(
-            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
-                .await,
+            to_response(
+                db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
+                    .await,
+            ),
             "create table",
         );
         assert_ok(
-            db.execute_sql("INSERT INTO t VALUES (1, 7)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (1, 7)").await),
             "insert",
         );
         db.close().await.unwrap();
@@ -201,7 +216,7 @@ async fn r1_encrypted_database_readonly() {
         .await
         .unwrap();
     let got = rows(
-        db.execute_sql("SELECT n FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT n FROM t WHERE id = 1").await),
         "enc select",
     );
     assert_eq!(got, vec![vec![serde_json::json!(7)]]);
@@ -223,7 +238,7 @@ async fn r2_checkpoint_clean_database_opens_readonly() {
 
     let db = Database::open_readonly(&path).await.unwrap();
     let got = rows(
-        db.execute_sql("SELECT n FROM t WHERE id = 2").await,
+        to_response(db.execute_sql("SELECT n FROM t WHERE id = 2").await),
         "select",
     );
     assert_eq!(got, vec![vec![serde_json::json!(20)]]);
@@ -279,7 +294,7 @@ async fn r2_readonly_available_after_read_write_recovery() {
     {
         let db = Database::open(&path).await.unwrap();
         assert_ok(
-            db.execute_sql("INSERT INTO t VALUES (3, 30)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (3, 30)").await),
             "insert after recovery",
         );
         db.close().await.unwrap();
@@ -287,7 +302,7 @@ async fn r2_readonly_available_after_read_write_recovery() {
 
     let db = Database::open_readonly(&path).await.unwrap();
     let got = rows(
-        db.execute_sql("SELECT n FROM t WHERE id = 3").await,
+        to_response(db.execute_sql("SELECT n FROM t WHERE id = 3").await),
         "select",
     );
     assert_eq!(got, vec![vec![serde_json::json!(30)]]);
@@ -305,9 +320,12 @@ async fn r3_readonly_session_writes_nothing() {
 
     {
         let db = Database::open_readonly(&path).await.unwrap();
-        assert_ok(db.execute_sql("SELECT COUNT(*) FROM t").await, "aggregate");
         assert_ok(
-            db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            to_response(db.execute_sql("SELECT COUNT(*) FROM t").await),
+            "aggregate",
+        );
+        assert_ok(
+            to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
             "indexed point",
         );
         db.checkpoint().await.unwrap();
@@ -397,7 +415,7 @@ async fn r4_readonly_session_rejects_every_write_plan_shape() {
         ("DROP TABLE", "DROP TABLE t"),
     ];
     for (kind, sql) in writes {
-        match db.execute_sql(sql).await {
+        match to_response(db.execute_sql(sql).await) {
             Response::Error { message, sqlstate } => {
                 assert_eq!(
                     sqlstate.as_deref(),
@@ -414,13 +432,19 @@ async fn r4_readonly_session_rejects_every_write_plan_shape() {
     }
 
     // 库与 schema 无变化：两行原样、索引与视图仍可读。
-    let got = rows(db.execute_sql("SELECT id, n FROM t").await, "scan");
+    let got = rows(
+        to_response(db.execute_sql("SELECT id, n FROM t").await),
+        "scan",
+    );
     assert_eq!(got.len(), 2, "rows must be untouched");
     assert_eq!(got[0], vec![serde_json::json!(1), serde_json::json!(10)]);
-    let via_view = rows(db.execute_sql("SELECT n FROM v_seed").await, "view");
+    let via_view = rows(
+        to_response(db.execute_sql("SELECT n FROM v_seed").await),
+        "view",
+    );
     assert_eq!(via_view.len(), 2, "view must still expand over both rows");
     let via_index = rows(
-        db.execute_sql("SELECT id FROM t WHERE n = 20").await,
+        to_response(db.execute_sql("SELECT id FROM t WHERE n = 20").await),
         "index",
     );
     assert_eq!(via_index, vec![vec![serde_json::json!(2)]]);
@@ -438,36 +462,42 @@ async fn r4_readonly_statements_are_not_restricted() {
         assert_eq!(rows(resp, what).len(), 2, "{what}");
     };
     one(
-        db.execute_sql("SELECT id FROM t WHERE n > 5").await,
+        to_response(db.execute_sql("SELECT id FROM t WHERE n > 5").await),
         "where",
     );
     one(
-        db.execute_sql("SELECT t.id FROM t JOIN v_seed ON v_seed.id = t.id")
-            .await,
+        to_response(
+            db.execute_sql("SELECT t.id FROM t JOIN v_seed ON v_seed.id = t.id")
+                .await,
+        ),
         "join",
     );
     one(
-        db.execute_sql("SELECT id FROM (SELECT * FROM t) AS sub")
-            .await,
+        to_response(
+            db.execute_sql("SELECT id FROM (SELECT * FROM t) AS sub")
+                .await,
+        ),
         "derived",
     );
     one(
-        db.execute_sql("SELECT id FROM t WHERE id IN (SELECT id FROM t)")
-            .await,
+        to_response(
+            db.execute_sql("SELECT id FROM t WHERE id IN (SELECT id FROM t)")
+                .await,
+        ),
         "subquery",
     );
 
     let tx: Transaction = db.begin().await.unwrap();
     assert_ok(
-        db.execute_in_tx("SELECT n FROM t WHERE id = 1", &tx).await,
+        to_response(db.execute_in_tx("SELECT n FROM t WHERE id = 1", &tx).await),
         "in-tx select",
     );
-    match db.execute_in_tx("INSERT INTO t VALUES (7, 7)", &tx).await {
+    match to_response(db.execute_in_tx("INSERT INTO t VALUES (7, 7)", &tx).await) {
         Response::Error { sqlstate, .. } => assert_eq!(sqlstate.as_deref(), Some("25006")),
         other => panic!("in-tx write should be rejected, got {other:?}"),
     }
     assert_ok(
-        db.execute_in_tx("SELECT n FROM t WHERE id = 2", &tx).await,
+        to_response(db.execute_in_tx("SELECT n FROM t WHERE id = 2", &tx).await),
         "in-tx select after rejection",
     );
     db.rollback(tx).await.unwrap();
@@ -483,11 +513,11 @@ async fn r5_readonly_session_attaches_readonly() {
     {
         let db = Database::open(&attached).await.unwrap();
         assert_ok(
-            db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await,
+            to_response(db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await),
             "create t2",
         );
         assert_ok(
-            db.execute_sql("INSERT INTO t2 VALUES (5)").await,
+            to_response(db.execute_sql("INSERT INTO t2 VALUES (5)").await),
             "insert t2",
         );
         db.close().await.unwrap();
@@ -652,19 +682,28 @@ async fn seed_with_index_and_view(dir: &TempDir) -> PathBuf {
     let path = db_path(dir);
     let db = Database::open(&path).await.unwrap();
     assert_ok(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
+                .await,
+        ),
         "create t",
     );
     assert_ok(
-        db.execute_sql("INSERT INTO t VALUES (1, 10), (2, 20)")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t VALUES (1, 10), (2, 20)")
+                .await,
+        ),
         "insert t",
     );
-    assert_ok(db.execute_sql("CREATE INDEX idx_n ON t (n)").await, "index");
     assert_ok(
-        db.execute_sql("CREATE VIEW v_seed AS SELECT * FROM t")
-            .await,
+        to_response(db.execute_sql("CREATE INDEX idx_n ON t (n)").await),
+        "index",
+    );
+    assert_ok(
+        to_response(
+            db.execute_sql("CREATE VIEW v_seed AS SELECT * FROM t")
+                .await,
+        ),
         "view",
     );
     db.close().await.unwrap();

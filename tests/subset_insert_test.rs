@@ -13,7 +13,7 @@
 //! 行为不变。dump→restore 往返保真由 cli_test 增量见证（S6）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -43,7 +43,7 @@ fn query_rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
 }
 
 async fn assert_count(db: &Database, sql: &str, expected: serde_json::Value, what: &str) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], expected, "{what}");
         }
@@ -53,10 +53,12 @@ async fn assert_count(db: &Database, sql: &str, expected: serde_json::Value, wha
 
 async fn setup(db: &Database) {
     expect_affected(
-        db.execute_sql(
-            "CREATE TABLE t (id INT PRIMARY KEY, name STRING DEFAULT 'anon', score INT)",
-        )
-        .await,
+        to_response(
+            db.execute_sql(
+                "CREATE TABLE t (id INT PRIMARY KEY, name STRING DEFAULT 'anon', score INT)",
+            )
+            .await,
+        ),
         "建表",
     );
 }
@@ -72,13 +74,15 @@ async fn subset_insert_omitted_column_takes_declared_default() {
     setup(&db).await;
 
     expect_affected(
-        db.execute_sql("INSERT INTO t (id, score) VALUES (1, 90)")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t (id, score) VALUES (1, 90)")
+                .await,
+        ),
         "子集 INSERT（省略 name）",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, name, score FROM t").await,
+        to_response(db.execute_sql("SELECT id, name, score FROM t").await),
         "行集查询",
     );
     assert_eq!(
@@ -104,13 +108,15 @@ async fn subset_insert_omitted_nullable_column_takes_null() {
     setup(&db).await;
 
     expect_affected(
-        db.execute_sql("INSERT INTO t (id) VALUES (2)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (2)").await),
         "子集 INSERT（省略 name/score）",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, name, score FROM t WHERE id = 2")
-            .await,
+        to_response(
+            db.execute_sql("SELECT id, name, score FROM t WHERE id = 2")
+                .await,
+        ),
         "行集查询",
     );
     assert_eq!(
@@ -135,13 +141,15 @@ async fn subset_insert_omitted_not_null_column_rejected_zero_side_effects() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name STRING NOT NULL)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name STRING NOT NULL)")
+                .await,
+        ),
         "建表",
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "省略 NOT NULL 列的子集 INSERT",
     );
     assert!(
@@ -170,13 +178,15 @@ async fn default_keyword_in_values_takes_declared_default_or_null() {
     setup(&db).await;
 
     expect_affected(
-        db.execute_sql("INSERT INTO t (id, name, score) VALUES (1, DEFAULT, DEFAULT)")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t (id, name, score) VALUES (1, DEFAULT, DEFAULT)")
+                .await,
+        ),
         "DEFAULT 关键字 INSERT",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, name, score FROM t").await,
+        to_response(db.execute_sql("SELECT id, name, score FROM t").await),
         "行集查询",
     );
     assert_eq!(
@@ -210,14 +220,18 @@ async fn declared_default_survives_restart() {
 
     let db2 = Database::open(&path).await.unwrap();
     expect_affected(
-        db2.execute_sql("INSERT INTO t (id, score) VALUES (3, 60)")
-            .await,
+        to_response(
+            db2.execute_sql("INSERT INTO t (id, score) VALUES (3, 60)")
+                .await,
+        ),
         "重开后的子集 INSERT",
     );
 
     let rows = query_rows(
-        db2.execute_sql("SELECT id, name, score FROM t WHERE id = 3")
-            .await,
+        to_response(
+            db2.execute_sql("SELECT id, name, score FROM t WHERE id = 3")
+                .await,
+        ),
         "重开后行集查询",
     );
     assert_eq!(
@@ -243,18 +257,20 @@ async fn full_list_and_listless_inserts_unchanged() {
 
     // 全列清单（乱序映射既有语义）
     expect_affected(
-        db.execute_sql("INSERT INTO t (score, name, id) VALUES (70, 'bob', 4)")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t (score, name, id) VALUES (70, 'bob', 4)")
+                .await,
+        ),
         "乱序全列清单 INSERT",
     );
     // 无清单
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (5, 'cat', 80)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5, 'cat', 80)").await),
         "无清单 INSERT",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, name, score FROM t").await,
+        to_response(db.execute_sql("SELECT id, name, score FROM t").await),
         "行集查询",
     );
     assert_eq!(
@@ -276,7 +292,7 @@ async fn full_list_and_listless_inserts_unchanged() {
 
     // 无清单行长度不符仍计划期拒绝（既有意图）
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (6, 'dog')").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (6, 'dog')").await),
         "无清单行长度不符 INSERT",
     );
     assert!(

@@ -14,7 +14,7 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::page_format::{
     compute_tuple_size, deserialize_tuple, deserialize_tuple_width, serialize_tuple, ColumnType,
     RowId,
@@ -306,7 +306,7 @@ async fn btree_insert_search_delete_matches_logical_model() {
 // ---------------------------------------------------------------------------
 
 async fn exec_ok(db: &Database, sql: &str) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { .. } | Response::AffectedRows { .. } => {}
         Response::Error { message, .. } => panic!("SQL failed: {message}\n{sql}"),
         other => panic!("unexpected response {other:?} for {sql}"),
@@ -314,7 +314,7 @@ async fn exec_ok(db: &Database, sql: &str) {
 }
 
 async fn exec_in_tx_ok(db: &Database, sql: &str, tx: &Transaction) {
-    match db.execute_in_tx(sql, tx).await {
+    match to_response(db.execute_in_tx(sql, tx).await) {
         Response::QueryResult { .. } | Response::AffectedRows { .. } => {}
         Response::Error { message, .. } => panic!("in-tx SQL failed: {message}\n{sql}"),
         other => panic!("unexpected in-tx response {other:?} for {sql}"),
@@ -323,7 +323,7 @@ async fn exec_in_tx_ok(db: &Database, sql: &str, tx: &Transaction) {
 
 /// 快照读行集 == 串行模型（每个提交/回滚相位后调用）。
 async fn verify_visible_rows(db: &Database, model: &BTreeMap<i64, i64>, phase: &str) {
-    let rows = match db.execute_sql("SELECT id, bal FROM acct").await {
+    let rows = match to_response(db.execute_sql("SELECT id, bal FROM acct").await) {
         Response::QueryResult { rows } => rows,
         Response::Error { message, .. } => panic!("[{phase}] SELECT failed: {message}"),
         other => panic!("[{phase}] unexpected response {other:?}"),
