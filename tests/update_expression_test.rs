@@ -7,7 +7,7 @@
 //! 对照 proposal 场景：S12–S17。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
 
@@ -16,7 +16,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -67,13 +67,15 @@ async fn literal_baseline_preserved() {
     let dir = tempdir().unwrap();
     let db = seed_t(&dir).await;
     assert_eq!(
-        affected(db.execute_sql("UPDATE t SET v = 99 WHERE id = 1").await),
+        affected(to_response(
+            db.execute_sql("UPDATE t SET v = 99 WHERE id = 1").await
+        )),
         1
     );
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id, v, name, f FROM t ORDER BY id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -94,10 +96,14 @@ async fn column_reference_expression() {
     let dir = tempdir().unwrap();
     let db = seed_t(&dir).await;
     assert_eq!(
-        affected(db.execute_sql("UPDATE t SET v = v + 1 WHERE id = 1").await),
+        affected(to_response(
+            db.execute_sql("UPDATE t SET v = v + 1 WHERE id = 1").await
+        )),
         1
     );
-    let rows = query_rows(db.execute_sql("SELECT id, v FROM t ORDER BY id").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id, v FROM t ORDER BY id").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!(11)], vec![json!(2), json!(20)]],
@@ -114,10 +120,10 @@ async fn constant_function_cast_right_values() {
     exec_ok(&db, "UPDATE t SET v = 1 + 2 WHERE id = 1").await;
     exec_ok(&db, "UPDATE t SET name = upper('ada') WHERE id = 1").await;
     exec_ok(&db, "UPDATE t SET v = CAST('42' AS INTEGER) WHERE id = 2").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id, v, name FROM t ORDER BY id")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -143,7 +149,7 @@ async fn multi_column_same_row_snapshot() {
     exec_ok(&db, "INSERT INTO t2 VALUES (1, 5, 50)").await;
 
     exec_ok(&db, "UPDATE t2 SET a = a + 1, b = a WHERE id = 1").await;
-    let rows = query_rows(db.execute_sql("SELECT a, b FROM t2").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT a, b FROM t2").await));
     assert_eq!(
         rows,
         vec![vec![json!(6), json!(5)]],
@@ -158,18 +164,18 @@ async fn multi_column_gate_failure_zero_side_effect() {
     let dir = tempdir().unwrap();
     let db = seed_t(&dir).await;
     // 第二列 name(STRING) 收 Int 表达式结果 → ColumnTypeMismatch，全语句失败。
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("UPDATE t SET v = v + 1, name = v WHERE id = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("v") || msg.contains("name"),
         "类型门必须点名失败列，实际: {msg}"
     );
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id, v, name FROM t WHERE id = 1")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!(10), json!("ada")]],
@@ -194,7 +200,7 @@ async fn float_upgrade_and_date_coerce() {
     exec_ok(&db, "UPDATE m SET f = 2 WHERE id = 1").await;
     // 标量函数 String 结果进 DATE 列 → coerce 强制解析。
     exec_ok(&db, "UPDATE m SET d = trim(' 2024-01-15 ') WHERE id = 1").await;
-    let rows = query_rows(db.execute_sql("SELECT f, d FROM m").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT f, d FROM m").await));
     assert_eq!(
         rows,
         vec![vec![json!(2.0), json!("2024-01-15")]],
@@ -211,15 +217,15 @@ async fn not_null_enforced_on_expression_result() {
     exec_ok(&db, "CREATE TABLE n (id INT PRIMARY KEY, x INT NOT NULL)").await;
     exec_ok(&db, "INSERT INTO n VALUES (1, 7)").await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("UPDATE n SET x = COALESCE(NULL, NULL) WHERE id = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("NOT NULL"),
         "NOT NULL 必须对表达式结果强制，实际: {msg}"
     );
-    let rows = query_rows(db.execute_sql("SELECT x FROM n").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT x FROM n").await));
     assert_eq!(rows, vec![vec![json!(7)]], "NOT NULL 拒绝必须零副作用");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -229,12 +235,16 @@ async fn not_null_enforced_on_expression_result() {
 async fn type_gate_rejects_cross_type_result() {
     let dir = tempdir().unwrap();
     let db = seed_t(&dir).await;
-    let msg = error_msg(db.execute_sql("UPDATE t SET v = name WHERE id = 1").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("UPDATE t SET v = name WHERE id = 1").await,
+    ));
     assert!(
         msg.contains("INT") && msg.contains("String"),
         "类型门必须点名期望与实际类型，实际: {msg}"
     );
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE id = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE id = 1").await,
+    ));
     assert_eq!(rows, vec![vec![json!(10)]], "类型门拒绝必须零副作用");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -249,19 +259,23 @@ async fn key_column_expression_rekey() {
     let dir = tempdir().unwrap();
     let db = seed_t(&dir).await;
     assert_eq!(
-        affected(
+        affected(to_response(
             db.execute_sql("UPDATE t SET id = id + 100 WHERE id = 1")
                 .await
-        ),
+        )),
         1
     );
-    let rows = query_rows(db.execute_sql("SELECT id, v FROM t WHERE id = 101").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id, v FROM t WHERE id = 101").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(101), json!(10)]],
         "rekey 后行在新键位可达"
     );
-    let rows = query_rows(db.execute_sql("SELECT id FROM t WHERE id = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id FROM t WHERE id = 1").await,
+    ));
     assert!(rows.is_empty(), "旧键位不再可达");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -271,15 +285,17 @@ async fn key_column_expression_rekey() {
 async fn key_column_rekey_collision_zero_side_effect() {
     let dir = tempdir().unwrap();
     let db = seed_t(&dir).await;
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("UPDATE t SET id = id + 1 WHERE id = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Duplicate") || msg.contains("duplicate"),
         "rekey 碰撞必须拒绝，实际: {msg}"
     );
-    let rows = query_rows(db.execute_sql("SELECT id, v FROM t ORDER BY id").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id, v FROM t ORDER BY id").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!(10)], vec![json!(2), json!(20)]],
@@ -293,12 +309,16 @@ async fn key_column_rekey_collision_zero_side_effect() {
 async fn key_column_non_int_result_rejected() {
     let dir = tempdir().unwrap();
     let db = seed_t(&dir).await;
-    let msg = error_msg(db.execute_sql("UPDATE t SET id = f WHERE id = 1").await);
+    let msg = error_msg(to_response(
+        db.execute_sql("UPDATE t SET id = f WHERE id = 1").await,
+    ));
     assert!(
         msg.contains("KeyTypeMismatch") || msg.contains("INT"),
         "键列类型门必须对表达式结果强制，实际: {msg}"
     );
-    let rows = query_rows(db.execute_sql("SELECT id FROM t WHERE id = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id FROM t WHERE id = 1").await,
+    ));
     assert_eq!(rows, vec![vec![json!(1)]], "键列类型门拒绝必须零副作用");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -316,19 +336,23 @@ async fn unique_column_expression_update() {
     exec_ok(&db, "INSERT INTO u VALUES (1, 100)").await;
     exec_ok(&db, "INSERT INTO u VALUES (2, 200)").await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("UPDATE u SET code = code * 2 WHERE id = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Duplicate") || msg.contains("duplicate"),
         "唯一列碰撞必须拒绝，实际: {msg}"
     );
-    let rows = query_rows(db.execute_sql("SELECT code FROM u WHERE id = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT code FROM u WHERE id = 1").await,
+    ));
     assert_eq!(rows, vec![vec![json!(100)]], "唯一列碰撞拒绝必须零副作用");
 
     exec_ok(&db, "UPDATE u SET code = code + 1 WHERE id = 1").await;
-    let rows = query_rows(db.execute_sql("SELECT code FROM u WHERE id = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT code FROM u WHERE id = 1").await,
+    ));
     assert_eq!(rows, vec![vec![json!(101)]], "唯一列表达式更新生效");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -341,9 +365,13 @@ async fn secondary_index_maintained_on_expression_update() {
     exec_ok(&db, "CREATE INDEX idx_v ON t(v)").await;
     exec_ok(&db, "UPDATE t SET v = v + 1 WHERE id = 1").await;
 
-    let rows = query_rows(db.execute_sql("SELECT id FROM t WHERE v = 11").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id FROM t WHERE v = 11").await,
+    ));
     assert_eq!(rows, vec![vec![json!(1)]], "次级索引必须指向更新后的行");
-    let rows = query_rows(db.execute_sql("SELECT id FROM t WHERE v = 10").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id FROM t WHERE v = 10").await,
+    ));
     assert!(rows.is_empty(), "次级索引旧键条目必须清除");
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }
@@ -364,7 +392,9 @@ async fn expression_update_persists_across_restart() {
     drop(db);
 
     let db = Database::open(&db_path(&dir)).await.unwrap();
-    let rows = query_rows(db.execute_sql("SELECT id, v FROM t WHERE id = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id, v FROM t WHERE id = 1").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!(20)]],

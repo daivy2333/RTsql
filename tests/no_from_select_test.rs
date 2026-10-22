@@ -7,7 +7,7 @@
 //! （真二进制）承载表头 + 行形状 + 拒绝面文案断言。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -231,7 +231,7 @@ fn nofrom_column_reference_error() {
 async fn lib_direct_matches_cli_shape() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("nofrom.db")).await.unwrap();
-    let resp = db.execute_sql("SELECT 1 + 1").await;
+    let resp = to_response(db.execute_sql("SELECT 1 + 1").await);
     match resp {
         Response::QueryResult { rows } => {
             assert_eq!(rows, vec![vec![serde_json::json!(2)]]);

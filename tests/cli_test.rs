@@ -7,7 +7,7 @@
 //! 为管道（非 TTY），因此默认格式为 JSON。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::page_format::ColumnType;
 use rtsql::storage::HEADER_SIZE;
 use std::io::{Read, Write};
@@ -761,9 +761,10 @@ async fn build_big_wal(dir: &Path, n: i64) {
     while done < n {
         let tx = db.begin().await.unwrap();
         for i in done..(done + CHUNK).min(n) {
-            let resp = db
-                .execute_in_tx(&format!("INSERT INTO t VALUES ({})", i), &tx)
-                .await;
+            let resp = to_response(
+                db.execute_in_tx(&format!("INSERT INTO t VALUES ({})", i), &tx)
+                    .await,
+            );
             if let Response::Error { message, .. } = resp {
                 panic!("insert {} failed: {}", i, message);
             }
@@ -4479,9 +4480,10 @@ fn test_unknown_order_by_key_cli() {
 async fn seed_multi_page_db(path: &Path) -> (u64, u64) {
     {
         let db = Database::open(path).await.expect("open fixture db");
-        let resp = db
-            .execute_sql("CREATE TABLE items (id INT PRIMARY KEY, val STRING)")
-            .await;
+        let resp = to_response(
+            db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, val STRING)")
+                .await,
+        );
         assert!(
             !matches!(resp, Response::Error { .. }),
             "create items failed: {:?}",
@@ -4495,7 +4497,7 @@ async fn seed_multi_page_db(path: &Path) -> (u64, u64) {
             }
             insert.push_str(&format!("({i}, 'v{i:0>32}')"));
         }
-        let resp = db.execute_sql(&insert).await;
+        let resp = to_response(db.execute_sql(&insert).await);
         assert!(
             !matches!(resp, Response::Error { .. }),
             "bulk insert failed: {:?}",

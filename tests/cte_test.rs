@@ -20,7 +20,7 @@
 //! 项 / DISTINCT 经既有装配全量复用）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use std::process::{Command, Stdio};
 use tempfile::{tempdir, TempDir};
@@ -30,7 +30,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -67,17 +67,17 @@ async fn basic_cte() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("WITH cte AS (SELECT v * 2 AS d FROM t) SELECT d FROM cte")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(2)], vec![json!(4)]]);
 
     // 第二次执行经 plan cache 命中路径（WITH 语句可缓存，SQL 文本自带结构）
-    let cached = query_rows(
+    let cached = query_rows(to_response(
         db.execute_sql("WITH cte AS (SELECT v * 2 AS d FROM t) SELECT d FROM cte")
             .await,
-    );
+    ));
     assert_eq!(cached, rows, "缓存命中路径结果一致");
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -91,10 +91,10 @@ async fn cte_with_compound_query() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("WITH cte AS (SELECT v FROM t) SELECT v FROM cte UNION SELECT v FROM c")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)], vec![json!(9)]]);
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -107,10 +107,10 @@ async fn cte_shadows_base_table() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("WITH c AS (SELECT 1 AS v) SELECT v FROM c")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)]],
@@ -127,12 +127,12 @@ async fn multi_def_forward_ref() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "WITH a AS (SELECT v FROM t), b AS (SELECT v + 10 AS w FROM a) SELECT w FROM b",
         )
         .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(11)], vec![json!(12)]]);
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -146,17 +146,17 @@ async fn column_alias_list() {
     exec_ok(&db, "CREATE TABLE t (a INT, b STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1, 'x')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("WITH cte(n, s) AS (SELECT a, b FROM t) SELECT n, s FROM cte")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(1), json!("x")]], "别名列表按序生效");
 
     // 列数不符点名拒绝
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("WITH cte(n, s, extra) AS (SELECT a, b FROM t) SELECT n FROM cte")
             .await,
-    );
+    ));
     assert!(
         msg.to_lowercase().contains("column"),
         "列数不符点名拒绝: {msg}"
@@ -171,10 +171,10 @@ async fn reverse_ref_rejected() {
     let dir = tempdir().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("WITH a AS (SELECT * FROM b), b AS (SELECT 1 AS v) SELECT * FROM a")
             .await,
-    );
+    ));
     assert!(
         msg.contains("'b'") || msg.contains("b'"),
         "反向引用按既有表缺失面拒绝: {msg}"
@@ -190,13 +190,13 @@ async fn multi_ref_consistent_rows() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "WITH cte AS (SELECT v FROM t) \
              SELECT a.v, b.v FROM cte a JOIN cte b ON a.v = b.v",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!(1)], vec![json!(2), json!(2)]]
@@ -217,13 +217,13 @@ async fn two_scalar_refs_same_rows() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql(
             "WITH cte AS (SELECT v FROM t) \
              SELECT (SELECT COUNT(*) FROM cte) AS n1, (SELECT COUNT(*) FROM cte) AS n2 FROM c",
         )
         .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(2), json!(2), json!(9)]],
@@ -243,7 +243,7 @@ async fn recursive_keyword_rejected() {
         "WITH RECURSIVE cte AS (SELECT 1 AS v) SELECT v FROM cte",
         "WITH RECURSIVE cte AS (SELECT 1 AS v), other AS (SELECT 2 AS v) SELECT v FROM other",
     ] {
-        let msg = error_msg(db.execute_sql(sql).await);
+        let msg = error_msg(to_response(db.execute_sql(sql).await));
         assert!(
             msg.contains("RECURSIVE"),
             "{sql}: RECURSIVE 点名拒绝, got {msg}"
@@ -260,10 +260,10 @@ async fn self_reference_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("WITH cte AS (SELECT v FROM cte) SELECT * FROM cte")
             .await,
-    );
+    ));
     assert!(msg.contains("cte"), "自引用点名拒绝: {msg}");
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -276,12 +276,12 @@ async fn with_in_subquery_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql(
             "SELECT k FROM t WHERE k IN (WITH cte AS (SELECT 1 AS x) SELECT x FROM cte)",
         )
         .await,
-    );
+    ));
     assert!(
         msg.contains("subquer") || msg.contains("WITH") || msg.contains("with"),
         "子查询内 WITH 点名拒绝: {msg}"
@@ -298,22 +298,22 @@ async fn nested_with_and_reference_alias_list_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed(&db).await;
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql(
             "WITH outer_cte AS (WITH inner_cte AS (SELECT 1 AS v) SELECT v FROM inner_cte) \
              SELECT v FROM outer_cte",
         )
         .await,
-    );
+    ));
     assert!(
         msg.contains("nested WITH"),
         "嵌套定义内 WITH 点名拒绝: {msg}"
     );
 
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("WITH cte AS (SELECT v FROM t) SELECT x FROM cte AS c2(x)")
             .await,
-    );
+    ));
     assert!(
         msg.contains("column alias list"),
         "引用处列别名列表点名拒绝: {msg}"
@@ -330,17 +330,19 @@ async fn no_with_queries_unchanged() {
     seed(&db).await;
 
     assert_eq!(
-        query_rows(db.execute_sql("SELECT v FROM c").await),
+        query_rows(to_response(db.execute_sql("SELECT v FROM c").await)),
         vec![vec![json!(9)]],
         "无 WITH 时同名基表查询不受影响"
     );
     assert_eq!(
-        query_rows(db.execute_sql("SELECT v FROM t WHERE v > 1").await),
+        query_rows(to_response(
+            db.execute_sql("SELECT v FROM t WHERE v > 1").await
+        )),
         vec![vec![json!(2)]]
     );
     // 未定义引用走既有表缺失面
     assert!(
-        error_msg(db.execute_sql("SELECT v FROM nothere").await).contains("nothere"),
+        error_msg(to_response(db.execute_sql("SELECT v FROM nothere").await)).contains("nothere"),
         "未定义表文案不变"
     );
 

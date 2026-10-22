@@ -23,7 +23,7 @@
 
 use rtsql::database::Database;
 use rtsql::executor::{NestedLoopJoinType, PhysicalPlan};
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::pipeline::{parse_stage, plan_stage};
 use serde_json::json;
 use std::process::Command;
@@ -34,7 +34,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -84,10 +84,10 @@ async fn left_join_matched() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_left_joined(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT l.id, r.val FROM l LEFT JOIN r ON l.id = r.rid")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -120,10 +120,10 @@ async fn left_join_null_key_no_match() {
     exec_ok(&db, "CREATE TABLE rn (rid INT, val VARCHAR)").await;
     exec_ok(&db, "INSERT INTO rn VALUES (1, 'a')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT ln.id, rn.val FROM ln LEFT JOIN rn ON ln.id = rn.rid")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!("a")], vec![json!(null), json!(null)]],
@@ -145,10 +145,10 @@ async fn left_join_non_equi_on() {
     exec_ok(&db, "CREATE TABLE rv (rid INT, val VARCHAR)").await;
     exec_ok(&db, "INSERT INTO rv VALUES (3, 'x')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT lv.v, rv.val FROM lv LEFT JOIN rv ON rv.rid > lv.v")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!("x")], vec![json!(5), json!(null)]],
@@ -175,10 +175,10 @@ async fn right_join_unmatched_padded() {
     exec_ok(&db, "INSERT INTO r VALUES (1, 'x')").await;
     exec_ok(&db, "INSERT INTO r VALUES (9, 'z')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT l.id, r.val FROM l RIGHT JOIN r ON l.id = r.rid")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!("x")], vec![json!(null), json!("z")]],
@@ -201,10 +201,10 @@ async fn full_join_both_sides_padded() {
     exec_ok(&db, "INSERT INTO fr VALUES (1, 'x')").await;
     exec_ok(&db, "INSERT INTO fr VALUES (9, 'z')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT fl.id, fr.val FROM fl FULL JOIN fr ON fl.id = fr.rid")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -225,10 +225,10 @@ async fn where_filters_padded_rows() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_left_joined(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT l.id FROM l LEFT JOIN r ON l.id = r.rid WHERE r.val = 'a'")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1)]],
@@ -248,10 +248,10 @@ async fn order_by_on_outer_result() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_left_joined(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT l.id, r.val FROM l LEFT JOIN r ON l.id = r.rid ORDER BY val DESC")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -273,9 +273,10 @@ async fn in_subquery_join_still_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_left_joined(&db).await;
 
-    let resp = db
-        .execute_sql("SELECT id FROM l WHERE id IN (SELECT rid FROM r LEFT JOIN l ON true)")
-        .await;
+    let resp = to_response(
+        db.execute_sql("SELECT id FROM l WHERE id IN (SELECT rid FROM r LEFT JOIN l ON true)")
+            .await,
+    );
     let msg = error_msg(resp);
     assert!(
         msg.contains("IN subquery with JOIN is not supported"),
@@ -307,7 +308,7 @@ async fn natural_join_rejected() {
         "SELECT l.id FROM l NATURAL JOIN r",
         "SELECT l.id FROM l JOIN r USING (id)",
     ] {
-        let msg = error_msg(db.execute_sql(sql).await);
+        let msg = error_msg(to_response(db.execute_sql(sql).await));
         assert!(
             msg.contains("INNER JOIN requires ON clause"),
             "{sql}: INNER 的 Using/Natural 形态必须维持 MissingOnClause 拒绝，实际 {msg:?}"
@@ -319,7 +320,7 @@ async fn natural_join_rejected() {
         "SELECT l.id FROM l NATURAL FULL JOIN r",
         "SELECT l.id FROM l LEFT JOIN r USING (id)",
     ] {
-        let msg = error_msg(db.execute_sql(sql).await);
+        let msg = error_msg(to_response(db.execute_sql(sql).await));
         assert!(
             msg.contains("Only INNER JOIN is supported"),
             "{sql}: 外连接的 Using/Natural 形态必须维持 UnsupportedJoinType 点名拒绝，实际 {msg:?}"
@@ -405,7 +406,7 @@ async fn where_subquery_over_join_stays_rejected() {
         "SELECT l.id FROM l LEFT JOIN r ON l.id = r.rid WHERE l.id IN (SELECT rid FROM r)",
         "SELECT l.id FROM l LEFT JOIN r ON l.id = r.rid WHERE EXISTS (SELECT rid FROM r)",
     ] {
-        let msg = error_msg(db.execute_sql(sql).await);
+        let msg = error_msg(to_response(db.execute_sql(sql).await));
         assert!(
             msg.contains("Unsupported statement type: WHERE CLAUSE ON JOIN"),
             "{sql}: JOIN 基座上的子查询谓词必须维持既有计划期拒绝，实际 {msg:?}"
@@ -422,10 +423,10 @@ async fn where_over_inner_join_reachable() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
     seed_left_joined(&db).await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT l.id, r.val FROM l JOIN r ON l.id = r.rid WHERE r.val <> 'b'")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!("a")]],
@@ -433,20 +434,20 @@ async fn where_over_inner_join_reachable() {
     );
 
     // NLJ 路径：`l.id < r.rid` 下 l.id=1 只匹配 rid=2（rid=1 不满足严格小于）
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT l.id, r.val FROM l JOIN r ON l.id < r.rid WHERE l.id = 1")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!("b")]],
         "INNER 非等值（NLJ 路径）JOIN + WHERE 必须可达"
     );
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT l.id, r.val FROM l LEFT JOIN r ON l.id = r.rid WHERE l.id > 2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(3), json!(null)]],
@@ -470,34 +471,34 @@ async fn where_over_join_column_resolution() {
     exec_ok(&db, "INSERT INTO jr VALUES (2, 30)").await;
 
     // 限定名 → 表内位置
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT jl.lval FROM jl JOIN jr ON jl.id = jr.id WHERE jr.rval = 20")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(10)]]);
 
     // 非限定名在组合列中唯一命中
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT jl.lval FROM jl JOIN jr ON jl.id = jr.id WHERE lval = 10")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(10)]]);
 
     // 两表同名 → AmbiguousColumn
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT jl.lval FROM jl JOIN jr ON jl.id = jr.id WHERE id = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Ambiguous column: 'id'"),
         "组合布局下多表同名列必须点名歧义，实际 {msg:?}"
     );
 
     // 组合列中不存在 → ColumnNotFound
-    let msg = error_msg(
+    let msg = error_msg(to_response(
         db.execute_sql("SELECT jl.lval FROM jl JOIN jr ON jl.id = jr.id WHERE nosuch = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Column not found: nosuch"),
         "组合布局下缺失列必须点名列名，实际 {msg:?}"
@@ -515,10 +516,10 @@ async fn where_over_join_projection_shape() {
     seed_left_joined(&db).await;
 
     let rows = query_rows(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "SELECT l.id FROM l LEFT JOIN r ON l.id = r.rid WHERE l.id > 0 ORDER BY id DESC LIMIT 2",
         )
-        .await,
+        .await),
     );
     assert_eq!(
         rows,
@@ -561,10 +562,10 @@ async fn where_over_join_aggregate() {
     exec_ok(&db, "INSERT INTO bc VALUES (2, 'y')").await;
 
     let rows = query_rows(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "SELECT ac.k, SUM(ac.amt) FROM ac JOIN bc ON ac.k = bc.k2 WHERE bc.tag = 'x' GROUP BY ac.k",
         )
-        .await,
+        .await),
     );
     assert_eq!(
         rows,

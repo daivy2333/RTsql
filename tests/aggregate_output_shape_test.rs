@@ -14,7 +14,7 @@
 //! - R3 既有形状零回归（含两处白名单校准用例）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
 
@@ -23,7 +23,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -195,10 +195,10 @@ fn interleaved_column_and_aggregate_shape_conserved() {
 async fn where_aggregate_shape_conserved() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT k, count(*) FROM t WHERE k = 1 GROUP BY k")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(1), json!(2)]]);
 }
 

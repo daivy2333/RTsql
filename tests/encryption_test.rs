@@ -8,7 +8,7 @@
 //! cli_test group).
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::StorageError;
 use rtsql::transaction::IsolationLevel;
 use tempfile::tempdir;
@@ -32,9 +32,10 @@ fn rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
 }
 
 async fn create_t(db: &Database) {
-    let resp = db
-        .execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
-        .await;
+    let resp = to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
+            .await,
+    );
     assert!(
         !matches!(resp, Response::Error { .. }),
         "create table failed: {resp:?}"
@@ -56,12 +57,12 @@ async fn encrypted_crud_and_restart_roundtrip() {
             .unwrap();
         create_t(&db).await;
         assert_affected(
-            db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
             "insert 1",
             1,
         );
         assert_affected(
-            db.execute_sql("INSERT INTO t VALUES (2, 20)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (2, 20)").await),
             "insert 2",
             1,
         );
@@ -70,7 +71,10 @@ async fn encrypted_crud_and_restart_roundtrip() {
     let db = Database::open_with_key(&path, IsolationLevel::RepeatableRead, Some(KEY))
         .await
         .unwrap();
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "reopen scan");
+    let scan = rows(
+        to_response(db.execute_sql("SELECT * FROM t").await),
+        "reopen scan",
+    );
     assert_eq!(scan, vec![row(1, 10), row(2, 20)]);
 }
 
@@ -85,7 +89,7 @@ async fn wrong_key_reopen_rejected() {
             .unwrap();
         create_t(&db).await;
         assert_affected(
-            db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
             "insert",
             1,
         );
@@ -142,7 +146,7 @@ async fn tampered_ciphertext_page_detected_on_read() {
             .unwrap();
         create_t(&db).await;
         assert_affected(
-            db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
             "insert",
             1,
         );
@@ -159,7 +163,7 @@ async fn tampered_ciphertext_page_detected_on_read() {
     let db = Database::open_with_key(&path, IsolationLevel::RepeatableRead, Some(KEY))
         .await
         .unwrap();
-    match db.execute_sql("SELECT * FROM t").await {
+    match to_response(db.execute_sql("SELECT * FROM t").await) {
         Response::Error { message, .. } => {
             assert!(message.contains("invalid key"), "got: {message}");
             assert!(
@@ -204,7 +208,7 @@ async fn companion_files_stay_in_existing_plaintext_format() {
             .unwrap();
         create_t(&db).await;
         assert_affected(
-            db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
             "insert",
             1,
         );
@@ -232,12 +236,12 @@ async fn plaintext_dump_to_encrypted_target_migration() {
         let db = Database::open(&plain).await.unwrap();
         create_t(&db).await;
         assert_affected(
-            db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
             "insert 1",
             1,
         );
         assert_affected(
-            db.execute_sql("INSERT INTO t VALUES (2, 20)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (2, 20)").await),
             "insert 2",
             1,
         );
@@ -254,7 +258,7 @@ async fn plaintext_dump_to_encrypted_target_migration() {
             .await
             .unwrap();
         for stmt in dump_statements {
-            let resp = target.execute_sql(stmt).await;
+            let resp = to_response(target.execute_sql(stmt).await);
             assert!(
                 !matches!(resp, Response::Error { .. }),
                 "restore statement '{stmt}' failed: {resp:?}"
@@ -266,7 +270,13 @@ async fn plaintext_dump_to_encrypted_target_migration() {
     let dst = Database::open_with_key(&enc, IsolationLevel::RepeatableRead, Some(KEY))
         .await
         .unwrap();
-    let src_rows = rows(src.execute_sql("SELECT * FROM t").await, "source scan");
-    let dst_rows = rows(dst.execute_sql("SELECT * FROM t").await, "target scan");
+    let src_rows = rows(
+        to_response(src.execute_sql("SELECT * FROM t").await),
+        "source scan",
+    );
+    let dst_rows = rows(
+        to_response(dst.execute_sql("SELECT * FROM t").await),
+        "target scan",
+    );
     assert_eq!(src_rows, dst_rows);
 }

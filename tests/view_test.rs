@@ -19,7 +19,7 @@
 //!   R3-S3 既有面零回归                      全量矩阵（各 GREEN condition）
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -37,7 +37,7 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str, what: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "{what} failed: {sql:?} -> {resp:?}"
@@ -45,7 +45,7 @@ async fn exec_ok(db: &Database, sql: &str, what: &str) {
 }
 
 async fn count_rows(db: &Database, sql: &str, what: &str) -> Vec<Vec<serde_json::Value>> {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => rows,
         other => panic!("{what}: expected QueryResult, got {other:?}"),
     }
@@ -262,7 +262,7 @@ async fn cycle_reference_rejected() {
     seed_table(&db).await;
 
     // v1 引用尚不存在的 v2 → 拒绝（42P01：引用对象不存在）
-    let resp = db.execute_sql("CREATE VIEW v1 AS SELECT * FROM v2").await;
+    let resp = to_response(db.execute_sql("CREATE VIEW v1 AS SELECT * FROM v2").await);
     expect_error(resp, "self/forward reference", "not found");
 
     // 零副作用：v1 未被创建（注册表与 catalog 均无 v1）
@@ -270,7 +270,7 @@ async fn cycle_reference_rejected() {
         db.views.read().await.get("v1").is_none(),
         "rejected view must not be registered"
     );
-    let resp = db.execute_sql("SELECT * FROM v1").await;
+    let resp = to_response(db.execute_sql("SELECT * FROM v1").await);
     expect_error(resp, "v1", "not found");
 }
 
@@ -287,23 +287,26 @@ async fn definition_error_and_duplicate_rejected() {
     exec_ok(&db, "CREATE VIEW big AS SELECT id, v FROM t", "seed view").await;
 
     // 定义引用不存在的表
-    let resp = db
-        .execute_sql("CREATE VIEW bad AS SELECT * FROM nope")
-        .await;
+    let resp = to_response(
+        db.execute_sql("CREATE VIEW bad AS SELECT * FROM nope")
+            .await,
+    );
     expect_error(resp, "missing table", "not found");
     // 定义引用不存在的列
-    let resp = db
-        .execute_sql("CREATE VIEW bad AS SELECT missing FROM t")
-        .await;
+    let resp = to_response(
+        db.execute_sql("CREATE VIEW bad AS SELECT missing FROM t")
+            .await,
+    );
     expect_error(resp, "missing column", "not found");
 
     // 与既有视图重名
-    let resp = db.execute_sql("CREATE VIEW big AS SELECT id FROM t").await;
+    let resp = to_response(db.execute_sql("CREATE VIEW big AS SELECT id FROM t").await);
     expect_error(resp, "duplicate view", "already exists");
     // 与既有基表重名
-    let resp = db
-        .execute_sql("CREATE VIEW t AS SELECT 1 AS x FROM t WHERE id = 1")
-        .await;
+    let resp = to_response(
+        db.execute_sql("CREATE VIEW t AS SELECT 1 AS x FROM t WHERE id = 1")
+            .await,
+    );
     expect_error(resp, "duplicate table name", "already exists");
 
     // 既有对象零变化：big 定义未变（仍为 v 全集 3 行）、t 未受影响
@@ -346,7 +349,7 @@ async fn modifier_rejections() {
             "TEMPORARY VIEW",
         ),
     ] {
-        let resp = db.execute_sql(sql).await;
+        let resp = to_response(db.execute_sql(sql).await);
         expect_error(resp, capability, capability);
         assert!(
             db.views.read().await.is_empty(),
@@ -360,11 +363,12 @@ async fn modifier_rejections() {
 
     // 超长定义前置点名拒绝、零副作用
     let padding = "x".repeat(5000);
-    let resp = db
-        .execute_sql(&format!(
+    let resp = to_response(
+        db.execute_sql(&format!(
             "CREATE VIEW huge AS SELECT '{padding}' AS p FROM t WHERE id = 1"
         ))
-        .await;
+        .await,
+    );
     expect_error(resp, "oversized definition", "too long");
     assert!(
         db.views.read().await.is_empty(),
@@ -480,11 +484,11 @@ async fn dml_through_view_rejected() {
     )
     .await;
 
-    let resp = db.execute_sql("INSERT INTO big VALUES (9, 90)").await;
+    let resp = to_response(db.execute_sql("INSERT INTO big VALUES (9, 90)").await);
     expect_error(resp, "insert into view", "read-only");
-    let resp = db.execute_sql("UPDATE big SET v = 999 WHERE id = 2").await;
+    let resp = to_response(db.execute_sql("UPDATE big SET v = 999 WHERE id = 2").await);
     expect_error(resp, "update view", "read-only");
-    let resp = db.execute_sql("DELETE FROM big WHERE id = 2").await;
+    let resp = to_response(db.execute_sql("DELETE FROM big WHERE id = 2").await);
     expect_error(resp, "delete from view", "read-only");
 
     // 基表零变化
@@ -537,19 +541,19 @@ async fn drop_view_deletes_and_missing_rejected() {
         .await;
 
         exec_ok(&db, "DROP VIEW big", "drop view").await;
-        let resp = db.execute_sql("SELECT * FROM big").await;
+        let resp = to_response(db.execute_sql("SELECT * FROM big").await);
         expect_error(resp, "query dropped view", "not found");
         // 基表数据不受影响
         let rows = count_rows(&db, "SELECT COUNT(*) FROM t", "count").await;
         assert_eq!(rows[0][0].as_i64().unwrap(), 3);
 
         // 再删 / 删不存在 → 点名拒绝
-        let resp = db.execute_sql("DROP VIEW big").await;
+        let resp = to_response(db.execute_sql("DROP VIEW big").await);
         expect_error(resp, "re-drop", "not found");
-        let resp = db.execute_sql("DROP VIEW nope").await;
+        let resp = to_response(db.execute_sql("DROP VIEW nope").await);
         expect_error(resp, "drop missing", "not found");
         // IF EXISTS 点名拒绝（Forbidden）
-        let resp = db.execute_sql("DROP VIEW IF EXISTS big").await;
+        let resp = to_response(db.execute_sql("DROP VIEW IF EXISTS big").await);
         expect_error(resp, "if exists", "IF EXISTS");
 
         db.close().await.unwrap();
@@ -557,7 +561,7 @@ async fn drop_view_deletes_and_missing_rejected() {
     {
         // 删除跨重启持久：重开后仍不存在
         let db = Database::open(&db_path(&dir)).await.unwrap();
-        let resp = db.execute_sql("SELECT * FROM big").await;
+        let resp = to_response(db.execute_sql("SELECT * FROM big").await);
         expect_error(resp, "dropped view stays dropped", "not found");
     }
 }
@@ -579,13 +583,13 @@ async fn view_not_base_table_target() {
     )
     .await;
 
-    let resp = db.execute_sql("TRUNCATE TABLE big").await;
+    let resp = to_response(db.execute_sql("TRUNCATE TABLE big").await);
     expect_error(resp, "truncate view", "not found");
-    let resp = db.execute_sql("CREATE INDEX idx_big ON big(id)").await;
+    let resp = to_response(db.execute_sql("CREATE INDEX idx_big ON big(id)").await);
     expect_error(resp, "index on view", "not found");
-    let resp = db.execute_sql("ALTER TABLE big ADD COLUMN w INT").await;
+    let resp = to_response(db.execute_sql("ALTER TABLE big ADD COLUMN w INT").await);
     expect_error(resp, "alter view", "not found");
-    let resp = db.execute_sql("DROP TABLE big").await;
+    let resp = to_response(db.execute_sql("DROP TABLE big").await);
     expect_error(resp, "drop table on view", "not found");
 
     // 上述目标拒绝后视图仍可查、基表完好
@@ -616,7 +620,7 @@ async fn definition_change_resolves_consistently() {
 
     exec_ok(&db, "DROP VIEW big", "drop").await;
     // 未重建期间查询点名拒绝（不得复用旧展开结果）
-    let resp = db.execute_sql("SELECT * FROM big").await;
+    let resp = to_response(db.execute_sql("SELECT * FROM big").await);
     expect_error(resp, "dropped between", "not found");
 
     exec_ok(

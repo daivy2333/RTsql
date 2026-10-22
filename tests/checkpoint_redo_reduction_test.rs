@@ -6,7 +6,7 @@
 //! - S2.4: 位点损坏（<16B / L > file_len）→ 安全退化全量重放
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::{AsyncStorage, BufferPool, FileStorage, RowId, TableManager};
 use rtsql::wal::{RecoveryManager, WalRecord, WalWriter};
 use std::path::{Path, PathBuf};
@@ -46,10 +46,12 @@ async fn build_checkpoint_scenario(dir: &TempDir, mode: SiteMode) -> PathBuf {
     let path = db_path(dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     for i in 0..3u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
 
     // 非 checkpoint 路径落盘 catalog + 数据页，使表定义在重启后可见
@@ -72,8 +74,10 @@ async fn build_checkpoint_scenario(dir: &TempDir, mode: SiteMode) -> PathBuf {
     }
 
     for i in 3..5u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -219,10 +223,12 @@ async fn checkpoint_truncates_wal_file() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     for i in 0..5u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
     let wal = path.with_extension("wal");
     let len_before = std::fs::metadata(&wal).unwrap().len();
@@ -251,22 +257,26 @@ async fn crash_after_checkpoint_replays_suffix_exactly() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     for i in 0..5u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
     db.checkpoint().await.unwrap();
 
     // checkpoint 后再写 3 行，然后不 close 直接 drop（崩溃模拟，页未刷）
     for i in 5..8u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
-    let resp = db2.execute_sql("SELECT * FROM t").await;
+    let resp = to_response(db2.execute_sql("SELECT * FROM t").await);
     match resp {
         Response::QueryResult { rows } => assert_eq!(
             rows.len(),
@@ -284,15 +294,19 @@ async fn redo_count_converges_after_checkpoint() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     for i in 0..5u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
     db.checkpoint().await.unwrap();
     for i in 5..8u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
     db.wal_buffer.as_ref().unwrap().shutdown().await;
     drop(db);
@@ -315,10 +329,12 @@ async fn close_triggers_checkpoint_and_preserves_data() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
     for i in 0..3u64 {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
-            .await;
+        to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({})", i))
+                .await,
+        );
     }
     let wal = path.with_extension("wal");
     let len_before = std::fs::metadata(&wal).unwrap().len();
@@ -335,7 +351,7 @@ async fn close_triggers_checkpoint_and_preserves_data() {
     );
 
     let db2 = Database::open(&path).await.unwrap();
-    let resp = db2.execute_sql("SELECT * FROM t").await;
+    let resp = to_response(db2.execute_sql("SELECT * FROM t").await);
     match resp {
         Response::QueryResult { rows } => assert_eq!(rows.len(), 3),
         other => panic!("Expected QueryResult, got {:?}", other),

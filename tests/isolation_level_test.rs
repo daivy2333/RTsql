@@ -9,7 +9,7 @@
 //! `open_with_isolation` and `IsolationLevel` do not exist yet (compile RED).
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::transaction::IsolationLevel;
 use tempfile::tempdir;
 
@@ -30,9 +30,10 @@ fn rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
 }
 
 async fn create_t(db: &Database) {
-    let resp = db
-        .execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
-        .await;
+    let resp = to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
+            .await,
+    );
     assert!(
         !matches!(resp, Response::Error { .. }),
         "create table failed: {resp:?}"
@@ -57,15 +58,21 @@ async fn rc_open_available() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
         "insert",
         1,
     );
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "auto-commit scan");
+    let scan = rows(
+        to_response(db.execute_sql("SELECT * FROM t").await),
+        "auto-commit scan",
+    );
     assert_eq!(scan, vec![row(1, 10)]);
 
     let tx = db.begin().await.unwrap();
-    let scan = rows(db.execute_in_tx("SELECT * FROM t", &tx).await, "in-tx scan");
+    let scan = rows(
+        to_response(db.execute_in_tx("SELECT * FROM t", &tx).await),
+        "in-tx scan",
+    );
     assert_eq!(scan, vec![row(1, 10)]);
     db.commit(tx).await.unwrap();
 }
@@ -85,12 +92,15 @@ async fn rc_dirty_read_excluded() {
 
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("INSERT INTO t VALUES (7, 70)", &tx).await,
+        to_response(db.execute_in_tx("INSERT INTO t VALUES (7, 70)", &tx).await),
         "uncommitted insert",
         1,
     );
 
-    let scan = rows(db.execute_sql("SELECT * FROM t").await, "auto-commit scan");
+    let scan = rows(
+        to_response(db.execute_sql("SELECT * FROM t").await),
+        "auto-commit scan",
+    );
     assert!(
         scan.is_empty(),
         "R2-S1: RC must exclude other transactions' uncommitted writes, got {scan:?}"
@@ -114,20 +124,20 @@ async fn rc_statement_sees_commit_between_statements() {
 
     let tx = db.begin().await.unwrap();
     let first = rows(
-        db.execute_in_tx("SELECT * FROM t", &tx).await,
+        to_response(db.execute_in_tx("SELECT * FROM t", &tx).await),
         "first select",
     );
     assert!(first.is_empty(), "precondition: row not yet present");
 
     // Another connection commits an insert between the reader's statements.
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (5, 50)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5, 50)").await),
         "interleaved insert",
         1,
     );
 
     let second = rows(
-        db.execute_in_tx("SELECT * FROM t", &tx).await,
+        to_response(db.execute_in_tx("SELECT * FROM t", &tx).await),
         "second select",
     );
     assert_eq!(
@@ -162,18 +172,21 @@ async fn rc_point_lookup_sees_commit_between_statements() {
     create_t(&db).await;
 
     let tx = db.begin().await.unwrap();
-    let first = rows(db.execute_in_tx("SELECT * FROM t", &tx).await, "first scan");
+    let first = rows(
+        to_response(db.execute_in_tx("SELECT * FROM t", &tx).await),
+        "first scan",
+    );
     assert!(first.is_empty(), "precondition: row not yet present");
 
     // Another connection commits an insert between the reader's statements.
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (5, 50)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5, 50)").await),
         "interleaved insert",
         1,
     );
 
     let second = rows(
-        db.execute_in_tx("SELECT * FROM t WHERE id = 5", &tx).await,
+        to_response(db.execute_in_tx("SELECT * FROM t WHERE id = 5", &tx).await),
         "second point lookup",
     );
     assert_eq!(
@@ -199,27 +212,27 @@ async fn rc_statement_sees_delete_between_statements() {
     create_t(&db).await;
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (9, 90)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (9, 90)").await),
         "insert",
         1,
     );
 
     let tx = db.begin().await.unwrap();
     let first = rows(
-        db.execute_in_tx("SELECT * FROM t", &tx).await,
+        to_response(db.execute_in_tx("SELECT * FROM t", &tx).await),
         "first select",
     );
     assert_eq!(first, vec![row(9, 90)], "precondition: row present");
 
     // Another connection commits a delete between the reader's statements.
     assert_affected(
-        db.execute_sql("DELETE FROM t WHERE id = 9").await,
+        to_response(db.execute_sql("DELETE FROM t WHERE id = 9").await),
         "interleaved delete",
         1,
     );
 
     let second = rows(
-        db.execute_in_tx("SELECT * FROM t", &tx).await,
+        to_response(db.execute_in_tx("SELECT * FROM t", &tx).await),
         "second select",
     );
     assert!(
@@ -245,11 +258,14 @@ async fn rc_self_uncommitted_write_visible() {
 
     let tx = db.begin().await.unwrap();
     assert_affected(
-        db.execute_in_tx("INSERT INTO t VALUES (3, 30)", &tx).await,
+        to_response(db.execute_in_tx("INSERT INTO t VALUES (3, 30)", &tx).await),
         "own insert",
         1,
     );
-    let scan = rows(db.execute_in_tx("SELECT * FROM t", &tx).await, "own read");
+    let scan = rows(
+        to_response(db.execute_in_tx("SELECT * FROM t", &tx).await),
+        "own read",
+    );
     assert_eq!(
         scan,
         vec![row(3, 30)],
@@ -265,21 +281,22 @@ async fn rc_self_uncommitted_write_visible() {
 async fn rc_autocommit_matches_default_path() {
     async fn run_sequence(path: &std::path::Path) -> Vec<Vec<serde_json::Value>> {
         let db = Database::open(path).await.unwrap();
-        let resp = db
-            .execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
-            .await;
+        let resp = to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, n INT)")
+                .await,
+        );
         assert!(!matches!(resp, Response::Error { .. }));
         assert_affected(
-            db.execute_sql("INSERT INTO t VALUES (1, 10)").await,
+            to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await),
             "insert",
             1,
         );
         assert_affected(
-            db.execute_sql("UPDATE t SET n = 20 WHERE id = 1").await,
+            to_response(db.execute_sql("UPDATE t SET n = 20 WHERE id = 1").await),
             "update",
             1,
         );
-        rows(db.execute_sql("SELECT * FROM t").await, "scan")
+        rows(to_response(db.execute_sql("SELECT * FROM t").await), "scan")
     }
 
     let dir = tempdir().unwrap();
@@ -318,8 +335,10 @@ async fn rc_scan_then_delete_keeps_remaining_rows_reachable_after_restart() {
         create_t(&db).await;
         for i in 1..=3 {
             assert_affected(
-                db.execute_sql(&format!("INSERT INTO t VALUES ({i}, {i}0)"))
-                    .await,
+                to_response(
+                    db.execute_sql(&format!("INSERT INTO t VALUES ({i}, {i}0)"))
+                        .await,
+                ),
                 "committed insert",
                 1,
             );
@@ -334,7 +353,7 @@ async fn rc_scan_then_delete_keeps_remaining_rows_reachable_after_restart() {
         .unwrap();
 
     let scan = rows(
-        db.execute_sql("SELECT * FROM t").await,
+        to_response(db.execute_sql("SELECT * FROM t").await),
         "scan after restart",
     );
     assert_eq!(
@@ -344,13 +363,13 @@ async fn rc_scan_then_delete_keeps_remaining_rows_reachable_after_restart() {
     );
 
     assert_affected(
-        db.execute_sql("DELETE FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("DELETE FROM t WHERE id = 1").await),
         "committed delete",
         1,
     );
 
     let lookup = rows(
-        db.execute_sql("SELECT * FROM t WHERE id = 2").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE id = 2").await),
         "point lookup after delete",
     );
     assert_eq!(
@@ -359,7 +378,7 @@ async fn rc_scan_then_delete_keeps_remaining_rows_reachable_after_restart() {
         "stale page summary must not hide a committed row from the point-lookup path"
     );
     let scan = rows(
-        db.execute_sql("SELECT * FROM t").await,
+        to_response(db.execute_sql("SELECT * FROM t").await),
         "full scan after delete",
     );
     assert_eq!(
@@ -390,8 +409,10 @@ async fn rc_reopen_sees_committed_rows_without_new_dml() {
         create_t(&db).await;
         for i in 1..=3 {
             assert_affected(
-                db.execute_sql(&format!("INSERT INTO t VALUES ({i}, {i}0)"))
-                    .await,
+                to_response(
+                    db.execute_sql(&format!("INSERT INTO t VALUES ({i}, {i}0)"))
+                        .await,
+                ),
                 "committed insert",
                 1,
             );
@@ -404,7 +425,7 @@ async fn rc_reopen_sees_committed_rows_without_new_dml() {
         .unwrap();
 
     let scan = rows(
-        db.execute_sql("SELECT * FROM t").await,
+        to_response(db.execute_sql("SELECT * FROM t").await),
         "immediate scan after reopen",
     );
     assert_eq!(
@@ -414,12 +435,12 @@ async fn rc_reopen_sees_committed_rows_without_new_dml() {
     );
 
     assert_affected(
-        db.execute_sql("INSERT INTO t VALUES (4, 40)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (4, 40)").await),
         "post-restart insert",
         1,
     );
     let scan = rows(
-        db.execute_sql("SELECT * FROM t").await,
+        to_response(db.execute_sql("SELECT * FROM t").await),
         "scan after new insert",
     );
     assert_eq!(

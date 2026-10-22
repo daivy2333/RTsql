@@ -17,7 +17,7 @@
 //!   变更前后恒 GREEN）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -34,31 +34,33 @@ async fn old_key_insert_accepted_after_key_nulled() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("UPDATE t SET id = NULL WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET id = NULL WHERE id = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("UPDATE SET id = NULL 应成功，实际 {:?}", other),
     }
 
     // 修复前：残留索引条目 → DuplicateKey 误拒（RED）
-    match db.execute_sql("INSERT INTO t VALUES (5, 200)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 200)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("旧键 INSERT 不应被残留条目误拒，实际 {:?}", other),
     }
 
     // 表含两行：无键行 (NULL, 100) + 新键行 (5, 200)
-    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(2), "表必须恰含两行");
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    match db.execute_sql("SELECT COUNT(*) FROM t WHERE v = 100").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t WHERE v = 100").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows[0][0],
@@ -68,7 +70,7 @@ async fn old_key_insert_accepted_after_key_nulled() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    match db.execute_sql("SELECT COUNT(*) FROM t WHERE v = 200").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t WHERE v = 200").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(1), "新键行 (5, 200) 必须可达");
         }
@@ -87,19 +89,21 @@ async fn old_key_point_query_empty_after_key_nulled() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("UPDATE t SET id = NULL WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET id = NULL WHERE id = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("UPDATE SET id = NULL 应成功，实际 {:?}", other),
     }
 
     // 修复前：经残留条目返回无键行（RED）
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 0, "旧键点查必须为空集（残留条目已清理）");
         }
@@ -107,7 +111,7 @@ async fn old_key_point_query_empty_after_key_nulled() {
     }
 
     // 无键行本身仍可经非键谓词可达
-    match db.execute_sql("SELECT COUNT(*) FROM t WHERE v = 100").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t WHERE v = 100").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(1), "无键行必须经非键谓词可达");
         }
@@ -133,23 +137,25 @@ async fn recovery_matches_runtime_after_key_nulled() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
     // DDL 无 WAL 记录：catalog 经 buffer_pool 落盘（夹具先例
     // keyless_row_test.rs），否则重开 redo 必 table not found
     db.buffer_pool.flush_all().await.unwrap();
 
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("UPDATE t SET id = NULL WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET id = NULL WHERE id = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("UPDATE SET id = NULL 应成功，实际 {:?}", other),
     }
 
     // 运行期两态比较面：修复前经残留条目返回无键行（RED）
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 0, "运行期旧键点查必须为空集");
         }
@@ -162,16 +168,16 @@ async fn recovery_matches_runtime_after_key_nulled() {
     let db2 = Database::open(&path).await.unwrap();
 
     // 恢复面：无键行 (NULL, 100) 可达
-    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(1), "恢复后必须恰含无键行");
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    match db2
-        .execute_sql("SELECT COUNT(*) FROM t WHERE v = 100")
-        .await
-    {
+    match to_response(
+        db2.execute_sql("SELECT COUNT(*) FROM t WHERE v = 100")
+            .await,
+    ) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(1), "无键行必须经非键谓词可达");
         }
@@ -179,7 +185,7 @@ async fn recovery_matches_runtime_after_key_nulled() {
     }
 
     // 恢复面：旧键点查空集（重建索引无键 5 条目）
-    match db2.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db2.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 0, "恢复后旧键点查必须为空集");
         }
@@ -187,11 +193,11 @@ async fn recovery_matches_runtime_after_key_nulled() {
     }
 
     // 恢复面：旧键 INSERT 成功——与运行期行为一致（两态一致）
-    match db2.execute_sql("INSERT INTO t VALUES (5, 200)").await {
+    match to_response(db2.execute_sql("INSERT INTO t VALUES (5, 200)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("恢复后旧键 INSERT 不应被误拒，实际 {:?}", other),
     }
-    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(2), "INSERT 后表必须恰含两行");
         }
@@ -209,19 +215,21 @@ async fn non_key_column_update_keeps_index_entry() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("UPDATE t SET v = 200 WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET v = 200 WHERE id = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("非键列 UPDATE 应成功，实际 {:?}", other),
     }
 
     // 索引条目 5 仍指向该行：点查返回更新后的行
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -244,18 +252,20 @@ async fn key_column_same_value_update_keeps_entry() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("UPDATE t SET id = 5 WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET id = 5 WHERE id = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("键列原值 UPDATE 应成功，实际 {:?}", other),
     }
 
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -294,19 +304,21 @@ async fn rekey_new_key_point_query_reachable() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("rekey UPDATE 应成功，实际 {:?}", other),
     }
 
     // 修复前：新键 7 无索引条目 → 空集（RED）
-    match db.execute_sql("SELECT * FROM t WHERE id = 7").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 7").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -329,30 +341,32 @@ async fn rekey_old_key_cleaned_insert_available() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("rekey UPDATE 应成功，实际 {:?}", other),
     }
 
     // 修复前：经残留条目返回 (7, 100)（RED）
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 0, "rekey 后旧键点查必须为空集");
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
     // 修复前：DuplicateKey 误拒（RED）
-    match db.execute_sql("INSERT INTO t VALUES (5, 200)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 200)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("rekey 后旧键 INSERT 不应被残留条目误拒，实际 {:?}", other),
     }
-    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(2), "表必须恰含两行");
         }
@@ -372,19 +386,21 @@ async fn rekey_collision_rejected_before_write_zero_side_effects() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("INSERT INTO t VALUES (7, 200)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (7, 200)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("第二次 INSERT 应成功，实际 {:?}", other),
     }
 
     // 修复前：无预检 → 成功 affected 1，行被静默改写（RED）
-    match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await) {
         Response::Error { message, .. } => {
             assert!(
                 message.to_lowercase().contains("duplicate"),
@@ -395,7 +411,7 @@ async fn rekey_collision_rejected_before_write_zero_side_effects() {
     }
 
     // 零副作用：两行原样
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -405,7 +421,7 @@ async fn rekey_collision_rejected_before_write_zero_side_effects() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    match db.execute_sql("SELECT * FROM t WHERE id = 7").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 7").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -415,7 +431,7 @@ async fn rekey_collision_rejected_before_write_zero_side_effects() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(2), "表必须恰含两行");
         }
@@ -439,23 +455,25 @@ async fn recovery_matches_runtime_after_rekey() {
     let path = db_path(&dir);
     let db = Database::open(&path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
     // DDL 无 WAL 记录：catalog 经 buffer_pool 落盘（夹具先例），否则重开
     // redo 必 table not found
     db.buffer_pool.flush_all().await.unwrap();
 
-    match db.execute_sql("INSERT INTO t VALUES (5, 100)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("首次 INSERT 应成功，实际 {:?}", other),
     }
-    match db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await {
+    match to_response(db.execute_sql("UPDATE t SET id = 7 WHERE id = 5").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("rekey UPDATE 应成功，实际 {:?}", other),
     }
 
     // 运行期两态比较面（修复前：新键空集 + 旧键返回 (7, 100)，RED）
-    match db.execute_sql("SELECT * FROM t WHERE id = 7").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 7").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -465,7 +483,7 @@ async fn recovery_matches_runtime_after_rekey() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 0, "运行期旧键点查必须为空集");
         }
@@ -478,7 +496,7 @@ async fn recovery_matches_runtime_after_rekey() {
     let db2 = Database::open(&path).await.unwrap();
 
     // 恢复面同断言（两态一致）
-    match db2.execute_sql("SELECT * FROM t WHERE id = 7").await {
+    match to_response(db2.execute_sql("SELECT * FROM t WHERE id = 7").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -488,18 +506,18 @@ async fn recovery_matches_runtime_after_rekey() {
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    match db2.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db2.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 0, "恢复后旧键点查必须为空集");
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
     // 恢复面：旧键 INSERT 成功（与运行期行为一致）
-    match db2.execute_sql("INSERT INTO t VALUES (5, 200)").await {
+    match to_response(db2.execute_sql("INSERT INTO t VALUES (5, 200)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望成功 */ }
         other => panic!("恢复后旧键 INSERT 不应被误拒，实际 {:?}", other),
     }
-    match db2.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db2.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(2), "INSERT 后表必须恰含两行");
         }
@@ -526,29 +544,31 @@ async fn delete_missing_middle_key_leaves_no_side_effects() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
     for (id, v) in [(1, 10), (2, 20), (3, 30)] {
-        match db
-            .execute_sql(&format!("INSERT INTO t VALUES ({id}, {v})"))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("INSERT INTO t VALUES ({id}, {v})"))
+                .await,
+        ) {
             Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
             other => panic!("INSERT ({id}) 应成功，实际 {:?}", other),
         }
     }
 
     // 修复前：affected 1 且 key 1 条目被误删（RED）
-    match db.execute_sql("DELETE FROM t WHERE id = 0").await {
+    match to_response(db.execute_sql("DELETE FROM t WHERE id = 0").await) {
         Response::AffectedRows { count: 0 } => { /* 期望未命中零副作用 */ }
         other => panic!("DELETE 未命中键必须 affected 0，实际 {:?}", other),
     }
 
     for (id, v) in [(1, 10), (2, 20), (3, 30)] {
-        match db
-            .execute_sql(&format!("SELECT * FROM t WHERE id = {id}"))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("SELECT * FROM t WHERE id = {id}"))
+                .await,
+        ) {
             Response::QueryResult { rows } => {
                 assert_eq!(
                     rows,
@@ -561,7 +581,7 @@ async fn delete_missing_middle_key_leaves_no_side_effects() {
     }
 
     // 修复前：key 1 条目被误删 → INSERT (1, …) 成功（RED）
-    match db.execute_sql("INSERT INTO t VALUES (1, 99)").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (1, 99)").await) {
         Response::Error { message, .. } => {
             assert!(
                 message.to_lowercase().contains("duplicate"),
@@ -573,7 +593,7 @@ async fn delete_missing_middle_key_leaves_no_side_effects() {
             other
         ),
     }
-    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(3), "表必须恰含三行");
         }
@@ -591,20 +611,22 @@ async fn delete_key_beyond_all_keys_reports_zero_without_error() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
-    match db.execute_sql("INSERT INTO t VALUES (1, 10)").await {
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    match to_response(db.execute_sql("INSERT INTO t VALUES (1, 10)").await) {
         Response::AffectedRows { count: 1 } => { /* 期望落库 */ }
         other => panic!("INSERT 应成功，实际 {:?}", other),
     }
 
     // 修复前：KeyNotFound 错误（RED）
-    match db.execute_sql("DELETE FROM t WHERE id = 999").await {
+    match to_response(db.execute_sql("DELETE FROM t WHERE id = 999").await) {
         Response::AffectedRows { count: 0 } => { /* 期望 affected 0 不报错 */ }
         other => panic!("DELETE 大于全部键必须 affected 0 不报错，实际 {:?}", other),
     }
 
-    match db.execute_sql("SELECT * FROM t WHERE id = 1").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,

@@ -11,7 +11,7 @@
 //! CTAS 各形态建后即崩恢复 + 既有表普通写入崩溃恢复对照。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::integrity::check_integrity;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -22,7 +22,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 
 /// 执行单条 SQL 并断言成功。
 async fn ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "{sql} must succeed: {resp:?}"
@@ -31,7 +31,7 @@ async fn ok(db: &Database, sql: &str) {
 
 /// 断言查询结果行集。
 async fn rows(db: &Database, sql: &str) -> Vec<Vec<serde_json::Value>> {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => rows,
         other => panic!("{sql} must return rows: {other:?}"),
     }

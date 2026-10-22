@@ -15,7 +15,7 @@
 //! 既有无键行语义，`UPDATE SET id = NULL` 继续 I037 删旧键分支。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -38,7 +38,7 @@ fn expect_affected(resp: Response, what: &str) {
 }
 
 async fn assert_count(db: &Database, sql: &str, expected: serde_json::Value, what: &str) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], expected, "{what}");
         }
@@ -56,13 +56,15 @@ async fn insert_int_key_rejects_float_value_with_zero_side_effects() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t VALUES (5.0, 1)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5.0, 1)").await),
         "Int 键列 INSERT Float 值",
     );
     assert!(
@@ -91,17 +93,19 @@ async fn insert_int_key_rejects_string_and_bool_values() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
 
     expect_error(
-        db.execute_sql("INSERT INTO t VALUES ('x', 1)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES ('x', 1)").await),
         "Int 键列 INSERT String 值",
     );
     expect_error(
-        db.execute_sql("INSERT INTO t VALUES (true, 1)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (true, 1)").await),
         "Int 键列 INSERT Bool 值",
     );
 
@@ -126,17 +130,19 @@ async fn update_int_key_rejects_float_value_with_zero_side_effects() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await),
         "首次 INSERT",
     );
 
     let message = expect_error(
-        db.execute_sql("UPDATE t SET id = 5.0 WHERE id = 5").await,
+        to_response(db.execute_sql("UPDATE t SET id = 5.0 WHERE id = 5").await),
         "UPDATE SET 键列为 Float",
     );
     assert!(
@@ -145,7 +151,7 @@ async fn update_int_key_rejects_float_value_with_zero_side_effects() {
     );
 
     // 零副作用：原行 (5, 100) 经点查逐字节保持
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -175,21 +181,23 @@ async fn update_int_key_rejects_string_value() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await),
         "首次 INSERT",
     );
 
     expect_error(
-        db.execute_sql("UPDATE t SET id = 'x' WHERE id = 5").await,
+        to_response(db.execute_sql("UPDATE t SET id = 'x' WHERE id = 5").await),
         "UPDATE SET 键列为 String",
     );
 
-    match db.execute_sql("SELECT * FROM t WHERE id = 5").await {
+    match to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -210,12 +218,14 @@ async fn insert_null_key_stays_accepted_keyless() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (NULL, 1)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (NULL, 1)").await),
         "键位 NULL INSERT",
     );
 
@@ -245,16 +255,18 @@ async fn update_set_key_null_stays_accepted() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await),
         "首次 INSERT",
     );
     expect_affected(
-        db.execute_sql("UPDATE t SET id = NULL WHERE id = 5").await,
+        to_response(db.execute_sql("UPDATE t SET id = NULL WHERE id = 5").await),
         "UPDATE SET 键列为 NULL",
     );
 
@@ -277,11 +289,11 @@ async fn float_key_column_keeps_accepting_int_value() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE ft (f FLOAT, n INT)").await,
+        to_response(db.execute_sql("CREATE TABLE ft (f FLOAT, n INT)").await),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO ft VALUES (5, 1)").await,
+        to_response(db.execute_sql("INSERT INTO ft VALUES (5, 1)").await),
         "Float 键列 INSERT Int 值",
     );
 
@@ -309,14 +321,18 @@ async fn explicit_column_list_key_violation_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO t (v, id) VALUES (1, 5.0)")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t (v, id) VALUES (1, 5.0)")
+                .await,
+        ),
         "显式列序键位越界 INSERT",
     );
     assert!(

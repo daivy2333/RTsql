@@ -3,8 +3,8 @@
 //! M7: Single entry point for opening databases, creating tables, and executing SQL.
 //! M11: WAL integration for crash recovery.
 
-use crate::network::protocol::Response;
 use crate::plan_cache::PlanCache;
+use crate::result::{SqlError, SqlOutcome};
 use crate::storage::{
     BufferPool, CatalogKind, ColumnType, FileStorage, MemoryStorage, Result, StorageError,
     TableManager, TableMeta,
@@ -420,7 +420,13 @@ impl Database {
         self.table_manager.get_table(name).await
     }
 
-    pub async fn execute_sql(&self, sql: &str) -> Response {
+    /// MS31-T01：库公共执行入口——返回类型化结果。
+    ///
+    /// 查询语句返回原生 `Value` 行与逐列元数据（列名 + 类型），DML 语句返回
+    /// 受影响行数；语句错误经 `Err` 携带消息与 SQLSTATE 分类（与既有协议
+    /// 错误面渲染同源）。核心层不依赖网络协议词表——协议面由协议模块的
+    /// `to_response` 在边界转换。
+    pub async fn execute_sql(&self, sql: &str) -> std::result::Result<SqlOutcome, SqlError> {
         crate::pipeline::execute(self, sql).await
     }
 
@@ -524,9 +530,16 @@ impl Database {
     /// DML statements reuse `tx.id()` and skip the implicit
     /// begin/commit/abort wrapping of [`Database::execute_sql`]; SELECT and
     /// DDL behave as in the implicit path (visibility semantics unchanged).
-    /// A failed statement returns an error response without terminating the
+    /// A failed statement returns an error result without terminating the
     /// transaction.
-    pub async fn execute_in_tx(&self, sql: &str, tx: &Transaction) -> Response {
+    ///
+    /// MS31-T01：返回类型化结果（`Ok(SqlOutcome)`）/ 类型化错误
+    /// （`Err(SqlError)`）——形态与 [`Database::execute_sql`] 一致。
+    pub async fn execute_in_tx(
+        &self,
+        sql: &str,
+        tx: &Transaction,
+    ) -> std::result::Result<SqlOutcome, SqlError> {
         crate::pipeline::execute_in_tx(self, sql, tx.id()).await
     }
 

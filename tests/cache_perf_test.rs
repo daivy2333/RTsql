@@ -1,4 +1,5 @@
 use rtsql::database::Database;
+use rtsql::network::protocol::to_response;
 use std::time::Instant;
 
 #[tokio::test]
@@ -7,38 +8,42 @@ async fn cache_perf_measurement() {
     let db_path = dir.path().join("perf.db");
     let db = Database::open(&db_path).await.unwrap();
 
-    db.execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, name STRING, value INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, name STRING, value INT)")
+            .await,
+    );
     for i in 0..100 {
-        db.execute_sql(&format!(
-            "INSERT INTO bench VALUES ({}, 'user_{}', {})",
-            i,
-            i,
-            i * 10
-        ))
-        .await;
+        to_response(
+            db.execute_sql(&format!(
+                "INSERT INTO bench VALUES ({}, 'user_{}', {})",
+                i,
+                i,
+                i * 10
+            ))
+            .await,
+        );
     }
 
     let sql = "SELECT * FROM bench WHERE id = 42";
 
     // Warm up
     for _ in 0..10 {
-        db.execute_sql(sql).await;
+        to_response(db.execute_sql(sql).await);
     }
 
     // Measure cached (same SQL repeated)
     let n = 1000;
     let start = Instant::now();
     for _ in 0..n {
-        db.execute_sql(sql).await;
+        to_response(db.execute_sql(sql).await);
     }
     let cached_us = start.elapsed().as_micros() / n as u128;
 
     // Clear cache by DDL, measure uncached
-    db.execute_sql("CREATE TABLE _dummy (x INT)").await;
+    to_response(db.execute_sql("CREATE TABLE _dummy (x INT)").await);
     let start = Instant::now();
     for _ in 0..n {
-        db.execute_sql(sql).await;
+        to_response(db.execute_sql(sql).await);
     }
     let uncached_us = start.elapsed().as_micros() / n as u128;
 
@@ -56,8 +61,10 @@ async fn cache_perf_measurement() {
     let start = Instant::now();
     for i in 0..n {
         let id = (i % 100) as i64;
-        db.execute_sql(&format!("SELECT * FROM bench WHERE id = {}", id))
-            .await;
+        to_response(
+            db.execute_sql(&format!("SELECT * FROM bench WHERE id = {}", id))
+                .await,
+        );
     }
     let diff_sql_us = start.elapsed().as_micros() / n as u128;
     println!("  Diff SQL: {} µs/call (100 unique SQLs)", diff_sql_us);
@@ -65,7 +72,7 @@ async fn cache_perf_measurement() {
     // Measure full scan
     let start = Instant::now();
     for _ in 0..100 {
-        db.execute_sql("SELECT * FROM bench").await;
+        to_response(db.execute_sql("SELECT * FROM bench").await);
     }
     let scan_us = start.elapsed().as_micros() / 100;
     println!("  Full scan: {} µs/call", scan_us);

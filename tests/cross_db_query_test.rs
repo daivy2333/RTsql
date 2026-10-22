@@ -29,7 +29,7 @@
 //!   (plan cache 跳过由 src/pipeline.rs 单元测试见证——CLI 无 cache 读路径)
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -595,14 +595,14 @@ async fn lib_path_two_part_name_keeps_flat_semantics() {
         "CREATE TABLE \"foo.bar\" (id INT)",
         "INSERT INTO \"foo.bar\" VALUES (42)",
     ] {
-        let resp = db.execute_sql(sql).await;
+        let resp = to_response(db.execute_sql(sql).await);
         assert!(
             !matches!(resp, Response::Error { .. }),
             "setup failed for {sql}: {resp:?}"
         );
     }
 
-    let hit = db.execute_sql("SELECT * FROM foo.bar").await;
+    let hit = to_response(db.execute_sql("SELECT * FROM foo.bar").await);
     match hit {
         Response::QueryResult { rows } => {
             assert_eq!(rows, vec![vec![serde_json::json!(42)]]);
@@ -610,7 +610,7 @@ async fn lib_path_two_part_name_keeps_flat_semantics() {
         other => panic!("expected rows from the literal dotted table, got {other:?}"),
     }
 
-    let miss = db.execute_sql("SELECT * FROM z.t").await;
+    let miss = to_response(db.execute_sql("SELECT * FROM z.t").await);
     assert!(
         matches!(&miss, Response::Error { message, .. } if message.contains("z.t") && message.contains("not found")),
         "unregistered two-part name must stay TableNotFound, got {miss:?}"

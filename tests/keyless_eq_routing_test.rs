@@ -14,7 +14,7 @@
 
 use rtsql::database::Database;
 use rtsql::executor::PhysicalPlan;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::pipeline::{parse_stage, plan_stage};
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
@@ -24,7 +24,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -58,7 +58,9 @@ async fn string_implicit_key_simple_equality_reaches_keyless_rows() {
     exec_ok(&db, "INSERT INTO t1 VALUES ('x', 1)").await;
     exec_ok(&db, "INSERT INTO t1 VALUES ('y', 2)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t1 WHERE s = 'x'").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t1 WHERE s = 'x'").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("x"), json!(1)]],
@@ -81,10 +83,10 @@ async fn string_implicit_key_and_combined_equality_reaches_keyless_rows() {
     exec_ok(&db, "INSERT INTO t1 VALUES ('x', 1)").await;
     exec_ok(&db, "INSERT INTO t1 VALUES ('y', 2)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT * FROM t1 WHERE s = 'x' AND n = 1")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("x"), json!(1)]],
@@ -106,7 +108,9 @@ async fn float_key_float_literal_equality_reaches_keyless_rows() {
     exec_ok(&db, "CREATE TABLE t2 (f FLOAT, n INT)").await;
     exec_ok(&db, "INSERT INTO t2 VALUES (5.0, 1)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t2 WHERE f = 5.0").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t2 WHERE f = 5.0").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(5.0), json!(1)]],
@@ -152,7 +156,9 @@ async fn text_primary_key_equality_reaches_keyless_rows() {
         .unwrap();
     exec_ok(&db, "INSERT INTO t3 VALUES ('x', 1)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t3 WHERE s = 'x'").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t3 WHERE s = 'x'").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("x"), json!(1)]],
@@ -224,7 +230,9 @@ async fn int_key_non_int_literal_still_empty_result() {
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1, 10)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t WHERE id = 'abc'").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t WHERE id = 'abc'").await,
+    ));
     assert!(
         rows.is_empty(),
         "Int 键列 + String 字面量等值必须保持空集（跨类型 equals false）"
@@ -252,7 +260,9 @@ async fn keyless_equality_reachability_survives_restart() {
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
-    let rows = query_rows(db2.execute_sql("SELECT * FROM t1 WHERE s = 'x'").await);
+    let rows = query_rows(to_response(
+        db2.execute_sql("SELECT * FROM t1 WHERE s = 'x'").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("x"), json!(1)]],
@@ -291,7 +301,9 @@ async fn float_key_int_literal_simple_equality_reaches_rows() {
     exec_ok(&db, "CREATE TABLE t4 (f FLOAT, n INT)").await;
     exec_ok(&db, "INSERT INTO t4 VALUES (5.0, 1)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t4 WHERE f = 5").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t4 WHERE f = 5").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(5.0), json!(1)]],
@@ -314,10 +326,10 @@ async fn float_key_int_literal_and_combined_equality_reaches_rows() {
     exec_ok(&db, "INSERT INTO t4 VALUES (5.0, 1)").await;
     exec_ok(&db, "INSERT INTO t4 VALUES (6.0, 2)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT * FROM t4 WHERE f = 5 AND n = 1")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(5.0), json!(1)]],
@@ -339,7 +351,9 @@ async fn float_key_int_literal_reversed_equality_reaches_rows() {
     exec_ok(&db, "CREATE TABLE t4 (f FLOAT, n INT)").await;
     exec_ok(&db, "INSERT INTO t4 VALUES (5.0, 1)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t4 WHERE 5 = f").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t4 WHERE 5 = f").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(5.0), json!(1)]],
@@ -388,7 +402,9 @@ async fn string_key_int_literal_keeps_empty_result() {
     exec_ok(&db, "CREATE TABLE t5 (s STRING, n INT)").await;
     exec_ok(&db, "INSERT INTO t5 VALUES ('x', 1)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT * FROM t5 WHERE s = 5").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT * FROM t5 WHERE s = 5").await,
+    ));
     assert!(
         rows.is_empty(),
         "String 键列 + Int 字面量等值必须保持空集（跨类型 equals false）"
@@ -416,7 +432,9 @@ async fn float_key_int_literal_reachability_survives_restart() {
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
-    let rows = query_rows(db2.execute_sql("SELECT * FROM t4 WHERE f = 5").await);
+    let rows = query_rows(to_response(
+        db2.execute_sql("SELECT * FROM t4 WHERE f = 5").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(5.0), json!(1)]],

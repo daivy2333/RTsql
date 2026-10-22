@@ -19,13 +19,14 @@ fn bench_insert(c: &mut Criterion) {
                 // criterion iterations (each iter runs the closure multiple times).
                 for j in 0..1 {
                     let id = i * 1000 + j;
-                    db.execute_sql(&format!(
-                        "INSERT INTO bench VALUES ({}, 'user_{}', {})",
-                        id,
-                        id,
-                        id * 10
-                    ))
-                    .await;
+                    let _ = db
+                        .execute_sql(&format!(
+                            "INSERT INTO bench VALUES ({}, 'user_{}', {})",
+                            id,
+                            id,
+                            id * 10
+                        ))
+                        .await;
                 }
                 cleanup_db(&path);
             });
@@ -50,7 +51,8 @@ fn bench_select(c: &mut Criterion) {
             let db = db.clone();
             async move {
                 for i in 0..50 {
-                    db.execute_sql(&format!("SELECT * FROM bench WHERE id = {}", i))
+                    let _ = db
+                        .execute_sql(&format!("SELECT * FROM bench WHERE id = {}", i))
                         .await;
                 }
             }
@@ -76,12 +78,13 @@ fn bench_update(c: &mut Criterion) {
             let db = db.clone();
             async move {
                 for i in 0..50 {
-                    db.execute_sql(&format!(
-                        "UPDATE bench SET value = {} WHERE id = {}",
-                        i * 20,
-                        i
-                    ))
-                    .await;
+                    let _ = db
+                        .execute_sql(&format!(
+                            "UPDATE bench SET value = {} WHERE id = {}",
+                            i * 20,
+                            i
+                        ))
+                        .await;
                 }
             }
         });
@@ -103,7 +106,8 @@ fn bench_delete(c: &mut Criterion) {
             insert_rows(&db, 0, 100).await;
 
             for i in 0..50 {
-                db.execute_sql(&format!("DELETE FROM bench WHERE id = {}", i))
+                let _ = db
+                    .execute_sql(&format!("DELETE FROM bench WHERE id = {}", i))
                     .await;
             }
             cleanup_db(&path);
@@ -127,7 +131,7 @@ fn bench_scan(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let db = db.clone();
             async move {
-                db.execute_sql("SELECT * FROM bench").await;
+                let _ = db.execute_sql("SELECT * FROM bench").await;
             }
         });
     });
@@ -150,7 +154,8 @@ fn bench_filter(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let db = db.clone();
             async move {
-                db.execute_sql("SELECT * FROM bench WHERE value > 500")
+                let _ = db
+                    .execute_sql("SELECT * FROM bench WHERE value > 500")
                     .await;
             }
         });
@@ -174,7 +179,8 @@ fn bench_sort(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let db = db.clone();
             async move {
-                db.execute_sql("SELECT * FROM bench ORDER BY value DESC")
+                let _ = db
+                    .execute_sql("SELECT * FROM bench ORDER BY value DESC")
                     .await;
             }
         });
@@ -198,7 +204,8 @@ fn bench_limit(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let db = db.clone();
             async move {
-                db.execute_sql("SELECT * FROM bench LIMIT 10 OFFSET 5")
+                let _ = db
+                    .execute_sql("SELECT * FROM bench LIMIT 10 OFFSET 5")
                     .await;
             }
         });
@@ -222,11 +229,12 @@ fn bench_join(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let db = db.clone();
             async move {
-                db.execute_sql(
-                    "SELECT customers.id, customers.name, orders.amount \
+                let _ = db
+                    .execute_sql(
+                        "SELECT customers.id, customers.name, orders.amount \
                      FROM customers INNER JOIN orders ON customers.id = orders.customer_id",
-                )
-                .await;
+                    )
+                    .await;
             }
         });
     });

@@ -634,7 +634,6 @@ fn check_tree_page(data: &[u8]) -> TreePageCheck {
 mod tests {
     use super::*;
     use crate::database::Database;
-    use crate::network::protocol::Response;
     use crate::storage::file_header::HEADER_SIZE;
     use crate::storage::page_format::overflow::{chunk_plan, collect_overflow_pages};
     use crate::storage::page_format::SlottedPageRef;
@@ -643,10 +642,7 @@ mod tests {
 
     async fn exec_ok(db: &Database, sql: &str) {
         let resp = db.execute_sql(sql).await;
-        assert!(
-            !matches!(resp, Response::Error { .. }),
-            "statement failed: {sql:?} -> {resp:?}"
-        );
+        assert!(resp.is_ok(), "statement failed: {sql:?} -> {resp:?}");
     }
 
     /// Build a database with small rows plus one ~10KB overflow row, then

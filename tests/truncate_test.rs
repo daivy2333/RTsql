@@ -11,7 +11,7 @@
 //!   R2-S1 崩溃后行不复活（drop 不 close）    truncate_consistent_across_crash_recovery
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::{tempdir, TempDir};
 
@@ -26,7 +26,7 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str, what: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "{what} failed: {sql:?} -> {resp:?}"
@@ -34,7 +34,7 @@ async fn exec_ok(db: &Database, sql: &str, what: &str) {
 }
 
 async fn count_rows(db: &Database, sql: &str, what: &str) -> Vec<Vec<serde_json::Value>> {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => rows,
         other => panic!("{what}: expected QueryResult, got {other:?}"),
     }
@@ -152,7 +152,7 @@ async fn truncate_inside_explicit_transaction_rejected() {
     let (db, _dir) = open_db().await;
     seed_with_secondary(&db).await;
     let tx = db.begin().await.unwrap();
-    match db.execute_in_tx("TRUNCATE TABLE t", &tx).await {
+    match to_response(db.execute_in_tx("TRUNCATE TABLE t", &tx).await) {
         Response::Error { sqlstate, .. } => {
             assert_eq!(
                 sqlstate.as_deref(),
@@ -187,7 +187,7 @@ async fn truncate_boundary_rejections() {
     seed_with_secondary(&db).await;
 
     // 多表：解析期即失败（无运行时多表臂），错误返回 = 拒绝
-    let resp = db.execute_sql("TRUNCATE TABLE t, other").await;
+    let resp = to_response(db.execute_sql("TRUNCATE TABLE t, other").await);
     assert!(
         matches!(resp, Response::Error { .. }),
         "multi-table TRUNCATE must be rejected, got {resp:?}"
@@ -195,7 +195,7 @@ async fn truncate_boundary_rejections() {
 
     // 缺失表：42P01 点名
     expect_error(
-        db.execute_sql("TRUNCATE nope").await,
+        to_response(db.execute_sql("TRUNCATE nope").await),
         "missing table",
         "not found",
     );
@@ -203,7 +203,7 @@ async fn truncate_boundary_rejections() {
     // 系统保留名：非用户表 → 42P01 点名
     for target in ["__tables", "__columns"] {
         expect_error(
-            db.execute_sql(&format!("TRUNCATE {target}")).await,
+            to_response(db.execute_sql(&format!("TRUNCATE {target}")).await),
             target,
             "not found",
         );
@@ -211,7 +211,7 @@ async fn truncate_boundary_rejections() {
 
     // Hive 分区形态：点名拒绝
     expect_error(
-        db.execute_sql("TRUNCATE TABLE t PARTITION (p0)").await,
+        to_response(db.execute_sql("TRUNCATE TABLE t PARTITION (p0)").await),
         "partition",
         "TRUNCATE",
     );

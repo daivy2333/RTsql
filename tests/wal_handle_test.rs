@@ -7,6 +7,7 @@
 //! 4. 并发写后恢复解析完整无错
 
 use rtsql::database::Database;
+use rtsql::network::protocol::to_response;
 use rtsql::storage::RowId;
 use rtsql::wal::{WalReader, WalRecord, WalWriter};
 use std::sync::Arc;
@@ -42,15 +43,17 @@ async fn test_fd_bound_under_10k_tx() {
         .await
         .expect("Failed to open database");
 
-    db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+            .await,
+    );
 
     // 压测前采样点在 Database::open 之后（排除打开瞬间的固有 fd）
     let before = count_fds().unwrap();
 
     for i in 0..10_000u64 {
         let sql = format!("INSERT INTO users VALUES ({}, 'user_{}')", i, i);
-        let resp = db.execute_sql(&sql).await;
+        let resp = to_response(db.execute_sql(&sql).await);
         assert_ok(resp, &format!("INSERT {}", i));
     }
 

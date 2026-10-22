@@ -19,7 +19,7 @@
 //! 活全部在测试自身的断言内完成。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::ColumnType;
 use rtsql::wal::WalWriter;
 use std::io::Read;
@@ -67,10 +67,10 @@ async fn create_table(db: &Database) {
 /// 插入 `from..=to` 的单行批次；每条一个提交边界。
 async fn insert_range(db: &Database, from: i64, to: i64) {
     for id in from..=to {
-        match db
-            .execute_sql(&format!("INSERT INTO t (id, pad) VALUES ({id}, 'p{id}')"))
-            .await
-        {
+        match to_response(
+            db.execute_sql(&format!("INSERT INTO t (id, pad) VALUES ({id}, 'p{id}')"))
+                .await,
+        ) {
             Response::AffectedRows { .. } => {}
             other => panic!("insert {id} must succeed, got {other:?}"),
         }
@@ -78,7 +78,7 @@ async fn insert_range(db: &Database, from: i64, to: i64) {
 }
 
 async fn query_rows(db: &Database, sql: &str, what: &str) -> Vec<Vec<serde_json::Value>> {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => rows,
         other => panic!("{what}: expected QueryResult, got {other:?}"),
     }
@@ -417,12 +417,13 @@ async fn explicit_transaction_defers_watermark_until_commit() {
     db.set_checkpoint_bytes_threshold(64 * 1024);
     let tx = db.begin().await.unwrap();
     for id in 1..=2000 {
-        let resp = db
-            .execute_in_tx(
+        let resp = to_response(
+            db.execute_in_tx(
                 &format!("INSERT INTO t (id, pad) VALUES ({id}, 'p{id}')"),
                 &tx,
             )
-            .await;
+            .await,
+        );
         assert!(
             matches!(resp, Response::AffectedRows { .. }),
             "事务内插入必须成功，got {resp:?}"
@@ -466,9 +467,10 @@ async fn checkpoint_failure_names_checkpoint_and_keeps_rows() {
         db.set_checkpoint_bytes_threshold(1);
         inject_site_write_failure(&db_path);
 
-        let resp = db
-            .execute_sql("INSERT INTO t (id, pad) VALUES (100, 'after')")
-            .await;
+        let resp = to_response(
+            db.execute_sql("INSERT INTO t (id, pad) VALUES (100, 'after')")
+                .await,
+        );
         let message = expect_error(resp, "auto checkpoint failure", "checkpoint failed");
         assert!(
             !message.is_empty(),
@@ -501,9 +503,10 @@ async fn ctas_checkpoint_failure_keeps_table_and_rows() {
         db.set_checkpoint_bytes_threshold(1);
         inject_site_write_failure(&db_path);
 
-        let resp = db
-            .execute_sql("CREATE TABLE copy_t AS SELECT id, pad FROM t")
-            .await;
+        let resp = to_response(
+            db.execute_sql("CREATE TABLE copy_t AS SELECT id, pad FROM t")
+                .await,
+        );
         expect_error(resp, "ctas auto checkpoint failure", "checkpoint failed");
 
         // 表存活：已提交数据不可被 checkpoint 失败连带删除

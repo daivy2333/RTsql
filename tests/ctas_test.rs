@@ -27,7 +27,7 @@
 //!                                          ctas_like_and_clone_rejected
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -579,16 +579,17 @@ async fn lib_path_ctas_two_part_name_keeps_flat_semantics() {
         .await
         .unwrap();
 
-    let miss = db.execute_sql("CREATE TABLE m AS SELECT * FROM o.u").await;
+    let miss = to_response(db.execute_sql("CREATE TABLE m AS SELECT * FROM o.u").await);
     assert!(
         matches!(&miss, Response::Error { message, .. } if message.contains("o.u") && message.contains("not found")),
         "lib path must keep flat-name lookup for the CTAS source, got {miss:?}"
     );
 
     // 同库可用（失败未留下 catalog 残留）。
-    let ok = db
-        .execute_sql("CREATE TABLE m AS SELECT k, name FROM t WHERE k = 1")
-        .await;
+    let ok = to_response(
+        db.execute_sql("CREATE TABLE m AS SELECT k, name FROM t WHERE k = 1")
+            .await,
+    );
     assert!(
         !matches!(ok, Response::Error { .. }),
         "lib retry after source failure: {ok:?}"

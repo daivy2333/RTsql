@@ -23,7 +23,7 @@
 //! S6 一致锚点恒 GREEN。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -53,7 +53,7 @@ fn query_rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
 }
 
 async fn assert_count(db: &Database, sql: &str, expected: serde_json::Value, what: &str) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], expected, "{what}");
         }
@@ -63,8 +63,10 @@ async fn assert_count(db: &Database, sql: &str, expected: serde_json::Value, wha
 
 async fn setup_p(db: &Database) {
     expect_affected(
-        db.execute_sql("CREATE TABLE p (id INT PRIMARY KEY, v INT)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE p (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "建表",
     );
 }
@@ -79,11 +81,14 @@ async fn out_of_order_list_maps_values_to_named_columns() {
     setup_p(&db).await;
 
     expect_affected(
-        db.execute_sql("INSERT INTO p (v, id) VALUES (1, 2)").await,
+        to_response(db.execute_sql("INSERT INTO p (v, id) VALUES (1, 2)").await),
         "乱序清单 INSERT",
     );
 
-    let rows = query_rows(db.execute_sql("SELECT id, v FROM p").await, "行集查询");
+    let rows = query_rows(
+        to_response(db.execute_sql("SELECT id, v FROM p").await),
+        "行集查询",
+    );
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(2), serde_json::json!(1)]],
@@ -104,8 +109,10 @@ async fn out_of_order_list_key_violation_rejected() {
     setup_p(&db).await;
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO p (v, id) VALUES (1, 5.0)")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO p (v, id) VALUES (1, 5.0)")
+                .await,
+        ),
         "乱序清单键位越界 INSERT",
     );
     assert!(
@@ -135,7 +142,7 @@ async fn partial_list_inserts_omitted_columns_no_panic() {
     setup_p(&db).await;
 
     expect_affected(
-        db.execute_sql("INSERT INTO p (v) VALUES (9)").await,
+        to_response(db.execute_sql("INSERT INTO p (v) VALUES (9)").await),
         "部分清单 INSERT（子集语义）",
     );
 
@@ -147,7 +154,7 @@ async fn partial_list_inserts_omitted_columns_no_panic() {
         "子集 INSERT 行必须落库",
     )
     .await;
-    match db.execute_sql("SELECT id, v FROM p").await {
+    match to_response(db.execute_sql("SELECT id, v FROM p").await) {
         Response::QueryResult { rows } => {
             assert_eq!(
                 rows,
@@ -172,7 +179,7 @@ async fn unknown_column_rejected_at_plan_time() {
     setup_p(&db).await;
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO p (id, zz) VALUES (7, 1)").await,
+        to_response(db.execute_sql("INSERT INTO p (id, zz) VALUES (7, 1)").await),
         "未知列 INSERT",
     );
     assert!(
@@ -202,7 +209,7 @@ async fn no_list_row_length_mismatch_rejected_at_plan_time() {
     setup_p(&db).await;
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO p VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO p VALUES (1)").await),
         "无清单数量不符 INSERT",
     );
     assert!(
@@ -230,13 +237,15 @@ async fn in_order_list_behavior_unchanged() {
     setup_p(&db).await;
 
     expect_affected(
-        db.execute_sql("INSERT INTO p (id, v) VALUES (5, 100)")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO p (id, v) VALUES (5, 100)")
+                .await,
+        ),
         "一致清单 INSERT",
     );
 
     let rows = query_rows(
-        db.execute_sql("SELECT id, v FROM p WHERE id = 5").await,
+        to_response(db.execute_sql("SELECT id, v FROM p WHERE id = 5").await),
         "键位点查",
     );
     assert_eq!(
@@ -259,7 +268,7 @@ async fn duplicate_column_in_list_rejected_at_plan_time() {
     setup_p(&db).await;
 
     let message = expect_error(
-        db.execute_sql("INSERT INTO p (id, id) VALUES (1, 2)").await,
+        to_response(db.execute_sql("INSERT INTO p (id, id) VALUES (1, 2)").await),
         "重复列 INSERT",
     );
     assert!(

@@ -19,7 +19,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;
 
 fn db_path(dir: &TempDir) -> PathBuf {
@@ -27,7 +27,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "statement failed: {sql:?} -> {resp:?}"
@@ -35,7 +35,7 @@ async fn exec_ok(db: &Database, sql: &str) {
 }
 
 async fn count_t(db: &Database) -> u64 {
-    match db.execute_sql("SELECT COUNT(*) FROM t").await {
+    match to_response(db.execute_sql("SELECT COUNT(*) FROM t").await) {
         Response::QueryResult { rows } => rows[0][0].as_u64().unwrap(),
         other => panic!("COUNT(*): {other:?}"),
     }

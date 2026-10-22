@@ -25,7 +25,7 @@
 //! 集（pristine master 探针实锤，与函数无关）——测试表加声明 PK 列规避。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;
 
 async fn open_db() -> (Database, TempDir) {
@@ -35,7 +35,7 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -66,7 +66,9 @@ fn error_message(resp: Response) -> String {
 async fn unknown_fn_select_keeps_existing_rejection() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
-    let msg = error_message(db.execute_sql("SELECT nonexistent_fn(id) FROM t").await);
+    let msg = error_message(to_response(
+        db.execute_sql("SELECT nonexistent_fn(id) FROM t").await,
+    ));
     assert!(
         msg.contains("Unsupported statement type"),
         "unexpected message: {msg}"
@@ -80,10 +82,10 @@ async fn unknown_fn_where_keeps_existing_rejection() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
-    let msg = error_message(
+    let msg = error_message(to_response(
         db.execute_sql("SELECT id FROM t WHERE nonexistent_fn(id) = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Unsupported expression type"),
         "unexpected message: {msg}"
@@ -96,7 +98,9 @@ async fn over_clause_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let msg = error_message(db.execute_sql("SELECT upper(name) OVER () FROM t").await);
+    let msg = error_message(to_response(
+        db.execute_sql("SELECT upper(name) OVER () FROM t").await,
+    ));
     assert!(msg.contains("OVER"), "unexpected message: {msg}");
 }
 
@@ -106,7 +110,9 @@ async fn distinct_qualifier_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let msg = error_message(db.execute_sql("SELECT upper(DISTINCT name) FROM t").await);
+    let msg = error_message(to_response(
+        db.execute_sql("SELECT upper(DISTINCT name) FROM t").await,
+    ));
     assert!(msg.contains("DISTINCT"), "unexpected message: {msg}");
 }
 
@@ -116,7 +122,9 @@ async fn arity_mismatch_rejected_at_plan() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let msg = error_message(db.execute_sql("SELECT substr(name) FROM t").await);
+    let msg = error_message(to_response(
+        db.execute_sql("SELECT substr(name) FROM t").await,
+    ));
     assert!(msg.contains("SUBSTR"), "unexpected message: {msg}");
     assert!(msg.contains("argument"), "unexpected message: {msg}");
 }
@@ -127,7 +135,9 @@ async fn named_argument_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let msg = error_message(db.execute_sql("SELECT upper(n => 'x') FROM t").await);
+    let msg = error_message(to_response(
+        db.execute_sql("SELECT upper(n => 'x') FROM t").await,
+    ));
     assert!(msg.contains("Named argument"), "unexpected message: {msg}");
 }
 
@@ -137,7 +147,7 @@ async fn wildcard_argument_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let msg = error_message(db.execute_sql("SELECT upper(*) FROM t").await);
+    let msg = error_message(to_response(db.execute_sql("SELECT upper(*) FROM t").await));
     assert!(msg.contains("wildcard"), "unexpected message: {msg}");
 }
 
@@ -147,7 +157,7 @@ async fn zero_arg_call_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let msg = error_message(db.execute_sql("SELECT upper() FROM t").await);
+    let msg = error_message(to_response(db.execute_sql("SELECT upper() FROM t").await));
     assert!(msg.contains("UPPER"), "unexpected message: {msg}");
     assert!(msg.contains("argument"), "unexpected message: {msg}");
 }
@@ -162,10 +172,10 @@ async fn upper_lower_derived_columns() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('AbC')").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT upper(name), lower(name) FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!("ABC"), serde_json::json!("abc")]]
@@ -178,7 +188,9 @@ async fn upper_alias_values() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let rows = query_rows(db.execute_sql("SELECT upper(name) AS u FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT upper(name) AS u FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("ABC")]]);
 }
 
@@ -189,10 +201,10 @@ async fn length_char_count_and_where() {
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('你好')").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT name, length(name) FROM t WHERE length(name) > 2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!("abc"), serde_json::json!(3)]]
@@ -214,7 +226,7 @@ async fn substr_routine_and_sqlite_edges() {
         ("SELECT substr(s, 3, -1) FROM t", "b"),
     ];
     for (sql, expected) in cases {
-        let rows = query_rows(db.execute_sql(sql).await);
+        let rows = query_rows(to_response(db.execute_sql(sql).await));
         assert_eq!(rows, vec![vec![serde_json::json!(expected)]], "sql: {sql}");
     }
 }
@@ -235,23 +247,23 @@ async fn replace_and_trim_space_only() {
     exec_ok(&db, "INSERT INTO t VALUES (2, '  x ')").await;
     exec_ok(&db, "INSERT INTO t VALUES (3, '\tx ')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT replace(s, '-', '+') FROM t WHERE s = 'a-b-a'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("a+b+a")]]);
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT trim(s) FROM t WHERE s = '  x '")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("x")]]);
 
     // TAB 保留：行首 TAB 不剥，行尾空格剥
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT trim(s) FROM t WHERE s = '\tx '")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("\tx")]]);
 }
 
@@ -263,7 +275,9 @@ async fn trim_specification_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY, s STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1, '  x ')").await;
-    let msg = error_message(db.execute_sql("SELECT trim(BOTH ' ' FROM s) FROM t").await);
+    let msg = error_message(to_response(
+        db.execute_sql("SELECT trim(BOTH ' ' FROM s) FROM t").await,
+    ));
     assert!(msg.contains("TRIM"), "unexpected message: {msg}");
 }
 
@@ -273,7 +287,7 @@ async fn strict_type_error_on_int() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (123)").await;
-    let msg = error_message(db.execute_sql("SELECT upper(id) FROM t").await);
+    let msg = error_message(to_response(db.execute_sql("SELECT upper(id) FROM t").await));
     assert!(msg.contains("Type mismatch"), "unexpected message: {msg}");
 }
 
@@ -287,7 +301,9 @@ async fn abs_keeps_input_type() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (i INT, f FLOAT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (-5, -5.5)").await;
-    let rows = query_rows(db.execute_sql("SELECT abs(i), abs(f) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT abs(i), abs(f) FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(5), serde_json::json!(5.5)]]
@@ -309,7 +325,7 @@ async fn round_direction_and_digits() {
         ("SELECT round(123.4, -1) FROM t", 120.0),
     ];
     for (sql, expected) in cases {
-        let rows = query_rows(db.execute_sql(sql).await);
+        let rows = query_rows(to_response(db.execute_sql(sql).await));
         assert_eq!(rows, vec![vec![serde_json::json!(expected)]], "sql: {sql}");
     }
 }
@@ -321,7 +337,9 @@ async fn floor_ceil_return_float() {
     exec_ok(&db, "CREATE TABLE t (f FLOAT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3.2)").await;
     exec_ok(&db, "INSERT INTO t VALUES (-3.7)").await;
-    let rows = query_rows(db.execute_sql("SELECT floor(f), ceil(f) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT floor(f), ceil(f) FROM t").await,
+    ));
     assert_eq!(
         rows,
         vec![
@@ -339,7 +357,9 @@ async fn ceil_floor_to_datetime_field_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (f FLOAT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3.2)").await;
-    let msg = error_message(db.execute_sql("SELECT ceil(f TO DAY) FROM t").await);
+    let msg = error_message(to_response(
+        db.execute_sql("SELECT ceil(f TO DAY) FROM t").await,
+    ));
     assert!(msg.contains("CEIL"), "unexpected message: {msg}");
 }
 
@@ -354,14 +374,18 @@ async fn null_propagation_string_functions() {
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES (NULL)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT upper(name) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT upper(name) FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(null)]]);
 
     // abs 腿（Iteration 001，R4/S1 完整三腿）：math NULL 同样传播
-    let rows = query_rows(db.execute_sql("SELECT abs(NULL) FROM t").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT abs(NULL) FROM t").await));
     assert_eq!(rows, vec![vec![serde_json::json!(null)]]);
 
-    let rows = query_rows(db.execute_sql("SELECT substr(name, 1, 1) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT substr(name, 1, 1) FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(null)]]);
 }
 
@@ -371,10 +395,10 @@ async fn null_short_circuit_skips_type_check() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT upper(CAST(NULL AS INT)) FROM t")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(null)]]);
 }
 
@@ -385,10 +409,10 @@ async fn nested_coalesce_argument() {
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES (NULL)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('x')").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT upper(COALESCE(name, 'empty')) FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -399,7 +423,7 @@ async fn nested_coalesce_argument() {
 
     // abs 腿（Iteration 001，R4/S3 AND 子句）：负数字面量常量参数；
     // 常量函数项逐行产出，两行表 → 两行 5
-    let rows = query_rows(db.execute_sql("SELECT abs(-5) FROM t").await);
+    let rows = query_rows(to_response(db.execute_sql("SELECT abs(-5) FROM t").await));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(5)], vec![serde_json::json!(5)]]
@@ -417,10 +441,10 @@ async fn where_function_predicate_pushdown() {
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY, name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1, 'AbC')").await;
     exec_ok(&db, "INSERT INTO t VALUES (2, 'xyz')").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id FROM t WHERE upper(name) = 'ABC'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(1)]]);
 }
 
@@ -431,10 +455,10 @@ async fn where_function_predicate_with_or() {
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY, name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1, 'AbC')").await;
     exec_ok(&db, "INSERT INTO t VALUES (2, 'xyz')").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id FROM t WHERE upper(name) = 'ABC' OR id = 2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]]
@@ -447,7 +471,9 @@ async fn aggregate_mixed_with_scalar_function_rejected() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let msg = error_message(db.execute_sql("SELECT count(*), upper(name) FROM t").await);
+    let msg = error_message(to_response(
+        db.execute_sql("SELECT count(*), upper(name) FROM t").await,
+    ));
     // MS13 T8 校准（BH-1 同型）：混合投影解锁后，未分组表达式项仍显式拒绝，
     // 错误通道由旧「Invalid aggregate argument」改为 spec 规定的
     // NonAggregatedColumn（group-by-expression R2）。
@@ -472,10 +498,10 @@ async fn having_scalar_function_reachable() {
     exec_ok(&db, "INSERT INTO t VALUES (2, 'B')").await;
     // upper 作用于分组键 name（HAVING 腿只能引用输出行上的列/聚合——
     // 既有 HavingNonAggregatedReference/ColumnNotFound 通道保持）。
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT name, count(*) FROM t GROUP BY name HAVING upper(name) = 'A'")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!("a"), serde_json::json!(1)]],
@@ -494,10 +520,10 @@ async fn order_by_expression_alias_keeps_input_order() {
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('b')").await;
     exec_ok(&db, "INSERT INTO t VALUES ('a')").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT upper(name) AS u FROM t ORDER BY u")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!("A")], vec![serde_json::json!("B")]]
@@ -511,7 +537,9 @@ async fn pk_compared_with_function_uses_plain_scan() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (5)").await;
-    let rows = query_rows(db.execute_sql("SELECT id FROM t WHERE id = abs(5)").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id FROM t WHERE id = abs(5)").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(5)]]);
 }
 
@@ -536,9 +564,10 @@ async fn abs_i64_min_explicit_overflow_error() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (k INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
-    let resp = db
-        .execute_sql("SELECT abs(0 - 9223372036854775807 - 1) FROM t")
-        .await;
+    let resp = to_response(
+        db.execute_sql("SELECT abs(0 - 9223372036854775807 - 1) FROM t")
+            .await,
+    );
     let msg = error_message(resp);
     assert!(
         !msg.contains("Unsupported"),
@@ -556,10 +585,10 @@ async fn round_extreme_positive_digits_saturate() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT round(1, 1000), round(2.5, 400) FROM t")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(1.0), serde_json::json!(2.5)]],
@@ -575,7 +604,9 @@ async fn round_extreme_negative_digits_saturate() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
-    let rows = query_rows(db.execute_sql("SELECT round(1, -1000) FROM t").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT round(1, -1000) FROM t").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(0.0)]]);
 }
 
@@ -597,20 +628,28 @@ async fn function_name_case_variants_equivalent() {
     exec_ok(&db, "INSERT INTO t2 VALUES (-5)").await;
 
     // 正面形态：大写/混合与小写结果逐字节一致
-    let upper = query_rows(db.execute_sql("SELECT UPPER(name) FROM t").await);
-    let lower = query_rows(db.execute_sql("SELECT upper(name) FROM t").await);
+    let upper = query_rows(to_response(
+        db.execute_sql("SELECT UPPER(name) FROM t").await,
+    ));
+    let lower = query_rows(to_response(
+        db.execute_sql("SELECT upper(name) FROM t").await,
+    ));
     assert_eq!(upper, lower, "UPPER 与 upper 结果应逐字节一致");
     assert_eq!(upper, vec![vec![serde_json::json!("ABC")]]);
 
-    let mixed_abs = query_rows(db.execute_sql("SELECT Abs(i) FROM t2").await);
-    let lower_abs = query_rows(db.execute_sql("SELECT abs(i) FROM t2").await);
+    let mixed_abs = query_rows(to_response(db.execute_sql("SELECT Abs(i) FROM t2").await));
+    let lower_abs = query_rows(to_response(db.execute_sql("SELECT abs(i) FROM t2").await));
     assert_eq!(mixed_abs, lower_abs, "Abs 与 abs 结果应逐字节一致");
     assert_eq!(mixed_abs, vec![vec![serde_json::json!(5)]]);
 
     // 错误面：未注册名大小写无关——MiXeD_Length 与 mixed_length 拒绝一致，
     // 且不因包含 LENGTH 子串而误匹配
-    let mixed_err = error_message(db.execute_sql("SELECT MiXeD_Length(name) FROM t").await);
-    let lower_err = error_message(db.execute_sql("SELECT mixed_length(name) FROM t").await);
+    let mixed_err = error_message(to_response(
+        db.execute_sql("SELECT MiXeD_Length(name) FROM t").await,
+    ));
+    let lower_err = error_message(to_response(
+        db.execute_sql("SELECT mixed_length(name) FROM t").await,
+    ));
     assert_eq!(mixed_err, lower_err, "未注册名大小写变体错误面应逐字节一致");
     assert!(
         mixed_err.contains("Unsupported statement type"),

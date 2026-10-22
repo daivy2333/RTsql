@@ -5,7 +5,6 @@ pub mod render;
 pub mod resolve;
 
 use crate::database::Database;
-use crate::network::protocol::Response;
 use crate::parser::planner::{
     classify_attach_statement, classify_transaction_statement, AttachInfo, TxStatementKind,
 };
@@ -14,6 +13,7 @@ use crate::pipeline::{
     execute_stage_in_tx_routed, execute_stage_routed, parse_stage, plan_stage_routed, AttachRoute,
     RoutedTables,
 };
+use crate::result::{value_to_json, SqlOutcome};
 use crate::storage::StorageError;
 use crate::transaction::{IsolationLevel, TransactionSession};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -953,15 +953,24 @@ async fn run_sql(
                     None => execute_stage_routed(db, plan, false, &routed).await,
                 };
                 match response {
-                    Response::QueryResult { rows } => {
-                        if let Err(e) =
-                            emit_stdout(&render(kind(format), &columns, &QueryPayload::Rows(rows)))
-                        {
+                    Ok(SqlOutcome::Rows { rows, .. }) => {
+                        // MS31-T01：类型化结果携原生 `Value` 行——渲染面消费
+                        // JSON 值，边界转换用与既有执行链同源的 `value_to_json`
+                        // （逐字节一致）。
+                        let json_rows: Vec<Vec<serde_json::Value>> = rows
+                            .into_iter()
+                            .map(|row| row.into_iter().map(value_to_json).collect())
+                            .collect();
+                        if let Err(e) = emit_stdout(&render(
+                            kind(format),
+                            &columns,
+                            &QueryPayload::Rows(json_rows),
+                        )) {
                             rollback_session(db, &mut session).await;
                             return ExitStatus::General(e);
                         }
                     }
-                    Response::AffectedRows { count } => {
+                    Ok(SqlOutcome::AffectedRows(count)) => {
                         if let Err(e) =
                             emit_stdout(&render(kind(format), &[], &QueryPayload::Affected(count)))
                         {
@@ -969,18 +978,17 @@ async fn run_sql(
                             return ExitStatus::General(e);
                         }
                     }
-                    Response::Error { message, sqlstate } => {
+                    Err(error) => {
                         return sql_failure_status(
                             index + 1,
                             total,
-                            &message,
+                            &error.message,
                             &statement_text,
                             rollback_session(db, &mut session).await,
                             // T7：响应错误透传 SQLSTATE（25006/42601/42P01 等）。
-                            sqlstate,
+                            error.sqlstate,
                         );
                     }
-                    Response::Pong => {}
                 }
             }
             Err(e) => {
@@ -1101,6 +1109,7 @@ fn emit_stderr(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::Value;
     use crate::storage::page_format::ColumnType;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1130,7 +1139,7 @@ mod tests {
                     .execute_sql(&format!("INSERT INTO t VALUES ({})", i))
                     .await
                 {
-                    Response::AffectedRows { .. } => {}
+                    Ok(SqlOutcome::AffectedRows(_)) => {}
                     other => panic!("insert {} failed: {:?}", i, other),
                 }
             }
@@ -1244,7 +1253,7 @@ mod tests {
             .unwrap();
         for i in 0..rows {
             match db.execute_sql(&format!("INSERT INTO t VALUES ({i})")).await {
-                Response::AffectedRows { .. } => {}
+                Ok(SqlOutcome::AffectedRows(_)) => {}
                 other => panic!("insert {i} failed: {other:?}"),
             }
         }
@@ -1310,10 +1319,10 @@ mod tests {
             // 重开可读且 work 内提交的行完整。
             let reopened = Database::open(&other_path).await.unwrap();
             match reopened.execute_sql("SELECT COUNT(*) FROM t").await {
-                Response::QueryResult { rows } => {
+                Ok(SqlOutcome::Rows { rows, .. }) => {
                     assert_eq!(
-                        rows[0][0].as_i64(),
-                        Some(300),
+                        rows[0][0],
+                        Value::Int(300),
                         "work-committed rows survive close"
                     )
                 }
@@ -1361,7 +1370,7 @@ mod tests {
                             .await
                             .unwrap();
                         match db.execute_sql("INSERT INTO mt VALUES (1)").await {
-                            Response::AffectedRows { .. } => {}
+                            Ok(SqlOutcome::AffectedRows(_)) => {}
                             other => panic!("main insert failed: {other:?}"),
                         }
                         session.register("a".to_string(), a);
@@ -1406,10 +1415,10 @@ mod tests {
             let _ = std::fs::remove_dir_all(&site);
             let reopened = Database::open(&a_path).await.unwrap();
             match reopened.execute_sql("SELECT COUNT(*) FROM t").await {
-                Response::QueryResult { rows } => {
+                Ok(SqlOutcome::Rows { rows, .. }) => {
                     assert_eq!(
-                        rows[0][0].as_i64(),
-                        Some(300),
+                        rows[0][0],
+                        Value::Int(300),
                         "committed rows survive close failure"
                     )
                 }
@@ -1451,7 +1460,7 @@ mod tests {
                             .await
                             .unwrap();
                         match db.execute_sql("INSERT INTO mt VALUES (1)").await {
-                            Response::AffectedRows { .. } => {}
+                            Ok(SqlOutcome::AffectedRows(_)) => {}
                             other => panic!("main insert failed: {other:?}"),
                         }
                         session.register("a".to_string(), a);

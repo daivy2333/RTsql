@@ -20,7 +20,8 @@ async fn setup_table_with_rows(n: i64) -> Database {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("bench.db");
     let db = Database::open(&db_path).await.unwrap();
-    db.execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, name STRING, value INT)")
+    let _ = db
+        .execute_sql("CREATE TABLE bench (id INT PRIMARY KEY, name STRING, value INT)")
         .await;
 
     // Batch INSERT in chunks of 1000 to keep statement size bounded.
@@ -34,7 +35,7 @@ async fn setup_table_with_rows(n: i64) -> Database {
             }
             sql.push_str(&format!("({}, 'user_{}', {})", i, i, i * 10));
         }
-        db.execute_sql(&sql).await;
+        let _ = db.execute_sql(&sql).await;
     }
     // Leak TempDir to keep the directory alive for the benchmark lifetime.
     std::mem::forget(dir);

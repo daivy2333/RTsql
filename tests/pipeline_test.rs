@@ -1,6 +1,7 @@
 //! Pipeline integration tests for DDL + WHERE execution
 
 use rtsql::database::Database;
+use rtsql::network::protocol::to_response;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -10,15 +11,19 @@ async fn test_plan_cache_hit() {
         .await
         .expect("Failed to open database");
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-        .await;
-    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+            .await,
+    );
 
     let sql = "SELECT * FROM t WHERE id = 1";
 
     // First execution - cache miss
-    let r1 = db.execute_sql(sql).await;
+    let r1 = to_response(db.execute_sql(sql).await);
     match &r1 {
         rtsql::network::protocol::Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1);
@@ -32,7 +37,7 @@ async fn test_plan_cache_hit() {
     );
 
     // Second execution - cache hit
-    let r2 = db.execute_sql(sql).await;
+    let r2 = to_response(db.execute_sql(sql).await);
     match &r2 {
         rtsql::network::protocol::Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1);
@@ -53,17 +58,17 @@ async fn test_ddl_clears_cache() {
         .await
         .expect("Failed to open database");
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await);
 
     let sql = "SELECT * FROM t";
-    db.execute_sql(sql).await;
+    to_response(db.execute_sql(sql).await);
     assert!(
         db.plan_cache_len() > 0,
         "Cache should have an entry after SELECT"
     );
 
     // DDL (CREATE TABLE) should clear cache
-    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await);
     assert_eq!(db.plan_cache_len(), 0, "Cache should be empty after DDL");
 }
 
@@ -74,12 +79,16 @@ async fn test_dml_not_cached() {
         .await
         .expect("Failed to open database");
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+    );
 
     // INSERT is DML and should NOT be cached
-    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+            .await,
+    );
     assert_eq!(db.plan_cache_len(), 0, "DML should not be cached");
 }
 
@@ -91,9 +100,10 @@ async fn test_pipeline_create_table() {
         .expect("Failed to open database");
 
     // Create table via SQL
-    let response = db
-        .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
-        .await;
+    let response = to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::AffectedRows { count } => {
@@ -106,7 +116,7 @@ async fn test_pipeline_create_table() {
     }
 
     // Verify table exists by querying it
-    let response = db.execute_sql("SELECT * FROM users").await;
+    let response = to_response(db.execute_sql("SELECT * FROM users").await);
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 0); // Empty table
@@ -126,18 +136,20 @@ async fn test_pipeline_create_table_already_exists() {
         .expect("Failed to open database");
 
     // Create table first time
-    let response = db
-        .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
-        .await;
+    let response = to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+    );
     assert!(matches!(
         response,
         rtsql::network::protocol::Response::AffectedRows { count: 0 }
     ));
 
     // Try to create same table again - should fail
-    let response = db
-        .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
-        .await;
+    let response = to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::Error { message, .. } => {
@@ -155,16 +167,17 @@ async fn test_pipeline_drop_table() {
         .expect("Failed to open database");
 
     // Create table
-    let response = db
-        .execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
-        .await;
+    let response = to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+    );
     assert!(matches!(
         response,
         rtsql::network::protocol::Response::AffectedRows { count: 0 }
     ));
 
     // Drop table
-    let response = db.execute_sql("DROP TABLE users").await;
+    let response = to_response(db.execute_sql("DROP TABLE users").await);
     match response {
         rtsql::network::protocol::Response::AffectedRows { count } => {
             assert_eq!(count, 0);
@@ -176,7 +189,7 @@ async fn test_pipeline_drop_table() {
     }
 
     // Verify table is dropped - should fail to query
-    let response = db.execute_sql("SELECT * FROM users").await;
+    let response = to_response(db.execute_sql("SELECT * FROM users").await);
     match response {
         rtsql::network::protocol::Response::Error { message, .. } => {
             assert!(message.contains("not found") || message.contains("does not exist"));
@@ -193,7 +206,7 @@ async fn test_pipeline_drop_table_if_exists() {
         .expect("Failed to open database");
 
     // DROP TABLE IF EXISTS on non-existent table should succeed
-    let response = db.execute_sql("DROP TABLE IF EXISTS nonexistent").await;
+    let response = to_response(db.execute_sql("DROP TABLE IF EXISTS nonexistent").await);
     match response {
         rtsql::network::protocol::Response::AffectedRows { count } => {
             assert_eq!(count, 0);
@@ -202,7 +215,7 @@ async fn test_pipeline_drop_table_if_exists() {
     }
 
     // DROP TABLE without IF EXISTS on non-existent table should fail
-    let response = db.execute_sql("DROP TABLE nonexistent").await;
+    let response = to_response(db.execute_sql("DROP TABLE nonexistent").await);
     match response {
         rtsql::network::protocol::Response::Error { message, .. } => {
             assert!(message.contains("not found"));
@@ -219,21 +232,30 @@ async fn test_pipeline_where_select() {
         .expect("Failed to open database");
 
     // Create table
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
+            .await,
+    );
 
     // Insert rows
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+            .await,
+    );
 
     // Query with WHERE clause (non-PK column)
-    let response = db
-        .execute_sql("SELECT id, name, age FROM users WHERE age > 28")
-        .await;
+    let response = to_response(
+        db.execute_sql("SELECT id, name, age FROM users WHERE age > 28")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -255,21 +277,30 @@ async fn test_pipeline_where_select_and() {
         .expect("Failed to open database");
 
     // Create table
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
+            .await,
+    );
 
     // Insert rows
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+            .await,
+    );
 
     // Query with AND in WHERE clause
-    let response = db
-        .execute_sql("SELECT id, name, age FROM users WHERE age > 25 AND age < 35")
-        .await;
+    let response = to_response(
+        db.execute_sql("SELECT id, name, age FROM users WHERE age > 25 AND age < 35")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -291,21 +322,30 @@ async fn test_pipeline_where_select_or() {
         .expect("Failed to open database");
 
     // Create table
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
+            .await,
+    );
 
     // Insert rows
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+            .await,
+    );
 
     // Query with OR in WHERE clause
-    let response = db
-        .execute_sql("SELECT id, name, age FROM users WHERE age < 26 OR age > 34")
-        .await;
+    let response = to_response(
+        db.execute_sql("SELECT id, name, age FROM users WHERE age < 26 OR age > 34")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -327,21 +367,30 @@ async fn test_pipeline_where_string_comparison() {
         .expect("Failed to open database");
 
     // Create table
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+    );
 
     // Insert rows
-    db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice')")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob')")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name) VALUES (3, 'Charlie')")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name) VALUES (3, 'Charlie')")
+            .await,
+    );
 
     // Query with string comparison
-    let response = db
-        .execute_sql("SELECT id, name FROM users WHERE name = 'Bob'")
-        .await;
+    let response = to_response(
+        db.execute_sql("SELECT id, name FROM users WHERE name = 'Bob'")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -364,18 +413,20 @@ async fn test_pipeline_full_flow() {
     // Full flow: CREATE TABLE -> INSERT -> SELECT with WHERE -> DROP TABLE
 
     // 1. CREATE TABLE
-    let response = db
-        .execute_sql("CREATE TABLE products (id INT PRIMARY KEY, name VARCHAR, price FLOAT)")
-        .await;
+    let response = to_response(
+        db.execute_sql("CREATE TABLE products (id INT PRIMARY KEY, name VARCHAR, price FLOAT)")
+            .await,
+    );
     assert!(matches!(
         response,
         rtsql::network::protocol::Response::AffectedRows { count: 0 }
     ));
 
     // 2. INSERT
-    let response = db
-        .execute_sql("INSERT INTO products (id, name, price) VALUES (1, 'Apple', 1.5)")
-        .await;
+    let response = to_response(
+        db.execute_sql("INSERT INTO products (id, name, price) VALUES (1, 'Apple', 1.5)")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::AffectedRows { count } => {
@@ -387,15 +438,20 @@ async fn test_pipeline_full_flow() {
         other => panic!("Unexpected response type: {:?}", other),
     }
 
-    db.execute_sql("INSERT INTO products (id, name, price) VALUES (2, 'Banana', 0.5)")
-        .await;
-    db.execute_sql("INSERT INTO products (id, name, price) VALUES (3, 'Cherry', 2.0)")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO products (id, name, price) VALUES (2, 'Banana', 0.5)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO products (id, name, price) VALUES (3, 'Cherry', 2.0)")
+            .await,
+    );
 
     // 3. SELECT with WHERE (float comparison)
-    let response = db
-        .execute_sql("SELECT id, name, price FROM products WHERE price > 1.0")
-        .await;
+    let response = to_response(
+        db.execute_sql("SELECT id, name, price FROM products WHERE price > 1.0")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -406,7 +462,7 @@ async fn test_pipeline_full_flow() {
     }
 
     // 4. DROP TABLE
-    let response = db.execute_sql("DROP TABLE products").await;
+    let response = to_response(db.execute_sql("DROP TABLE products").await);
     assert!(matches!(
         response,
         rtsql::network::protocol::Response::AffectedRows { count: 0 }
@@ -421,21 +477,30 @@ async fn test_select_order_by_asc() {
         .expect("Failed to open database");
 
     // Create table
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
+            .await,
+    );
 
     // Insert rows
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+            .await,
+    );
 
     // Query with ORDER BY ASC
-    let response = db
-        .execute_sql("SELECT id, name, age FROM users ORDER BY age ASC")
-        .await;
+    let response = to_response(
+        db.execute_sql("SELECT id, name, age FROM users ORDER BY age ASC")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -471,21 +536,30 @@ async fn test_select_order_by_desc_with_limit() {
         .expect("Failed to open database");
 
     // Create table
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR, age INT)")
+            .await,
+    );
 
     // Insert rows
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+            .await,
+    );
 
     // Query with ORDER BY DESC LIMIT 2
-    let response = db
-        .execute_sql("SELECT id, name, age FROM users ORDER BY age DESC LIMIT 2")
-        .await;
+    let response = to_response(
+        db.execute_sql("SELECT id, name, age FROM users ORDER BY age DESC LIMIT 2")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -516,25 +590,36 @@ async fn test_select_where_order_by_limit() {
         .expect("Failed to open database");
 
     // Create table
-    db.execute_sql("CREATE TABLE products (id INT PRIMARY KEY, name VARCHAR, price FLOAT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE products (id INT PRIMARY KEY, name VARCHAR, price FLOAT)")
+            .await,
+    );
 
     // Insert rows
-    db.execute_sql("INSERT INTO products (id, name, price) VALUES (1, 'Apple', 5.0)")
-        .await;
-    db.execute_sql("INSERT INTO products (id, name, price) VALUES (2, 'Banana', 8.0)")
-        .await;
-    db.execute_sql("INSERT INTO products (id, name, price) VALUES (3, 'Cherry', 12.0)")
-        .await;
-    db.execute_sql("INSERT INTO products (id, name, price) VALUES (4, 'Date', 15.0)")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO products (id, name, price) VALUES (1, 'Apple', 5.0)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO products (id, name, price) VALUES (2, 'Banana', 8.0)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO products (id, name, price) VALUES (3, 'Cherry', 12.0)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO products (id, name, price) VALUES (4, 'Date', 15.0)")
+            .await,
+    );
 
     // Query with WHERE + ORDER BY + LIMIT
-    let response = db
-        .execute_sql(
+    let response = to_response(
+        db.execute_sql(
             "SELECT id, name, price FROM products WHERE price > 10.0 ORDER BY price ASC LIMIT 2",
         )
-        .await;
+        .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -566,29 +651,44 @@ async fn test_pipeline_join_execution_basic() {
         .expect("Failed to open database");
 
     // Create tables
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
-        .await;
-    db.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT)")
+            .await,
+    );
 
     // Insert data
-    db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice')")
-        .await;
-    db.execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob')")
-        .await;
-    db.execute_sql("INSERT INTO orders (id, user_id) VALUES (10, 1)")
-        .await;
-    db.execute_sql("INSERT INTO orders (id, user_id) VALUES (20, 1)")
-        .await;
-    db.execute_sql("INSERT INTO orders (id, user_id) VALUES (30, 2)")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO orders (id, user_id) VALUES (20, 1)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("INSERT INTO orders (id, user_id) VALUES (30, 2)")
+            .await,
+    );
 
     // Execute JOIN
-    let response = db
-        .execute_sql(
+    let response = to_response(
+        db.execute_sql(
             "SELECT users.name, orders.id FROM users JOIN orders ON users.id = orders.user_id",
         )
-        .await;
+        .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {
@@ -615,19 +715,20 @@ async fn test_pipeline_join_with_null_keys() {
         .expect("Failed to open database");
 
     // Create tables
-    db.execute_sql("CREATE TABLE a (id INT PRIMARY KEY)").await;
-    db.execute_sql("CREATE TABLE b (id INT PRIMARY KEY)").await;
+    to_response(db.execute_sql("CREATE TABLE a (id INT PRIMARY KEY)").await);
+    to_response(db.execute_sql("CREATE TABLE b (id INT PRIMARY KEY)").await);
 
     // Insert data with NULL values
-    db.execute_sql("INSERT INTO a (id) VALUES (1)").await;
-    db.execute_sql("INSERT INTO a (id) VALUES (NULL)").await;
-    db.execute_sql("INSERT INTO b (id) VALUES (1)").await;
-    db.execute_sql("INSERT INTO b (id) VALUES (NULL)").await;
+    to_response(db.execute_sql("INSERT INTO a (id) VALUES (1)").await);
+    to_response(db.execute_sql("INSERT INTO a (id) VALUES (NULL)").await);
+    to_response(db.execute_sql("INSERT INTO b (id) VALUES (1)").await);
+    to_response(db.execute_sql("INSERT INTO b (id) VALUES (NULL)").await);
 
     // Execute JOIN - NULL should not match NULL in SQL
-    let response = db
-        .execute_sql("SELECT * FROM a JOIN b ON a.id = b.id")
-        .await;
+    let response = to_response(
+        db.execute_sql("SELECT * FROM a JOIN b ON a.id = b.id")
+            .await,
+    );
 
     match response {
         rtsql::network::protocol::Response::QueryResult { rows } => {

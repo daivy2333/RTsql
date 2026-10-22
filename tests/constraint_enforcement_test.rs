@@ -15,7 +15,7 @@
 //! 错误文本断言点名列名与约束名。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -24,7 +24,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 }
 
 async fn expect_error(db: &Database, sql: &str, needle: &str) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::Error { message, .. } => assert!(
             message.contains(needle),
             "expected error containing {needle:?}, got: {message}"
@@ -34,7 +34,7 @@ async fn expect_error(db: &Database, sql: &str, needle: &str) {
 }
 
 async fn expect_affected(db: &Database, sql: &str, count: u64) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::AffectedRows { count: c } => assert_eq!(c, count, "{sql}"),
         other => panic!("Expected AffectedRows({count}) for {sql}, got {:?}", other),
     }
@@ -42,7 +42,7 @@ async fn expect_affected(db: &Database, sql: &str, count: u64) {
 
 async fn expect_count(db: &Database, table: &str, count: usize) {
     let sql = format!("SELECT COUNT(*) FROM {}", table);
-    match db.execute_sql(&sql).await {
+    match to_response(db.execute_sql(&sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(count), "{sql}");
         }
@@ -60,10 +60,10 @@ async fn insert_null_rejected_naming_column() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql(
+    to_response(db.execute_sql(
         "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL, name VARCHAR(100))",
     )
-    .await;
+    .await);
 
     expect_error(
         &db,
@@ -81,8 +81,10 @@ async fn insert_null_rejection_is_side_effect_free() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
+            .await,
+    );
 
     expect_error(
         &db,
@@ -105,8 +107,10 @@ async fn insert_non_null_succeeds() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
+            .await,
+    );
 
     expect_affected(&db, "INSERT INTO users VALUES (1, 'a@b.c')", 1).await;
     expect_count(&db, "users", 1).await;
@@ -121,8 +125,10 @@ async fn insert_null_into_pk_not_null_combo_rejected() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY NOT NULL, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY NOT NULL, v INT)")
+            .await,
+    );
 
     expect_error(
         &db,
@@ -142,8 +148,10 @@ async fn undeclared_columns_keep_existing_semantics() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
 
     // 普通列 NULL：既有语义，成功
     expect_affected(&db, "INSERT INTO t VALUES (1, NULL)", 1).await;
@@ -165,8 +173,10 @@ async fn update_set_null_on_not_null_column_rejected_keeps_old_value() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO users VALUES (1, 'a@b.c')", 1).await;
 
     expect_error(
@@ -177,7 +187,7 @@ async fn update_set_null_on_not_null_column_rejected_keeps_old_value() {
     .await;
 
     // 原值保持
-    match db.execute_sql("SELECT email FROM users WHERE id = 1").await {
+    match to_response(db.execute_sql("SELECT email FROM users WHERE id = 1").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!("a@b.c"), "原值必须保持");
         }
@@ -193,12 +203,14 @@ async fn update_set_non_null_succeeds() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO users VALUES (1, 'a@b.c')", 1).await;
 
     expect_affected(&db, "UPDATE users SET email = 'x@y.z' WHERE id = 1", 1).await;
-    match db.execute_sql("SELECT email FROM users WHERE id = 1").await {
+    match to_response(db.execute_sql("SELECT email FROM users WHERE id = 1").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!("x@y.z"));
         }
@@ -214,8 +226,10 @@ async fn update_key_not_found_takes_priority() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100) NOT NULL)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO users VALUES (1, 'a@b.c')", 1).await;
 
     expect_error(
@@ -238,8 +252,10 @@ async fn insert_duplicate_unique_value_rejected_side_effect_free() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
 
     expect_error(&db, "INSERT INTO items VALUES (2, 100)", "Duplicate key").await;
@@ -258,8 +274,10 @@ async fn insert_distinct_unique_values_succeed() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
     expect_affected(&db, "INSERT INTO items VALUES (2, 200)", 1).await;
     expect_count(&db, "items", 2).await;
@@ -273,8 +291,10 @@ async fn insert_multiple_nulls_into_unique_column_succeed() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, NULL)", 1).await;
     expect_affected(&db, "INSERT INTO items VALUES (2, NULL)", 1).await;
     expect_count(&db, "items", 2).await;
@@ -288,8 +308,10 @@ async fn two_unique_columns_enforced_independently() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, a INT UNIQUE, b INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, a INT UNIQUE, b INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO t VALUES (1, 10, 20)", 1).await;
 
     // a 冲突
@@ -313,8 +335,10 @@ async fn update_set_unique_to_existing_value_rejected_keeps_old() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
     expect_affected(&db, "INSERT INTO items VALUES (2, 200)", 1).await;
 
@@ -326,7 +350,7 @@ async fn update_set_unique_to_existing_value_rejected_keeps_old() {
     .await;
 
     // 原值保持：id=1 仍是 100
-    match db.execute_sql("SELECT code FROM items WHERE id = 1").await {
+    match to_response(db.execute_sql("SELECT code FROM items WHERE id = 1").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(100), "原值必须保持");
         }
@@ -342,8 +366,10 @@ async fn update_non_unique_column_keeps_uniqueness_enforced() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE, tag INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE, tag INT)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, 100, 1)", 1).await;
     expect_affected(&db, "INSERT INTO items VALUES (2, 200, 2)", 1).await;
 
@@ -362,8 +388,10 @@ async fn update_set_unique_to_new_value_moves_occupancy() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
     expect_affected(&db, "INSERT INTO items VALUES (2, 200)", 1).await;
 
@@ -384,8 +412,10 @@ async fn update_set_unique_to_null_frees_value() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
 
     expect_affected(&db, "UPDATE items SET code = NULL WHERE id = 1", 1).await;
@@ -404,8 +434,10 @@ async fn update_pk_rekey_follows_all_unique_entries() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, a INT UNIQUE, b INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, a INT UNIQUE, b INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO t VALUES (1, 10, 20)", 1).await;
     expect_affected(&db, "INSERT INTO t VALUES (2, 11, 21)", 1).await;
 
@@ -431,8 +463,10 @@ async fn delete_unique_row_then_reinsert_same_value_succeeds() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
     expect_affected(&db, "DELETE FROM items WHERE id = 1", 1).await;
 
@@ -455,8 +489,10 @@ async fn crash_recovery_rebuilds_unique_enforcement() {
     let path = db_path(&dir);
 
     let db = Database::open(&path).await.unwrap();
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     // 夹具先例（wal_recovery_large_test.rs）：DDL 后 checkpoint 落盘
     // catalog，再注入 DML——崩溃恢复面针对 redo + 重建，不针对 catalog。
     db.checkpoint().await.unwrap();
@@ -484,8 +520,10 @@ async fn clean_reopen_keeps_unique_enforcement() {
 
     {
         let db = Database::open(&path).await.unwrap();
-        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-            .await;
+        to_response(
+            db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+        );
         expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
         db.close().await.unwrap();
     }
@@ -509,8 +547,10 @@ async fn cross_chain_duplicate_unique_value_fails_recovery_named() {
 
     {
         let db = Database::open(&path).await.unwrap();
-        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-            .await;
+        to_response(
+            db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+        );
         // 夹具先例：DDL 后 checkpoint 落盘 catalog（同 (a)）
         db.checkpoint().await.unwrap();
         expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
@@ -560,21 +600,25 @@ async fn drop_table_with_unique_index_releases_pages_for_reuse() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE big (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE big (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     for i in 0..100u64 {
         let sql = format!("INSERT INTO big VALUES ({i}, {})", 10_000 + i);
         expect_affected(&db, &sql, 1).await;
     }
     let pages_before = db.buffer_pool.storage().page_count();
 
-    match db.execute_sql("DROP TABLE big").await {
+    match to_response(db.execute_sql("DROP TABLE big").await) {
         Response::AffectedRows { .. } => {}
         other => panic!("Expected AffectedRows for DROP, got {:?}", other),
     }
 
-    db.execute_sql("CREATE TABLE fresh (id INT PRIMARY KEY)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE fresh (id INT PRIMARY KEY)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO fresh VALUES (1)", 1).await;
     expect_count(&db, "fresh", 1).await;
 
@@ -600,8 +644,10 @@ async fn insert_non_int_into_int_unique_column_rejected_key_type_mismatch() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
 
     expect_error(
         &db,
@@ -626,8 +672,10 @@ async fn update_set_int_unique_column_to_non_int_rejected_keeps_old_value() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
-    db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, code INT UNIQUE)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO items VALUES (1, 100)", 1).await;
 
     expect_error(
@@ -638,7 +686,7 @@ async fn update_set_int_unique_column_to_non_int_rejected_keeps_old_value() {
     .await;
 
     // 原行保持：id=1 的 code 仍为 100
-    match db.execute_sql("SELECT code FROM items WHERE id = 1").await {
+    match to_response(db.execute_sql("SELECT code FROM items WHERE id = 1").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(100), "原值必须保持");
         }
@@ -682,12 +730,18 @@ async fn create_table_non_integer_pk_rejected_side_effect_free() {
     }
 
     // INTEGER 声明全形态保持可达且强制生效（含表级形态、INT 别名拼写）。
-    db.execute_sql("CREATE TABLE ok_col (id INT PRIMARY KEY, v INT)")
-        .await;
-    db.execute_sql("CREATE TABLE ok_alias (id INTEGER PRIMARY KEY, v INT)")
-        .await;
-    db.execute_sql("CREATE TABLE ok_tbl (id INT, v INT, PRIMARY KEY(id))")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE ok_col (id INT PRIMARY KEY, v INT)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("CREATE TABLE ok_alias (id INTEGER PRIMARY KEY, v INT)")
+            .await,
+    );
+    to_response(
+        db.execute_sql("CREATE TABLE ok_tbl (id INT, v INT, PRIMARY KEY(id))")
+            .await,
+    );
     for t in ["ok_col", "ok_alias", "ok_tbl"] {
         expect_affected(&db, &format!("INSERT INTO {t} VALUES (1, 10)"), 1).await;
         expect_error(
@@ -700,12 +754,14 @@ async fn create_table_non_integer_pk_rejected_side_effect_free() {
     }
 
     // 隐式主键（无 PK 声明）不受检查波及：INT 首列仍强制重复拒绝。
-    db.execute_sql("CREATE TABLE imp (id INT, v INT)").await;
+    to_response(db.execute_sql("CREATE TABLE imp (id INT, v INT)").await);
     expect_affected(&db, "INSERT INTO imp VALUES (1, 10)", 1).await;
     expect_error(&db, "INSERT INTO imp VALUES (1, 11)", "Duplicate key").await;
     // 非 INT 首列的隐式主键 = 无键行语义（重复合法，逐字节保持）。
-    db.execute_sql("CREATE TABLE imp_txt (name TEXT, v INT)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE imp_txt (name TEXT, v INT)")
+            .await,
+    );
     expect_affected(&db, "INSERT INTO imp_txt VALUES ('a', 1)", 1).await;
     expect_affected(&db, "INSERT INTO imp_txt VALUES ('a', 2)", 1).await;
     expect_count(&db, "imp_txt", 2).await;
@@ -753,13 +809,13 @@ async fn legacy_non_integer_pk_table_still_usable() {
     expect_affected(&db, "INSERT INTO s VALUES ('a', 1)", 1).await;
     expect_affected(&db, "INSERT INTO s VALUES ('a', 2)", 1).await;
     expect_count(&db, "s", 2).await;
-    match db.execute_sql("SELECT v FROM s WHERE name = 'a'").await {
+    match to_response(db.execute_sql("SELECT v FROM s WHERE name = 'a'").await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 2, "两行均在：{rows:?}");
         }
         other => panic!("Expected QueryResult, got {:?}", other),
     }
-    db.execute_sql("DROP TABLE s").await;
+    to_response(db.execute_sql("DROP TABLE s").await);
     expect_error(&db, "SELECT COUNT(*) FROM s", "not found").await;
     db.wal_buffer.as_ref().unwrap().shutdown().await;
 }

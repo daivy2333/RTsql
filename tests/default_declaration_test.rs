@@ -15,7 +15,7 @@
 //! String 声明同态）、非日期族维持拒绝；ALTER ADD COLUMN 同款。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
@@ -49,7 +49,7 @@ fn query_rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
 
 async fn expect_table_absent(db: &Database, table: &str, what: &str) {
     let sql = format!("SELECT COUNT(*) FROM {table}");
-    match db.execute_sql(&sql).await {
+    match to_response(db.execute_sql(&sql).await) {
         Response::Error { .. } => {}
         other => panic!("{what} 拒绝后表必须不存在，实际 {other:?}"),
     }
@@ -98,7 +98,7 @@ async fn create_table_bool_default_int_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     let message = expect_error(
-        db.execute_sql("CREATE TABLE t (b BOOL DEFAULT 1)").await,
+        to_response(db.execute_sql("CREATE TABLE t (b BOOL DEFAULT 1)").await),
         "BOOL 列 DEFAULT 1 建表",
     );
     assert!(
@@ -121,7 +121,7 @@ async fn create_table_cross_type_default_matrix_rejected() {
         ("CREATE TABLE t2 (s STRING DEFAULT 1)", "s", "STRING", "INT"),
         ("CREATE TABLE t3 (a INT DEFAULT 1.5)", "a", "INT", "FLOAT"),
     ] {
-        let message = expect_error(db.execute_sql(sql).await, sql);
+        let message = expect_error(to_response(db.execute_sql(sql).await), sql);
         assert!(
             message.contains(col) && message.contains(expected) && message.contains(actual),
             "{sql} 错误必须点名列名与类型，实际: {message}"
@@ -143,8 +143,10 @@ async fn create_table_invalid_date_string_default_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     let message = expect_error(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, d DATE DEFAULT '2026-13-99')")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, d DATE DEFAULT '2026-13-99')")
+                .await,
+        ),
         "非法日期 DEFAULT 建表",
     );
     assert!(message.contains('d'), "错误必须点名列名，实际: {message}");
@@ -165,16 +167,18 @@ async fn float_column_int_default_normalized_across_restart() {
         let db = Database::open(&path).await.unwrap();
 
         expect_affected(
-            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, score FLOAT DEFAULT 2)")
-                .await,
+            to_response(
+                db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, score FLOAT DEFAULT 2)")
+                    .await,
+            ),
             "建表",
         );
         expect_affected(
-            db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+            to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
             "省略 score 的 INSERT",
         );
         let rows = query_rows(
-            db.execute_sql("SELECT score FROM t WHERE id = 1").await,
+            to_response(db.execute_sql("SELECT score FROM t WHERE id = 1").await),
             "默认值读回",
         );
         assert_eq!(
@@ -187,11 +191,11 @@ async fn float_column_int_default_normalized_across_restart() {
 
     let db2 = Database::open(&path).await.unwrap();
     expect_affected(
-        db2.execute_sql("INSERT INTO t (id) VALUES (2)").await,
+        to_response(db2.execute_sql("INSERT INTO t (id) VALUES (2)").await),
         "重开后省略 score 的 INSERT",
     );
     let rows = query_rows(
-        db2.execute_sql("SELECT score FROM t WHERE id = 2").await,
+        to_response(db2.execute_sql("SELECT score FROM t WHERE id = 2").await),
         "重开后默认值读回",
     );
     assert_eq!(rows[0][0], serde_json::json!(2.0), "归一持久化跨重启一致");
@@ -205,16 +209,18 @@ async fn date_column_string_default_accepted_reads_back() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, d DATE DEFAULT '2026-01-02')")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, d DATE DEFAULT '2026-01-02')")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "省略 d 的 INSERT",
     );
     let rows = query_rows(
-        db.execute_sql("SELECT d FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT d FROM t WHERE id = 1").await),
         "默认值读回",
     );
     assert_eq!(rows[0][0], serde_json::json!("2026-01-02"));
@@ -228,16 +234,18 @@ async fn default_null_exempt_on_bool_column() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, b BOOL DEFAULT NULL)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, b BOOL DEFAULT NULL)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "省略 b 的 INSERT",
     );
     let rows = query_rows(
-        db.execute_sql("SELECT b FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT b FROM t WHERE id = 1").await),
         "默认值读回",
     );
     assert_eq!(
@@ -255,16 +263,18 @@ async fn bool_column_bool_default_accepted_control() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, b BOOL DEFAULT TRUE)")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, b BOOL DEFAULT TRUE)")
+                .await,
+        ),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "省略 b 的 INSERT",
     );
     let rows = query_rows(
-        db.execute_sql("SELECT b FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT b FROM t WHERE id = 1").await),
         "默认值读回",
     );
     assert_eq!(rows[0][0], serde_json::json!(true));
@@ -283,16 +293,18 @@ async fn date_typedstring_default_accepted() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, d DATE DEFAULT DATE '2026-01-02')")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, d DATE DEFAULT DATE '2026-01-02')")
+                .await,
+        ),
         "TypedString DATE DEFAULT 建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "省略 d 的 INSERT",
     );
     let rows = query_rows(
-        db.execute_sql("SELECT d FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT d FROM t WHERE id = 1").await),
         "默认值读回",
     );
     assert_eq!(rows[0][0], serde_json::json!("2026-01-02"));
@@ -306,18 +318,18 @@ async fn timestamp_typedstring_default_accepted() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql(
+        to_response(db.execute_sql(
             "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP DEFAULT TIMESTAMP '2026-01-02 10:30:00')",
         )
-        .await,
+        .await),
         "TypedString TIMESTAMP DEFAULT 建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "省略 ts 的 INSERT",
     );
     let rows = query_rows(
-        db.execute_sql("SELECT ts FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT ts FROM t WHERE id = 1").await),
         "默认值读回",
     );
     assert_eq!(rows[0][0], serde_json::json!("2026-01-02 10:30:00"));
@@ -331,8 +343,10 @@ async fn non_datetime_typedstring_still_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     let message = expect_error(
-        db.execute_sql("CREATE TABLE t (a INT DEFAULT INT '5')")
-            .await,
+        to_response(
+            db.execute_sql("CREATE TABLE t (a INT DEFAULT INT '5')")
+                .await,
+        ),
         "非日期族 TypedString 建表",
     );
     assert!(
@@ -451,12 +465,14 @@ async fn alter_add_column_bool_default_int_rejected() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await,
+        to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await),
         "建表",
     );
     let message = expect_error(
-        db.execute_sql("ALTER TABLE t ADD COLUMN b BOOL DEFAULT 1")
-            .await,
+        to_response(
+            db.execute_sql("ALTER TABLE t ADD COLUMN b BOOL DEFAULT 1")
+                .await,
+        ),
         "ADD COLUMN BOOL DEFAULT 1",
     );
     assert!(
@@ -466,11 +482,11 @@ async fn alter_add_column_bool_default_int_rejected() {
 
     // 零副作用：表结构不变（无 b 列）。
     expect_affected(
-        db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "拒绝后原结构 INSERT",
     );
     let rows = query_rows(
-        db.execute_sql("SELECT id FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT id FROM t WHERE id = 1").await),
         "原结构查询",
     );
     assert_eq!(rows[0].len(), 1, "ADD COLUMN 拒绝必须零副作用");
@@ -484,20 +500,22 @@ async fn alter_add_column_date_default_existing_rows_read_back() {
     let db = Database::open(&db_path(&dir)).await.unwrap();
 
     expect_affected(
-        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await,
+        to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await),
         "建表",
     );
     expect_affected(
-        db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "存量行",
     );
     expect_affected(
-        db.execute_sql("ALTER TABLE t ADD COLUMN d DATE DEFAULT '2026-01-02'")
-            .await,
+        to_response(
+            db.execute_sql("ALTER TABLE t ADD COLUMN d DATE DEFAULT '2026-01-02'")
+                .await,
+        ),
         "ADD COLUMN DATE DEFAULT",
     );
     let rows = query_rows(
-        db.execute_sql("SELECT d FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT d FROM t WHERE id = 1").await),
         "存量行默认值读回",
     );
     assert_eq!(rows[0][0], serde_json::json!("2026-01-02"));

@@ -11,7 +11,7 @@
 //! 「碰巧正确」区——本文件是缺口修复的载体。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;
 
 async fn open_db() -> Database {
@@ -21,11 +21,11 @@ async fn open_db() -> Database {
 }
 
 async fn exec(db: &Database, sql: &str) -> Response {
-    db.execute_sql(sql).await
+    to_response(db.execute_sql(sql).await)
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"

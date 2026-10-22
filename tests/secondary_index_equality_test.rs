@@ -8,7 +8,7 @@
 //! 边界子树漏发；失败语句 abort 路径残留幻影条目（COUNT 漂移）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::{tempdir, TempDir};
 
 const ROWS: i64 = 15000;
@@ -23,14 +23,14 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::Error { message, .. } => panic!("{sql:?} failed: {message}"),
         _ => {}
     }
 }
 
 async fn query_i64(db: &Database, sql: &str, what: &str) -> i64 {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => rows[0][0]
             .as_i64()
             .unwrap_or_else(|| panic!("{what}: not an integer: {:?}", rows[0][0])),
@@ -144,7 +144,7 @@ async fn failed_statement_leaves_no_index_side_effects() {
     exec_ok(&db, "DELETE FROM t WHERE id = 2").await;
     let before = count_matrix(&db, "pre-failure count").await;
 
-    let resp = db.execute_sql("UPDATE t SET id = id + 1").await;
+    let resp = to_response(db.execute_sql("UPDATE t SET id = id + 1").await);
     match &resp {
         Response::Error { message, .. } => assert!(
             message.to_lowercase().contains("duplicate"),

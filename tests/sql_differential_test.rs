@@ -30,7 +30,7 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rusqlite::Connection;
 use serde_json::Value as JsonVal;
 use std::cmp::Ordering;
@@ -341,7 +341,7 @@ async fn build_engines() -> Engines {
         .await
         .expect("open RTsql :memory:");
     for (i, stmt) in stmts.iter().enumerate() {
-        match rt.execute_sql(stmt).await {
+        match to_response(rt.execute_sql(stmt).await) {
             Response::QueryResult { .. } | Response::AffectedRows { .. } => {}
             Response::Error { message, .. } => {
                 panic!("seed stmt #{i} failed on RTsql: {message}\n{stmt}")
@@ -362,7 +362,7 @@ async fn build_engines() -> Engines {
 // ---------------------------------------------------------------------------
 
 async fn rows_rt(db: &Database, id: &str, sql: &str) -> NormRows {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => {
             normalize(rows.into_iter().map(|r| r.iter().map(norm_rt).collect()))
         }
@@ -776,7 +776,7 @@ const OB_ROWS: &[(&str, &str)] = &[
 
 /// 有序执行：不做行间排序归一化，逐行逐位比较（ORDER BY 语义专用通道）。
 async fn rows_rt_ordered(db: &Database, id: &str, sql: &str) -> NormRows {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => rows
             .into_iter()
             .map(|r| r.iter().map(norm_rt).collect())
@@ -829,7 +829,7 @@ async fn order_and_aggregate_fixed_expectations() {
         .expect("open RTsql :memory:");
     let sq = Connection::open_in_memory().expect("open SQLite :memory:");
     for (sql, id) in std::iter::once((OB_DDL, "ob-ddl")).chain(OB_ROWS.iter().copied()) {
-        match rt.execute_sql(sql).await {
+        match to_response(rt.execute_sql(sql).await) {
             Response::QueryResult { .. } | Response::AffectedRows { .. } => {}
             Response::Error { message, .. } => panic!("[{id}] RTsql failed: {message}"),
             other => panic!("[{id}] unexpected response {other:?}"),

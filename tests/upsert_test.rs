@@ -7,7 +7,7 @@
 //! 恢复两态与显式事务面在文件末段（2.5）。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -16,7 +16,7 @@ fn db_path(dir: &TempDir) -> PathBuf {
 }
 
 async fn expect_error(db: &Database, sql: &str, needle: &str) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::Error { message, .. } => assert!(
             message.contains(needle),
             "expected error containing {needle:?}, got: {message}"
@@ -26,7 +26,7 @@ async fn expect_error(db: &Database, sql: &str, needle: &str) {
 }
 
 async fn expect_affected(db: &Database, sql: &str, count: u64) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::AffectedRows { count: c } => assert_eq!(c, count, "{sql}"),
         other => panic!("Expected AffectedRows({count}) for {sql}, got {:?}", other),
     }
@@ -34,7 +34,7 @@ async fn expect_affected(db: &Database, sql: &str, count: u64) {
 
 async fn expect_count(db: &Database, table: &str, count: usize) {
     let sql = format!("SELECT COUNT(*) FROM {table}");
-    match db.execute_sql(&sql).await {
+    match to_response(db.execute_sql(&sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(count), "{sql}");
         }
@@ -43,7 +43,7 @@ async fn expect_count(db: &Database, table: &str, count: usize) {
 }
 
 async fn expect_where_count(db: &Database, sql: &str, count: usize) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][0], serde_json::json!(count), "{sql}");
         }
@@ -52,7 +52,7 @@ async fn expect_where_count(db: &Database, sql: &str, count: usize) {
 }
 
 async fn expect_cell(db: &Database, sql: &str, column: usize, expected: serde_json::Value) {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => {
             assert_eq!(rows[0][column], expected, "{sql}");
         }
@@ -62,10 +62,10 @@ async fn expect_cell(db: &Database, sql: &str, column: usize, expected: serde_js
 
 /// 建夹具表：id INT PK / name VARCHAR（DEFAULT 'anon'）/ code INT UNIQUE。
 async fn setup(db: &Database) {
-    db.execute_sql(
+    to_response(db.execute_sql(
         "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) DEFAULT 'anon', code INT UNIQUE)",
     )
-    .await;
+    .await);
     db.checkpoint().await.unwrap();
 }
 
@@ -668,8 +668,10 @@ async fn do_update_rekey_maintains_pk_entry() {
 async fn do_update_not_null_violation_is_side_effect_free() {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&db_path(&dir)).await.unwrap();
-    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, req VARCHAR(100) NOT NULL)")
-        .await;
+    to_response(
+        db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, req VARCHAR(100) NOT NULL)")
+            .await,
+    );
     db.checkpoint().await.unwrap();
     expect_affected(&db, "INSERT INTO t VALUES (1, 'keep')", 1).await;
 
@@ -993,23 +995,25 @@ async fn explicit_tx_upsert_failure_rolls_back_and_allows_reinsert() {
 
     let tx = db.begin().await.unwrap();
     // 唯一碰撞 → 零副作用拒绝（拒绝语句不产生任何写入）
-    let rejected = db
-        .execute_in_tx(
+    let rejected = to_response(
+        db.execute_in_tx(
             "INSERT INTO users VALUES (1, 'Zed', 200) ON CONFLICT (id) DO UPDATE SET code = 200",
             &tx,
         )
-        .await;
+        .await,
+    );
     assert!(
         matches!(rejected, Response::Error { .. }),
         "事务内唯一碰撞必须报错，实际: {rejected:?}"
     );
     // 同事务内的成功 upsert 随后被回滚
-    let applied = db
-        .execute_in_tx(
+    let applied = to_response(
+        db.execute_in_tx(
             "INSERT INTO users VALUES (1, 'Zed', 300) ON CONFLICT (id) DO UPDATE SET name = 'Zed'",
             &tx,
         )
-        .await;
+        .await,
+    );
     assert!(
         matches!(applied, Response::AffectedRows { count: 1 }),
         "同事务内合法 upsert 应成功，实际: {applied:?}"
@@ -1053,12 +1057,12 @@ async fn explicit_tx_upsert_commit_persists() {
     expect_affected(&db, "INSERT INTO users VALUES (1, 'Alice', 100)", 1).await;
 
     let tx = db.begin().await.unwrap();
-    match db
+    match to_response(db
         .execute_in_tx(
             "INSERT INTO users VALUES (1, 'Zed', 300) ON CONFLICT (id) DO UPDATE SET name = 'Zed', code = 300",
             &tx,
         )
-        .await
+        .await)
     {
         Response::AffectedRows { count } => assert_eq!(count, 1),
         other => panic!("Expected AffectedRows(1), got {:?}", other),
@@ -1094,10 +1098,10 @@ async fn explicit_tx_replace_rollback_restores_row() {
     expect_affected(&db, "INSERT INTO users VALUES (1, 'Alice', 100)", 1).await;
 
     let tx = db.begin().await.unwrap();
-    match db
-        .execute_in_tx("REPLACE INTO users VALUES (1, 'Zed', 300)", &tx)
-        .await
-    {
+    match to_response(
+        db.execute_in_tx("REPLACE INTO users VALUES (1, 'Zed', 300)", &tx)
+            .await,
+    ) {
         Response::AffectedRows { count } => assert_eq!(count, 1),
         other => panic!("Expected AffectedRows(1), got {:?}", other),
     }
@@ -1105,7 +1109,7 @@ async fn explicit_tx_replace_rollback_restores_row() {
 
     // 回滚后原行按 abort 通道复现（墓碑中和），且墓碑的 PK 与唯一索引条目
     // 经 replan 2.9 还原——点查可达（修复前丢失，见显式事务回滚矩阵）。
-    match db.execute_sql("SELECT * FROM users").await {
+    match to_response(db.execute_sql("SELECT * FROM users").await) {
         Response::QueryResult { rows } => assert_eq!(
             rows,
             vec![vec![

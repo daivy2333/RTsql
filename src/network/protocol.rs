@@ -4,6 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::network::error::NetworkError;
+use crate::result::{value_to_json, SqlError, SqlOutcome};
 
 /// Protocol abstraction trait
 #[async_trait]
@@ -57,6 +58,27 @@ impl Request {
             Request::Delete { sql } => Some(sql),
             Request::Ping => None,
         }
+    }
+}
+
+/// 类型化执行结果 → 协议响应（MS31-T01 边界转换）。
+///
+/// 四臂映射：`Ok(Rows)` → `QueryResult`（逐值 `value_to_json`）、
+/// `Ok(AffectedRows)` → `AffectedRows`、`Err` → `Error` 原样透传。
+/// `Pong` 不进类型化结果——Ping 由 `SqlHandler` 在调用库入口前本地处理。
+pub fn to_response(outcome: std::result::Result<SqlOutcome, SqlError>) -> Response {
+    match outcome {
+        Ok(SqlOutcome::Rows { rows, .. }) => Response::QueryResult {
+            rows: rows
+                .into_iter()
+                .map(|row| row.into_iter().map(value_to_json).collect())
+                .collect(),
+        },
+        Ok(SqlOutcome::AffectedRows(count)) => Response::AffectedRows { count },
+        Err(error) => Response::Error {
+            message: error.message,
+            sqlstate: error.sqlstate,
+        },
     }
 }
 
@@ -128,6 +150,8 @@ impl Protocol for JsonProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::Value;
+    use crate::result::{ColumnMeta, SqlError, SqlOutcome};
 
     /// R3 场景 4 通道：None 时 JSON 输出逐字节不变（既有协议兼容见证）。
     #[test]
@@ -149,5 +173,56 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json, r#"{"Error":{"message":"boom","sqlstate":"0A000"}}"#);
+    }
+
+    /// T1：边界转换映射矩阵——Ok(Rows) → QueryResult（逐值 `value_to_json`
+    /// 转换，Float NaN → Null、Date → DA5 字符串）。
+    #[test]
+    fn to_response_maps_rows_with_value_conversion() {
+        let outcome = Ok(SqlOutcome::Rows {
+            columns: vec![ColumnMeta {
+                name: "a".to_string(),
+                column_type: None,
+            }],
+            rows: vec![
+                vec![Value::Int(1), Value::Float(f64::NAN)],
+                vec![Value::Date(0), Value::Null],
+            ],
+        });
+        match to_response(outcome) {
+            Response::QueryResult { rows } => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0][0], serde_json::json!(1));
+                assert_eq!(rows[0][1], serde_json::Value::Null);
+                assert_eq!(rows[1][0], serde_json::json!("0001-01-01"));
+                assert_eq!(rows[1][1], serde_json::Value::Null);
+            }
+            other => panic!("expected QueryResult, got {other:?}"),
+        }
+    }
+
+    /// T1：Ok(AffectedRows) → AffectedRows 透传。
+    #[test]
+    fn to_response_maps_affected_rows() {
+        match to_response(Ok(SqlOutcome::AffectedRows(3))) {
+            Response::AffectedRows { count } => assert_eq!(count, 3),
+            other => panic!("expected AffectedRows, got {other:?}"),
+        }
+    }
+
+    /// T1：Err(SqlError) → Error{message, sqlstate} 逐字段相等。
+    #[test]
+    fn to_response_maps_error_payload_field_by_field() {
+        let outcome = Err(SqlError {
+            message: "boom".to_string(),
+            sqlstate: Some("42703".to_string()),
+        });
+        match to_response(outcome) {
+            Response::Error { message, sqlstate } => {
+                assert_eq!(message, "boom");
+                assert_eq!(sqlstate, Some("42703".to_string()));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }

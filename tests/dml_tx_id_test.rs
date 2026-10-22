@@ -8,7 +8,7 @@
 //!         `active_transactions()` 永为 0。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::RowId;
 use tempfile::tempdir;
 
@@ -18,7 +18,7 @@ async fn open_db_with_table(table_sql: &str) -> (Database, tempfile::TempDir) {
     let db = Database::open(&dir.path().join("test.db"))
         .await
         .expect("Failed to open database");
-    let resp = db.execute_sql(table_sql).await;
+    let resp = to_response(db.execute_sql(table_sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "CREATE TABLE failed: {:?}",
@@ -50,9 +50,10 @@ async fn read_vh(
 async fn test_insert_writes_real_create_tx_id() {
     let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
 
-    let resp = db
-        .execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
-        .await;
+    let resp = to_response(
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+            .await,
+    );
     assert!(
         matches!(resp, Response::AffectedRows { count: 1 }),
         "{:?}",
@@ -79,11 +80,14 @@ async fn test_insert_writes_real_create_tx_id() {
 async fn test_update_writes_real_create_tx_id() {
     let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
 
-    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
-        .await;
-    let resp = db
-        .execute_sql("UPDATE t SET name = 'bob' WHERE id = 1")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+            .await,
+    );
+    let resp = to_response(
+        db.execute_sql("UPDATE t SET name = 'bob' WHERE id = 1")
+            .await,
+    );
     assert!(
         matches!(resp, Response::AffectedRows { count: 1 }),
         "{:?}",
@@ -126,9 +130,11 @@ async fn test_update_writes_real_create_tx_id() {
 async fn test_delete_writes_real_create_tx_id() {
     let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
 
-    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
-        .await;
-    let resp = db.execute_sql("DELETE FROM t WHERE id = 1").await;
+    to_response(
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+            .await,
+    );
+    let resp = to_response(db.execute_sql("DELETE FROM t WHERE id = 1").await);
     assert!(
         matches!(resp, Response::AffectedRows { count: 1 }),
         "{:?}",
@@ -157,16 +163,19 @@ async fn test_delete_writes_real_create_tx_id() {
 async fn test_insert_duplicate_pk_aborts_transaction() {
     let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
 
-    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+            .await,
+    );
 
     // Snapshot the current tx id (the successful INSERT committed; allocator advanced).
     let tx_id_before = db.transaction_manager.current_tx_id();
 
     // Duplicate PK should fail.
-    let resp = db
-        .execute_sql("INSERT INTO t (id, name) VALUES (1, 'bob')")
-        .await;
+    let resp = to_response(
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'bob')")
+            .await,
+    );
     assert!(
         matches!(resp, Response::Error { .. }),
         "duplicate PK should error, got {:?}",
@@ -198,12 +207,13 @@ async fn test_consecutive_dml_have_unique_tx_ids() {
 
     let mut prev = initial;
     for i in 0..10 {
-        let resp = db
-            .execute_sql(&format!(
+        let resp = to_response(
+            db.execute_sql(&format!(
                 "INSERT INTO t (id, name) VALUES ({}, 'row{}')",
                 i, i
             ))
-            .await;
+            .await,
+        );
         assert!(
             matches!(resp, Response::AffectedRows { count: 1 }),
             "{:?}",
@@ -225,10 +235,12 @@ async fn test_consecutive_dml_have_unique_tx_ids() {
 async fn test_insert_visible_after_commit() {
     let (db, _dir) = open_db_with_table("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)").await;
 
-    db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
-        .await;
+    to_response(
+        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'alice')")
+            .await,
+    );
 
-    let resp = db.execute_sql("SELECT id, name FROM t WHERE id = 1").await;
+    let resp = to_response(db.execute_sql("SELECT id, name FROM t WHERE id = 1").await);
     match resp {
         Response::QueryResult { rows } => {
             assert_eq!(rows.len(), 1, "row must be visible after commit");

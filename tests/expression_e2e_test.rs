@@ -23,7 +23,7 @@
 //! 折叠覆盖完整。
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;
 
 async fn open_db() -> (Database, TempDir) {
@@ -33,7 +33,7 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -67,16 +67,18 @@ async fn in_match_and_negation() {
         exec_ok(&db, &format!("INSERT INTO t VALUES ({id})")).await;
     }
 
-    let rows = query_rows(db.execute_sql("SELECT id FROM t WHERE id IN (1, 3)").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT id FROM t WHERE id IN (1, 3)").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(1)], vec![serde_json::json!(3)]]
     );
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id FROM t WHERE id NOT IN (1, 3)")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(2)]]);
 }
 
@@ -89,19 +91,19 @@ async fn between_inclusive_endpoints() {
         exec_ok(&db, &format!("INSERT INTO t VALUES ({id})")).await;
     }
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id FROM t WHERE id BETWEEN 2 AND 3")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(2)], vec![serde_json::json!(3)]]
     );
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT id FROM t WHERE id NOT BETWEEN 2 AND 3")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(1)], vec![serde_json::json!(4)]]
@@ -120,22 +122,22 @@ async fn like_wildcards_and_negation() {
         exec_ok(&db, &format!("INSERT INTO t VALUES ('{name}')")).await;
     }
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT name FROM t WHERE name LIKE 'A%'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("Alice")]]);
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT name FROM t WHERE name LIKE '_ob'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("Bob")]]);
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT name FROM t WHERE name NOT LIKE '%o%'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("Alice")]]);
 }
 
@@ -148,10 +150,14 @@ async fn is_null_and_is_not_null() {
     exec_ok(&db, "INSERT INTO t VALUES (NULL)").await;
     exec_ok(&db, "INSERT INTO t VALUES (3)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE v IS NULL").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE v IS NULL").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(null)]]);
 
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE v IS NOT NULL").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE v IS NOT NULL").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(1)], vec![serde_json::json!(3)]]
@@ -169,10 +175,10 @@ async fn not_compound_predicate() {
     }
 
     // 既非 a=1 也非 b=2 → 仅 (3,9)
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT a, b FROM t WHERE NOT (a = 1 OR b = 2)")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(3), serde_json::json!(9)]]);
 }
 
@@ -183,10 +189,10 @@ async fn like_escape_clause_rejected() {
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('Alice')").await;
 
-    let msg = error_message(
+    let msg = error_message(to_response(
         db.execute_sql("SELECT name FROM t WHERE name LIKE 'A%' ESCAPE '\\'")
             .await,
-    );
+    ));
     assert!(
         msg.contains("LIKE ESCAPE clause is not supported"),
         "ESCAPE 子句必须显式拒绝，实际: {msg}"
@@ -200,10 +206,10 @@ async fn ilike_remains_unsupported() {
     exec_ok(&db, "CREATE TABLE t (name STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('Alice')").await;
 
-    let msg = error_message(
+    let msg = error_message(to_response(
         db.execute_sql("SELECT name FROM t WHERE name ILIKE 'a%'")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Unsupported expression type"),
         "ILIKE 必须维持拒绝，实际: {msg}"
@@ -222,10 +228,10 @@ async fn not_in_with_null_excludes_all() {
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
     exec_ok(&db, "INSERT INTO t VALUES (2)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t WHERE v NOT IN (2, NULL)")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         Vec::<Vec<serde_json::Value>>::new(),
@@ -241,10 +247,14 @@ async fn existing_comparison_null_behavior_unchanged() {
     exec_ok(&db, "INSERT INTO t VALUES (NULL)").await;
     exec_ok(&db, "INSERT INTO t VALUES (2)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE v = 2").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE v = 2").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(2)]]);
 
-    let rows = query_rows(db.execute_sql("SELECT v FROM t WHERE v > 0").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v FROM t WHERE v > 0").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(2)]]);
 }
 
@@ -255,7 +265,9 @@ async fn or_true_beats_unknown() {
     exec_ok(&db, "CREATE TABLE t (a INT, b INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (NULL, 1)").await;
 
-    let rows = query_rows(db.execute_sql("SELECT b FROM t WHERE a = 1 OR b = 1").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT b FROM t WHERE a = 1 OR b = 1").await,
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(1)]]);
 }
 
@@ -267,10 +279,10 @@ async fn not_is_null_inverts_normally() {
     exec_ok(&db, "INSERT INTO t VALUES (NULL)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t WHERE NOT (v IS NULL)")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(1)]]);
 }
 
@@ -287,17 +299,17 @@ async fn searched_case_branches() {
     exec_ok(&db, "INSERT INTO t VALUES (40)").await;
 
     // 命中分支：score >= 60 → 1
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT score FROM t WHERE CASE WHEN score >= 60 THEN 1 ELSE 0 END = 1")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(95)]]);
 
     // 缺省 ELSE → NULL：未命中行产出 NULL，经 IS NULL 捕获
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT score FROM t WHERE CASE WHEN score >= 60 THEN 1 END IS NULL")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(40)]]);
 }
 
@@ -310,16 +322,16 @@ async fn simple_case_null_operand_falls_to_else() {
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
     // operand NULL 与 1 比较为 Unknown → 不命中 → ELSE
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t WHERE CASE v WHEN 1 THEN 'one' ELSE 'other' END = 'other'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(null)]]);
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t WHERE CASE v WHEN 1 THEN 'one' ELSE 'other' END = 'one'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(1)]]);
 }
 
@@ -333,24 +345,24 @@ async fn coalesce_first_non_null_argument() {
     exec_ok(&db, "INSERT INTO t VALUES (NULL, NULL)").await;
 
     // 行 1：a NULL → 取 b='x'
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT b FROM t WHERE COALESCE(a, b, 'fallback') = 'x'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("x")]]);
 
     // 行 2：a='y' 非 NULL → 直接取 a
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT b FROM t WHERE COALESCE(a, b, 'fallback') = 'y'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("z")]]);
 
     // 行 3：全 NULL → 兜底参数
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT b FROM t WHERE COALESCE(a, b, 'fallback') = 'fallback'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(null)]]);
 }
 
@@ -361,10 +373,10 @@ async fn cast_string_to_int_both_faces() {
     exec_ok(&db, "CREATE TABLE t (s STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('42')").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT s FROM t WHERE CAST(s AS INT) = 42")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!("42")]]);
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;
@@ -373,10 +385,10 @@ async fn cast_string_to_int_both_faces() {
     let (db, _dir) = open_db().await;
     exec_ok(&db, "CREATE TABLE t (s STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('abc')").await;
-    let msg = error_message(
+    let msg = error_message(to_response(
         db.execute_sql("SELECT s FROM t WHERE CAST(s AS INT) = 42")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Type mismatch"),
         "'abc' 不可解析为 Int 必须执行期报错，实际: {msg}"
@@ -390,10 +402,10 @@ async fn cast_float_to_int_truncates_toward_zero() {
     exec_ok(&db, "CREATE TABLE t (f FLOAT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1.7)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT f FROM t WHERE CAST(f AS INT) = 1")
             .await,
-    );
+    ));
     assert_eq!(rows.len(), 1, "CAST(1.7 AS INT) = 1（截断向零）");
 }
 
@@ -406,10 +418,10 @@ async fn value_expression_as_predicate_operand() {
     exec_ok(&db, "INSERT INTO t VALUES (60.5)").await;
 
     // CAST(59.5) = 59 不命中；CAST(60.5) = 60 命中
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT f FROM t WHERE CAST(f AS INT) >= 60")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(60.5)]]);
 }
 
@@ -420,10 +432,10 @@ async fn cast_int_to_string_value_formatting() {
     exec_ok(&db, "CREATE TABLE t (v INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (42)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t WHERE CAST(v AS STRING) = '42'")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(42)]]);
 }
 
@@ -434,10 +446,10 @@ async fn cast_null_short_circuits() {
     exec_ok(&db, "CREATE TABLE t (v INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (7)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT v FROM t WHERE CAST(NULL AS INT) IS NULL")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![serde_json::json!(7)]]);
 }
 
@@ -448,19 +460,19 @@ async fn cast_bool_numeric_rejected() {
     exec_ok(&db, "CREATE TABLE t (v INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
-    let msg = error_message(
+    let msg = error_message(to_response(
         db.execute_sql("SELECT v FROM t WHERE CAST(v AS BOOL) = true")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Type mismatch"),
         "Int→Bool 必须拒绝，实际: {msg}"
     );
 
-    let msg = error_message(
+    let msg = error_message(to_response(
         db.execute_sql("SELECT v FROM t WHERE CAST(true AS INT) = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("Type mismatch"),
         "Bool→Int 必须拒绝，实际: {msg}"
@@ -474,10 +486,10 @@ async fn try_cast_rejected() {
     exec_ok(&db, "CREATE TABLE t (s STRING)").await;
     exec_ok(&db, "INSERT INTO t VALUES ('x')").await;
 
-    let msg = error_message(
+    let msg = error_message(to_response(
         db.execute_sql("SELECT s FROM t WHERE TRY_CAST(s AS INT) = 1")
             .await,
-    );
+    ));
     assert!(
         msg.contains("TRY_CAST"),
         "TRY_CAST 必须显式拒绝，实际: {msg}"
@@ -495,10 +507,10 @@ async fn cast_unknown_target_type_rejected() {
     exec_ok(&db, "CREATE TABLE t (v INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
-    let msg = error_message(
+    let msg = error_message(to_response(
         db.execute_sql("SELECT v FROM t WHERE CAST(v AS TIME) = v")
             .await,
-    );
+    ));
     assert!(
         msg.contains("CAST"),
         "未知 CAST 目标类型必须计划期拒绝，实际: {msg}"
@@ -525,7 +537,7 @@ async fn negative_number_literal_persists() {
     // DDL 无 WAL 记录：catalog 需先落盘（keyless_row_test 夹具先例）
     db.buffer_pool.flush_all().await.unwrap();
 
-    match db.execute_sql("INSERT INTO t VALUES (-1, 'x')").await {
+    match to_response(db.execute_sql("INSERT INTO t VALUES (-1, 'x')").await) {
         Response::AffectedRows { count: 1 } => {}
         other => panic!("负数 INSERT 应 affected 1，实际 {:?}", other),
     }
@@ -533,12 +545,14 @@ async fn negative_number_literal_persists() {
     // MS16 T8 校准：负 Float 行移入 Float 键列表（R3 强制后 Int 键列不接受）
     exec_ok(&db, "CREATE TABLE tf (f FLOAT, s STRING)").await;
     db.buffer_pool.flush_all().await.unwrap();
-    match db.execute_sql("INSERT INTO tf VALUES (-1.5, 'y')").await {
+    match to_response(db.execute_sql("INSERT INTO tf VALUES (-1.5, 'y')").await) {
         Response::AffectedRows { count: 1 } => {}
         other => panic!("负浮点 INSERT 应 affected 1，实际 {:?}", other),
     }
 
-    let rows = query_rows(db.execute_sql("SELECT v, s FROM t WHERE s = 'x'").await);
+    let rows = query_rows(to_response(
+        db.execute_sql("SELECT v, s FROM t WHERE s = 'x'").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(-1), serde_json::json!("x")]]
@@ -548,13 +562,17 @@ async fn negative_number_literal_persists() {
     drop(db);
 
     let db2 = Database::open(&path).await.unwrap();
-    let rows = query_rows(db2.execute_sql("SELECT v, s FROM t ORDER BY v").await);
+    let rows = query_rows(to_response(
+        db2.execute_sql("SELECT v, s FROM t ORDER BY v").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(-1), serde_json::json!("x")]],
         "负数行必须持久化并在重开后可见"
     );
-    let rows = query_rows(db2.execute_sql("SELECT f, s FROM tf ORDER BY f").await);
+    let rows = query_rows(to_response(
+        db2.execute_sql("SELECT f, s FROM tf ORDER BY f").await,
+    ));
     assert_eq!(
         rows,
         vec![vec![serde_json::json!(-1.5), serde_json::json!("y")]],
@@ -570,7 +588,9 @@ async fn non_literal_negation_still_rejected() {
     exec_ok(&db, "CREATE TABLE t (v INT)").await;
     exec_ok(&db, "INSERT INTO t VALUES (1)").await;
 
-    let msg = error_message(db.execute_sql("INSERT INTO t VALUES (-v)").await);
+    let msg = error_message(to_response(
+        db.execute_sql("INSERT INTO t VALUES (-v)").await,
+    ));
     assert!(
         msg.contains("Unsupported value type"),
         "列引用取负必须维持拒绝，实际: {msg}"

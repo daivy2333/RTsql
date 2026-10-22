@@ -151,7 +151,7 @@ impl RTsqlDirect {
         });
     }
 
-    fn execute(&self, sql: &str) -> rtsql::network::protocol::Response {
+    fn execute(&self, sql: &str) -> std::result::Result<rtsql::SqlOutcome, rtsql::SqlError> {
         let db = self.database.clone();
         self.runtime.block_on(async { db.execute_sql(sql).await })
     }
@@ -354,14 +354,14 @@ fn bench_rtsql_insert(c: &mut Criterion) {
     group.bench_function("insert_100_rows", |b| {
         b.iter(|| {
             for i in 0..100i64 {
-                rtsql.execute(&format!(
+                let _ = rtsql.execute(&format!(
                     "INSERT INTO bench VALUES ({}, 'user_{}', {})",
                     i,
                     i,
                     i * 10
                 ));
             }
-            rtsql.execute("DELETE FROM bench");
+            let _ = rtsql.execute("DELETE FROM bench");
         });
     });
 
@@ -374,7 +374,7 @@ fn bench_rtsql_select(c: &mut Criterion) {
 
     // Insert test data
     for i in 0..1000i64 {
-        rtsql.execute(&format!(
+        let _ = rtsql.execute(&format!(
             "INSERT INTO bench VALUES ({}, 'user_{}', {})",
             i,
             i,
@@ -387,7 +387,7 @@ fn bench_rtsql_select(c: &mut Criterion) {
 
     group.bench_function("pk_lookup_1k", |b| {
         b.iter(|| {
-            rtsql.execute("SELECT * FROM bench WHERE id = 42");
+            let _ = rtsql.execute("SELECT * FROM bench WHERE id = 42");
         });
     });
 
@@ -400,7 +400,7 @@ fn bench_rtsql_scan(c: &mut Criterion) {
 
     // Insert test data
     for i in 0..1000i64 {
-        rtsql.execute(&format!(
+        let _ = rtsql.execute(&format!(
             "INSERT INTO bench VALUES ({}, 'user_{}', {})",
             i,
             i,
@@ -413,7 +413,7 @@ fn bench_rtsql_scan(c: &mut Criterion) {
 
     group.bench_function("full_scan_1k", |b| {
         b.iter(|| {
-            rtsql.execute("SELECT * FROM bench");
+            let _ = rtsql.execute("SELECT * FROM bench");
         });
     });
 
@@ -446,14 +446,14 @@ fn bench_compare_insert(c: &mut Criterion) {
     group.bench_function("rtsql_insert_100", |b| {
         b.iter(|| {
             for i in 0..100i64 {
-                rtsql.execute(&format!(
+                let _ = rtsql.execute(&format!(
                     "INSERT INTO bench VALUES ({}, 'user_{}', {})",
                     i,
                     i,
                     i * 10
                 ));
             }
-            rtsql.execute("DELETE FROM bench");
+            let _ = rtsql.execute("DELETE FROM bench");
         });
     });
 
@@ -485,7 +485,7 @@ fn bench_compare_pk_lookup(c: &mut Criterion) {
     let rtsql = RTsqlDirect::new();
     rtsql.setup_bench_table();
     for i in 0..1000i64 {
-        rtsql.execute(&format!(
+        let _ = rtsql.execute(&format!(
             "INSERT INTO bench VALUES ({}, 'user_{}', {})",
             i,
             i,
@@ -494,7 +494,7 @@ fn bench_compare_pk_lookup(c: &mut Criterion) {
     }
     group.bench_function("rtsql_pk_lookup_1k", |b| {
         b.iter(|| {
-            rtsql.execute("SELECT * FROM bench WHERE id = 42");
+            let _ = rtsql.execute("SELECT * FROM bench WHERE id = 42");
         });
     });
 
@@ -525,7 +525,7 @@ fn bench_compare_full_scan(c: &mut Criterion) {
     let rtsql = RTsqlDirect::new();
     rtsql.setup_bench_table();
     for i in 0..1000i64 {
-        rtsql.execute(&format!(
+        let _ = rtsql.execute(&format!(
             "INSERT INTO bench VALUES ({}, 'user_{}', {})",
             i,
             i,
@@ -534,7 +534,7 @@ fn bench_compare_full_scan(c: &mut Criterion) {
     }
     group.bench_function("rtsql_full_scan_1k", |b| {
         b.iter(|| {
-            rtsql.execute("SELECT * FROM bench");
+            let _ = rtsql.execute("SELECT * FROM bench");
         });
     });
 
@@ -575,14 +575,14 @@ fn bench_split_performance(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("rtsql_insert", size), |b| {
             b.iter(|| {
                 for i in 0..*size {
-                    rtsql.execute(&format!(
+                    let _ = rtsql.execute(&format!(
                         "INSERT INTO bench VALUES ({}, 'user_{}', {})",
                         i,
                         i,
                         i * 10
                     ));
                 }
-                rtsql.execute("DELETE FROM bench");
+                let _ = rtsql.execute("DELETE FROM bench");
             });
         });
     }
@@ -617,7 +617,7 @@ fn bench_pk_lookup_after_split(c: &mut Criterion) {
         let rtsql = RTsqlDirect::new();
         rtsql.setup_bench_table();
         for i in 0..*size as i64 {
-            rtsql.execute(&format!(
+            let _ = rtsql.execute(&format!(
                 "INSERT INTO bench VALUES ({}, 'user_{}', {})",
                 i,
                 i,
@@ -626,7 +626,7 @@ fn bench_pk_lookup_after_split(c: &mut Criterion) {
         }
         group.bench_function(BenchmarkId::new("rtsql_pk_lookup", size), |b| {
             b.iter(|| {
-                rtsql.execute(&format!("SELECT * FROM bench WHERE id = {}", size / 2));
+                let _ = rtsql.execute(&format!("SELECT * FROM bench WHERE id = {}", size / 2));
             });
         });
     }
@@ -679,7 +679,7 @@ fn bench_non_unique_index(c: &mut Criterion) {
     rtsql.setup_bench_table();
     for i in 0..1000i64 {
         let dup_val = i / 10;
-        rtsql.execute(&format!(
+        let _ = rtsql.execute(&format!(
             "INSERT INTO bench VALUES ({}, 'user_{}', {})",
             i, i, dup_val
         ));
@@ -687,7 +687,7 @@ fn bench_non_unique_index(c: &mut Criterion) {
 
     group.bench_function("rtsql_search_duplicates", |b| {
         b.iter(|| {
-            rtsql.execute("SELECT * FROM bench WHERE value = 50");
+            let _ = rtsql.execute("SELECT * FROM bench WHERE value = 50");
         });
     });
 
@@ -744,7 +744,7 @@ fn bench_file_size(c: &mut Criterion) {
                 .unwrap();
         });
         for i in 0..*size as i64 {
-            runtime.block_on(async {
+            let _ = runtime.block_on(async {
                 rtsql_db
                     .execute_sql(&format!(
                         "INSERT INTO bench VALUES ({}, 'user_{}', {})",

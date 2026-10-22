@@ -15,6 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use rtsql::database::Database;
+use rtsql::network::protocol::to_response;
 use rtsql::storage::{FileStorage, StorageError};
 use rtsql::transaction::IsolationLevel;
 use tempfile::TempDir;
@@ -335,10 +336,12 @@ async fn test_cli_attach_waits_within_budget() {
     {
         let main_db = Database::open(&main_path).await.unwrap();
         let att_db = Database::open(&att_path).await.unwrap();
-        att_db
-            .execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
-            .await;
-        att_db.execute_sql("INSERT INTO t VALUES (1)").await;
+        to_response(
+            att_db
+                .execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
+                .await,
+        );
+        to_response(att_db.execute_sql("INSERT INTO t VALUES (1)").await);
         // lib 契约：DDL 无 WAL，drop 不 close——显式落盘 schema 与数据后再释放。
         att_db.close().await.unwrap();
         drop(att_db);

@@ -7,7 +7,7 @@
 //! tx-id reuse across every statement inside one transaction.
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::transaction::{Snapshot, Transaction};
 use tempfile::tempdir;
 
@@ -47,13 +47,17 @@ fn expect_affected(resp: Response, what: &str) -> u64 {
 async fn explicit_tx_commit_makes_multi_table_writes_visible() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t1",
     );
     expect_ok(
-        &db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t2",
     );
 
@@ -61,13 +65,17 @@ async fn explicit_tx_commit_makes_multi_table_writes_visible() {
     let tx_id = tx.id();
 
     expect_affected(
-        db.execute_in_tx("INSERT INTO t1 (id, name) VALUES (1, 'a')", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t1 (id, name) VALUES (1, 'a')", &tx)
+                .await,
+        ),
         "in-tx insert t1",
     );
     expect_affected(
-        db.execute_in_tx("INSERT INTO t2 (id, name) VALUES (2, 'b')", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t2 (id, name) VALUES (2, 'b')", &tx)
+                .await,
+        ),
         "in-tx insert t2",
     );
 
@@ -96,12 +104,12 @@ async fn explicit_tx_commit_makes_multi_table_writes_visible() {
     db.commit(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t1").await,
+        to_response(db.execute_sql("SELECT * FROM t1").await),
         "select t1 after commit",
     );
     assert_eq!(rows.len(), 1);
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t2").await,
+        to_response(db.execute_sql("SELECT * FROM t2").await),
         "select t2 after commit",
     );
     assert_eq!(rows.len(), 1);
@@ -115,19 +123,23 @@ async fn explicit_tx_allows_ddl_and_dml_together() {
 
     let tx = db.begin().await.unwrap();
     expect_ok(
-        &db.execute_in_tx("CREATE TABLE t2 (id INT PRIMARY KEY, name VARCHAR)", &tx)
-            .await,
+        &to_response(
+            db.execute_in_tx("CREATE TABLE t2 (id INT PRIMARY KEY, name VARCHAR)", &tx)
+                .await,
+        ),
         "in-tx create table",
     );
     expect_affected(
-        db.execute_in_tx("INSERT INTO t2 (id, name) VALUES (1, 'a')", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t2 (id, name) VALUES (1, 'a')", &tx)
+                .await,
+        ),
         "in-tx insert into fresh table",
     );
     db.commit(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t2").await,
+        to_response(db.execute_sql("SELECT * FROM t2").await),
         "select t2 after commit",
     );
     assert_eq!(rows.len(), 1);
@@ -139,21 +151,25 @@ async fn explicit_tx_allows_ddl_and_dml_together() {
 async fn explicit_tx_rollback_leaves_no_insert_residue() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("INSERT INTO t (id, name) VALUES (1, 'a')", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t (id, name) VALUES (1, 'a')", &tx)
+                .await,
+        ),
         "in-tx insert",
     );
     db.rollback(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t").await,
+        to_response(db.execute_sql("SELECT * FROM t").await),
         "select after rollback",
     );
     assert!(
@@ -163,7 +179,7 @@ async fn explicit_tx_rollback_leaves_no_insert_residue() {
     );
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
         "pk select after rollback",
     );
     assert!(rows.is_empty(), "rolled-back PK must not resolve");
@@ -182,26 +198,32 @@ async fn explicit_tx_rollback_leaves_no_insert_residue() {
 async fn explicit_tx_rollback_restores_updated_value() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
-            .await,
+        &to_response(
+            db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
+                .await,
+        ),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("UPDATE t SET name = 'b' WHERE id = 1", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("UPDATE t SET name = 'b' WHERE id = 1", &tx)
+                .await,
+        ),
         "in-tx update",
     );
     db.rollback(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t").await,
+        to_response(db.execute_sql("SELECT * FROM t").await),
         "select after update rollback",
     );
     assert_eq!(
@@ -222,15 +244,17 @@ async fn explicit_tx_rollback_restores_updated_value() {
 async fn explicit_tx_survives_failed_statement() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t",
     );
 
     let tx = db.begin().await.unwrap();
 
     // Parse error inside the tx.
-    let resp = db.execute_in_tx("INSERT INTO no such table", &tx).await;
+    let resp = to_response(db.execute_in_tx("INSERT INTO no such table", &tx).await);
     assert!(
         matches!(resp, Response::Error { .. }),
         "bad SQL must error: {:?}",
@@ -239,13 +263,16 @@ async fn explicit_tx_survives_failed_statement() {
 
     // Constraint failure inside the tx (duplicate PK).
     expect_affected(
-        db.execute_in_tx("INSERT INTO t (id, name) VALUES (1, 'a')", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t (id, name) VALUES (1, 'a')", &tx)
+                .await,
+        ),
         "first insert",
     );
-    let resp = db
-        .execute_in_tx("INSERT INTO t (id, name) VALUES (1, 'dup')", &tx)
-        .await;
+    let resp = to_response(
+        db.execute_in_tx("INSERT INTO t (id, name) VALUES (1, 'dup')", &tx)
+            .await,
+    );
     assert!(
         matches!(resp, Response::Error { .. }),
         "dup PK must error: {:?}",
@@ -254,14 +281,16 @@ async fn explicit_tx_survives_failed_statement() {
 
     // The tx still accepts and commits further work.
     expect_affected(
-        db.execute_in_tx("INSERT INTO t (id, name) VALUES (2, 'b')", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("INSERT INTO t (id, name) VALUES (2, 'b')", &tx)
+                .await,
+        ),
         "post-error insert",
     );
     db.commit(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t").await,
+        to_response(db.execute_sql("SELECT * FROM t").await),
         "select after commit",
     );
     assert_eq!(rows.len(), 2, "only the two successful inserts commit");
@@ -273,7 +302,7 @@ async fn explicit_tx_survives_failed_statement() {
 async fn explicit_tx_double_commit_and_rollback_error() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await,
+        &to_response(db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").await),
         "create t",
     );
 
@@ -301,7 +330,7 @@ async fn explicit_tx_double_commit_and_rollback_error() {
 
     // Database still usable after both errors.
     expect_ok(
-        &db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        &to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "insert after errors",
     );
 }
@@ -311,19 +340,26 @@ async fn explicit_tx_double_commit_and_rollback_error() {
 async fn implicit_execute_sql_autocommits_unchanged() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t",
     );
 
     expect_affected(
-        db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
-            .await,
+        to_response(
+            db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
+                .await,
+        ),
         "implicit insert",
     );
 
     // Auto-committed: visible immediately through a fresh statement.
-    let rows = expect_rows(db.execute_sql("SELECT * FROM t").await, "select");
+    let rows = expect_rows(
+        to_response(db.execute_sql("SELECT * FROM t").await),
+        "select",
+    );
     assert_eq!(rows.len(), 1);
 
     // And no transaction lingers in the active set.
@@ -341,8 +377,10 @@ async fn implicit_execute_sql_autocommits_unchanged() {
 async fn explicit_tx_reuses_tx_id_across_statements() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t",
     );
 
@@ -351,11 +389,13 @@ async fn explicit_tx_reuses_tx_id_across_statements() {
 
     for (id, name) in [(1, "a"), (2, "b"), (3, "c")] {
         expect_affected(
-            db.execute_in_tx(
-                &format!("INSERT INTO t (id, name) VALUES ({}, '{}')", id, name),
-                &tx,
-            )
-            .await,
+            to_response(
+                db.execute_in_tx(
+                    &format!("INSERT INTO t (id, name) VALUES ({}, '{}')", id, name),
+                    &tx,
+                )
+                .await,
+            ),
             &format!("in-tx insert {}", id),
         );
     }
@@ -417,25 +457,29 @@ async fn explicit_tx_reuses_tx_id_across_statements() {
 async fn rollback_of_delete_restores_pk_point_lookup() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
-            .await,
+        &to_response(
+            db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
+                .await,
+        ),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        to_response(db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await),
         "in-tx delete",
     );
     db.rollback(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
         "pk point lookup after delete rollback",
     );
     assert_eq!(
@@ -450,26 +494,31 @@ async fn rollback_of_delete_restores_pk_point_lookup() {
 async fn rollback_of_delete_keeps_unique_value_occupied() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
-            .await,
+        &to_response(
+            db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
+                .await,
+        ),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        to_response(db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await),
         "in-tx delete",
     );
     db.rollback(tx).await.unwrap();
 
-    let resp = db
-        .execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
-        .await;
+    let resp = to_response(
+        db.execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
+            .await,
+    );
     assert!(
         matches!(resp, Response::Error { .. }),
         "回滚后原唯一值必须仍被占用（UNIQUE 不得静默失效），got: {:?}",
@@ -482,21 +531,27 @@ async fn rollback_of_delete_keeps_unique_value_occupied() {
 async fn rollback_of_replace_restores_row_fully() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
-            .await,
+        &to_response(
+            db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
+                .await,
+        ),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     assert_eq!(
         expect_affected(
-            db.execute_in_tx("REPLACE INTO t (id, code) VALUES (1, 300)", &tx)
-                .await,
+            to_response(
+                db.execute_in_tx("REPLACE INTO t (id, code) VALUES (1, 300)", &tx)
+                    .await
+            ),
             "in-tx replace",
         ),
         1
@@ -505,15 +560,16 @@ async fn rollback_of_replace_restores_row_fully() {
 
     assert_eq!(
         expect_rows(
-            db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
             "pk point lookup after replace rollback",
         ),
         vec![vec![serde_json::json!(1), serde_json::json!(100)]],
         "回滚后原行必须经点查完整复现"
     );
-    let resp = db
-        .execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
-        .await;
+    let resp = to_response(
+        db.execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
+            .await,
+    );
     assert!(
         matches!(resp, Response::Error { .. }),
         "回滚后原唯一值必须仍被占用，got: {:?}",
@@ -527,31 +583,37 @@ async fn rollback_of_replace_restores_row_fully() {
 async fn rollback_of_update_then_delete_restores_pre_update_version() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
-            .await,
+        &to_response(
+            db.execute_sql("INSERT INTO t (id, name) VALUES (1, 'a')")
+                .await,
+        ),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("UPDATE t SET name = 'b' WHERE id = 1", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("UPDATE t SET name = 'b' WHERE id = 1", &tx)
+                .await,
+        ),
         "in-tx update",
     );
     expect_affected(
-        db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+        to_response(db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await),
         "in-tx delete",
     );
     db.rollback(tx).await.unwrap();
 
     assert_eq!(
         expect_rows(
-            db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
             "pk point lookup after update+delete rollback",
         ),
         vec![vec![serde_json::json!(1), serde_json::json!("a")]],
@@ -559,7 +621,7 @@ async fn rollback_of_update_then_delete_restores_pre_update_version() {
     );
     assert_eq!(
         expect_rows(
-            db.execute_sql("SELECT * FROM t").await,
+            to_response(db.execute_sql("SELECT * FROM t").await),
             "full scan after update+delete rollback",
         )
         .len(),
@@ -578,19 +640,24 @@ async fn rollback_of_update_then_delete_restores_pre_update_version() {
 async fn failed_replace_statement_leaves_no_index_residue() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE, note VARCHAR)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE, note VARCHAR)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t (id, code, note) VALUES (1, 10, 'keep')")
-            .await,
+        &to_response(
+            db.execute_sql("INSERT INTO t (id, code, note) VALUES (1, 10, 'keep')")
+                .await,
+        ),
         "seed insert",
     );
 
-    let resp = db
-        .execute_sql("REPLACE INTO t (id, code, note) VALUES (1, 10, 123)")
-        .await;
+    let resp = to_response(
+        db.execute_sql("REPLACE INTO t (id, code, note) VALUES (1, 10, 123)")
+            .await,
+    );
     assert!(
         matches!(resp, Response::Error { .. }),
         "note 列收 Int 必须被类型门拒绝，got: {:?}",
@@ -599,7 +666,7 @@ async fn failed_replace_statement_leaves_no_index_residue() {
 
     assert_eq!(
         expect_rows(
-            db.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await),
             "pk point lookup after failed replace",
         ),
         vec![vec![
@@ -611,16 +678,17 @@ async fn failed_replace_statement_leaves_no_index_residue() {
     );
     assert_eq!(
         expect_rows(
-            db.execute_sql("SELECT * FROM t").await,
+            to_response(db.execute_sql("SELECT * FROM t").await),
             "full scan after failed replace",
         )
         .len(),
         1,
         "失败 REPLACE 回滚后扫描必须单行"
     );
-    let resp = db
-        .execute_sql("INSERT INTO t (id, code, note) VALUES (2, 10, 'other')")
-        .await;
+    let resp = to_response(
+        db.execute_sql("INSERT INTO t (id, code, note) VALUES (2, 10, 'other')")
+            .await,
+    );
     assert!(
         matches!(resp, Response::Error { .. }),
         "失败 REPLACE 回滚后原唯一值必须仍被占用，got: {:?}",
@@ -637,19 +705,23 @@ async fn rollback_index_restore_survives_clean_reopen() {
     {
         let db = Database::open(&path).await.unwrap();
         expect_ok(
-            &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
-                .await,
+            &to_response(
+                db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                    .await,
+            ),
             "create t",
         );
         expect_ok(
-            &db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
-                .await,
+            &to_response(
+                db.execute_sql("INSERT INTO t (id, code) VALUES (1, 100)")
+                    .await,
+            ),
             "seed insert",
         );
 
         let tx = db.begin().await.unwrap();
         expect_affected(
-            db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await,
+            to_response(db.execute_in_tx("DELETE FROM t WHERE id = 1", &tx).await),
             "in-tx delete",
         );
         db.rollback(tx).await.unwrap();
@@ -659,15 +731,16 @@ async fn rollback_index_restore_survives_clean_reopen() {
     let db2 = Database::open(&path).await.unwrap();
     assert_eq!(
         expect_rows(
-            db2.execute_sql("SELECT * FROM t WHERE id = 1").await,
+            to_response(db2.execute_sql("SELECT * FROM t WHERE id = 1").await),
             "pk point lookup after clean reopen",
         ),
         vec![vec![serde_json::json!(1), serde_json::json!(100)]],
         "干净重开后 PK 等值点查必须仍可达"
     );
-    let resp = db2
-        .execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
-        .await;
+    let resp = to_response(
+        db2.execute_sql("INSERT INTO t (id, code) VALUES (2, 100)")
+            .await,
+    );
     assert!(
         matches!(resp, Response::Error { .. }),
         "干净重开后原唯一值必须仍被占用，got: {:?}",
@@ -688,26 +761,30 @@ async fn rollback_index_restore_survives_clean_reopen() {
 async fn rollback_of_pk_rekey_restores_old_key_lookup() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        &to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
+                .await,
+        ),
         "in-tx rekey update",
     );
     db.rollback(tx).await.unwrap();
 
     assert_eq!(
         expect_rows(
-            db.execute_sql("SELECT * FROM t WHERE id = 5").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await),
             "old key point lookup after rekey rollback"
         ),
         vec![vec![serde_json::json!(5), serde_json::json!(100)]],
@@ -720,25 +797,29 @@ async fn rollback_of_pk_rekey_restores_old_key_lookup() {
 async fn rollback_of_pk_rekey_leaves_no_new_key_residue() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+        &to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
+                .await,
+        ),
         "in-tx rekey update",
     );
     db.rollback(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t WHERE id = 7").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE id = 7").await),
         "new key point lookup after rekey rollback",
     );
     assert!(
@@ -746,7 +827,7 @@ async fn rollback_of_pk_rekey_leaves_no_new_key_residue() {
         "rekey 回滚后新键 7 点查必须为空集，got: {:?}",
         rows
     );
-    let resp = db.execute_sql("INSERT INTO t VALUES (7, 200)").await;
+    let resp = to_response(db.execute_sql("INSERT INTO t VALUES (7, 200)").await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "回滚后新键 7 的 INSERT 不得被残留条目误拒，got: {:?}",
@@ -761,25 +842,29 @@ async fn rollback_of_pk_rekey_leaves_no_new_key_residue() {
 async fn rollback_of_unique_rekey_keeps_entries_consistent() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t VALUES (1, 5)").await,
+        &to_response(db.execute_sql("INSERT INTO t VALUES (1, 5)").await),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("UPDATE t SET code = 9 WHERE id = 1", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("UPDATE t SET code = 9 WHERE id = 1", &tx)
+                .await,
+        ),
         "in-tx unique rekey update",
     );
     db.rollback(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t WHERE code = 5").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE code = 5").await),
         "unique old value scan after rollback",
     );
     assert_eq!(
@@ -788,14 +873,14 @@ async fn rollback_of_unique_rekey_keeps_entries_consistent() {
         "回滚后原行 (1, 5) 必须经扫描可达"
     );
 
-    let resp = db.execute_sql("INSERT INTO t VALUES (2, 5)").await;
+    let resp = to_response(db.execute_sql("INSERT INTO t VALUES (2, 5)").await);
     assert!(
         matches!(resp, Response::Error { .. }),
         "回滚后原唯一值 5 必须仍被占用（UNIQUE 不得静默失效），got: {:?}",
         resp
     );
 
-    let resp = db.execute_sql("INSERT INTO t VALUES (2, 9)").await;
+    let resp = to_response(db.execute_sql("INSERT INTO t VALUES (2, 9)").await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "回滚后新唯一值 9 必须被释放（不得被残留条目误拒），got: {:?}",
@@ -813,22 +898,26 @@ async fn rollback_of_pk_rekey_consistent_across_crash_reopen() {
     {
         let db = Database::open(&path).await.unwrap();
         expect_ok(
-            &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
-                .await,
+            &to_response(
+                db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)")
+                    .await,
+            ),
             "create t",
         );
         // DDL 无 WAL 记录：catalog 经 buffer_pool 落盘（夹具先例），否则
         // 重开 redo 必 table not found。
         db.buffer_pool.flush_all().await.unwrap();
         expect_ok(
-            &db.execute_sql("INSERT INTO t VALUES (5, 100)").await,
+            &to_response(db.execute_sql("INSERT INTO t VALUES (5, 100)").await),
             "seed insert",
         );
 
         let tx = db.begin().await.unwrap();
         expect_affected(
-            db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
-                .await,
+            to_response(
+                db.execute_in_tx("UPDATE t SET id = 7 WHERE id = 5", &tx)
+                    .await,
+            ),
             "in-tx rekey update",
         );
         db.rollback(tx).await.unwrap();
@@ -836,14 +925,14 @@ async fn rollback_of_pk_rekey_consistent_across_crash_reopen() {
         // 运行期两态比较面（修复前：旧键空集 + 新键返回 (5, 100)，RED）
         assert_eq!(
             expect_rows(
-                db.execute_sql("SELECT * FROM t WHERE id = 5").await,
+                to_response(db.execute_sql("SELECT * FROM t WHERE id = 5").await),
                 "runtime old key lookup"
             ),
             vec![vec![serde_json::json!(5), serde_json::json!(100)]],
             "运行期旧键 5 点查必须可达"
         );
         let rows = expect_rows(
-            db.execute_sql("SELECT * FROM t WHERE id = 7").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE id = 7").await),
             "runtime new key lookup",
         );
         assert!(
@@ -859,14 +948,14 @@ async fn rollback_of_pk_rekey_consistent_across_crash_reopen() {
     let db2 = Database::open(&path).await.unwrap();
     assert_eq!(
         expect_rows(
-            db2.execute_sql("SELECT * FROM t WHERE id = 5").await,
+            to_response(db2.execute_sql("SELECT * FROM t WHERE id = 5").await),
             "recovered old key lookup"
         ),
         vec![vec![serde_json::json!(5), serde_json::json!(100)]],
         "恢复后旧键 5 点查必须可达"
     );
     let rows = expect_rows(
-        db2.execute_sql("SELECT * FROM t WHERE id = 7").await,
+        to_response(db2.execute_sql("SELECT * FROM t WHERE id = 7").await),
         "recovered new key lookup",
     );
     assert!(
@@ -874,7 +963,7 @@ async fn rollback_of_pk_rekey_consistent_across_crash_reopen() {
         "恢复后新键 7 点查必须为空集，got: {:?}",
         rows
     );
-    let resp = db2.execute_sql("INSERT INTO t VALUES (7, 200)").await;
+    let resp = to_response(db2.execute_sql("INSERT INTO t VALUES (7, 200)").await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "恢复后新键 7 的 INSERT 必须可用，got: {:?}",
@@ -890,25 +979,29 @@ async fn rollback_of_pk_rekey_consistent_across_crash_reopen() {
 async fn rollback_of_unique_set_from_null_releases_new_value() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t (id) VALUES (1)").await,
+        &to_response(db.execute_sql("INSERT INTO t (id) VALUES (1)").await),
         "seed insert (code NULL)",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("UPDATE t SET code = 9 WHERE id = 1", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("UPDATE t SET code = 9 WHERE id = 1", &tx)
+                .await,
+        ),
         "in-tx set unique from null",
     );
     db.rollback(tx).await.unwrap();
 
     let rows = expect_rows(
-        db.execute_sql("SELECT * FROM t WHERE code = 9").await,
+        to_response(db.execute_sql("SELECT * FROM t WHERE code = 9").await),
         "scan for new value after rollback",
     );
     assert!(
@@ -916,7 +1009,7 @@ async fn rollback_of_unique_set_from_null_releases_new_value() {
         "回滚后新值 9 不得经扫描可达，got: {:?}",
         rows
     );
-    let resp = db.execute_sql("INSERT INTO t VALUES (2, 9)").await;
+    let resp = to_response(db.execute_sql("INSERT INTO t VALUES (2, 9)").await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "回滚后新唯一值 9 必须被释放（不得被残留条目误拒），got: {:?}",
@@ -939,25 +1032,29 @@ async fn rollback_of_unique_set_from_null_releases_new_value() {
 async fn rollback_of_unique_set_to_null_restores_old_value_occupation() {
     let (db, _dir) = open_db().await;
     expect_ok(
-        &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
-            .await,
+        &to_response(
+            db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                .await,
+        ),
         "create t",
     );
     expect_ok(
-        &db.execute_sql("INSERT INTO t VALUES (1, 5)").await,
+        &to_response(db.execute_sql("INSERT INTO t VALUES (1, 5)").await),
         "seed insert",
     );
 
     let tx = db.begin().await.unwrap();
     expect_affected(
-        db.execute_in_tx("UPDATE t SET code = NULL WHERE id = 1", &tx)
-            .await,
+        to_response(
+            db.execute_in_tx("UPDATE t SET code = NULL WHERE id = 1", &tx)
+                .await,
+        ),
         "in-tx set unique to null",
     );
     db.rollback(tx).await.unwrap();
 
     // 修复前：旧值 5 条目缺失 → INSERT 成功（RED）
-    let resp = db.execute_sql("INSERT INTO t VALUES (2, 5)").await;
+    let resp = to_response(db.execute_sql("INSERT INTO t VALUES (2, 5)").await);
     assert!(
         matches!(resp, Response::Error { .. }),
         "回滚后旧唯一值 5 必须仍被占用（UNIQUE 不得静默失效），got: {:?}",
@@ -966,7 +1063,7 @@ async fn rollback_of_unique_set_to_null_restores_old_value_occupation() {
 
     assert_eq!(
         expect_rows(
-            db.execute_sql("SELECT * FROM t WHERE code = 5").await,
+            to_response(db.execute_sql("SELECT * FROM t WHERE code = 5").await),
             "old value scan after rollback"
         ),
         vec![vec![serde_json::json!(1), serde_json::json!(5)]],
@@ -984,28 +1081,32 @@ async fn rollback_of_unique_set_to_null_consistent_across_crash_reopen() {
     {
         let db = Database::open(&path).await.unwrap();
         expect_ok(
-            &db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
-                .await,
+            &to_response(
+                db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, code INT UNIQUE)")
+                    .await,
+            ),
             "create t",
         );
         // DDL 无 WAL 记录：catalog 经 buffer_pool 落盘（夹具先例），否则
         // 重开 redo 必 table not found。
         db.buffer_pool.flush_all().await.unwrap();
         expect_ok(
-            &db.execute_sql("INSERT INTO t VALUES (1, 5)").await,
+            &to_response(db.execute_sql("INSERT INTO t VALUES (1, 5)").await),
             "seed insert",
         );
 
         let tx = db.begin().await.unwrap();
         expect_affected(
-            db.execute_in_tx("UPDATE t SET code = NULL WHERE id = 1", &tx)
-                .await,
+            to_response(
+                db.execute_in_tx("UPDATE t SET code = NULL WHERE id = 1", &tx)
+                    .await,
+            ),
             "in-tx set unique to null",
         );
         db.rollback(tx).await.unwrap();
 
         // 运行期两态比较面（修复前：INSERT 成功，RED）
-        let resp = db.execute_sql("INSERT INTO t VALUES (2, 5)").await;
+        let resp = to_response(db.execute_sql("INSERT INTO t VALUES (2, 5)").await);
         assert!(
             matches!(resp, Response::Error { .. }),
             "运行期旧唯一值 5 必须仍被占用，got: {:?}",
@@ -1017,7 +1118,7 @@ async fn rollback_of_unique_set_to_null_consistent_across_crash_reopen() {
     }
 
     let db2 = Database::open(&path).await.unwrap();
-    let resp = db2.execute_sql("INSERT INTO t VALUES (2, 5)").await;
+    let resp = to_response(db2.execute_sql("INSERT INTO t VALUES (2, 5)").await);
     assert!(
         matches!(resp, Response::Error { .. }),
         "恢复后旧唯一值 5 必须仍被占用（两态一致），got: {:?}",
@@ -1025,7 +1126,7 @@ async fn rollback_of_unique_set_to_null_consistent_across_crash_reopen() {
     );
     assert_eq!(
         expect_rows(
-            db2.execute_sql("SELECT * FROM t WHERE code = 5").await,
+            to_response(db2.execute_sql("SELECT * FROM t WHERE code = 5").await),
             "old value scan after crash reopen"
         ),
         vec![vec![serde_json::json!(1), serde_json::json!(5)]],

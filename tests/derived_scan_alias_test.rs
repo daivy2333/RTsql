@@ -13,6 +13,7 @@
 //! - R3 别名排序可达（DESC）；无别名、限定名引用与既有拒绝面零回归。
 
 use rtsql::database::Database;
+use rtsql::network::protocol::to_response;
 use serde_json::json;
 use std::io::Read;
 use std::path::Path;
@@ -25,7 +26,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, rtsql::network::protocol::Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -57,10 +58,10 @@ async fn derived_plain_column_alias_name() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT v AS val FROM (SELECT v FROM t)")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("b")], vec![json!("a")]]);
 }
 
@@ -70,10 +71,10 @@ async fn derived_qualified_alias_name() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT d.v AS val FROM (SELECT v FROM t) AS d")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("b")], vec![json!("a")]]);
 }
 
@@ -85,10 +86,10 @@ async fn cte_plain_column_alias_name() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("WITH c AS (SELECT v FROM t) SELECT v AS val FROM c")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("b")], vec![json!("a")]]);
 }
 
@@ -100,10 +101,10 @@ async fn cte_alias_sort_desc() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("WITH c AS (SELECT v FROM t) SELECT v AS val FROM c ORDER BY val DESC")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("b")], vec![json!("a")]]);
 }
 
@@ -140,10 +141,10 @@ async fn derived_expression_item_unchanged() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT upper(v) FROM (SELECT v FROM t)")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("B")], vec![json!("A")]]);
     let out = query_cli("SELECT upper(v) FROM (SELECT v FROM t)");
     assert_eq!(out.code, Some(0), "query failed: {}", out.stderr);
@@ -175,10 +176,10 @@ async fn derived_pure_list_trims_rows() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT n FROM (SELECT v, n FROM t) AS d")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
 }
 
@@ -200,10 +201,10 @@ async fn cte_pure_list_trims_rows() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("WITH c AS (SELECT v, n FROM t) SELECT n FROM c")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
 }
 
@@ -214,7 +215,7 @@ async fn view_pure_list_trims_rows() {
     let db = seed(&dir).await;
     exec_ok(&db, "CREATE VIEW vw AS SELECT v, n FROM t").await;
 
-    let rows = rows_of(db.execute_sql("SELECT n FROM vw").await);
+    let rows = rows_of(to_response(db.execute_sql("SELECT n FROM vw").await));
     assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
 }
 
@@ -230,7 +231,7 @@ async fn derived_unknown_column_named_rejected() {
         "WITH c AS (SELECT v, n FROM t) SELECT zzz FROM c",
         "SELECT zzz FROM vw",
     ] {
-        let msg = error_msg(db.execute_sql(sql).await);
+        let msg = error_msg(to_response(db.execute_sql(sql).await));
         assert!(
             msg.contains("Column not found") && msg.contains("zzz"),
             "unknown outer column over derived base must be named: {sql:?} -> {msg}"
@@ -244,10 +245,10 @@ async fn derived_where_combination_trims() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT n FROM (SELECT v, n FROM t) AS d WHERE n = 2")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(2)]]);
 }
 
@@ -257,10 +258,10 @@ async fn derived_order_by_combination_trims() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT v FROM (SELECT v, n FROM t) AS d ORDER BY v")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("a")], vec![json!("b")]]);
 
     let out = query_cli("SELECT v FROM (SELECT v, n FROM t) AS d ORDER BY v");
@@ -283,7 +284,7 @@ async fn ctas_from_derived_trims_columns() {
         "CREATE TABLE cn AS SELECT n FROM (SELECT v, n FROM t) AS d",
     )
     .await;
-    let rows = rows_of(db.execute_sql("SELECT n FROM cn").await);
+    let rows = rows_of(to_response(db.execute_sql("SELECT n FROM cn").await));
     assert_eq!(rows, vec![vec![json!(1)], vec![json!(2)]]);
 
     let dir = fixture();
@@ -310,10 +311,10 @@ async fn derived_wildcard_identity() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT * FROM (SELECT v, n FROM t) AS d")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!("b"), json!(1)], vec![json!("a"), json!(2)]]
@@ -326,10 +327,10 @@ async fn derived_count_identity() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT COUNT(*) FROM (SELECT v, n FROM t) AS d")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!(2)]]);
 }
 
@@ -339,10 +340,10 @@ async fn nested_derived_column_order() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT n, v FROM (SELECT v, n FROM (SELECT v, n FROM t) AS d) AS e")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!("b")], vec![json!(2), json!("a")]]
@@ -364,10 +365,10 @@ async fn r4_derived_inner_alias_outer_visible() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT val FROM (SELECT v AS val FROM t) d ORDER BY val")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("a")], vec![json!("b")]]);
 }
 
@@ -377,10 +378,10 @@ async fn r4_derived_inner_expression_outer_visible() {
     let dir = tempdir().unwrap();
     let db = seed(&dir).await;
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT up FROM (SELECT upper(v) AS up FROM t) d ORDER BY up")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("A")], vec![json!("B")]]);
 }
 
@@ -394,10 +395,10 @@ async fn r4_derived_inner_distinct_dedups() {
         exec_ok(&db, &format!("INSERT INTO t2 VALUES ('{v}')")).await;
     }
 
-    let rows = rows_of(
+    let rows = rows_of(to_response(
         db.execute_sql("SELECT d FROM (SELECT DISTINCT v AS d FROM t2) s ORDER BY d")
             .await,
-    );
+    ));
     assert_eq!(rows, vec![vec![json!("x")], vec![json!("y")]]);
 }
 
@@ -413,19 +414,21 @@ async fn r4_three_channels_identical() {
     .await;
 
     let expected = vec![vec![json!("a"), json!("A")], vec![json!("b"), json!("B")]];
-    let derived = rows_of(
+    let derived = rows_of(to_response(
         db.execute_sql(
             "SELECT val, up FROM (SELECT v AS val, upper(v) AS up FROM t) d ORDER BY val",
         )
         .await,
-    );
-    let view = rows_of(db.execute_sql("SELECT val, up FROM vw ORDER BY val").await);
-    let cte = rows_of(
+    ));
+    let view = rows_of(to_response(
+        db.execute_sql("SELECT val, up FROM vw ORDER BY val").await,
+    ));
+    let cte = rows_of(to_response(
         db.execute_sql(
             "WITH c AS (SELECT v AS val, upper(v) AS up FROM t) SELECT val, up FROM c ORDER BY val",
         )
         .await,
-    );
+    ));
     assert_eq!(derived, expected);
     assert_eq!(
         view, expected,
@@ -449,7 +452,7 @@ async fn r4_expression_items_still_rejected_in_expression_subqueries() {
         "SELECT n FROM t WHERE EXISTS (SELECT upper(v) FROM t)",
         "SELECT n FROM t WHERE n = (SELECT upper(v) FROM t)",
     ] {
-        let msg = error_msg(db.execute_sql(sql).await);
+        let msg = error_msg(to_response(db.execute_sql(sql).await));
         assert!(
             msg.contains("Invalid aggregate argument: Expected column name"),
             "expression subquery rejection surface must be unchanged: {sql:?} -> {msg}"
@@ -566,12 +569,12 @@ async fn t03_d3_aggregate_derived_alias_key_visible() {
     exec_ok(&db, "INSERT INTO orders VALUES (2, 'alpha')").await;
     exec_ok(&db, "INSERT INTO orders VALUES (3, 'beta')").await;
 
-    let mut rows = rows_of(
+    let mut rows = rows_of(to_response(
         db.execute_sql(
             "SELECT d.n, d.c FROM (SELECT tag AS n, COUNT(*) AS c FROM orders GROUP BY tag) d",
         )
         .await,
-    );
+    ));
     rows.sort_by_key(|row| row[0].as_str().unwrap().to_string());
     assert_eq!(
         rows,
@@ -593,12 +596,12 @@ async fn t03_d3_aggregate_derived_plain_key_unchanged() {
     exec_ok(&db, "INSERT INTO orders VALUES (2, 'alpha')").await;
     exec_ok(&db, "INSERT INTO orders VALUES (3, 'beta')").await;
 
-    let mut rows = rows_of(
+    let mut rows = rows_of(to_response(
         db.execute_sql(
             "SELECT d.tag, d.c FROM (SELECT tag, COUNT(*) AS c FROM orders GROUP BY tag) d",
         )
         .await,
-    );
+    ));
     rows.sort_by_key(|row| row[0].as_str().unwrap().to_string());
     assert_eq!(
         rows,
@@ -620,13 +623,13 @@ async fn t03_d3_aggregate_cte_alias_key_visible() {
     exec_ok(&db, "INSERT INTO orders VALUES (2, 'alpha')").await;
     exec_ok(&db, "INSERT INTO orders VALUES (3, 'beta')").await;
 
-    let mut rows = rows_of(
+    let mut rows = rows_of(to_response(
         db.execute_sql(
             "WITH g AS (SELECT tag AS n, COUNT(*) AS c FROM orders GROUP BY tag) \
              SELECT g.n, g.c FROM g",
         )
         .await,
-    );
+    ));
     rows.sort_by_key(|row| row[0].as_str().unwrap().to_string());
     assert_eq!(
         rows,

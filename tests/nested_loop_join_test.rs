@@ -17,7 +17,7 @@ use rtsql::executor::{
     inject_correlated_values, ColumnExpression, ComparisonOp, ComparisonPredicate, FilterNode,
     NestedLoopJoinNode, ParameterExpression, PhysicalPlan, PredicateRef, ScanNode, Value,
 };
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::pipeline::{parse_stage, plan_stage};
 use serde_json::json;
 use std::sync::Arc;
@@ -28,7 +28,7 @@ fn db_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    let resp = db.execute_sql(sql).await;
+    let resp = to_response(db.execute_sql(sql).await);
     assert!(
         !matches!(resp, Response::Error { .. }),
         "setup statement failed: {sql:?} -> {resp:?}"
@@ -76,10 +76,10 @@ async fn inequality_join_produces_semantic_result() {
     exec_ok(&db, "INSERT INTO s VALUES (2)").await;
     exec_ok(&db, "INSERT INTO s VALUES (3)").await;
 
-    let rows = sort_rows_i64(query_rows(
+    let rows = sort_rows_i64(query_rows(to_response(
         db.execute_sql("SELECT r.a, s.b FROM r JOIN s ON r.a < s.b")
             .await,
-    ));
+    )));
     assert_eq!(
         rows,
         vec![
@@ -108,10 +108,10 @@ async fn mixed_legs_multi_and_evaluated() {
     exec_ok(&db, "INSERT INTO s VALUES (2)").await;
     exec_ok(&db, "INSERT INTO s VALUES (3)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT r.a, s.b FROM r JOIN s ON r.a < s.b AND r.a >= 2")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![vec![json!(2), json!(3)]],
@@ -136,10 +136,10 @@ async fn null_side_combination_excluded() {
     exec_ok(&db, "INSERT INTO s VALUES (2)").await;
     exec_ok(&db, "INSERT INTO s VALUES (NULL)").await;
 
-    let rows = sort_rows_i64(query_rows(
+    let rows = sort_rows_i64(query_rows(to_response(
         db.execute_sql("SELECT r.a, s.b FROM r JOIN s ON r.a < s.b")
             .await,
-    ));
+    )));
     assert_eq!(
         rows,
         vec![vec![json!(1), json!(2)]],
@@ -161,20 +161,20 @@ async fn empty_input_yields_empty_set() {
     exec_ok(&db, "CREATE TABLE s (b INT)").await;
     exec_ok(&db, "INSERT INTO s VALUES (2)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT r.a, s.b FROM r JOIN s ON r.a < s.b")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         Vec::<Vec<serde_json::Value>>::new(),
         "左侧空表必须产出空集"
     );
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT s.b, r.a FROM s JOIN r ON s.b > r.a")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         Vec::<Vec<serde_json::Value>>::new(),
@@ -243,10 +243,10 @@ async fn order_by_over_non_equi_join() {
     exec_ok(&db, "INSERT INTO s VALUES (3)").await;
     exec_ok(&db, "INSERT INTO s VALUES (2)").await;
 
-    let rows = query_rows(
+    let rows = query_rows(to_response(
         db.execute_sql("SELECT r.a, s.b FROM r JOIN s ON r.a < s.b ORDER BY a")
             .await,
-    );
+    ));
     assert_eq!(
         rows,
         vec![
@@ -378,10 +378,10 @@ async fn where_over_non_equi_join_reachable() {
     exec_ok(&db, "INSERT INTO s VALUES (2)").await;
     exec_ok(&db, "INSERT INTO s VALUES (3)").await;
 
-    let rows = sort_rows_i64(query_rows(
+    let rows = sort_rows_i64(query_rows(to_response(
         db.execute_sql("SELECT r.a, s.b FROM r JOIN s ON r.a < s.b WHERE r.a > 0")
             .await,
-    ));
+    )));
     assert_eq!(
         rows,
         vec![

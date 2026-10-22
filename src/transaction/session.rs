@@ -88,7 +88,8 @@ impl Default for TransactionSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::protocol::Response;
+    use crate::executor::Value;
+    use crate::result::{SqlError, SqlOutcome};
 
     async fn open_db() -> (Database, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -98,18 +99,14 @@ mod tests {
         (db, dir)
     }
 
-    fn expect_ok(resp: &Response, what: &str) {
-        assert!(
-            !matches!(resp, Response::Error { .. }),
-            "{what} failed: {:?}",
-            resp
-        );
+    fn expect_ok(resp: &std::result::Result<SqlOutcome, SqlError>, what: &str) {
+        assert!(resp.is_ok(), "{what} failed: {:?}", resp);
     }
 
-    fn query_rows(resp: Response, what: &str) -> Vec<Vec<serde_json::Value>> {
+    fn query_rows(resp: std::result::Result<SqlOutcome, SqlError>, what: &str) -> Vec<Vec<Value>> {
         match resp {
-            Response::QueryResult { rows } => rows,
-            other => panic!("{what}: expected QueryResult, got {:?}", other),
+            Ok(SqlOutcome::Rows { rows, .. }) => rows,
+            other => panic!("{what}: expected Rows, got {:?}", other),
         }
     }
 
@@ -140,7 +137,7 @@ mod tests {
             "post-commit select",
         );
         assert_eq!(rows.len(), 1, "committed write must be visible");
-        assert_eq!(rows[0][0], serde_json::json!(1));
+        assert_eq!(rows[0][0], Value::Int(1));
     }
 
     #[tokio::test]

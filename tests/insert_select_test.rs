@@ -30,7 +30,7 @@
 //!   R5    目标 checkpoint 失败保提交  insert_select_target_auto_checkpoint_failure_preserves_commit
 
 use rtsql::database::Database;
-use rtsql::network::protocol::Response;
+use rtsql::network::protocol::{to_response, Response};
 use rtsql::pipeline::{AttachRoute, RoutedTables};
 use std::collections::HashMap;
 use std::io::Read;
@@ -667,11 +667,11 @@ async fn routed_exec(main: &Database, route: &AttachRoute, sql: &str) -> Respons
     let plan = plan_stage_routed(main, sql, stmt, false, Some(route), &mut routed)
         .await
         .unwrap_or_else(|e| panic!("plan {sql}: {e}"));
-    execute_stage_routed(main, plan, false, &routed).await
+    to_response(execute_stage_routed(main, plan, false, &routed).await)
 }
 
 async fn query(db: &Database, sql: &str) -> Vec<Vec<serde_json::Value>> {
-    match db.execute_sql(sql).await {
+    match to_response(db.execute_sql(sql).await) {
         Response::QueryResult { rows } => rows,
         other => panic!("{sql}: expected QueryResult, got {other:?}"),
     }
@@ -688,9 +688,11 @@ async fn insert_select_target_auto_checkpoint_failure_preserves_commit() {
 
     let other = Arc::new(Database::open(&other_path).await.unwrap());
     assert_ok(
-        other
-            .execute_sql("CREATE TABLE dst (id INT PRIMARY KEY, label VARCHAR)")
-            .await,
+        to_response(
+            other
+                .execute_sql("CREATE TABLE dst (id INT PRIMARY KEY, label VARCHAR)")
+                .await,
+        ),
         "create attached dst",
     );
     other.checkpoint().await.unwrap();
@@ -699,16 +701,18 @@ async fn insert_select_target_auto_checkpoint_failure_preserves_commit() {
 
     let main = Database::open(&main_path).await.unwrap();
     assert_ok(
-        main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, tag VARCHAR)")
-            .await,
+        to_response(
+            main.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, tag VARCHAR)")
+                .await,
+        ),
         "create main t",
     );
     assert_ok(
-        main.execute_sql("INSERT INTO t VALUES (1, 'a')").await,
+        to_response(main.execute_sql("INSERT INTO t VALUES (1, 'a')").await),
         "seed main row 1",
     );
     assert_ok(
-        main.execute_sql("INSERT INTO t VALUES (2, 'b')").await,
+        to_response(main.execute_sql("INSERT INTO t VALUES (2, 'b')").await),
         "seed main row 2",
     );
 
