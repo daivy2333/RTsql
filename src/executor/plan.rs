@@ -540,6 +540,11 @@ pub struct SortNode {
     /// MS10-T01 Iter001: 输出投影（空 = 恒等）。Sort 在输入行形状上比较排序键、
     /// 产出时按投影裁剪（design D10：排序键允许不在投影内）。
     pub projection: Vec<usize>,
+    /// MS32 Iter002（design D3）：LIMIT 直接约束排序时的驻留上限
+    /// （`offset + limit`）。`None` = 全量排序；仅计划期两处 Limit 包装点
+    /// 在 `Sort` / `Projection(Sort)` 形状上赋值，其余形状维持 `None`
+    /// （Distinct、聚合、集合运算等全量排序语义不变）。渲染不输出本字段。
+    pub bounded: Option<usize>,
 }
 
 /// 分页节点（LIMIT + OFFSET）

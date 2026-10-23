@@ -436,6 +436,7 @@ mod tests {
                     table_name: "t".to_string(),
                     columns: vec!["v".to_string()],
                     projection: Vec::new(),
+                    bounded: None,
                 })),
             })),
             limit: 5,

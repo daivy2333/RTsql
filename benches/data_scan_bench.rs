@@ -79,6 +79,27 @@ fn bench_data_scan_vs_scan(c: &mut Criterion) {
                 assert_eq!(count, _n);
             });
         });
+
+        // MS32-T01 Iter000 (Task 1.2): batch extraction via `next_batch(256)`.
+        // At baseline-capture time `next_batch` is still the default
+        // row-at-a-time loop, so this item measures the row-at-a-time path
+        // under the batch call shape. The comparison run (Task 1.3) replaces
+        // it with DataScan's own accumulating implementation.
+        group.bench_with_input(BenchmarkId::new("next_batch", n), &n, |b, &_n| {
+            b.to_async(&rt).iter(|| async {
+                let mut executor =
+                    DataScanExecutor::new(tm.clone(), bp.clone(), None, None, None, None);
+                let mut count = 0i64;
+                loop {
+                    let batch = executor.next_batch(256).await.unwrap();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    count += batch.len() as i64;
+                }
+                assert_eq!(count, _n);
+            });
+        });
     }
     group.finish();
 }

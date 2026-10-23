@@ -648,4 +648,57 @@ mod tests {
             "with_prefetch(true) must explicitly enable prefetch"
         );
     }
+
+    /// MS32-T01 Iter000（Task 1.3）：DataScan 的批量取出与逐行取出同序。
+    ///
+    /// 同一张表的两个独立 DataScan 执行器——一个走 `next`，一个走
+    /// `next_batch(64)`——抽干后行序列必须逐项相同。攒批实现前（默认方法）
+    /// 与攒批实现后（DataScan 覆盖实现）本测试都必须通过。
+    ///
+    /// 实际结果：攒批实现未通过 10% 时间门，生产改动已撤回，本测试守护的是
+    /// `Executor::next_batch` 默认方法的同序契约。
+    #[tokio::test]
+    async fn data_scan_next_batch_matches_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::database::Database::open(&dir.path().join("t.db"))
+            .await
+            .unwrap();
+        assert!(db
+            .execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name STRING)")
+            .await
+            .is_ok());
+        assert!(db
+            .execute_sql("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+            .await
+            .is_ok());
+
+        let table_meta = db.table_manager.get_table("t").await.unwrap();
+
+        let mut rowwise = DataScanExecutor::new(
+            table_meta.clone(),
+            db.buffer_pool.clone(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut expected: Vec<ExecResult> = Vec::new();
+        while let Some(result) = rowwise.next().await.unwrap() {
+            expected.push(result);
+        }
+
+        let mut batched =
+            DataScanExecutor::new(table_meta, db.buffer_pool.clone(), None, None, None, None);
+        let mut actual: Vec<ExecResult> = Vec::new();
+        loop {
+            let batch = batched.next_batch(64).await.unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            actual.extend(batch);
+        }
+
+        assert_eq!(expected.len(), 3);
+        assert_eq!(expected, actual);
+    }
 }

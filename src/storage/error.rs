@@ -114,6 +114,12 @@ pub enum StorageError {
     #[error("{0}")]
     ExecutionError(String),
 
+    /// MS32 Iteration 003（design D4）：查询内存预算超限——Display 无前缀
+    /// 纪律同 `ExecutionError`（单层 `Execution error: ` 由 pipeline 漏斗
+    /// 赋予，SQLSTATE 53200 由漏斗/转换臂分类）。
+    #[error("query memory limit exceeded (limit {limit} bytes)")]
+    QueryMemoryExceeded { limit: u64 },
+
     #[error("transaction error: {0}")]
     Transaction(#[from] TransactionError),
 

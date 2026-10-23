@@ -9,6 +9,7 @@
 //! statement, so a local cache never outlives it).
 
 use crate::database::Database;
+use crate::executor::query_budget::{param_key_bytes, rows_bytes, unlimited_budget, SharedBudget};
 use crate::executor::{CorrelatedParam, ExecResult, Executor, PhysicalPlan, Value};
 use crate::storage::Result;
 use crate::transaction::Snapshot;
@@ -44,6 +45,9 @@ pub struct SubqueryEvalExecutor {
     /// T4（change 2026-10-04-external-review-gaps）：输出收窄宽度（节点
     /// `output_width`）——参数提取后、标量插入前按此宽度截断行；0 = 恒等。
     output_width: usize,
+    /// MS32 Iter003（design D5）：语句级查询内存预算——相关缓存键值入账，
+    /// 并随重建臂穿线到子查询计划。
+    budget: SharedBudget,
 }
 
 impl SubqueryEvalExecutor {
@@ -102,7 +106,14 @@ impl SubqueryEvalExecutor {
             cached_result: None,
             correlated_cache: HashMap::new(),
             output_width,
+            budget: unlimited_budget(),
         }
+    }
+
+    /// MS32 Iter003（design D5）：注入语句级预算（pipeline 构造臂）。
+    pub(crate) fn with_budget(mut self, budget: SharedBudget) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Evaluate the subquery, returning the scalar result (first row, first column).
@@ -115,6 +126,7 @@ impl SubqueryEvalExecutor {
             None,
             self.snapshot.clone(),
             &self.routed_tables,
+            &self.budget,
         )
         .await?;
 
@@ -194,6 +206,7 @@ impl Executor for SubqueryEvalExecutor {
                                 None,
                                 self.snapshot.clone(),
                                 &self.routed_tables,
+                                &self.budget,
                             )
                             .await?;
                             let mut result_value: Option<Value> = None;
@@ -221,6 +234,10 @@ impl Executor for SubqueryEvalExecutor {
                             }
                             // Store only after a successful drain; errors and
                             // the multi-row early exit above never reach here.
+                            // MS32 Iter003（design D5）：缓存驻留 = 键 + 行集，
+                            // 入账先于插入（超限整句失败）。
+                            self.budget
+                                .charge(param_key_bytes(&param_values) + rows_bytes(&collected))?;
                             self.correlated_cache.insert(param_values, collected);
                             result_value.unwrap_or(Value::Null)
                         }

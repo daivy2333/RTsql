@@ -1,4 +1,5 @@
 use crate::database::Database;
+use crate::executor::query_budget::{row_bytes, QueryBudget, SharedBudget};
 use crate::executor::{
     inject_correlated_values, AggregateExecutor, AggregateNode, AlterTableExecutor,
     AntiJoinExecutor, ConflictAction, CreateIndexExecutor, CreateTableAsSelectNode,
@@ -404,6 +405,11 @@ pub async fn execute_stage_routed(
     if let Some(rejection) = readonly_rejection(database, &plan) {
         return Err(rejection);
     }
+    // MS32 Iter003（design D4）：语句级预算——语句入口取上限快照构造，语句
+    // 结束随执行器树丢弃（计数不跨语句）。limit 0（默认）时 charge/release
+    // 全部短路。InsertSelect 归一臂的递归会为新计划重建预算：归一后的
+    // Insert/Upsert 值是计划字面量，无算子驻留计费点。
+    let budget: SharedBudget = Arc::new(QueryBudget::new(database.query_memory_limit()));
     // MS31-T01：查询结果的列元数据在执行面装配——列名单源为既有计划输出列
     // （`get_plan_output_columns`，与 CLI 表头同源同序）；列类型经计划 walk
     // 取声明类型（不可得者由结果行值推导兜底）。
@@ -490,7 +496,7 @@ pub async fn execute_stage_routed(
         PhysicalPlan::CreateTableAsSelect(node) => {
             // MS20 T4：CTAS 是混合面（SELECT 物化 + 建表 + 落行），没有单一
             // executor —— 走 `execute_ctas_routed`。缓存清理与 DDL 臂同款。
-            let response = execute_ctas_routed(database, node, profiling, routed).await;
+            let response = execute_ctas_routed(database, node, profiling, routed, &budget).await;
             bump_schema_version(database);
             response
         }
@@ -500,18 +506,18 @@ pub async fn execute_stage_routed(
             // 臂——begin/abort_tables/abort/commit 与执行器接线不在此复制；
             // 同表写回只消费物化前行（物化先于 begin，结构性保证）。
             let snapshot = database.statement_snapshot(None).await;
-            let rows =
-                match materialize_insert_select_source(database, &node.source, snapshot, routed)
-                    .await
-                {
-                    Ok(rows) => rows,
-                    Err(message) => {
-                        return Err(SqlError {
-                            message,
-                            sqlstate: None,
-                        })
-                    }
-                };
+            let rows = match materialize_insert_select_source(
+                database,
+                &node.source,
+                snapshot,
+                routed,
+                &budget,
+            )
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => return Err(executor_creation_error(e)),
+            };
             let normalized = match normalize_insert_select(node, rows) {
                 Ok(plan) => plan,
                 Err(message) => {
@@ -566,7 +572,9 @@ pub async fn execute_stage_routed(
                 None
             };
             let executor =
-                match create_executor_from_plan(plan, database, Some(tx_id), None, routed).await {
+                match create_executor_from_plan(plan, database, Some(tx_id), None, routed, &budget)
+                    .await
+                {
                     Ok(e) => e,
                     Err(e) => {
                         if let Some(abort_tables) = &abort_tables {
@@ -575,10 +583,7 @@ pub async fn execute_stage_routed(
                                 .abort(tx, &target_db.buffer_pool, abort_tables)
                                 .await;
                         }
-                        return Err(SqlError {
-                            message: e.to_string(),
-                            sqlstate: None,
-                        });
+                        return Err(executor_creation_error(e));
                     }
                 };
             if let Some(start) = executor_creation_start {
@@ -637,18 +642,19 @@ pub async fn execute_stage_routed(
             } else {
                 None
             };
-            let executor =
-                match create_executor_from_plan(plan, database, None, statement_snapshot, routed)
-                    .await
-                {
-                    Ok(e) => e,
-                    Err(e) => {
-                        return Err(SqlError {
-                            message: e.to_string(),
-                            sqlstate: None,
-                        });
-                    }
-                };
+            let executor = match create_executor_from_plan(
+                plan,
+                database,
+                None,
+                statement_snapshot,
+                routed,
+                &budget,
+            )
+            .await
+            {
+                Ok(e) => e,
+                Err(e) => return Err(executor_creation_error(e)),
+            };
             if let Some(start) = executor_creation_start {
                 record_time("executor_creation", start.elapsed());
             }
@@ -751,28 +757,43 @@ fn multi_statement_rejected(count: usize) -> SqlError {
 
 /// MS20-T02 Iter001（design D4）：把 `InsertSelect` 源完整物化为原生 Value
 /// 行——CTAS 同款消费模式（不经 JSON/SQL 文本往返，不流式）。任何错误都在
-/// 目标 begin / 写入之前返回。
+/// 目标 begin / 写入之前返回。MS32 Iter003：返回 `StorageError`（原 String
+/// 通道丢失变体信息，超限的 53200 分类穿不过去）；非超限错误的 Display
+/// 与既有文案逐字节一致。
 async fn materialize_insert_select_source(
     database: &Database,
     source: &PhysicalPlan,
     snapshot: Option<Snapshot>,
     routed: &RoutedTables,
-) -> std::result::Result<Vec<Vec<Value>>, String> {
+    budget: &SharedBudget,
+) -> std::result::Result<Vec<Vec<Value>>, StorageError> {
     let mut select =
-        match create_executor_from_plan(source.clone(), database, None, snapshot, routed).await {
+        match create_executor_from_plan(source.clone(), database, None, snapshot, routed, budget)
+            .await
+        {
             Ok(executor) => executor,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e),
         };
     let mut rows: Vec<Vec<Value>> = Vec::new();
+    // MS32 Iter003（design D5）：源行在写入前整段驻留——逐行入账，峰值即
+    // 全部源行；物化完成（函数返回前）整段出账：归一后的值成为计划字面
+    // 量，不属算子驻留。
+    let mut charged = 0u64;
     loop {
         match select.next().await {
-            Ok(Some(ExecResult::Row(values))) => rows.push(values),
+            Ok(Some(ExecResult::Row(values))) => {
+                let bytes = row_bytes(&values);
+                budget.charge(bytes)?;
+                charged += bytes;
+                rows.push(values);
+            }
             // 源计划恒为 SELECT（`build_insert_select` 产出），只有行输出；
             // RowId / AffectedRows 是写面信号，视为物化结束。
             Ok(Some(_)) | Ok(None) => break,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e),
         }
     }
+    budget.release(charged);
     Ok(rows)
 }
 
@@ -831,6 +852,7 @@ async fn execute_ctas_routed(
     node: &CreateTableAsSelectNode,
     profiling: bool,
     routed: &RoutedTables,
+    budget: &SharedBudget,
 ) -> std::result::Result<SqlOutcome, SqlError> {
     // 0. 目标已存在 → 与建表通道同型（`DuplicateTable`）拒绝。提前于物化，
     //    免去为注定失败的语句跑完整个源结果集；错误面与「物化后建表被拒」
@@ -855,16 +877,12 @@ async fn execute_ctas_routed(
         None,
         statement_snapshot,
         routed,
+        budget,
     )
     .await
     {
         Ok(executor) => executor,
-        Err(e) => {
-            return Err(SqlError {
-                message: e.to_string(),
-                sqlstate: None,
-            })
-        }
+        Err(e) => return Err(executor_creation_error(e)),
     };
     if let Some(start) = create_start {
         record_time("executor_creation", start.elapsed());
@@ -876,9 +894,19 @@ async fn execute_ctas_routed(
         None
     };
     let mut rows: Vec<Vec<Value>> = Vec::new();
+    // MS32 Iter003（design D5）：CTAS 源行在写入前整段驻留——逐行入账，
+    // 物化完成后整段出账（与 `materialize_insert_select_source` 同型）。
+    let mut charged = 0u64;
     loop {
         match select.next().await {
-            Ok(Some(ExecResult::Row(values))) => rows.push(values),
+            Ok(Some(ExecResult::Row(values))) => {
+                let bytes = row_bytes(&values);
+                if let Err(e) = budget.charge(bytes) {
+                    return Err(executor_creation_error(e));
+                }
+                charged += bytes;
+                rows.push(values);
+            }
             // 源计划恒为 SELECT（`build_create_table_as_select` 产出），只有行
             // 输出；RowId / AffectedRows 是写面信号，视为物化结束。
             Ok(Some(_)) | Ok(None) => break,
@@ -890,6 +918,7 @@ async fn execute_ctas_routed(
             }
         }
     }
+    budget.release(charged);
     if let Some(start) = exec_start {
         record_time("executor_execution", start.elapsed());
     }
@@ -1193,6 +1222,9 @@ pub async fn execute_stage_in_tx_routed(
     if let Some(rejection) = attached_write_in_tx_rejection(&plan, routed) {
         return Err(rejection);
     }
+    // MS32 Iter003（design D4）：语句级预算（与 `execute_stage_routed` 同点
+    // 构造——两叶子覆盖全部执行入口）。
+    let budget: SharedBudget = Arc::new(QueryBudget::new(database.query_memory_limit()));
     // MS31-T01：列元数据装配（与 `execute_stage_routed` 同点、同单源）。
     let output_columns = PlanBuilder::new().get_plan_output_columns(&plan);
     let output_types = resolve_type_slots(database, routed, plan_type_slots(&plan)).await;
@@ -1265,16 +1297,11 @@ pub async fn execute_stage_in_tx_routed(
             // 写可见），插入复用该 tx_id，不另开提交点。
             let snapshot = database.statement_snapshot(Some(tx_id)).await;
             let rows =
-                match materialize_insert_select_source(database, &node.source, snapshot, routed)
+                match materialize_insert_select_source(database, &node.source, snapshot, routed, &budget)
                     .await
                 {
                     Ok(rows) => rows,
-                    Err(message) => {
-                        return Err(SqlError {
-                            message,
-                            sqlstate: None,
-                        })
-                    }
+                    Err(e) => return Err(executor_creation_error(e)),
                 };
             let normalized = match normalize_insert_select(node, rows) {
                 Ok(plan) => plan,
@@ -1295,18 +1322,22 @@ pub async fn execute_stage_in_tx_routed(
             // reader (self writes stay visible via `is_visible_self`); the
             // default RepeatableRead path stays `None`.
             let statement_snapshot = database.statement_snapshot(Some(tx_id)).await;
-            match create_executor_from_plan(plan, database, Some(tx_id), statement_snapshot, routed)
-                .await
+            match create_executor_from_plan(
+                plan,
+                database,
+                Some(tx_id),
+                statement_snapshot,
+                routed,
+                &budget,
+            )
+            .await
             {
                 Ok(executor) => {
                     let response = execute_executor(executor).await;
                     // MS31-T01：列元数据装配（与隐式事务路径同点、同单源）。
                     Ok(attach_column_metadata(response?, output_columns, output_types))
                 }
-                Err(e) => Err(SqlError {
-                    message: e.to_string(),
-                    sqlstate: None,
-                }),
+                Err(e) => Err(executor_creation_error(e)),
             }
         }
     }
@@ -1572,6 +1603,31 @@ fn materialize_value_slots(values: &mut [Vec<Value>], slots: &[ValueParamSlot], 
     }
 }
 
+/// MS32 Iter003（design D4）：执行错误的 SQLSTATE 分类——查询内存超限
+/// 53200，其余错误维持无分类（`sqlstate: None`）既有面。
+fn storage_error_sqlstate(e: &StorageError) -> Option<String> {
+    match e {
+        StorageError::QueryMemoryExceeded { .. } => Some("53200".to_string()),
+        _ => None,
+    }
+}
+
+/// MS32 Iter003（design D4）：执行器创建 / 物化期错误转换——超限获得与
+/// 漏斗出口相同的 `Execution error: ` 前缀与 53200（三公共入口同面），
+/// 其余错误维持既有裸文案与无分类，逐字节不变。
+fn executor_creation_error(e: StorageError) -> SqlError {
+    match e {
+        StorageError::QueryMemoryExceeded { .. } => SqlError {
+            message: format!("Execution error: {e}"),
+            sqlstate: storage_error_sqlstate(&e),
+        },
+        _ => SqlError {
+            message: e.to_string(),
+            sqlstate: None,
+        },
+    }
+}
+
 /// Execute an executor and return the response
 async fn execute_executor(
     mut executor: Box<dyn Executor + Send>,
@@ -1593,7 +1649,7 @@ async fn execute_executor(
             Err(e) => {
                 return Err(SqlError {
                     message: format!("Execution error: {}", e),
-                    sqlstate: None,
+                    sqlstate: storage_error_sqlstate(&e),
                 })
             }
         }
@@ -2083,13 +2139,20 @@ async fn load_table_meta(
 /// 事务管理器——**附加库必须用自己的 `transaction_manager`**：tx-id 空间按库
 /// 独立，串用主库实例会错误抑制墓碑（design D6）。写执行器臂同样经
 /// `routed_db` 取目标库资源（MS20-T02）。
+///
+/// `budget` 是本语句的查询内存预算（MS32 Iter003，design D4/D5）：语句入口
+/// 构造的同一实例穿线到全部子树与子查询重建臂；驻留算子经 `with_budget`
+/// 持有并在驻留点 charge/release。
 pub(crate) fn create_executor_from_plan<'a>(
     plan: PhysicalPlan,
     database: &'a Database,
     tx_id: Option<u64>,
     snapshot: Option<Snapshot>,
     routed: &'a RoutedTables,
+    budget: &SharedBudget,
 ) -> CreateExecutorFuture<'a> {
+    // 预算按 Arc 克隆进 future：返回 future 只捕获 'a 借用（database/routed）。
+    let budget = budget.clone();
     Box::pin(async move {
         match plan {
             PhysicalPlan::Filter(node) => {
@@ -2100,6 +2163,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 Ok(Box::new(
@@ -2278,18 +2342,27 @@ pub(crate) fn create_executor_from_plan<'a>(
                     table_name: _,
                     column_indices,
                 } = node;
-                let input_executor =
-                    create_executor_from_plan(*input, database, tx_id, snapshot.clone(), routed)
-                        .await?;
-                Ok(Box::new(AggregateExecutor::new(
-                    input_executor,
-                    group_by,
-                    group_key_exprs,
-                    aggregates,
-                    aggregate_arg_indices,
-                    output_columns,
-                    column_indices,
-                )) as Box<dyn Executor + Send>)
+                let input_executor = create_executor_from_plan(
+                    *input,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                    &budget,
+                )
+                .await?;
+                Ok(Box::new(
+                    AggregateExecutor::new(
+                        input_executor,
+                        group_by,
+                        group_key_exprs,
+                        aggregates,
+                        aggregate_arg_indices,
+                        output_columns,
+                        column_indices,
+                    )
+                    .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Having(node) => {
@@ -2299,6 +2372,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 Ok(Box::new(HavingExecutor::new(input, node.predicate))
@@ -2313,11 +2387,14 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 Ok(Box::new(
                     SortExecutor::new(input, node.order_by, node.columns)
-                        .with_projection(node.projection),
+                        .with_projection(node.projection)
+                        .with_bounded(node.bounded)
+                        .with_budget(budget.clone()),
                 ) as Box<dyn Executor + Send>)
             }
 
@@ -2329,6 +2406,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 Ok(Box::new(LimitExecutor::new(input, node.limit, node.offset))
@@ -2355,6 +2433,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
 
@@ -2365,19 +2444,23 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
 
-                Ok(Box::new(JoinExecutor::new(JoinConfig {
-                    left_executor,
-                    right_executor,
-                    conditions: join_node.conditions.clone(),
-                    output_columns: join_node.output_columns.clone(),
-                    output_sides: join_node.output_sides.clone(),
-                    left_column_indices,
-                    right_column_indices,
-                    right_table_name,
-                })) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    JoinExecutor::new(JoinConfig {
+                        left_executor,
+                        right_executor,
+                        conditions: join_node.conditions.clone(),
+                        output_columns: join_node.output_columns.clone(),
+                        output_sides: join_node.output_sides.clone(),
+                        left_column_indices,
+                        right_column_indices,
+                        right_table_name,
+                    })
+                    .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::NestedLoopJoin(node) => {
@@ -2393,6 +2476,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 let right_executor = create_executor_from_plan(
@@ -2401,17 +2485,21 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
 
-                Ok(Box::new(NestedLoopJoinExecutor::new(
-                    left_executor,
-                    right_executor,
-                    node.predicate.clone(),
-                    node.output_columns.clone(),
-                    node.output_sides.clone(),
-                    node.join_type,
-                )) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    NestedLoopJoinExecutor::new(
+                        left_executor,
+                        right_executor,
+                        node.predicate.clone(),
+                        node.output_columns.clone(),
+                        node.output_sides.clone(),
+                        node.join_type,
+                    )
+                    .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::SemiJoin(node) => {
@@ -2435,6 +2523,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 let right_executor = create_executor_from_plan(
@@ -2443,22 +2532,26 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
 
-                Ok(Box::new(SemiJoinExecutorV2::new(JoinRelatedConfig {
-                    left: left_executor,
-                    right: right_executor,
-                    conditions: node.conditions,
-                    projection: node.projection,
-                    correlated_params: node.correlated_params,
-                    left_column_indices,
-                    right_column_indices,
-                    right_plan,
-                    database: Some(Arc::new(database.clone())),
-                    snapshot,
-                    routed_tables: Arc::new(routed.clone()),
-                })) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    SemiJoinExecutorV2::new(JoinRelatedConfig {
+                        left: left_executor,
+                        right: right_executor,
+                        conditions: node.conditions,
+                        projection: node.projection,
+                        correlated_params: node.correlated_params,
+                        left_column_indices,
+                        right_column_indices,
+                        right_plan,
+                        database: Some(Arc::new(database.clone())),
+                        snapshot,
+                        routed_tables: Arc::new(routed.clone()),
+                    })
+                    .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::AntiJoin(node) => {
@@ -2481,6 +2574,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 let right_executor = create_executor_from_plan(
@@ -2489,22 +2583,26 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
 
-                Ok(Box::new(AntiJoinExecutor::new(JoinRelatedConfig {
-                    left: left_executor,
-                    right: right_executor,
-                    conditions: node.conditions,
-                    projection: node.projection,
-                    correlated_params: node.correlated_params,
-                    left_column_indices,
-                    right_column_indices,
-                    right_plan,
-                    database: Some(Arc::new(database.clone())),
-                    snapshot,
-                    routed_tables: Arc::new(routed.clone()),
-                })) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    AntiJoinExecutor::new(JoinRelatedConfig {
+                        left: left_executor,
+                        right: right_executor,
+                        conditions: node.conditions,
+                        projection: node.projection,
+                        correlated_params: node.correlated_params,
+                        left_column_indices,
+                        right_column_indices,
+                        right_plan,
+                        database: Some(Arc::new(database.clone())),
+                        snapshot,
+                        routed_tables: Arc::new(routed.clone()),
+                    })
+                    .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::SubqueryEval(node) => {
@@ -2526,20 +2624,24 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
-                Ok(Box::new(SubqueryEvalExecutor::with_output_width(
-                    input_executor,
-                    *node.subquery,
-                    node.output_column.clone(),
-                    node.result_column_index,
-                    node.correlated_params.clone(),
-                    outer_column_indices,
-                    Arc::new(database.clone()),
-                    snapshot,
-                    Arc::new(routed.clone()),
-                    node.output_width,
-                )) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    SubqueryEvalExecutor::with_output_width(
+                        input_executor,
+                        *node.subquery,
+                        node.output_column.clone(),
+                        node.result_column_index,
+                        node.correlated_params.clone(),
+                        outer_column_indices,
+                        Arc::new(database.clone()),
+                        snapshot,
+                        Arc::new(routed.clone()),
+                        node.output_width,
+                    )
+                    .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::ScalarSubqueryFilter(node) => {
@@ -2552,18 +2654,22 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
-                Ok(Box::new(ScalarSubqueryFilterExecutor::new(
-                    input_executor,
-                    node.predicate.clone(),
-                    node.bindings.clone(),
-                    outer_column_indices,
-                    Arc::new(database.clone()),
-                    snapshot,
-                    Arc::new(routed.clone()),
-                    node.projection.clone(),
-                )) as Box<dyn Executor + Send>)
+                Ok(Box::new(
+                    ScalarSubqueryFilterExecutor::new(
+                        input_executor,
+                        node.predicate.clone(),
+                        node.bindings.clone(),
+                        outer_column_indices,
+                        Arc::new(database.clone()),
+                        snapshot,
+                        Arc::new(routed.clone()),
+                        node.projection.clone(),
+                    )
+                    .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::DerivedScan(node) => {
@@ -2574,16 +2680,27 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 let mut rows = Vec::new();
+                // MS32 Iter003（design D5）：派生表源行在继续执行前整段驻留
+                // ——逐行入账（峰值即全部源行），物化完成即整段出账：执行器
+                // 后续产出行按「最终结果行不计」豁免。
+                let mut charged = 0u64;
                 loop {
                     match subquery_executor.next().await? {
-                        Some(ExecResult::Row(row)) => rows.push(row),
+                        Some(ExecResult::Row(row)) => {
+                            let bytes = row_bytes(&row);
+                            budget.charge(bytes)?;
+                            charged += bytes;
+                            rows.push(row);
+                        }
                         Some(_) => {} // skip non-row results
                         None => break,
                     }
                 }
+                budget.release(charged);
                 Ok(
                     Box::new(DerivedScanExecutor::new(rows, node.projection.clone()))
                         as Box<dyn Executor + Send>,
@@ -2599,6 +2716,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 let items = node.items.into_iter().map(|item| item.expr).collect();
@@ -2615,9 +2733,13 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
-                Ok(Box::new(DistinctExecutor::new(input)) as Box<dyn Executor + Send>)
+                Ok(
+                    Box::new(DistinctExecutor::new(input).with_budget(budget.clone()))
+                        as Box<dyn Executor + Send>,
+                )
             }
 
             PhysicalPlan::SetOperation(node) => {
@@ -2629,6 +2751,7 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
                 let right = create_executor_from_plan(
@@ -2637,12 +2760,13 @@ pub(crate) fn create_executor_from_plan<'a>(
                     tx_id,
                     snapshot.clone(),
                     routed,
+                    &budget,
                 )
                 .await?;
-                Ok(
-                    Box::new(SetOperationExecutor::new(left, right, node.op, node.all))
-                        as Box<dyn Executor + Send>,
-                )
+                Ok(Box::new(
+                    SetOperationExecutor::new(left, right, node.op, node.all)
+                        .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::SingleRow => {

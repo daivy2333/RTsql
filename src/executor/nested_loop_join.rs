@@ -17,6 +17,7 @@
 //! original-left rows are dropped), so the padding side follows the preserved
 //! side of the rewritten plan.
 
+use crate::executor::query_budget::{row_bytes, unlimited_budget, SharedBudget};
 use crate::executor::{
     ExecResult, Executor, JoinSide, NestedLoopJoinType, OutputColumn, PredicateRef, Value,
 };
@@ -46,6 +47,8 @@ pub struct NestedLoopJoinExecutor {
     /// MS25 T1: Full 补齐阶段的右行游标（与匹配阶段的 `current_right_index`
     /// 分离——左输入耗尽时后者已等于右行数）
     drain_index: usize,
+    /// MS32 Iter003（design D5）：语句级查询内存预算——右行物化入账。
+    budget: SharedBudget,
 }
 
 impl NestedLoopJoinExecutor {
@@ -72,7 +75,14 @@ impl NestedLoopJoinExecutor {
             left_matched: false,
             right_matched: Vec::new(),
             drain_index: 0,
+            budget: unlimited_budget(),
         }
+    }
+
+    /// MS32 Iter003（design D5）：注入语句级预算（pipeline 构造臂）。
+    pub(crate) fn with_budget(mut self, budget: SharedBudget) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// 构建输出行（根据 output_columns 从左/右组合侧提取列，
@@ -141,6 +151,9 @@ impl Executor for NestedLoopJoinExecutor {
             self.right_materialized = true;
             while let Some(result) = self.right_executor.next().await? {
                 if let ExecResult::Row(row) = result {
+                    // MS32 Iter003（design D5）：右行物化逐行入账，驻留持续
+                    // 到语句结束；左行流式不计。
+                    self.budget.charge(row_bytes(&row))?;
                     self.right_rows.push(row);
                 }
             }

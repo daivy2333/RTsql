@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-10-23（**MS31 完成收尾**：类型化库结果与参数绑定 API 经单 change `2026-10-21-ms31-typed-api-param-binding` 交付归档——T01 类型化公共结果（`Result<SqlOutcome, SqlError>`、原生 Value 行集合与列元数据、核心/协议解耦、CLI 四格式与 PG/JSON 输出逐字节零变化）/ T02 占位符与类型化参数执行 + 可复用预编译语句（参数绑定通道与拒绝面、schema 版本戳单点、prepare/PreparedStatement、失效/并发/事务矩阵）；三 Iteration 全部 accepted，全量终态 2123/0/2；行为规格新增 sql-parameter-binding、typed-library-results 两域）
+> 最后更新：2026-10-23（**MS32 完成收尾**：执行器批量接口与查询资源契约经单 change `2026-10-23-ms32-executor-batch-and-query-memory` 交付归档——四 Iteration 全 accepted：000 批量接口〔`Executor::next_batch` 默认方法保留；DataScan 生产攒批未过 10% 时间门，接线撤回、生产路径保持逐行〕/ 001 哈希 JOIN 左表逐行〔经 replan Cycle：见证改 WHERE 谓词溢出；`left_rows` 整表缓存与匹配桶整桶克隆删除，BuildRight → Output 两阶段〕/ 002 有界排序〔`SortNode.bounded` 两 Limit 包装点形状赋值，驻留 ≤ offset+limit，EXPLAIN 不变，Distinct 形态不越界〕/ 003 查询内存上限〔语句级预算 + `set_query_memory_limit`/`RTSQL_QUERY_MEMORY_BYTES` 双通道 + D5 驻留点计费 + 三入口 53200 错误面；`ScanExecutor.results` 经 spec 场景裁定不计费〕；全量终态 2144/0/2；行为规格新增 executor-batch-interface、query-memory-budget 两域。底层设计批（MS30–MS32）全部完成，执行序仅余 MS22 性能批）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-33 个 Milestone：21 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 6 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档），MS30 于 2026-10-21 完成（change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration accepted 归档——单 change 承载两任务为 2026-10-20 用户指令，T03/T04 为裁定增补段），MS31 于 2026-10-23 完成（change `2026-10-21-ms31-typed-api-param-binding` 三 Iteration accepted 归档——单 change 承载 T01+T02 为 2026-10-21 用户裁定））。★初版达成★。
+33 个 Milestone：22 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 5 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档），MS30 于 2026-10-21 完成（change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration accepted 归档——单 change 承载两任务为 2026-10-20 用户指令，T03/T04 为裁定增补段），MS31 于 2026-10-23 完成（change `2026-10-21-ms31-typed-api-param-binding` 三 Iteration accepted 归档——单 change 承载 T01+T02 为 2026-10-21 用户裁定），MS32 于 2026-10-23 完成（change `2026-10-23-ms32-executor-batch-and-query-memory` 四 Iteration accepted 归档——000 生产攒批未过时间门撤回、001 经 replan Cycle；单 change 承载 T01+T02 为计划期裁定））。★初版达成★。
 
 统一执行序（2026-10-01 用户裁定重排——功能补齐前置、性能优化殿后独立成批；沿用「批准执行序与编号无关」既定先例，编号只表规划先后，执行以本序为准）：**MS28 CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint）→ MS29 输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验）→ MS20-T02 跨文件 DML 二期 → MS27 存储演进批（超页溢出 + 完整性校验）→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据（2026-10-01）：外部评审实证的自动化使用摩擦先行收口——并发硬失败 exit 4 → 可配置等待是多 agent 并发使用的语义前提，也是 MS22 持锁窗口治理的前置；输入通道与声明语义同代码面相邻（lifecycle.rs import + ddl_dml.rs 建表/类型面）；存储格式演进体量最大放功能带末尾；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DETACH（I076）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）、WAL fsync 组提交（I049——串行单写者模型下无效，MS22 量化时剔除）等留 improvements 域未排期。
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
@@ -75,9 +75,9 @@
 - **Split signals**: 兼容迁移若迫使破坏性 API 变更（调用者面无法平滑）时停下裁定迁移策略；预编译语句若牵动 plan cache key 语义重构时拆独立设计
 - **Related changes**: `openspec/changes/archive/2026-10-21-ms31-typed-api-param-binding/`（2026-10-23 归档）
 
-### MS32：执行器批量接口与查询资源契约 — planned
+### MS32：执行器批量接口与查询资源契约 — completed
 
-- **Status**: planned（2026-10-19 用户批准底层设计批增补；来源 I081/I082——优先级排序第 7–8 位；两项均量化先行，不达标部分沿 MS22 纪律退还 I 台账留量化记录）
+- **Status**: completed（2026-10-23；change `2026-10-23-ms32-executor-batch-and-query-memory` 四 Iteration 全部 accepted 归档——Iteration 000 批量接口〔T01：`next_batch` 默认方法与逐行同序、`max=0` 不消费；DataScan 攒批未过 10% 时间门，生产接线撤回、逐行路径保留〕、001 哈希 JOIN 左表逐行〔经 replan Cycle；两阶段状态机、左表不整表驻留、匹配桶不整桶克隆〕、002 有界排序〔`SortNode.bounded` 仅两 Limit 包装点按 `Limit(Sort)`/`Limit(Projection(Sort))` 形状赋值；EXPLAIN 文本不变〕、003 查询内存上限〔语句级预算、双通道配置、D5 驻留点计费、三入口 53200 错误面、计数不跨语句〕；全量终态 2144/0/2）
 - **Dependencies**: None 硬前置（建议序在 MS30 后——I082 触碰 JOIN 执行面，避免与绑定收口同面并发改动）
 - **Outcome**: 查询执行资源模型成立——`next_batch` 批量接口与查询内存预算/超限错误成为执行器公共契约；Hash JOIN 构建侧缓存 + 左侧全量物化 + 匹配集合克隆的内存放大收敛（左侧逐行探测），ORDER BY + LIMIT 走 Top-N
 - **Rationale**: `Executor::next()` 逐行 + async-trait 装箱的分配/调度耗时占比未测量（I081 先测量再评估，不预设向量化框架）；Sort 全量收集、Hash JOIN 双侧全量缓存与匹配集合 `.cloned()`（I082 证据：`src/executor/sort.rs::initialize`、`src/executor/join.rs::next` 三阶段）；两项共同定义「执行与资源」一个阶段成果，并与 I020（表示层）/I066（分配器）分层归因、不同时改多层
@@ -94,7 +94,7 @@
 - **Verification boundary**: 量化基线（装箱开销/克隆规模 before/after bench，`--save-baseline` 纪律）+ 内存预算超限拒绝矩阵 + 既有 JOIN/Sort/大值用例零回归 + 全量分批回归（M19）
 - **Diagnostic boundary**: `src/executor/executor_trait.rs` + `src/executor/sort.rs::initialize` + `src/executor/join.rs::next` 三阶段 + 热点算子转换清单
 - **Split signals**: `next_batch` 若需改变 `dyn Executor` 装配协议（牵动全执行器）时拆独立设计 change；内存预算若牵动跨算子资源管理器时单独收口
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-10-23-ms32-executor-batch-and-query-memory/`（2026-10-23 归档）
 
 ## D-candidates（不归入当前 MS，待后续决定）
 
@@ -127,7 +127,7 @@ MS32 执行资源契约（无硬前置，建议序 MS30 后避开 JOIN 同面并
 全部功能带（MS28/MS29/MS20-T02/MS27）──→ 底层设计批（MS30–MS32，2026-10-19 批准）──→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）
 ```
 
-建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 ✓ → MS32 → MS22**（截至 2026-10-23 前十四项已完成；下一项 MS32 执行器批量接口与查询资源契约〔无硬前置，依赖 MS30 已满足〕，MS22 性能批仍殿后——候选范围量化定稿后转 ready）
+建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 ✓ → MS32 ✓ → MS22**（截至 2026-10-23 前十五项已完成，底层设计批 MS30–MS32 全部收口；执行序仅余 MS22 实测驱动性能批〔殿后独立，候选范围量化定稿后转 ready；I081/I082 的批量接线与 JOIN 流水已随 MS32 量化落地或收敛，剩余候选按各自量化数据决定〕）
 
 无环；所有依赖均已满足。初版后工作（MS18-MS32）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
 
