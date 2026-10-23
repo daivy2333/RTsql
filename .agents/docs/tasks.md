@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-10-21（**MS30 完成收尾**：SQL 语义绑定层一期经单 change `2026-10-20-ms30-semantic-binding-differential-net` 交付归档——T01 rusqlite 差分与性质测试网 / T02 绑定作用域表基建 + 关联子查询分类单源（C1）+ JOIN 布局段源统一（C2）/ 用户裁定增补 T03 差分白名单四缺陷清偿 + T04 投影臂登记收口；四 Iteration 全部 accepted，全量终态 2057/0/2，差分白名单 6 → 1；行为规格新增 sql-differential-testing、sql-semantic-binding、sql-semantics-conformance 三域）
+> 最后更新：2026-10-23（**MS31 完成收尾**：类型化库结果与参数绑定 API 经单 change `2026-10-21-ms31-typed-api-param-binding` 交付归档——T01 类型化公共结果（`Result<SqlOutcome, SqlError>`、原生 Value 行集合与列元数据、核心/协议解耦、CLI 四格式与 PG/JSON 输出逐字节零变化）/ T02 占位符与类型化参数执行 + 可复用预编译语句（参数绑定通道与拒绝面、schema 版本戳单点、prepare/PreparedStatement、失效/并发/事务矩阵）；三 Iteration 全部 accepted，全量终态 2123/0/2；行为规格新增 sql-parameter-binding、typed-library-results 两域）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-33 个 Milestone：20 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 7 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档），MS30 于 2026-10-21 完成（change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration accepted 归档——单 change 承载两任务为 2026-10-20 用户指令，T03/T04 为裁定增补段））。★初版达成★。
+33 个 Milestone：21 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 6 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档），MS30 于 2026-10-21 完成（change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration accepted 归档——单 change 承载两任务为 2026-10-20 用户指令，T03/T04 为裁定增补段），MS31 于 2026-10-23 完成（change `2026-10-21-ms31-typed-api-param-binding` 三 Iteration accepted 归档——单 change 承载 T01+T02 为 2026-10-21 用户裁定））。★初版达成★。
 
 统一执行序（2026-10-01 用户裁定重排——功能补齐前置、性能优化殿后独立成批；沿用「批准执行序与编号无关」既定先例，编号只表规划先后，执行以本序为准）：**MS28 CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint）→ MS29 输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验）→ MS20-T02 跨文件 DML 二期 → MS27 存储演进批（超页溢出 + 完整性校验）→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据（2026-10-01）：外部评审实证的自动化使用摩擦先行收口——并发硬失败 exit 4 → 可配置等待是多 agent 并发使用的语义前提，也是 MS22 持锁窗口治理的前置；输入通道与声明语义同代码面相邻（lifecycle.rs import + ddl_dml.rs 建表/类型面）；存储格式演进体量最大放功能带末尾；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DETACH（I076）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）、WAL fsync 组提交（I049——串行单写者模型下无效，MS22 量化时剔除）等留 improvements 域未排期。
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
@@ -54,9 +54,9 @@
 - **Split signals**: 绑定基建若需改变 PhysicalPlan 词表结构（触及 I074 第三刀单点）时拆出独立设计 change；差分网若牵动 rusqlite 版本升级（I093 域）时单独评估
 - **Related changes**: `openspec/changes/archive/2026-10-20-ms30-semantic-binding-differential-net/`（2026-10-21 归档）
 
-### MS31：类型化库结果与参数绑定 API — planned
+### MS31：类型化库结果与参数绑定 API — completed
 
-- **Status**: planned（2026-10-19 用户批准底层设计批增补；来源 I088/I089——优先级排序第 2–3 位）
+- **Status**: completed（2026-10-23；change `2026-10-21-ms31-typed-api-param-binding` 三 Iteration 全部 accepted 归档——Iteration 000 类型化结果基建与调用面迁移〔T01：公共结果类型与边界转换、入口签名替换与全调用面迁移、列类型装配〕、001 占位符与类型化参数执行〔T02 前半：AST 占位符计数与拒绝面、计划面占位符编译、参数执行通道〕、002 可复用预编译语句〔T02 后半：schema 版本戳单点、prepare/PreparedStatement、失效/并发/事务矩阵〕；全量终态 2123/0/2；单 change 承载两任务为 2026-10-21 用户裁定）
 - **Dependencies**: MS30（I089 消费 I080 绑定结果；I088 的列元数据与绑定信息衔接）
 - **Outcome**: 嵌入式库 API 面定型——公共结果携带原生 Value 与列名/类型元数据（CLI/JSON/PG 在边界转换），类型化参数 execute/query 接口与可复用预编译语句；调用者不再自行渲染值、可直接消费内部类型
 - **Rationale**: 核心执行结果当前依赖 `network::protocol::Response`（JSON 值数组、无完整列元数据），核心↔协议耦合（I088 证据：`src/database.rs::execute_sql`、`src/pipeline.rs::execute_executor` 与 `value_to_json`）；程序调用需自行渲染 SQL 文本、重复 SQL 的计划生命周期缺公共契约（I089）。两任务严格串行、同 API 故障域，聚合一段
@@ -68,12 +68,12 @@
 | MS31-T02 | I089：类型化参数 execute/query + 可复用预编译语句（定型、NULL、参数个数/类型错误、schema 变化后计划失效契约；不以字符串替换实现） | improvements I089（2026-10-18 用户接受方向；优先级排序第 3 位） |
 
 - **Non-goals**: PG Extended Query 协议（I071 触发锁定维持）；流式游标/背压（I065 long-term）；crate 边界拆分（I074 长期方向，不以本段为前置）
-- **Workload**: 中，约 2 个 change（T01 一 change；T02 视 Plan 调查可 1-2）
-- **Stable baseline**: lib 公共契约为类型化结果 + 参数绑定；`network::protocol::Response` 退化为边界转换词表——CLI/Server 消费者与嵌入式使用者各取所需
+- **Workload**: 中，约 2 个 change（实际：单 change 承载 T01+T02，2026-10-21 用户裁定）
+- **Stable baseline**: lib 公共契约为类型化结果 + 参数绑定；`network::protocol::Response` 退化为边界转换词表——CLI/Server 消费者与嵌入式使用者各取所需；参数以原生 `Value` 绑定（位置式 `?`，不用字符串替换），预编译语句自持计划、schema 变化后透明重计划
 - **Verification boundary**: 类型化结果与既有 JSON 输出逐字节等价（边界转换处）+ 参数绑定错误矩阵 + CLI/PG 既有面零回归 + 全量分批回归（M19）
 - **Diagnostic boundary**: `src/database.rs::execute_sql`/`execute_in_tx` + `src/network/protocol.rs::Response` + `src/pipeline.rs` 转换点与 plan cache 失效面
 - **Split signals**: 兼容迁移若迫使破坏性 API 变更（调用者面无法平滑）时停下裁定迁移策略；预编译语句若牵动 plan cache key 语义重构时拆独立设计
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-10-21-ms31-typed-api-param-binding/`（2026-10-23 归档）
 
 ### MS32：执行器批量接口与查询资源契约 — planned
 
@@ -127,7 +127,7 @@ MS32 执行资源契约（无硬前置，建议序 MS30 后避开 JOIN 同面并
 全部功能带（MS28/MS29/MS20-T02/MS27）──→ 底层设计批（MS30–MS32，2026-10-19 批准）──→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）
 ```
 
-建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 → MS32 → MS22**（截至 2026-10-21 前十三项已完成；下一项 MS31 类型化库结果与参数绑定 API〔依赖 MS30 已满足〕，MS22 性能批仍殿后——候选范围量化定稿后转 ready）
+建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 ✓ → MS32 → MS22**（截至 2026-10-23 前十四项已完成；下一项 MS32 执行器批量接口与查询资源契约〔无硬前置，依赖 MS30 已满足〕，MS22 性能批仍殿后——候选范围量化定稿后转 ready）
 
 无环；所有依赖均已满足。初版后工作（MS18-MS32）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
 

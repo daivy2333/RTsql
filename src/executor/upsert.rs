@@ -373,6 +373,13 @@ impl UpsertExecutor {
                 UpsertValueExpr::Literal(v) => v.clone(),
                 UpsertValueExpr::Excluded(idx) => inserted[*idx].clone(),
                 UpsertValueExpr::Old(idx) => old_values[*idx].clone(),
+                // MS31 Iteration 001：参数槽位在 pipeline 物化（改写为
+                // Literal）后才构造执行器——执行器见到该形态说明物化漏做。
+                UpsertValueExpr::Param(index) => {
+                    return Err(StorageError::Internal(format!(
+                        "unmaterialized parameter slot in DO UPDATE assignment: param {index}"
+                    )))
+                }
             };
             let coerced = coerce_datetime_write(&raw, &self.schema[col_idx])?;
             values[col_idx] = coerced;

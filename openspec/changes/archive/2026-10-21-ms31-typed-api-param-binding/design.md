@@ -70,25 +70,27 @@
 - CLI 主路径：`execute_stage*` 返回 SqlOutcome 后，QueryOutcome →（value_to_json）→ `QueryPayload::Rows` → render（render.rs 零改动）；`sql_failure_status` 从 SqlError 解构 (message, sqlstate)，文案与退出码不变。
 - tests 81 文件：经 `to_response` 保持既有 Response 断言形态（每文件 helper 内一行替换，断言不动）——A2 批准的迁移形态。
 
-### D5 占位符计划面（可达集 = 调查定稿，A6）
+### D5 占位符计划面（可达集 = 调查定稿，A6；编号机制经 Iteration 001 Review 回折定稿）
 
-- 命名空间 `__param_{index}`（0 基，按 AST 出现序）——与 `{table}.{column}`、`__scalar_subquery_{i}` 无碰撞。仅接受裸 `?`；`?N`（Placeholder("?N")）与 `$N` 点名拒绝（一套位置式方言）。
-- 计数：AST 级 `count_placeholders(&Statement) -> usize`（parse 后即可校验；个数不符在 plan 前点名「期望 N 实际 M」）。`execute_sql` 内部等价 `params = &[]`——含占位符语句无参执行报同一个数错误。
-- **表达式位**（SELECT/WHERE 谓词、投影项、UPDATE SET 右值）：`Expr::Value(Placeholder("?"))` → `ParameterExpression::new("__param_{i}")`（PlanBuilder 计数器分配）。UPDATE SET 的 `Expr::Value` Literal 臂遇 `?` 改路由 `UpdateValue::Expression(ParameterExpression)`（表达式臂执行器对旧行快照求值，参数 owned evaluate 真值）。
+- 命名空间 `__param_{index}`（0 基，**按 SQL 文本序**）——与 `{table}.{column}`、`__scalar_subquery_{i}` 无碰撞。仅接受裸 `?`；`?N`（Placeholder("?N")）与 `$N` 点名拒绝（一套位置式方言）。
+- 编号与计数（Iteration 001 定稿，替代原「PlanBuilder 计数器分配」——计划期遍历序 ≠ SQL 文本序〔FROM/JOIN ON 先于投影、聚合分支投影晚于 WHERE〕，按计划序分配会使 `SELECT ? FROM t WHERE a = ?` 绑定错位）：`src/parser/placeholder.rs::assign_placeholder_indices` **AST 单遍**按文本序把裸 `?` 改写为 `__param_{i}` 标记（幂等），计划面读标记序号、不自行计数；`count_placeholders(&Statement) -> usize` 与编号同一遍历规则（计数模式克隆语句走同一 walk，同源同序；个数不符在 plan 前点名「期望 N 实际 M」）。`execute_sql` 内部等价 `params = &[]`——含占位符语句无参执行报同一个数错误。
+- **表达式位**（SELECT/WHERE 谓词、投影项、UPDATE SET 右值）：`Expr::Value(Placeholder("__param_{i}"))` → `ParameterExpression::new("__param_{i}")`；未编号形态（CLI 等不经编号入口到达计划面）点名拒绝，不静默按 NULL。UPDATE SET 的 `Expr::Value` Literal 臂遇占位符改路由 `UpdateValue::Expression(ParameterExpression)`（表达式臂执行器对旧行快照求值，参数 owned evaluate 真值）。
+- SELECT 计划期的键提取/索引路由遇占位符位按「计划期无值」处理（不提取键 / 不路由索引 / 非字面量腿，谓词回落扫描路径执行期按参数值求值）——Iteration 001 实现定稿的可达性前提。
 - **DML 值位**（INSERT VALUES / UPSERT 待插值与 DO UPDATE SET Literal 臂）：`InsertNode`/`UpsertNode` 新增 `param_slots: Vec<ValueParamSlot>` 字段（`ValueParamSlot { row: usize, col: usize, param_index: usize }`；Upsert 的 DO UPDATE 赋值以独立槽位形态记录），值槽计划期置 `Value::Null` 占位；pipeline DML 臂构造执行器前按参数物化 `values[r][c] = params[i]` / 赋值右值物化——类型门/NOT NULL/键列门/索引维护全部沿用执行器既有语义（占位 Null 豁免计划期检查，执行期门在真实值上跑，与字面量语句同源）。
 - **不可达位点名拒绝**：DML WHERE 定位键位（`WHERE a = ?`——Key 为计划期物化，`extract_pk_from_where` 无值不可提取，`ddl_dml.rs:1976-1986`）、标识位、DDL 语句内占位符。delta spec 场景已同步修订（见 specs/sql-parameter-binding）。
 
 ### D6 参数执行通道
 
 - `Database::execute_with_params(&self, sql: &str, params: &[Value]) -> Result<SqlOutcome, SqlError>`；`Database::execute_in_tx_with_params(&self, sql, params, tx)`。
-- 流程：parse → `count_placeholders` 校验 → plan（占位符已编译为 ParameterExpression / param_slots）→ SELECT 树经 `inject_correlated_values` 同款 walk 注入 `__param_{i}` → DML 臂槽位物化 → execute_stage[_in_tx]。plan 为本次新建，注入直接作用于该计划（无需 clone）。
+- 流程（Iteration 001 落地形态）：parse → `assign_placeholder_indices`（形态拒绝面）→ 个数校验 → plan（占位符已编译为 ParameterExpression / param_slots）→ `materialize_params`（SELECT 树 `inject_correlated_values` 同款 walk 注入 `__param_{i}` + DML 臂槽位物化 + UPSERT DO UPDATE 赋值物化）→ execute_stage[_in_tx]。plan 为本次新建，注入直接作用于该计划（无需 clone）；**参数化语句不消费 plan cache get，put 门排除含占位符语句**（cache key 只含 SQL 文本不含参数值——跨执行值残留杜绝）。
 - 值借用通道限制面（`evaluate_ref` 降级，见调查结论）：谓词/UPDATE 表达式/投影项均走 owned evaluate 真值通道（MS30 T03-D2 修复面）；顶层投影位 `SELECT ?` 的求值通道在 Act 先行测试中锁定（TEXT 参数真值断言，若触发 evaluate_ref 降级则该位置点名拒绝并记录）。
 
-### D7 可复用预编译语句（A5/A7）
+### D7 可复用预编译语句（A5/A7；并发机制与字段形态经 Iteration 002 Review 回折定稿）
 
 - `Database` 新增 `schema_version: Arc<AtomicU64>`；pipeline 全部 `plan_cache.clear()` 站点收敛为单一 helper `bump_schema_version(db)`（clear + fetch_add 同点），版本戳与缓存失效同源。
-- `Database::prepare(&self, sql: &str) -> Result<PreparedStatement, SqlError>`：parse + 计数 + plan 一次；`PreparedStatement { db: Database, sql: String, plan: PhysicalPlan, param_count: usize, schema_version: u64 }`（Database 为 Clone 的 Arc 集，持引用不延长文件生命周期语义——close 由调用者编排，与现 Arc<Database> 消费者同型）。
-- `PreparedStatement::execute(&self, params: &[Value]) -> Result<SqlOutcome, SqlError>`：版本戳不匹配 → **透明 re-plan**（重跑 parse+plan，更新自持计划与版本戳，结果与直接执行一致）；匹配 → `plan.clone()` → 注入/物化 → execute_stage。**每次执行操作计划私有副本**——`&self` 并发安全（A7），无共享可变状态。
+- `Database::prepare(&self, sql: &str) -> Result<PreparedStatement, SqlError>`：parse + 编号 + 计数 + plan 一次，版本戳快照取**构建计划之前**的读数（保守口径：读数偏早最多多一次 re-plan；读数偏晚会把按旧 schema 建的计划标成新版本、漏判失效）。`PreparedStatement { db: Database, sql: String, state: Mutex<PreparedState { plan, param_count, schema_version }>, exec_gate }`（002 回折：原 `{ db, sql, plan, param_count, schema_version }` 平铺形态不可支持 `&self` 下 re-plan 更新自持计划——计划/个数/版本须置于锁内；Database 为 Clone 的 Arc 集，持引用不延长文件生命周期语义——close 由调用者编排，与现 Arc<Database> 消费者同型）。
+- `PreparedStatement::execute(&self, params: &[Value]) -> Result<SqlOutcome, SqlError>`：版本戳不匹配 → **透明 re-plan**（**完整重跑 parse+编号+计数+plan**——语句文本的 AST 可能因 schema 变化走不同计划路径，不能只重跑 plan；更新自持计划与版本戳，结果与直接执行一致）；匹配 → 自持计划副本 → 注入/物化 → execute_stage。
+- **并发机制（002 回折，替代原「每次执行操作计划私有副本——无共享可变状态」）**：`PhysicalPlan` 的 Clone 对 `ExpressionRef`/`PredicateRef`（`Arc<dyn …>`）子树为浅克隆，`ParameterExpression` 的参数值（`Mutex<Value>`）是计划树共享可变状态——「计划私有副本」在既有节点词表下不可达，深拷贝需执行器 trait 改动（超出本 change 目标面与 Forbidden）。`&self` 并发安全改为：每次执行持计划副本，**同一条预编译语句的并发执行经闸门（`exec_gate`）串行化**——闸门覆盖「resolve_plan + 参数注入 + 执行」全段，注入与执行不交错；与执行期相关子查询 clone+就地注入的既有暂态参数模型一致。不同预编译语句各有闸门、互不阻塞。
 - `PreparedStatement::execute_in_tx(&self, params, tx)` 同款走 execute_stage_in_tx。
 - prepare 语句面与 execute_sql 一致（单语句、无 attach 路由上下文——lib 面既有形态）；prepared 不读写 plan_cache（自持计划；SELECT「计划不经每次执行重建」由自持保证）；DDL 可 prepare，执行触发版本 bump → 后续执行透明 re-plan（幂等）。
 

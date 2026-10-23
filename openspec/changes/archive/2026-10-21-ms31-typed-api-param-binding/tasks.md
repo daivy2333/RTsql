@@ -2,7 +2,7 @@
 
 来源：proposal What Changes 1/2（T01 + T02）；设计依据 design.md D1-D8。
 
-> Status: in-progress（2026-10-22：Iteration 000 完成——Cycle `000-initial` 修复轮后复审 **accepted**〔G1 benches 编译面 / G2 声明来源一致性两 Gap 关闭，F2 前提复核裁定 Act 判定成立〕；类型化入口（`Result<SqlOutcome, SqlError>`）+ 列类型装配落地，核心路径零 `network::protocol` 依赖，全量终态 2081/0/2。Iteration 001 Cycle `000-initial` 已展开并获批（2026-10-22「批准」，Status: ready——待 Act 执行））
+> Status: 交付完成待收尾（2026-10-22：Iteration 000 完成——Cycle `000-initial` 修复轮后复审 **accepted**〔G1 benches 编译面 / G2 声明来源一致性两 Gap 关闭，F2 前提复核裁定 Act 判定成立〕；类型化入口（`Result<SqlOutcome, SqlError>`）+ 列类型装配落地，核心路径零 `network::protocol` 依赖，全量终态 2081/0/2。Iteration 001 Cycle `000-initial` 已实施并复审 **accepted**（2026-10-22：T5–T8 落地——参数化通道 `execute_with_params`/`execute_in_tx_with_params` + 拒绝面 + 计划面编译，全量终态 2109/0/2；设计回折 D5/D6 已裁定回写）。Iteration 002 Cycle `000-initial` 已实施并复审 **accepted**（2026-10-23：T9–T11 落地——schema 版本戳单点 + `prepare`/`PreparedStatement` + 失效/并发/事务矩阵，全量终态 2123/0/2；D7 并发机制设计回折经 Review 裁定接受并回写 design.md——执行持计划副本 + 同语句并发经闸门串行化）。三个 Iteration 全部 accepted，T1-T11 全数完成；收尾归档待用户指令）
 
 ## 任务清单
 
@@ -46,6 +46,7 @@
 
 ### Iteration 001: 占位符与类型化参数执行（T02 前半）
 
+- Status: completed（2026-10-22 复审 accepted——T5–T8 完成、Gate 3/4 通过、偏差与设计回折裁定接受（design.md D5/D6 已回写）；全量终态 2109/0/2）
 - Tasks: T5, T6, T7, T8
 - Depends on: Iteration 000（消费 SqlOutcome/SqlError 形态与注入通道）
 - Stable baseline: SQL 文本位置式 `?` 全可达位（SELECT 谓词/投影、UPDATE SET 右值、INSERT/UPSERT 值位）绑定原生 Value 参数；个数/类型错误矩阵与 NULL 三值语义锁定；不可达位（DML WHERE 键位、标识位、DDL、`?N`）点名拒绝
@@ -55,9 +56,10 @@
 
 ### Iteration 002: 可复用预编译语句（T02 后半）
 
+- Status: completed（2026-10-23 复审 accepted——T9–T11 完成、Gate 3/4 通过、D7 并发机制设计回折裁定接受〔执行持计划副本 + 同语句并发经闸门串行化，见 design D7 回折〕；全量终态 2123/0/2）
 - Tasks: T9, T10, T11
 - Depends on: Iteration 001（消费参数通道与注入/物化协议）
-- Stable baseline: prepare 一次、多次带参执行；schema 变化（DDL 八类 + CTAS）后透明 re-plan、结果与直接执行一致；显式事务内执行；`&self` 并发安全（每次执行计划私有副本）
+- Stable baseline: prepare 一次、多次带参执行；schema 变化（DDL 八类 + CTAS）后透明 re-plan、结果与直接执行一致；显式事务内执行；`&self` 并发安全（执行持计划副本，同一条语句的并发执行经闸门串行化——计划树参数节点为共享可变状态，机制定稿见 design D7 回折）
 - Verification boundary: T9 版本戳单点测试；T10/T11 行为矩阵（复用/失效/事务/并发）真实入口验证；全量分批回归（M19）预算一次（T11）
 - Diagnostic boundary: `src/database.rs`（schema_version/prepare 家族）、`src/pipeline.rs`（bump 单点与 re-plan 路径）
 - Non-goals: plan cache key 语义重构、prepare 的 attach 路由面（lib 面与 execute_sql 一致）、PG Extended Query 协议

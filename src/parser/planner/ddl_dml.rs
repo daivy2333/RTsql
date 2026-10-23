@@ -11,8 +11,8 @@ use crate::executor::{
     AlterTableNode, AlterTableOp, ColumnConstraint, ColumnDef, ColumnType, ConflictAction,
     ConflictArbiter, CreateIndexNode, CreateTableAsSelectNode, CreateTableNode, CreateViewNode,
     DeleteNode, DropIndexNode, DropTableNode, DropViewNode, InsertNode, InsertSelectNode,
-    JoinCondition, PhysicalPlan, TruncateNode, UpdateAssignment, UpdateNode, UpdateValue,
-    UpsertAssignment, UpsertNode, UpsertValueExpr, Value,
+    JoinCondition, ParameterExpression, PhysicalPlan, TruncateNode, UpdateAssignment, UpdateNode,
+    UpdateValue, UpsertAssignment, UpsertNode, UpsertValueExpr, Value, ValueParamSlot,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -20,6 +20,7 @@ use crate::parser::value::value_from_sqlparser;
 use sqlparser::ast::{
     Assignment, BinaryOperator, ConflictTarget, Expr, OnConflictAction, OnInsert,
 };
+use std::sync::Arc;
 
 /// MS21 Iter005 (T5-b/D12)：视图定义 SQL 文本长度上限（字节）。catalog 行须
 /// 单 slot 可容（页面 4KB 减去行头/既有尾段预留），超限在计划期前置点名
@@ -37,6 +38,21 @@ fn column_type_name(ct: &ColumnType) -> &'static str {
         ColumnType::Date => "DATE",
         ColumnType::Timestamp => "TIMESTAMP",
     }
+}
+
+/// MS31 Iteration 001（T5）：DML WHERE 定位键位占位符点名拒绝。
+///
+/// 定位键在计划期物化——`UPDATE`/`DELETE` 的 WHERE 必须是主键等值（值在
+/// 计划期可得才能定位行）；参数值到执行期才可得，该位不可达。错误文案
+/// 指明该原因，区别于一般性的 PK 文案（谓词形态不对）。
+fn reject_parameterized_key_clause(statement: &str, expr: &Expr) -> Result<(), PlanError> {
+    if crate::parser::placeholder::expr_has_placeholder(expr) {
+        return Err(PlanError::ParseError(format!(
+            "parameterized primary key is not supported in {statement} WHERE clause: \
+             the locating key is materialized at plan time and is only available at execution time"
+        )));
+    }
+    Ok(())
 }
 
 /// 值类型大写名（声明期 DEFAULT 错误面「实际值类型」侧）。
@@ -168,6 +184,9 @@ fn upsert_assignment_unsupported(column: &str) -> PlanError {
 enum InsertValue {
     Val(Value),
     DefaultKeyword,
+    /// 参数占位位（MS31 Iteration 001）：`?` 占位的待插值——记录参数序号，
+    /// 计划期该位置 `Value::Null` 占位，执行期由 pipeline 物化真实值。
+    Param(usize),
 }
 
 impl PlanBuilder {
@@ -347,12 +366,13 @@ impl PlanBuilder {
         // validate it as a permutation of the table's columns and reorder each
         // row through the list→table mapping (key-position semantics act on
         // the reordered value).
-        let values = self.map_insert_values(&table_name_str, &columns, values)?;
+        let (values, param_slots) = self.map_insert_values(&table_name_str, &columns, values)?;
 
         match self.build_upsert_action(&table_name_str, on, replace_into)? {
             Some((arbiter, action)) => Ok(PhysicalPlan::Upsert(UpsertNode {
                 table_name: table_name_str,
                 values,
+                param_slots,
                 arbiter,
                 action,
             })),
@@ -360,6 +380,7 @@ impl PlanBuilder {
                 table_name: table_name_str,
                 columns,
                 values,
+                param_slots,
             })),
         }
     }
@@ -584,6 +605,16 @@ impl PlanBuilder {
         expr: &Expr,
     ) -> Result<UpsertValueExpr, PlanError> {
         match expr {
+            // MS31 Iteration 001（T6）：参数占位位——`DO UPDATE SET` 右值记
+            // 参数序号（独立槽位形态），执行期由 pipeline 物化为字面量。
+            Expr::Value(sqlparser::ast::Value::Placeholder(text)) => {
+                match crate::parser::placeholder::placeholder_index(text) {
+                    Some(index) => Ok(UpsertValueExpr::Param(index)),
+                    None => Err(PlanError::ParseError(
+                        crate::parser::placeholder::unsupported_placeholder_message(text),
+                    )),
+                }
+            }
             Expr::Value(v) => Ok(UpsertValueExpr::Literal(value_from_sqlparser(v)?)),
             // 类型字面量 plan 期解析（与 `build_update` 同规则）；裸字符串的强制
             // 解析在执行期按目标列类型进行。
@@ -676,7 +707,7 @@ impl PlanBuilder {
         table_name: &str,
         columns: &[String],
         values: Vec<Vec<InsertValue>>,
-    ) -> Result<Vec<Vec<Value>>, PlanError> {
+    ) -> Result<(Vec<Vec<Value>>, Vec<ValueParamSlot>), PlanError> {
         let table_name_lower = table_name.to_lowercase();
         let table_columns = self.tables.get(&table_name_lower).ok_or_else(|| {
             PlanError::ParseError(format!("Table '{}' does not exist", table_name))
@@ -691,28 +722,38 @@ impl PlanBuilder {
         let fill =
             |i: usize| -> Value { defaults.get(i).cloned().flatten().unwrap_or(Value::Null) };
 
+        // MS31 Iteration 001（T6）：参数占位位登记——计划期该位置置 NULL
+        // 占位，槽位记录（行位 × 列位 → 参数序号），执行期由 pipeline 物化。
+        let mut param_slots: Vec<ValueParamSlot> = Vec::new();
+
         if columns.is_empty() {
-            return values
-                .into_iter()
-                .map(|row| {
-                    if row.len() != table_columns.len() {
-                        Err(insert_count_error(
-                            table_name,
-                            table_columns.len(),
-                            row.len(),
-                        ))
-                    } else {
-                        Ok(row
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, iv)| match iv {
-                                InsertValue::Val(v) => v,
-                                InsertValue::DefaultKeyword => fill(i),
-                            })
-                            .collect())
+            let mut rows_out = Vec::with_capacity(values.len());
+            for (row_index, row) in values.into_iter().enumerate() {
+                if row.len() != table_columns.len() {
+                    return Err(insert_count_error(
+                        table_name,
+                        table_columns.len(),
+                        row.len(),
+                    ));
+                }
+                let mut ordered: Vec<Value> = Vec::with_capacity(table_columns.len());
+                for (i, iv) in row.into_iter().enumerate() {
+                    match iv {
+                        InsertValue::Val(v) => ordered.push(v),
+                        InsertValue::DefaultKeyword => ordered.push(fill(i)),
+                        InsertValue::Param(param_index) => {
+                            param_slots.push(ValueParamSlot {
+                                row: row_index,
+                                col: i,
+                                param_index,
+                            });
+                            ordered.push(Value::Null);
+                        }
                     }
-                })
-                .collect();
+                }
+                rows_out.push(ordered);
+            }
+            return Ok((rows_out, param_slots));
         }
 
         // The list entries must resolve to distinct known columns (a subset
@@ -732,23 +773,31 @@ impl PlanBuilder {
             table_pos.push(pos);
         }
 
-        values
-            .into_iter()
-            .map(|row| {
-                if row.len() != columns.len() {
-                    return Err(insert_count_error(table_name, columns.len(), row.len()));
-                }
-                // 全宽输出：省略位与 DEFAULT 关键字位预填 defaults/NULL，
-                // 显式值位经清单→表列映射放置。
-                let mut ordered: Vec<Value> = (0..table_columns.len()).map(fill).collect();
-                for (requested, target) in table_pos.iter().enumerate() {
-                    if let InsertValue::Val(v) = &row[requested] {
-                        ordered[*target] = v.clone();
+        let mut rows_out = Vec::with_capacity(values.len());
+        for (row_index, row) in values.into_iter().enumerate() {
+            if row.len() != columns.len() {
+                return Err(insert_count_error(table_name, columns.len(), row.len()));
+            }
+            // 全宽输出：省略位与 DEFAULT 关键字位预填 defaults/NULL，
+            // 显式值位经清单→表列映射放置。
+            let mut ordered: Vec<Value> = (0..table_columns.len()).map(fill).collect();
+            for (requested, target) in table_pos.iter().enumerate() {
+                match &row[requested] {
+                    InsertValue::Val(v) => ordered[*target] = v.clone(),
+                    InsertValue::DefaultKeyword => {}
+                    InsertValue::Param(param_index) => {
+                        param_slots.push(ValueParamSlot {
+                            row: row_index,
+                            col: *target,
+                            param_index: *param_index,
+                        });
+                        ordered[*target] = Value::Null;
                     }
                 }
-                Ok(ordered)
-            })
-            .collect()
+            }
+            rows_out.push(ordered);
+        }
+        Ok((rows_out, param_slots))
     }
 
     /// Extract values from INSERT source (VALUES clause)
@@ -777,6 +826,18 @@ impl PlanBuilder {
                         row.iter()
                             .map(|expr| {
                                 match expr {
+                                    // MS31 Iteration 001（T6）：参数占位位——记录
+                                    // 参数序号（占位符已按 SQL 文本序编号）。
+                                    Expr::Value(sqlparser::ast::Value::Placeholder(text)) => {
+                                        match crate::parser::placeholder::placeholder_index(text) {
+                                            Some(index) => Ok(InsertValue::Param(index)),
+                                            None => Err(PlanError::ParseError(
+                                                crate::parser::placeholder::unsupported_placeholder_message(
+                                                    text,
+                                                ),
+                                            )),
+                                        }
+                                    }
                                     Expr::Value(v) => Ok(InsertValue::Val(value_from_sqlparser(v)?)),
                                     Expr::Identifier(ident) => {
                                         // Handle NULL identifier
@@ -1973,6 +2034,12 @@ impl PlanBuilder {
         // change 2026-10-04-external-review-gaps T6：无 WHERE → 全表形态
         // （`key: None`，第一重门移除）；带 WHERE 维持既有 PK 等值提取链，
         // 第二重门文案与语义逐字节（一般谓词维持点名拒绝）。
+        // MS31 Iteration 001（T5）：DML WHERE 定位键位占位符点名拒绝——定位键
+        // 为计划期物化（值在计划期可得才能定位行），参数值到执行期才可得，
+        // 该位不可达。区别于一般性的 PK 文案（谓词形态不对）。
+        if let Some(where_expr) = selection.as_ref() {
+            reject_parameterized_key_clause("UPDATE", where_expr)?;
+        }
         let key = match selection.as_ref() {
             None => None,
             Some(where_expr) => Some(
@@ -1984,7 +2051,6 @@ impl PlanBuilder {
                     })?,
             ),
         };
-
         // Only support single column update
         // change 2026-10-03-practical-core-gaps T8：单赋值限制解除——逐赋值
         // 右值路由为 Literal（既有语义逐字节）或 Expression（既有值表达式
@@ -2002,6 +2068,20 @@ impl PlanBuilder {
 
             // Extract new value
             let value = match &assignment.value {
+                // MS31 Iteration 001（T6）：参数占位位改路由表达式臂——执行器
+                // 对命中行旧行快照求值，参数走 owned evaluate 真值通道。
+                Expr::Value(sqlparser::ast::Value::Placeholder(text)) => {
+                    match crate::parser::placeholder::placeholder_param_name(text) {
+                        Some(name) => UpdateValue::Expression(Arc::new(ParameterExpression::new(
+                            name.to_string(),
+                        ))),
+                        None => {
+                            return Err(PlanError::ParseError(
+                                crate::parser::placeholder::unsupported_placeholder_message(text),
+                            ))
+                        }
+                    }
+                }
                 Expr::Value(v) => UpdateValue::Literal(value_from_sqlparser(v)?),
                 // MS13 T4: 类型字面量 plan 期解析（决策 2）；裸字符串的强制解析
                 // 在 UpdateExecutor 按目标列类型进行。
@@ -2088,6 +2168,11 @@ impl PlanBuilder {
         // change 2026-10-04-external-review-gaps T6：无 WHERE → 全表形态
         // （`key: None`，第一重门移除）；带 WHERE 维持既有 PK 等值提取链，
         // 第二重门文案与语义逐字节（一般谓词维持点名拒绝）。
+        // MS31 Iteration 001（T5）：DML WHERE 定位键位占位符点名拒绝（与 UPDATE
+        // 同因——定位键为计划期物化，参数值到执行期才可得）。
+        if let Some(where_expr) = selection.as_ref() {
+            reject_parameterized_key_clause("DELETE", where_expr)?;
+        }
         let key = match selection.as_ref() {
             None => None,
             Some(where_expr) => Some(

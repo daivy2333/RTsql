@@ -162,6 +162,8 @@ fn describe(plan: &PhysicalPlan) -> String {
                                 UpsertValueExpr::Literal(v) => format!("{:?}", v),
                                 UpsertValueExpr::Excluded(i) => format!("excluded[{}]", i),
                                 UpsertValueExpr::Old(i) => format!("old[{}]", i),
+                                // MS31 Iteration 001：参数槽位（计划期形态）。
+                                UpsertValueExpr::Param(i) => format!("?{}", i),
                             };
                             format!("col[{}]={}", a.column, right)
                         })
