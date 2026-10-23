@@ -87,7 +87,7 @@ pub use plan::{
     OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
     ScalarSubqueryBinding, ScalarSubqueryFilterNode, ScanNode, SemiJoinNode, SetOpKind,
     SetOperationNode, SortNode, SubqueryEvalNode, TruncateNode, UpdateAssignment, UpdateNode,
-    UpdateValue, UpsertAssignment, UpsertNode, UpsertValueExpr,
+    UpdateValue, UpsertAssignment, UpsertNode, UpsertValueExpr, ValueParamSlot,
 };
 pub use predicate::{
     ArithOp, BinaryArithExpression, CaseExpression, CastExpression, CastType, CoalesceExpression,

@@ -192,6 +192,25 @@ pub struct InsertNode {
     pub columns: Vec<String>,
     /// 值列表（每行一组值，支持批量插入）
     pub values: Vec<Vec<Value>>,
+    /// 值位参数槽（MS31 Iteration 001）：待插值位上的参数占位——计划期该位
+    /// 置 `Value::Null` 占位，执行期由 pipeline 按参数物化真实值。
+    pub param_slots: Vec<ValueParamSlot>,
+}
+
+/// 值位参数槽（MS31 Iteration 001 / design D5）。
+///
+/// 记录「行位 × 列位 → 参数序号」的映射：`values[row][col]` 在计划期是
+/// `Value::Null` 占位，pipeline 在构造执行器前按 `param_index` 取参数值
+/// 物化到该位——类型门 / NOT NULL / 键列门 / 索引维护全部沿用执行器既有
+/// 语义（在真实值上跑，与字面量语句同源）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValueParamSlot {
+    /// 行位（VALUES 行序）。
+    pub row: usize,
+    /// 列位（全宽行内的表列位）。
+    pub col: usize,
+    /// 参数序号（`__param_{i}` 的 `i`）。
+    pub param_index: usize,
 }
 
 /// 冲突仲裁目标（MS24 Iter001 design D4）
@@ -212,6 +231,9 @@ pub enum UpsertValueExpr {
     Excluded(usize),
     /// 裸列名——冲突行的旧值
     Old(usize),
+    /// 参数位（MS31 Iteration 001）：`DO UPDATE SET` 右值位上的参数占位——
+    /// 计划期记录参数序号，执行期由 pipeline 物化为字面量。
+    Param(usize),
 }
 
 /// DO UPDATE 的单列赋值（MS24 Iter001 design D4）
@@ -241,6 +263,9 @@ pub struct UpsertNode {
     pub table_name: String,
     /// 值列表（D2 全宽填充后的行，与 `InsertNode.values` 同形）
     pub values: Vec<Vec<Value>>,
+    /// 值位参数槽（MS31 Iteration 001）：待插值位上的参数占位——同
+    /// `InsertNode.param_slots`。
+    pub param_slots: Vec<ValueParamSlot>,
     /// 冲突仲裁目标
     pub arbiter: ConflictArbiter,
     /// 冲突动作

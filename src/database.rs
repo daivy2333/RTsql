@@ -3,6 +3,7 @@
 //! M7: Single entry point for opening databases, creating tables, and executing SQL.
 //! M11: WAL integration for crash recovery.
 
+use crate::executor::{PhysicalPlan, Value};
 use crate::plan_cache::PlanCache;
 use crate::result::{SqlError, SqlOutcome};
 use crate::storage::{
@@ -13,6 +14,7 @@ use crate::transaction::{IsolationLevel, Snapshot, Transaction, TransactionManag
 use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalReader, WalRecord, WalWriter};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{oneshot, RwLock};
@@ -108,6 +110,12 @@ pub struct Database {
     pub wal_writer: Option<Arc<WalWriter>>,
     pub wal_buffer: Option<Arc<WALBuffer>>,
     pub plan_cache: Arc<PlanCache>,
+    /// MS31 Iteration 002（T9）：schema 版本戳——与 plan cache 失效同源递增
+    /// （`bump_schema_version` 单点）。预编译语句据此判定计划是否失效。
+    ///
+    /// 内存语义：open 时归零，不持久化、不进 WAL / catalog——预编译语句不
+    /// 跨 open 存活。
+    pub schema_version: Arc<AtomicU64>,
     /// MS26 T1/D1：同上，非 `ReadWrite` 模式为 `None`。
     pub checkpoint_manager: Option<Arc<CheckpointManager>>,
     /// MS09 Iter000 (D4): isolation level fixed at open time. The default
@@ -374,6 +382,7 @@ impl Database {
             wal_writer,
             wal_buffer,
             plan_cache,
+            schema_version: Arc::new(AtomicU64::new(0)),
             checkpoint_manager,
             isolation,
             views,
@@ -428,6 +437,21 @@ impl Database {
     /// `to_response` 在边界转换。
     pub async fn execute_sql(&self, sql: &str) -> std::result::Result<SqlOutcome, SqlError> {
         crate::pipeline::execute(self, sql).await
+    }
+
+    /// MS31 Iteration 001（T7）：参数化执行入口——`sql` 内的裸 `?` 按 SQL 文本
+    /// 序绑定 `params` 中的原生值。
+    ///
+    /// 参数值以原生 `Value` 传入（无字符串解析、无 SQL 文本拼接）：类型门 /
+    /// NOT NULL / 键列门与字面量语句同源。参数个数与语句内占位符个数不符时
+    /// 在计划前拒绝（点名「期望 N 实际 M」）。参数化语句不读写 plan cache
+    /// （cache key 只含 SQL 文本，不含参数值）。
+    pub async fn execute_with_params(
+        &self,
+        sql: &str,
+        params: &[Value],
+    ) -> std::result::Result<SqlOutcome, SqlError> {
+        crate::pipeline::execute_with_params(self, sql, params).await
     }
 
     /// Begin a new explicit transaction (MS07-T04).
@@ -543,9 +567,56 @@ impl Database {
         crate::pipeline::execute_in_tx(self, sql, tx.id()).await
     }
 
+    /// MS31 Iteration 001（T7）：显式事务内的参数化执行入口——语义与
+    /// [`Database::execute_with_params`] 一致，DML 消费调用方事务的 `tx_id`
+    /// （事务语义与既有 `execute_in_tx` 相同）。
+    pub async fn execute_in_tx_with_params(
+        &self,
+        sql: &str,
+        params: &[Value],
+        tx: &Transaction,
+    ) -> std::result::Result<SqlOutcome, SqlError> {
+        crate::pipeline::execute_in_tx_with_params(self, sql, params, tx.id()).await
+    }
+
+    /// MS31 Iteration 002（T10）：预编译语句——prepare 一次、多次带参执行。
+    ///
+    /// prepare 期完成 parse、单语句检查、占位符编号与计划构建（计划**不写
+    /// plan cache**——预编译语句自持计划），并快照 schema 版本戳。执行期
+    /// 版本戳不匹配则透明 re-plan（完整重跑 parse + 编号 + 计划），结果与
+    /// 直接执行一致。
+    ///
+    /// 语句面与 [`Database::execute_sql`] 一致：单语句、多语句拒绝、解析与
+    /// 计划错误面同源。
+    pub async fn prepare(&self, sql: &str) -> std::result::Result<PreparedStatement, SqlError> {
+        // 版本戳取**构建计划之前**的读数（保守）：读数早于计划所见的 schema
+        // 时最多多一次 re-plan；读数晚于计划所见的 schema 会漏判失效。
+        let version_before_plan = self.schema_version();
+        let (plan, param_count) = crate::pipeline::plan_prepared(self, sql).await?;
+        Ok(PreparedStatement {
+            db: self.clone(),
+            sql: sql.to_string(),
+            state: std::sync::Mutex::new(PreparedState {
+                plan,
+                param_count,
+                schema_version: version_before_plan,
+            }),
+            exec_gate: tokio::sync::Mutex::new(()),
+        })
+    }
+
     /// Get plan cache size (for testing)
     pub fn plan_cache_len(&self) -> usize {
         self.plan_cache.len()
+    }
+
+    /// MS31 Iteration 002（T9）：当前 schema 版本戳。
+    ///
+    /// 与 plan cache 失效同源递增——每次 schema 变更（DDL / CTAS）执行后
+    /// 由 `pipeline::bump_schema_version` 单点递增一次。预编译语句持版本
+    /// 快照，执行时与本值比对判定计划是否失效。
+    pub fn schema_version(&self) -> u64 {
+        self.schema_version.load(Ordering::SeqCst)
     }
 
     /// Flush all dirty buffer-pool pages and the WAL to disk, then record a
@@ -609,4 +680,116 @@ impl Database {
             .map(|_captured_lsn| ())
             .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))
     }
+}
+
+/// MS31 Iteration 002（T10）：预编译语句的自持状态。
+struct PreparedState {
+    /// 自持计划——不经 plan cache（prepare 与执行都不读写缓存）。
+    plan: PhysicalPlan,
+    /// 语句内占位符个数（prepare 期确定）。
+    param_count: usize,
+    /// 计划构建时的 schema 版本戳快照。
+    schema_version: u64,
+}
+
+/// MS31 Iteration 002（T10）：可复用预编译语句。
+///
+/// prepare 一次、多次带参执行：计划在 prepare 期构建一次并自持，执行时把
+/// 参数物化到计划副本上。schema 变化（DDL / CTAS）后版本戳递增，执行时
+/// 透明 re-plan——结果与直接执行一致。
+///
+/// `&self` 共享安全：每次执行持有计划副本；同一条语句的并发执行经闸门
+/// 串行化——计划树内的参数节点是共享可变状态（见 [`PreparedStatement::execute`]）。
+pub struct PreparedStatement {
+    /// 库实例（`Database` 字段全为 `Arc`，克隆与既有 `Arc<Database>` 消费者
+    /// 同型）。
+    db: Database,
+    /// 语句文本——re-plan 时重新解析。
+    sql: String,
+    /// 自持计划与版本戳快照。
+    state: std::sync::Mutex<PreparedState>,
+    /// 同一条预编译语句的并发执行闸门。
+    exec_gate: tokio::sync::Mutex<()>,
+}
+
+impl std::fmt::Debug for PreparedStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedStatement")
+            .field("sql", &self.sql)
+            .finish()
+    }
+}
+
+impl PreparedStatement {
+    /// 带参执行一次预编译语句。
+    ///
+    /// 参数注入与执行在同一闸门内完成：计划树内的参数节点是**计划树共享的
+    /// 可变状态**（`ExpressionRef = Arc<dyn Expression>`，`PhysicalPlan` 的
+    /// `Clone` 是浅克隆——表达式子树在副本间共享），并发执行同一条预编译
+    /// 语句必须串行化，否则后执行者会覆盖前执行者的参数值。不同预编译语句
+    /// 各有闸门，互不阻塞。
+    ///
+    /// 参数个数与语句占位符个数不符时在执行前点名（文案与 SQLSTATE 与参数
+    /// 化执行通道同源）。
+    pub async fn execute(&self, params: &[Value]) -> std::result::Result<SqlOutcome, SqlError> {
+        let _gate = self.exec_gate.lock().await;
+        let (mut plan, param_count) = self.resolve_plan().await?;
+        check_param_count(param_count, params)?;
+        if !params.is_empty() {
+            crate::pipeline::materialize_params(&mut plan, params);
+        }
+        crate::pipeline::execute_stage(&self.db, plan, crate::profiling::is_profiling_enabled())
+            .await
+    }
+
+    /// 在既有显式事务内带参执行一次预编译语句。
+    ///
+    /// 事务语义与 [`Database::execute_in_tx_with_params`] 一致——DML 消费调用
+    /// 方事务的 `tx_id`，快照与可见性语义不变。
+    pub async fn execute_in_tx(
+        &self,
+        params: &[Value],
+        tx: &Transaction,
+    ) -> std::result::Result<SqlOutcome, SqlError> {
+        let _gate = self.exec_gate.lock().await;
+        let (mut plan, param_count) = self.resolve_plan().await?;
+        check_param_count(param_count, params)?;
+        if !params.is_empty() {
+            crate::pipeline::materialize_params(&mut plan, params);
+        }
+        crate::pipeline::execute_stage_in_tx(&self.db, plan, tx.id()).await
+    }
+
+    /// 取本次执行要用的计划——版本戳匹配则复用自持计划；不匹配则透明
+    /// re-plan（完整重跑 parse + 编号 + 计划，不只重跑计划——语句文本对应的
+    /// AST 可能因 schema 变化走不同计划路径），并更新自持计划与版本戳。
+    async fn resolve_plan(&self) -> std::result::Result<(PhysicalPlan, usize), SqlError> {
+        {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.schema_version == self.db.schema_version() {
+                return Ok((state.plan.clone(), state.param_count));
+            }
+        }
+        // 版本戳取**重跑计划之前**的读数（保守，理由同 `Database::prepare`）。
+        let version_before_replan = self.db.schema_version();
+        let (plan, param_count) = crate::pipeline::plan_prepared(&self.db, &self.sql).await?;
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.plan = plan.clone();
+            state.param_count = param_count;
+            state.schema_version = version_before_replan;
+        }
+        Ok((plan, param_count))
+    }
+}
+
+/// 参数个数校验——与参数化执行通道同文案同 SQLSTATE。
+fn check_param_count(param_count: usize, params: &[Value]) -> std::result::Result<(), SqlError> {
+    if param_count != params.len() {
+        return Err(crate::pipeline::parameter_count_mismatch(
+            param_count,
+            params.len(),
+        ));
+    }
+    Ok(())
 }

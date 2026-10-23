@@ -1,15 +1,17 @@
 use crate::database::Database;
 use crate::executor::{
-    AggregateExecutor, AggregateNode, AlterTableExecutor, AntiJoinExecutor, CreateIndexExecutor,
-    CreateTableAsSelectNode, CreateTableExecutor, CreateViewExecutor, DataScanExecutor,
-    DeleteExecutor, DerivedScanExecutor, DistinctExecutor, DropIndexExecutor, DropTableExecutor,
-    DropViewExecutor, ExecResult, Executor, ExplainExecutor, FilterExecutor, HavingExecutor,
-    IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, InsertNode, InsertSelectNode,
-    JoinConfig, JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor,
-    OutputColumn, PhysicalPlan, ProjectionExecutor, ScalarSubqueryFilterExecutor, ScanExecutor,
-    SemiJoinExecutorV2, SetOperationExecutor, SingleRowExecutor, SortExecutor,
-    SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor, UpsertExecutor, UpsertNode, Value,
+    inject_correlated_values, AggregateExecutor, AggregateNode, AlterTableExecutor,
+    AntiJoinExecutor, ConflictAction, CreateIndexExecutor, CreateTableAsSelectNode,
+    CreateTableExecutor, CreateViewExecutor, DataScanExecutor, DeleteExecutor, DerivedScanExecutor,
+    DistinctExecutor, DropIndexExecutor, DropTableExecutor, DropViewExecutor, ExecResult, Executor,
+    ExplainExecutor, FilterExecutor, HavingExecutor, IndexScanAllExecutor, IndexScanExecutor,
+    InsertExecutor, InsertNode, InsertSelectNode, JoinConfig, JoinExecutor, JoinRelatedConfig,
+    LimitExecutor, NestedLoopJoinExecutor, OutputColumn, PhysicalPlan, ProjectionExecutor,
+    ScalarSubqueryFilterExecutor, ScanExecutor, SemiJoinExecutorV2, SetOperationExecutor,
+    SingleRowExecutor, SortExecutor, SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor,
+    UpsertExecutor, UpsertNode, UpsertValueExpr, Value, ValueParamSlot,
 };
+use crate::parser::placeholder::{assign_placeholder_indices, count_placeholders, PARAM_PREFIX};
 use crate::parser::planner::ViewDef;
 use crate::parser::{parse_sql, PlanBuilder, PlanError};
 use crate::profiling::{
@@ -97,14 +99,30 @@ impl TableRef {
 /// MS31-T01：库公共执行入口（`Database::execute_sql` 的实现体）——返回类型化
 /// 结果与类型化错误，不再以协议词表 `Response` 承载。
 pub async fn execute(database: &Database, sql: &str) -> std::result::Result<SqlOutcome, SqlError> {
+    // MS31 Iteration 001：无参路径等价 `params = &[]`——含占位符语句报参数
+    // 个数错误（期望 N 实际 0），与参数化路径同一个错。
+    execute_with_params(database, sql, &[]).await
+}
+
+/// MS31 Iteration 001（T7）：参数化执行入口——`sql` 内的裸 `?` 按 SQL 文本序
+/// 绑定 `params` 中的原生值。
+///
+/// 流程：parse → 占位符编号（形态拒绝面）→ 个数校验 → plan → 参数物化
+/// （表达式位注入 + DML 值位槽位）→ 执行。参数化语句不读写 plan cache
+/// （cache key 只含 SQL 文本，不含参数值）。
+pub async fn execute_with_params(
+    database: &Database,
+    sql: &str,
+    params: &[Value],
+) -> std::result::Result<SqlOutcome, SqlError> {
     let profiling = is_profiling_enabled();
 
     if profiling {
         // Wrap entire execution in profiling scope for task-local storage
-        return with_profiling_scope(execute_inner(database, sql)).await;
+        return with_profiling_scope(execute_inner(database, sql, params)).await;
     }
 
-    execute_inner(database, sql).await
+    execute_inner(database, sql, params).await
 }
 
 /// Pipeline 阶段 1：SQL 文本 → AST。
@@ -170,13 +188,38 @@ pub async fn plan_stage(
     stmt: &Statement,
     profiling: bool,
 ) -> std::result::Result<PhysicalPlan, PlanFailure> {
-    plan_stage_routed(
+    plan_stage_impl(
         database,
         sql,
         stmt,
         profiling,
         None,
         &mut RoutedTables::new(),
+        true,
+    )
+    .await
+}
+
+/// MS31 Iteration 002（T10）：预编译语句的计划面——与 [`plan_stage`] 同序
+/// （同一计划构建路径），但**不写 plan cache**。
+///
+/// 预编译语句自持计划（缓存 key 只含 SQL 文本、不含参数值，预编译路径与
+/// 参数化执行通道同款不入缓存）——prepare 与执行都不经缓存，计划复用由
+/// 语句对象自身承担。
+pub async fn plan_stage_uncached(
+    database: &Database,
+    sql: &str,
+    stmt: &Statement,
+    profiling: bool,
+) -> std::result::Result<PhysicalPlan, PlanFailure> {
+    plan_stage_impl(
+        database,
+        sql,
+        stmt,
+        profiling,
+        None,
+        &mut RoutedTables::new(),
+        false,
     )
     .await
 }
@@ -194,6 +237,20 @@ pub async fn plan_stage_routed(
     profiling: bool,
     route: Option<&AttachRoute>,
     routed: &mut RoutedTables,
+) -> std::result::Result<PhysicalPlan, PlanFailure> {
+    plan_stage_impl(database, sql, stmt, profiling, route, routed, true).await
+}
+
+/// 计划构建实现——`cache_put` 决定本次计划是否写入 plan cache（既有路径恒
+/// `true`；预编译语句面为 `false`）。
+async fn plan_stage_impl(
+    database: &Database,
+    sql: &str,
+    stmt: &Statement,
+    profiling: bool,
+    route: Option<&AttachRoute>,
+    routed: &mut RoutedTables,
+    cache_put: bool,
 ) -> std::result::Result<PhysicalPlan, PlanFailure> {
     match stmt {
         // MS20 T4: CTAS 两侧都要判定——写目标沿用 DDL 标记（附加库目标计划期
@@ -288,12 +345,31 @@ pub async fn plan_stage_routed(
             let plan = plan_builder.build_plan(stmt).map_err(PlanFailure::from)?;
             // MS20 T2: attach 身份不在 cache key 内——含附加库引用的语句不得
             // 进缓存，否则同文本语句在「有/无该别名」的会话间互相污染。
-            if is_cacheable(stmt) && routed.is_empty() {
+            // MS31 Iteration 001：含占位符语句同样不进缓存——cache key 只含
+            // SQL 文本，不含参数值；参数化语句的计划在参数值下才成立。
+            // MS31 Iteration 002：预编译语句面不写缓存（自持计划）。
+            if cache_put && is_cacheable(stmt) && routed.is_empty() && count_placeholders(stmt) == 0
+            {
                 database.plan_cache.put(sql.to_string(), plan.clone());
             }
             Ok(plan)
         }
     }
+}
+
+/// MS31 Iteration 002（T9）：plan cache 失效与 schema 版本戳的**同源单点**。
+///
+/// 全部生产侧 schema 变更站点（DDL 八臂 + CTAS）经本函数收敛——缓存清空与
+/// 版本递增发生在同一点、同一顺序（先清后增），各臂「成功后与失败后都清」
+/// 的既有时序逐字节保持。
+///
+/// 版本戳只增不减；它与缓存失效同源，因此「缓存已清空」蕴含「版本已递增」，
+/// 预编译语句不会持有比缓存更旧的失效判据。
+pub(crate) fn bump_schema_version(database: &Database) {
+    database.plan_cache.clear();
+    database
+        .schema_version
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Pipeline 阶段 3：PhysicalPlan → Response。
@@ -348,7 +424,7 @@ pub async fn execute_stage_routed(
             };
             let response = execute_executor(executor).await;
             // 时序保持：DDL 执行后清缓存（与原 execute_inner 行为等价——成功后与失败后都清）。
-            database.plan_cache.clear();
+            bump_schema_version(database);
             response
         }
         // MS21 Iter002 (T2-c/T2-f)：CREATE/DROP INDEX 直包对应执行器（DDL 臂
@@ -367,7 +443,7 @@ pub async fn execute_stage_routed(
                 _ => unreachable!("DDL match already filtered"),
             };
             let response = execute_executor(executor).await;
-            database.plan_cache.clear();
+            bump_schema_version(database);
             response
         }
         // MS21 Iter003 (T3-b/c)：ALTER TABLE 直包执行器（DDL 臂同型；执行后
@@ -378,7 +454,7 @@ pub async fn execute_stage_routed(
                 Arc::new(database.clone()),
             ));
             let response = execute_executor(executor).await;
-            database.plan_cache.clear();
+            bump_schema_version(database);
             response
         }
         // MS21 Iter004 (T4-a)：TRUNCATE 直包执行器（DDL 臂同型；执行后清缓存
@@ -389,7 +465,7 @@ pub async fn execute_stage_routed(
                 Arc::new(database.clone()),
             ));
             let response = execute_executor(executor).await;
-            database.plan_cache.clear();
+            bump_schema_version(database);
             response
         }
         // MS21 Iter005 (T5-b/T5-d)：CREATE/DROP VIEW 直包执行器（DDL 臂同型
@@ -408,14 +484,14 @@ pub async fn execute_stage_routed(
                 _ => unreachable!("DDL match already filtered"),
             };
             let response = execute_executor(executor).await;
-            database.plan_cache.clear();
+            bump_schema_version(database);
             response
         }
         PhysicalPlan::CreateTableAsSelect(node) => {
             // MS20 T4：CTAS 是混合面（SELECT 物化 + 建表 + 落行），没有单一
             // executor —— 走 `execute_ctas_routed`。缓存清理与 DDL 臂同款。
             let response = execute_ctas_routed(database, node, profiling, routed).await;
-            database.plan_cache.clear();
+            bump_schema_version(database);
             response
         }
         PhysicalPlan::InsertSelect(node) => {
@@ -663,13 +739,14 @@ fn attached_write_in_tx_rejection(plan: &PhysicalPlan, routed: &RoutedTables) ->
 
 /// MS10-T04：单结果执行路径（网络 / 显式事务）的多语句显式拒绝——
 /// 两条路径共用同一文案；拒绝必须发生在 plan_stage / cache put 之前。
-fn multi_statement_rejected(count: usize) -> std::result::Result<SqlOutcome, SqlError> {
-    Err(SqlError {
+/// MS10-T04：多语句拒绝——单结果执行路径只支持单语句。
+fn multi_statement_rejected(count: usize) -> SqlError {
+    SqlError {
         message: format!(
             "only a single statement is supported on this path (got {count} statements); use the CLI (rtsql) to run multi-statement scripts"
         ),
         sqlstate: None,
-    })
+    }
 }
 
 /// MS20-T02 Iter001（design D4）：把 `InsertSelect` 源完整物化为原生 Value
@@ -726,6 +803,8 @@ fn normalize_insert_select(
         Some((arbiter, action)) => Ok(PhysicalPlan::Upsert(UpsertNode {
             table_name: node.table_name.clone(),
             values,
+            // INSERT SELECT 的源行在执行期物化——无计划期参数槽位。
+            param_slots: Vec::new(),
             arbiter: arbiter.clone(),
             action: action.clone(),
         })),
@@ -733,6 +812,7 @@ fn normalize_insert_select(
             table_name: node.table_name.clone(),
             columns: node.columns.clone(),
             values,
+            param_slots: Vec::new(),
         })),
     }
 }
@@ -1012,7 +1092,21 @@ pub async fn execute_in_tx(
     sql: &str,
     tx_id: u64,
 ) -> std::result::Result<SqlOutcome, SqlError> {
-    let statements = match parse_stage(sql).await {
+    // MS31 Iteration 001：无参路径等价 `params = &[]`。
+    execute_in_tx_with_params(database, sql, &[], tx_id).await
+}
+
+/// MS31 Iteration 001（T7）：显式事务内的参数化执行入口。
+///
+/// 与隐式路径同流程（parse → 编号 → 个数校验 → plan → 物化 → 执行），
+/// DML 消费调用方的 `tx_id`——事务语义与既有 `execute_in_tx` 一致。
+pub async fn execute_in_tx_with_params(
+    database: &Database,
+    sql: &str,
+    params: &[Value],
+    tx_id: u64,
+) -> std::result::Result<SqlOutcome, SqlError> {
+    let mut statements = match parse_stage(sql).await {
         Ok(s) => s,
         Err(message) => {
             return Err(SqlError {
@@ -1022,9 +1116,9 @@ pub async fn execute_in_tx(
         }
     };
     if statements.len() > 1 {
-        return multi_statement_rejected(statements.len());
+        return Err(multi_statement_rejected(statements.len()));
     }
-    let stmt = match statements.first() {
+    let stmt = match statements.first_mut() {
         Some(s) => s,
         None => {
             return Err(SqlError {
@@ -1033,7 +1127,21 @@ pub async fn execute_in_tx(
             })
         }
     };
-    let plan = match plan_stage(database, sql, stmt, false).await {
+    // 占位符编号（形态拒绝面）与个数校验——计划前、零副作用。
+    let placeholder_count = match assign_placeholder_indices(stmt) {
+        Ok(count) => count,
+        Err(error) => {
+            let failure = PlanFailure::from(error);
+            return Err(SqlError {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate.to_string()),
+            });
+        }
+    };
+    if placeholder_count != params.len() {
+        return Err(parameter_count_mismatch(placeholder_count, params.len()));
+    }
+    let mut plan = match plan_stage(database, sql, stmt, false).await {
         Ok(p) => p,
         Err(failure) => {
             return Err(SqlError {
@@ -1042,6 +1150,9 @@ pub async fn execute_in_tx(
             })
         }
     };
+    if !params.is_empty() {
+        materialize_params(&mut plan, params);
+    }
     execute_stage_in_tx(database, plan, tx_id).await
 }
 
@@ -1112,7 +1223,7 @@ pub async fn execute_stage_in_tx_routed(
                 _ => unreachable!("DDL match already filtered"),
             };
             let response = execute_executor(executor).await;
-            database.plan_cache.clear();
+            bump_schema_version(database);
             response
         }
         PhysicalPlan::CreateTableAsSelect(_) => {
@@ -1204,6 +1315,7 @@ pub async fn execute_stage_in_tx_routed(
 async fn execute_inner(
     database: &Database,
     sql: &str,
+    params: &[Value],
 ) -> std::result::Result<SqlOutcome, SqlError> {
     let profiling = is_profiling_enabled();
 
@@ -1223,7 +1335,13 @@ async fn execute_inner(
     } else {
         None
     };
-    let cached_plan = database.plan_cache.get(sql);
+    // MS31 Iteration 001：参数化通道不消费 plan cache——cache key 只含 SQL
+    // 文本，不含参数值；同一文本在不同参数值下的计划不成立。
+    let cached_plan = if params.is_empty() {
+        database.plan_cache.get(sql)
+    } else {
+        None
+    };
     if let Some(start) = cache_hit_check_start {
         record_time("cache_hit_check", start.elapsed());
     }
@@ -1245,7 +1363,7 @@ async fn execute_inner(
     } else {
         None
     };
-    let statements = match parse_stage(sql).await {
+    let mut statements = match parse_stage(sql).await {
         Ok(s) => s,
         Err(message) => {
             if let Some(start) = parse_start {
@@ -1263,9 +1381,9 @@ async fn execute_inner(
     // MS10-T04：单结果执行路径仅支持单语句——多语句从静默截断改为显式拒绝，
     // 拒绝发生在 plan_stage / cache put 之前（完整串键污染随之消失）。
     if statements.len() > 1 {
-        return multi_statement_rejected(statements.len());
+        return Err(multi_statement_rejected(statements.len()));
     }
-    let stmt = match statements.first() {
+    let stmt = match statements.first_mut() {
         Some(s) => s,
         None => {
             return Err(SqlError {
@@ -1275,13 +1393,30 @@ async fn execute_inner(
         }
     };
 
+    // MS31 Iteration 001（T5/T7）：占位符编号（SQL 文本序）与形态拒绝面——
+    // 非裸占位符形态 / DDL 内占位符在此点名拒绝（计划前、零副作用）。
+    let placeholder_count = match assign_placeholder_indices(stmt) {
+        Ok(count) => count,
+        Err(error) => {
+            let failure = PlanFailure::from(error);
+            return Err(SqlError {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate.to_string()),
+            });
+        }
+    };
+    // 个数校验：期望 N 实际 M——计划前拒绝（零副作用）。
+    if placeholder_count != params.len() {
+        return Err(parameter_count_mismatch(placeholder_count, params.len()));
+    }
+
     // Stage 2: plan
     let plan_start = if profiling {
         Some(Instant::now())
     } else {
         None
     };
-    let plan = match plan_stage(database, sql, stmt, profiling).await {
+    let mut plan = match plan_stage(database, sql, stmt, profiling).await {
         Ok(p) => p,
         Err(failure) => {
             if let Some(start) = plan_start {
@@ -1295,6 +1430,12 @@ async fn execute_inner(
     };
     if let Some(start) = plan_start {
         record_time("plan", start.elapsed());
+    }
+
+    // MS31 Iteration 001（T7）：参数物化——表达式位注入（谓词 / 投影 / UPDATE
+    // 赋值右值）+ DML 值位槽位物化（INSERT / UPSERT 待插值位）。
+    if !params.is_empty() {
+        materialize_params(&mut plan, params);
     }
 
     // Stage 3: execute
@@ -1312,6 +1453,123 @@ async fn execute_inner(
         print_timings(start.elapsed());
     }
     response
+}
+
+/// MS31 Iteration 002（T10）：预编译语句的计划构建——与 `execute_with_params`
+/// 同序（parse → 单语句 → 占位符编号 → plan），但**不写 plan cache**
+/// （预编译语句自持计划）。
+///
+/// 返回 `(计划, 占位符个数)`：占位符个数在 prepare 期确定，执行期据此校验
+/// 参数个数（错误面与参数化执行通道同源）。
+pub(crate) async fn plan_prepared(
+    database: &Database,
+    sql: &str,
+) -> std::result::Result<(PhysicalPlan, usize), SqlError> {
+    let mut statements = match parse_stage(sql).await {
+        Ok(s) => s,
+        Err(message) => {
+            return Err(SqlError {
+                message: format!("Parse error: {message}"),
+                sqlstate: Some(PARSE_SQLSTATE.to_string()),
+            })
+        }
+    };
+    if statements.len() > 1 {
+        return Err(multi_statement_rejected(statements.len()));
+    }
+    let stmt = match statements.first_mut() {
+        Some(s) => s,
+        None => {
+            return Err(SqlError {
+                message: "No statement executed".to_string(),
+                sqlstate: None,
+            })
+        }
+    };
+    // 占位符编号（形态拒绝面）——与参数化执行通道同源同序。
+    let placeholder_count = match assign_placeholder_indices(stmt) {
+        Ok(count) => count,
+        Err(error) => {
+            let failure = PlanFailure::from(error);
+            return Err(SqlError {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate.to_string()),
+            });
+        }
+    };
+    let plan = match plan_stage_uncached(database, sql, stmt, false).await {
+        Ok(p) => p,
+        Err(failure) => {
+            return Err(SqlError {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate.to_string()),
+            })
+        }
+    };
+    Ok((plan, placeholder_count))
+}
+
+/// MS31 Iteration 001（T7）：参数个数不符——点名「期望 N 实际 M」。
+///
+/// 拒绝发生在计划前（零副作用）；SQLSTATE 用解析类 42601（语句级拒绝）。
+pub(crate) fn parameter_count_mismatch(expected: usize, actual: usize) -> SqlError {
+    SqlError {
+        message: format!(
+            "Parameter count mismatch: expected {expected} placeholder(s), got {actual} parameter(s)"
+        ),
+        sqlstate: Some(PARSE_SQLSTATE.to_string()),
+    }
+}
+
+/// MS31 Iteration 001（T7）：参数物化。
+///
+/// - 表达式位（谓词 / 投影 / UPDATE 赋值右值）：同款 walk 注入
+///   `__param_{i}` → 参数值；
+/// - DML 值位（INSERT / UPSERT 待插值位）：按槽位把 `Value::Null` 占位换成
+///   真实参数值——类型门 / NOT NULL / 键列门 / 索引维护全部沿用执行器既有
+///   语义（在真实值上跑，与字面量语句同源）。
+pub(crate) fn materialize_params(plan: &mut PhysicalPlan, params: &[Value]) {
+    match plan {
+        PhysicalPlan::Insert(node) => {
+            materialize_value_slots(&mut node.values, &node.param_slots, params);
+        }
+        PhysicalPlan::Upsert(node) => {
+            materialize_value_slots(&mut node.values, &node.param_slots, params);
+            // DO UPDATE 赋值右值：参数槽位物化为字面量（执行器只见既有形态）。
+            if let ConflictAction::DoUpdate(assignments) = &mut node.action {
+                for assignment in assignments.iter_mut() {
+                    if let UpsertValueExpr::Param(index) = assignment.expr {
+                        if let Some(value) = params.get(index) {
+                            assignment.expr = UpsertValueExpr::Literal(value.clone());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    let param_values: Vec<(String, Value)> = params
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (format!("{PARAM_PREFIX}{index}"), value.clone()))
+        .collect();
+    inject_correlated_values(plan, &param_values);
+}
+
+/// 值位槽位物化——`values[row][col] = params[param_index]`。
+fn materialize_value_slots(values: &mut [Vec<Value>], slots: &[ValueParamSlot], params: &[Value]) {
+    for slot in slots {
+        let Some(value) = params.get(slot.param_index) else {
+            continue;
+        };
+        let Some(row) = values.get_mut(slot.row) else {
+            continue;
+        };
+        let Some(cell) = row.get_mut(slot.col) else {
+            continue;
+        };
+        *cell = value.clone();
+    }
 }
 
 /// Execute an executor and return the response

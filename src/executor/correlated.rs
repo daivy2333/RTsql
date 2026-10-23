@@ -4,7 +4,7 @@
 //! ParameterExpression nodes in Filter, Having, and pushed-down DataScan
 //! predicate trees.
 
-use crate::executor::{PhysicalPlan, Value};
+use crate::executor::{PhysicalPlan, UpdateValue, Value};
 
 /// Inject correlated parameter values into all ParameterExpression nodes
 /// in the given PhysicalPlan tree. Walks recursively into sub-plans.
@@ -50,6 +50,16 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
             }
         }
         PhysicalPlan::Sort(node) => {
+            // MS31 Iteration 001：排序键表达式位（别名键 / 聚合输出行键）可能
+            // 携带 ParameterExpression——注入链与谓词、投影同款（未注入时求值
+            // 为 Null，排序键退化为常量）。
+            for column in &node.order_by {
+                if let Some(expr) = &column.expr {
+                    for (name, value) in param_values {
+                        expr.set_parameter_value(name, value);
+                    }
+                }
+            }
             inject_correlated_values(&node.input, param_values);
         }
         PhysicalPlan::Limit(node) => {
@@ -83,13 +93,24 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
             }
             inject_correlated_values(&node.input, param_values);
         }
+        // MS31 Iteration 001：UPDATE 赋值右值位——值表达式臂携带
+        // ParameterExpression（参数位右值），经同款注入链取值（执行器对命中行
+        // 旧行快照求值，走 owned evaluate 真值通道）。
+        PhysicalPlan::Update(node) => {
+            for assignment in &node.assignments {
+                if let UpdateValue::Expression(expr) = &assignment.value {
+                    for (name, value) in param_values {
+                        expr.set_parameter_value(name, value);
+                    }
+                }
+            }
+        }
         // Leaf or DML nodes: no sub-plans, no predicates
         PhysicalPlan::Scan(_)
         | PhysicalPlan::IndexScan(_)
         | PhysicalPlan::IndexScanAll(_)
         | PhysicalPlan::Insert(_)
         | PhysicalPlan::Upsert(_)
-        | PhysicalPlan::Update(_)
         | PhysicalPlan::Delete(_)
         | PhysicalPlan::CreateTable(_)
         | PhysicalPlan::CreateIndex(_)

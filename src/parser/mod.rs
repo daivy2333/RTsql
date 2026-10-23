@@ -4,10 +4,12 @@
 
 pub mod ast;
 pub mod error;
+pub mod placeholder;
 pub mod planner;
 pub mod value;
 
 pub use ast::parse_sql;
 pub use error::PlanError;
+pub use placeholder::{assign_placeholder_indices, count_placeholders};
 pub use planner::PlanBuilder;
 pub use value::value_from_sqlparser;

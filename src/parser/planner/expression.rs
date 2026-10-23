@@ -410,6 +410,18 @@ impl PlanBuilder {
             }
 
             Expr::Value(v) => {
+                // MS31 Iteration 001（T6）：参数占位符编译为 `ParameterExpression`
+                // ——占位符已由 `assign_placeholder_indices` 按 SQL 文本序编号
+                // （`__param_{i}`），此处只读标记序号，不自行计数。未编号形态
+                // （裸 `?` / `?N` / `$N`）点名拒绝——不得静默按 NULL 处理。
+                if let sqlparser::ast::Value::Placeholder(text) = v {
+                    return match crate::parser::placeholder::placeholder_param_name(text) {
+                        Some(name) => Ok(Arc::new(ParameterExpression::new(name.to_string()))),
+                        None => Err(PlanError::ParseError(
+                            crate::parser::placeholder::unsupported_placeholder_message(text),
+                        )),
+                    };
+                }
                 // Constant value
                 let value = value_from_sqlparser(v)?;
                 Ok(Arc::new(ConstantExpression { value }))

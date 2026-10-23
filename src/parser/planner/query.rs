@@ -19,6 +19,7 @@ use crate::executor::{
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
+use crate::parser::placeholder::is_placeholder_value;
 use crate::parser::value::value_from_sqlparser;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Query, TableFactor};
 use std::collections::HashMap;
@@ -3334,6 +3335,10 @@ impl PlanBuilder {
                     return Ok(false);
                 };
                 if let Expr::Value(v) = literal {
+                    // MS31 Iteration 001：参数占位位不是字面量腿。
+                    if is_placeholder_value(v) {
+                        return Ok(false);
+                    }
                     return Ok(value_from_sqlparser(v)?.to_key().is_none());
                 }
                 Ok(false)
@@ -3406,6 +3411,10 @@ impl PlanBuilder {
         let Some((index_name, _)) = indexes.iter().find(|(_, col)| *col == column_name) else {
             return Ok(None);
         };
+        // MS31 Iteration 001：参数占位位在计划期无值——不路由索引键。
+        if is_placeholder_value(literal) {
+            return Ok(None);
+        }
         // 仅 Int 字面量可路由（非 Int / NULL → to_key None → 既有路径）
         let value = value_from_sqlparser(literal)?;
         match value.to_key() {
@@ -3439,6 +3448,11 @@ impl PlanBuilder {
             if let Expr::Identifier(ident) = left.as_ref() {
                 if ident.value.to_lowercase() == pk_column {
                     if let Expr::Value(v) = right.as_ref() {
+                        // MS31 Iteration 001：参数占位位在计划期无值——不提取
+                        // 定位键（回落既有扫描路径，谓词在执行期按参数值求值）。
+                        if is_placeholder_value(v) {
+                            return Ok(None);
+                        }
                         let value = value_from_sqlparser(v)?;
                         return Ok(value.to_key());
                     }
@@ -3449,6 +3463,9 @@ impl PlanBuilder {
             if let Expr::Identifier(ident) = right.as_ref() {
                 if ident.value.to_lowercase() == pk_column {
                     if let Expr::Value(v) = left.as_ref() {
+                        if is_placeholder_value(v) {
+                            return Ok(None);
+                        }
                         let value = value_from_sqlparser(v)?;
                         return Ok(value.to_key());
                     }
