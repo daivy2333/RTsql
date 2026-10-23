@@ -50,6 +50,22 @@ pub(crate) fn projected_columns(columns: &[String], projection: &[usize]) -> Vec
     }
 }
 
+/// MS32 Iter002（design D3）：LIMIT 直接约束排序时把驻留上限写进 SortNode。
+/// 可设界形状仅两种——`Sort`，或恰好一层 `Projection` 且其输入是 `Sort`
+/// （deferred_wrap 表达式项形状，值写进内层 SortNode）。`Distinct(...)` 与
+/// 其他形状不设界——DISTINCT、聚合、集合运算保持全量排序语义。
+fn mark_sort_bounded(plan: &mut PhysicalPlan, bounded: usize) {
+    match plan {
+        PhysicalPlan::Sort(node) => node.bounded = Some(bounded),
+        PhysicalPlan::Projection(node) => {
+            if let PhysicalPlan::Sort(sort) = node.input.as_mut() {
+                sort.bounded = Some(bounded);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl PlanBuilder {
     /// T03-D3：派生表 / CTE 基座的列源——direct 形态聚合的注册列按 SELECT 清单
     /// 逐位取名。
@@ -1117,7 +1133,7 @@ impl PlanBuilder {
         let columns = self.get_plan_output_columns(&node);
 
         // 复合语句尾 ORDER BY（键 ∈ 复合输出列名；裸名限制与既有 ORDER BY 一致）
-        let plan_with_order = if !query.order_by.is_empty() {
+        let mut plan_with_order = if !query.order_by.is_empty() {
             let order_by: Vec<OrderByColumn> = query
                 .order_by
                 .iter()
@@ -1149,6 +1165,8 @@ impl PlanBuilder {
                 // The compound output already is the SELECT shape — the Sort
                 // node is the identity here (no projection owner below it).
                 projection: Vec::new(),
+                // 有界与否由复合语句尾 LIMIT 包装点按需写入（design D3）。
+                bounded: None,
             })
         } else {
             node
@@ -1163,6 +1181,9 @@ impl PlanBuilder {
                 .map(|o| parse_offset_value(&o.value))
                 .transpose()?
                 .unwrap_or(0);
+            // MS32 Iter002（design D3）：此处 `plan_with_order` 为 identity
+            // 投影的裸 `Sort`（无 ORDER BY 时是复合节点，helper 不动作）。
+            mark_sort_bounded(&mut plan_with_order, offset.saturating_add(limit));
             return Ok(PhysicalPlan::Limit(crate::executor::LimitNode {
                 input: Box::new(plan_with_order),
                 limit,
@@ -2982,6 +3003,8 @@ impl PlanBuilder {
                 table_name: table_name.clone(),
                 columns: sort_columns,
                 projection: sort_projection,
+                // 有界与否由顶层 LIMIT 包装点按需写入（design D3）。
+                bounded: None,
             });
             // change 2026-10-03-practical-core-gaps T6：条件包装在 Sort 之上
             // 装配（Sort 在聚合输出行上求值后再按 SELECT 清单出值）；无表达式
@@ -3046,7 +3069,7 @@ impl PlanBuilder {
             // DerivedScan, …) is not row-transparent, so capping below it
             // would truncate its input. The top-level Limit node is always
             // kept (safe cap + offset skipping for non-pushed shapes).
-            let input = match plan_with_distinct {
+            let mut input = match plan_with_distinct {
                 PhysicalPlan::DataScan(mut node) => {
                     node.scan_cap = Some(if limit == 0 {
                         0
@@ -3057,6 +3080,11 @@ impl PlanBuilder {
                 }
                 other => other,
             };
+
+            // MS32 Iter002（design D3）：LIMIT 直接约束排序时只驻留
+            // `offset + limit` 行——形状为 `Sort` 或 `Projection(Sort)`
+            // （deferred_wrap）；`Distinct(...)` 与其他形状不设界，全量排序。
+            mark_sort_bounded(&mut input, offset.saturating_add(limit));
 
             PhysicalPlan::Limit(crate::executor::LimitNode {
                 input: Box::new(input),

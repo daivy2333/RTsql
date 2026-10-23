@@ -15,6 +15,7 @@
 //! (executors are rebuilt per statement). Errors are never cached.
 
 use crate::database::Database;
+use crate::executor::query_budget::{param_key_bytes, unlimited_budget, value_bytes, SharedBudget};
 use crate::executor::{
     apply_projection, inject_correlated_values, ExecResult, Executor, PredicateRef, Value,
 };
@@ -46,6 +47,9 @@ pub struct ScalarSubqueryFilterExecutor {
     routed_tables: Arc<crate::pipeline::RoutedTables>,
     projection: Vec<usize>,
     caches: Vec<BindingCache>,
+    /// MS32 Iter003（design D5）：语句级查询内存预算——相关缓存键值入账，
+    /// 并随重建臂穿线到绑定子查询计划。
+    budget: SharedBudget,
 }
 
 impl ScalarSubqueryFilterExecutor {
@@ -78,7 +82,14 @@ impl ScalarSubqueryFilterExecutor {
             routed_tables,
             projection,
             caches,
+            budget: unlimited_budget(),
         }
+    }
+
+    /// MS32 Iter003（design D5）：注入语句级预算（pipeline 构造臂）。
+    pub(crate) fn with_budget(mut self, budget: SharedBudget) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Extract correlated parameter values for one binding from the outer row
@@ -126,6 +137,7 @@ impl ScalarSubqueryFilterExecutor {
             None,
             self.snapshot.clone(),
             &self.routed_tables,
+            &self.budget,
         )
         .await?;
 
@@ -169,6 +181,10 @@ impl ScalarSubqueryFilterExecutor {
             let injected = plan;
             inject_correlated_values(&injected, &param_values);
             let value = self.eval_subquery_scalar(&injected).await?;
+            // MS32 Iter003（design D5）：缓存驻留 = 键 + 标量值，入账先于
+            // 插入（超限整句失败）。
+            self.budget
+                .charge(param_key_bytes(&param_values) + value_bytes(&value))?;
             self.caches[binding_idx]
                 .correlated
                 .insert(param_values, value.clone());

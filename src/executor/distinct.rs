@@ -8,6 +8,7 @@
 //! operations reuse.
 
 use crate::executor::executor_trait::Executor;
+use crate::executor::query_budget::{row_bytes, unlimited_budget, SharedBudget};
 use crate::executor::result::ExecResult;
 use crate::executor::Value;
 use crate::storage;
@@ -22,6 +23,9 @@ pub struct DistinctExecutor {
     has_consumed_input: bool,
     /// Current position in `rows`
     index: usize,
+    /// MS32 Iter003（design D5）：语句级查询内存预算——去重输出行与 seen
+    /// 集合副本分别入账。
+    budget: SharedBudget,
 }
 
 impl DistinctExecutor {
@@ -31,7 +35,14 @@ impl DistinctExecutor {
             rows: Vec::new(),
             has_consumed_input: false,
             index: 0,
+            budget: unlimited_budget(),
         }
+    }
+
+    /// MS32 Iter003（design D5）：注入语句级预算（pipeline 构造臂）。
+    pub(crate) fn with_budget(mut self, budget: SharedBudget) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Consume the whole input, keeping the first occurrence of each row
@@ -40,7 +51,13 @@ impl DistinctExecutor {
         loop {
             match self.input.next().await? {
                 Some(ExecResult::Row(row)) => {
-                    if seen.insert(row.clone()) {
+                    // MS32 Iter003（design D5）：幸存行两份驻留（输出行 + seen
+                    // 副本）入账；重复行的瞬态克隆属在途数据不计。入账先于
+                    // 插入——超限整句失败，无需回滚集合。
+                    let bytes = row_bytes(&row);
+                    if !seen.contains(&row) {
+                        self.budget.charge(bytes.saturating_mul(2))?;
+                        seen.insert(row.clone());
                         self.rows.push(row);
                     }
                 }

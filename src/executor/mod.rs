@@ -35,6 +35,7 @@ mod plan;
 mod plan_format;
 mod predicate;
 mod projection;
+pub(crate) mod query_budget;
 mod result;
 mod scalar_subquery_filter;
 mod scan;
@@ -96,6 +97,7 @@ pub use predicate::{
     LogicalPredicate, NotPredicate, ParameterExpression, Predicate, PredicateRef, Ternary,
 };
 pub use projection::ProjectionExecutor;
+pub use query_budget::QueryBudget;
 pub use result::ExecResult;
 pub use scalar_subquery_filter::ScalarSubqueryFilterExecutor;
 pub use scan::ScanExecutor;
@@ -143,5 +145,50 @@ impl StubRowExecutor {
 impl Executor for StubRowExecutor {
     async fn next(&mut self) -> crate::storage::Result<Option<ExecResult>> {
         Ok(self.rows.next().map(ExecResult::Row))
+    }
+}
+
+/// MS32-T01 Iter000（Task 1.1）：`next_batch` 默认方法的契约——批量取出与
+/// 逐行取出同序，`max = 0` 不消费输入。
+#[cfg(test)]
+mod batch_interface_tests {
+    use super::*;
+
+    fn rows(n: i64) -> Vec<Vec<Value>> {
+        (0..n).map(|i| vec![Value::Int(i)]).collect()
+    }
+
+    #[tokio::test]
+    async fn next_batch_matches_rows() {
+        // 5 行按 2 分批：2、2、1，然后空批。
+        let mut executor = StubRowExecutor::new(rows(5));
+        let first = executor.next_batch(2).await.unwrap();
+        let second = executor.next_batch(2).await.unwrap();
+        let third = executor.next_batch(2).await.unwrap();
+        let fourth = executor.next_batch(2).await.unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(third.len(), 1);
+        assert!(fourth.is_empty());
+
+        // 分批序列与逐行序列逐项相同。
+        let mut rowwise = StubRowExecutor::new(rows(5));
+        let mut expected = Vec::new();
+        while let Some(result) = rowwise.next().await.unwrap() {
+            expected.push(result);
+        }
+        let mut actual = Vec::new();
+        actual.extend(first);
+        actual.extend(second);
+        actual.extend(third);
+        assert_eq!(actual, expected);
+
+        // `max = 0` 返回空批且不推进游标——下一次 `next` 仍是第一行。
+        let mut zero = StubRowExecutor::new(rows(5));
+        assert!(zero.next_batch(0).await.unwrap().is_empty());
+        assert_eq!(
+            zero.next().await.unwrap(),
+            Some(ExecResult::Row(vec![Value::Int(0)]))
+        );
     }
 }

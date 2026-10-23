@@ -6,6 +6,9 @@
 //! - Correlated subquery: correlated_params non-empty, re-materializes right per left row (placeholder)
 
 use crate::database::Database;
+use crate::executor::query_budget::{
+    charge_bucket_insert, param_key_bytes, rows_bytes, unlimited_budget, SharedBudget,
+};
 use crate::executor::{
     apply_projection, ExecResult, Executor, JoinCondition, JoinRelatedConfig, PhysicalPlan, Value,
 };
@@ -65,6 +68,12 @@ pub struct SemiJoinExecutorV2 {
     /// (including NULL-key rows, which count toward `right_has_rows`). Errors
     /// are never cached.
     correlated_rows_cache: HashMap<Vec<(String, Value)>, Vec<Vec<Value>>>,
+    /// MS32 Iter003（design D5）：语句级查询内存预算——右哈希表（键 + 行
+    /// 克隆）与相关缓存（键 + 行集）入账；相关重建换表时旧表按记账字节
+    /// 出账。
+    budget: SharedBudget,
+    /// 当前右哈希表的入账字节数（相关重建路径的换表出账依据）。
+    right_residency: u64,
 
     phase: SemiJoinPhase,
     executed: bool,
@@ -88,9 +97,23 @@ impl SemiJoinExecutorV2 {
             snapshot: config.snapshot,
             routed_tables: config.routed_tables,
             correlated_rows_cache: HashMap::new(),
+            budget: unlimited_budget(),
+            right_residency: 0,
             phase: SemiJoinPhase::BuildRight,
             executed: false,
         }
+    }
+
+    /// MS32 Iter003（design D5）：注入语句级预算（pipeline 构造臂）。
+    pub(crate) fn with_budget(mut self, budget: SharedBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// MS32 Iter003（design D5）：相关重建换表——旧表先按记账字节出账。
+    /// 按字段传递（调用点同时持有 `right_plan` / `database` 的字段借用）。
+    fn release_right_residency(budget: &SharedBudget, residency: &mut u64) {
+        budget.release(std::mem::take(residency));
     }
 
     /// Build hash key from right-table row using join conditions
@@ -196,7 +219,14 @@ impl Executor for SemiJoinExecutorV2 {
                             if let ExecResult::Row(row) = result {
                                 has_rows = true;
                                 if let Some(hash_key) = self.build_right_key(&row) {
-                                    hashmap.entry(hash_key).or_default().push(row);
+                                    // MS32 Iter003（design D5）：独立路径单次
+                                    // 建表，驻留到语句结束（单源计费助手）。
+                                    charge_bucket_insert(
+                                        &self.budget,
+                                        &mut hashmap,
+                                        hash_key,
+                                        row,
+                                    )?;
                                 }
                             }
                         }
@@ -224,17 +254,25 @@ impl Executor for SemiJoinExecutorV2 {
                                     {
                                         // Cache hit: rebuild the hash map and row
                                         // presence exactly as the miss path does.
+                                        Self::release_right_residency(
+                                            &self.budget,
+                                            &mut self.right_residency,
+                                        );
                                         let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
                                             HashMap::new();
+                                        let mut residency = 0u64;
                                         for row in rows {
                                             if let Some(hash_key) = self.build_right_key(row) {
-                                                hashmap
-                                                    .entry(hash_key)
-                                                    .or_default()
-                                                    .push(row.clone());
+                                                residency += charge_bucket_insert(
+                                                    &self.budget,
+                                                    &mut hashmap,
+                                                    hash_key,
+                                                    row.clone(),
+                                                )?;
                                             }
                                         }
                                         let has_rows = !rows.is_empty();
+                                        self.right_residency = residency;
                                         self.right_hashmap = Some(hashmap);
                                         self.right_has_rows = Some(has_rows);
                                     } else {
@@ -252,25 +290,39 @@ impl Executor for SemiJoinExecutorV2 {
                                                 None,
                                                 self.snapshot.clone(),
                                                 &self.routed_tables,
+                                                &self.budget,
                                             )
                                             .await?;
+                                        Self::release_right_residency(
+                                            &self.budget,
+                                            &mut self.right_residency,
+                                        );
                                         let mut hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>> =
                                             HashMap::new();
                                         let mut has_rows = false;
                                         let mut collected: Vec<Vec<Value>> = Vec::new();
+                                        let mut residency = 0u64;
                                         while let Some(result) = right_exec.next().await? {
                                             if let ExecResult::Row(row) = result {
                                                 has_rows = true;
                                                 if let Some(hash_key) = self.build_right_key(&row) {
-                                                    hashmap
-                                                        .entry(hash_key)
-                                                        .or_default()
-                                                        .push(row.clone());
+                                                    residency += charge_bucket_insert(
+                                                        &self.budget,
+                                                        &mut hashmap,
+                                                        hash_key,
+                                                        row.clone(),
+                                                    )?;
                                                 }
                                                 collected.push(row);
                                             }
                                         }
                                         // Store only after a successful drain.
+                                        // MS32 Iter003（design D5）：缓存驻留 =
+                                        // 相关参数键 + 行集，入账先于插入。
+                                        self.budget.charge(
+                                            param_key_bytes(&param_values) + rows_bytes(&collected),
+                                        )?;
+                                        self.right_residency = residency;
                                         self.correlated_rows_cache.insert(param_values, collected);
                                         self.right_hashmap = Some(hashmap);
                                         self.right_has_rows = Some(has_rows);

@@ -5,10 +5,14 @@
 //! accumulators) and GROUP_CONCAT(col [, sep]).
 
 use crate::executor::executor_trait::Executor;
+use crate::executor::query_budget::{
+    row_bytes, string_bytes, unlimited_budget, value_bytes, SharedBudget,
+};
 use crate::executor::result::ExecResult;
 use crate::executor::{ExpressionRef, Value};
 use crate::storage;
 use async_trait::async_trait;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 /// Aggregate function descriptor (from SQL parse)
@@ -289,6 +293,29 @@ impl AggregateState {
     }
 }
 
+/// MS32 Iter003（design D5）：单个累加器状态的驻留字节——携带 `Value` /
+/// 字符串的状态计（SUM/AVG 的和值、MIN/MAX 当前值、DISTINCT 集合、
+/// GROUP_CONCAT 拼接段与分隔符）；纯数值累加器恒 0 不计。
+fn state_value_bytes(state: &AggregateState) -> u64 {
+    match state {
+        AggregateState::Sum { sum, .. } | AggregateState::Avg { sum, .. } => {
+            sum.as_ref().map_or(0, value_bytes)
+        }
+        AggregateState::Min(current) | AggregateState::Max(current) => {
+            current.as_ref().map_or(0, value_bytes)
+        }
+        AggregateState::CountDistinct(seen) => seen.iter().map(value_bytes).sum(),
+        AggregateState::SumDistinct { seen, sum }
+        | AggregateState::AvgDistinct { seen, sum, .. } => {
+            seen.iter().map(value_bytes).sum::<u64>() + sum.as_ref().map_or(0, value_bytes)
+        }
+        AggregateState::GroupConcat { parts, separator } => {
+            parts.iter().map(|p| string_bytes(p)).sum::<u64>() + string_bytes(separator)
+        }
+        AggregateState::CountStar(_) | AggregateState::Count { .. } => 0,
+    }
+}
+
 /// MS25 D7: render a value as its GROUP_CONCAT text part. Date/Timestamp use
 /// the same DA5 string form as the CLI renderer; other scalars use their
 /// `Display`/`to_string` form.
@@ -332,6 +359,9 @@ pub struct AggregateExecutor {
     output_rows: Option<Vec<Vec<Value>>>,
     /// Current position in output rows
     output_index: usize,
+    /// MS32 Iter003（design D5）：语句级查询内存预算——分组键与状态值入账
+    /// （纯数值累加器不计）。
+    budget: SharedBudget,
 }
 
 impl AggregateExecutor {
@@ -357,7 +387,14 @@ impl AggregateExecutor {
             has_consumed_input: false,
             output_rows: None,
             output_index: 0,
+            budget: unlimited_budget(),
         }
+    }
+
+    /// MS32 Iter003（design D5）：注入语句级预算（pipeline 构造臂）。
+    pub(crate) fn with_budget(mut self, budget: SharedBudget) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Consume all input rows and accumulate aggregate states
@@ -370,6 +407,7 @@ impl AggregateExecutor {
             self.single_group = Some(states);
         }
 
+        let budget = self.budget.clone();
         loop {
             match self.input.next().await? {
                 Some(ExecResult::Row(row)) => {
@@ -382,13 +420,21 @@ impl AggregateExecutor {
                                 self.aggregate_arg_indices.get(i).copied().flatten(),
                                 &self.column_indices,
                             );
-                            states[i].update(&value);
+                            Self::update_state(&budget, &mut states[i], &value)?;
                         }
                     } else {
                         let group_key = self.extract_group_key(&row)?;
-                        let states = self.groups.entry(group_key).or_insert_with(|| {
-                            self.aggregates.iter().map(AggregateState::new).collect()
-                        });
+                        let states = match self.groups.entry(group_key) {
+                            // MS32 Iter003（design D5）：新组分组键入账（驻留
+                            // 到语句结束）；既有组无键计费。
+                            Entry::Vacant(vacant) => {
+                                budget.charge(row_bytes(vacant.key()))?;
+                                vacant.insert(
+                                    self.aggregates.iter().map(AggregateState::new).collect(),
+                                )
+                            }
+                            Entry::Occupied(occupied) => occupied.into_mut(),
+                        };
                         for (i, func) in self.aggregates.iter().enumerate() {
                             let value = Self::extract_value(
                                 &row,
@@ -396,7 +442,7 @@ impl AggregateExecutor {
                                 self.aggregate_arg_indices.get(i).copied().flatten(),
                                 &self.column_indices,
                             );
-                            states[i].update(&value);
+                            Self::update_state(&budget, &mut states[i], &value)?;
                         }
                     }
                 }
@@ -406,6 +452,29 @@ impl AggregateExecutor {
         }
 
         self.has_consumed_input = true;
+        Ok(())
+    }
+
+    /// MS32 Iter003（design D5）：状态值驻留增量入账——按更新前后状态字节
+    /// 数差入账/出账；纯数值累加器（COUNT 族、数值 count）恒 0 不计。默认
+    /// 不限制（limit 0）时跳过前后度量，维持零开销。
+    fn update_state(
+        budget: &SharedBudget,
+        state: &mut AggregateState,
+        value: &Value,
+    ) -> storage::Result<()> {
+        if budget.limit() == 0 {
+            state.update(value);
+            return Ok(());
+        }
+        let before = state_value_bytes(state);
+        state.update(value);
+        let after = state_value_bytes(state);
+        if after > before {
+            budget.charge(after - before)?;
+        } else if after < before {
+            budget.release(before - after);
+        }
         Ok(())
     }
 

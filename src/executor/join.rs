@@ -1,5 +1,6 @@
 //! Join executor - INNER JOIN using hash join algorithm
 
+use crate::executor::query_budget::{charge_bucket_insert, unlimited_budget, SharedBudget};
 use crate::executor::{
     ColumnRef, ExecResult, Executor, JoinCondition, JoinConfig, JoinSide, OutputColumn, Value,
 };
@@ -11,9 +12,7 @@ use std::collections::HashMap;
 enum JoinPhase {
     /// 构建右表哈希表
     BuildRight,
-    /// 扫描左表并缓存
-    ScanLeft,
-    /// 输出匹配结果
+    /// 左表逐行探测并输出匹配结果
     Output,
 }
 
@@ -36,10 +35,14 @@ pub struct JoinExecutor {
 
     // 哈希连接状态
     right_hashmap: HashMap<Vec<Value>, Vec<Vec<Value>>>,
-    left_rows: Vec<Vec<Value>>,
-    current_left_index: usize,
-    current_right_matches: Vec<Vec<Value>>,
+    /// 当前探测中的左表行（None = 需从左执行器取下一行，左侧行不整表驻留）
+    current_left: Option<Vec<Value>>,
+    /// 当前行命中桶的键，探测时缓存；桶按需经键取回，不整桶克隆
+    current_match_key: Option<Vec<Value>>,
     current_right_index: usize,
+    /// MS32 Iter003（design D5）：语句级查询内存预算——右行 + 哈希键入账；
+    /// 左行只作当前探测行不计。
+    budget: SharedBudget,
 
     phase: JoinPhase,
     executed: bool,
@@ -58,13 +61,19 @@ impl JoinExecutor {
             output_sides: config.output_sides,
             _right_table_name: config.right_table_name,
             right_hashmap: HashMap::new(),
-            left_rows: Vec::new(),
-            current_left_index: 0,
-            current_right_matches: Vec::new(),
+            current_left: None,
+            current_match_key: None,
             current_right_index: 0,
+            budget: unlimited_budget(),
             phase: JoinPhase::BuildRight,
             executed: false,
         }
+    }
+
+    /// MS32 Iter003（design D5）：注入语句级预算（pipeline 构造臂）。
+    pub(crate) fn with_budget(mut self, budget: SharedBudget) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// T11（change 2026-10-04-external-review-gaps）：条件键列位查表——
@@ -155,61 +164,65 @@ impl Executor for JoinExecutor {
                     while let Some(result) = self.right_executor.next().await? {
                         if let ExecResult::Row(row) = result {
                             if let Some(hash_key) = self.build_hash_key_right(&row) {
-                                self.right_hashmap.entry(hash_key).or_default().push(row);
+                                // MS32 Iter003（design D5）：右行逐行入账、哈希
+                                // 键按桶入账（单源助手）；驻留持续到语句结束，
+                                // 左行只作当前探测行不计。
+                                charge_bucket_insert(
+                                    &self.budget,
+                                    &mut self.right_hashmap,
+                                    hash_key,
+                                    row,
+                                )?;
                             }
-                        }
-                    }
-                    self.phase = JoinPhase::ScanLeft;
-                }
-
-                JoinPhase::ScanLeft => {
-                    // Phase 2: 执行左表，缓存所有行
-                    while let Some(result) = self.left_executor.next().await? {
-                        if let ExecResult::Row(row) = result {
-                            self.left_rows.push(row);
                         }
                     }
                     self.phase = JoinPhase::Output;
                 }
 
                 JoinPhase::Output => {
-                    // Phase 3: 逐行匹配输出
-                    while self.current_left_index < self.left_rows.len() {
-                        let left_row = &self.left_rows[self.current_left_index];
+                    // Phase 2: 左表逐行探测，左侧行不缓存
+                    if self.current_left.is_none() {
+                        match self.left_executor.next().await? {
+                            Some(ExecResult::Row(row)) => {
+                                self.current_left = Some(row);
+                                self.current_right_index = 0;
+                            }
+                            Some(_) => continue,
+                            // 左表已耗尽
+                            None => return Ok(None),
+                        }
+                    }
 
-                        // Skip NULL keys (no match possible)
-                        let hash_key = match self.build_hash_key_left(left_row) {
-                            Some(key) => key,
+                    // 首次探测当前左表行
+                    if self.current_right_index == 0 {
+                        let left_row = self.current_left.as_ref().unwrap();
+                        match self.build_hash_key_left(left_row) {
+                            // 键含 NULL 不会匹配任何右表行
                             None => {
-                                self.current_left_index += 1;
+                                self.current_left = None;
                                 continue;
                             }
-                        };
-
-                        // 查找匹配的右表行
-                        if self.current_right_index == 0 {
-                            self.current_right_matches = self
-                                .right_hashmap
-                                .get(&hash_key)
-                                .cloned()
-                                .unwrap_or_default();
+                            Some(hash_key) => self.current_match_key = Some(hash_key),
                         }
+                    }
 
-                        // 输出当前匹配
-                        if self.current_right_index < self.current_right_matches.len() {
-                            let right_row = &self.current_right_matches[self.current_right_index];
+                    // 查找匹配的右表行，按下标取行，不克隆整桶
+                    let hash_key = self
+                        .current_match_key
+                        .as_ref()
+                        .expect("match key cached while probing");
+                    if let Some(bucket) = self.right_hashmap.get(hash_key) {
+                        if self.current_right_index < bucket.len() {
+                            let right_row = &bucket[self.current_right_index];
+                            let left_row = self.current_left.as_ref().unwrap();
                             let output_row = self.build_output_row(left_row, right_row);
                             self.current_right_index += 1;
                             return Ok(Some(ExecResult::Row(output_row)));
                         }
-
-                        // 当前左表行所有匹配已输出，移到下一行
-                        self.current_left_index += 1;
-                        self.current_right_index = 0;
                     }
 
-                    // 所有行已处理完毕
-                    return Ok(None);
+                    // 当前左表行所有匹配已输出（或无匹配），移到下一行
+                    self.current_left = None;
                 }
             }
         }

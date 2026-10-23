@@ -125,6 +125,11 @@ pub struct Database {
     pub views: Arc<RwLock<HashMap<String, ViewMeta>>>,
     /// MS26 T1/D1：打开模式（构造期一次定型，运行期不变）。
     mode: OpenMode,
+    /// MS32 Iteration 003（design D4）：查询内存上限（字节）——语句入口取
+    /// 快照构造语句级预算。`0` = 不限制（默认）。`Arc<AtomicU64>` 沿
+    /// `schema_version` 先例（`AtomicU64` 不实现 `Clone`）；克隆共享不改
+    /// 变快照语义——上限变更只影响之后开始的语句。
+    query_memory_limit: Arc<AtomicU64>,
 }
 
 impl Database {
@@ -387,6 +392,7 @@ impl Database {
             isolation,
             views,
             mode,
+            query_memory_limit: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -521,6 +527,18 @@ impl Database {
         if let Some(writer) = &self.wal_writer {
             writer.set_checkpoint_bytes_threshold(bytes);
         }
+    }
+
+    /// 设置查询内存上限（MS32 Iteration 003，design D4，`query-memory-budget`
+    /// R1）——`0`（默认）不限制。语句入口取快照构造语句级预算，故只影响
+    /// 之后开始的语句；语句结束后计数丢弃，不跨语句。
+    pub fn set_query_memory_limit(&self, bytes: u64) {
+        self.query_memory_limit.store(bytes, Ordering::SeqCst);
+    }
+
+    /// 语句入口的上限快照读取（pipeline 预算构造点消费）。
+    pub(crate) fn query_memory_limit(&self) -> u64 {
+        self.query_memory_limit.load(Ordering::SeqCst)
     }
 
     /// Roll back an explicit transaction: every version the transaction

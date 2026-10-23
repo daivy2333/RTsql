@@ -1,5 +1,6 @@
 //! Join executor unit tests (M12)
 
+use rtsql::database::Database;
 use rtsql::executor::{
     ColumnRef, ExecResult, Executor, InsertExecutor, JoinCondition, JoinConfig, JoinExecutor,
     JoinSide, OutputColumn, ScanExecutor, Value,
@@ -903,6 +904,50 @@ async fn test_join_keyless_base_tables_visible() -> Result<()> {
     assert_eq!(results[0][1], Value::Int(1));
     assert_eq!(results[1][0], Value::String("a2".to_string()));
     assert_eq!(results[1][1], Value::Int(2));
+
+    Ok(())
+}
+
+// =============================================================================
+// Statement-level error surface (MS32 Iter001 Task 2.1)
+// =============================================================================
+
+/// 等值哈希 JOIN 的 WHERE 谓词在左侧行 id=2 上 `abs(i64::MIN)` 溢出，行 id=1
+/// 先通过谓词。语句级结果必须是 `Err`，不得作为只含成功行的 `Ok` 交出部分行。
+/// i64::MIN 无法以 SQL 字面量写入，按 scalar_function_test 先例用
+/// `0 - 9223372036854775807 - 1` 构造。JOIN 上的表达式投影是计划期点名拒绝
+/// 的既有边界（不放宽），见证放在 WHERE 谓词面。
+#[tokio::test]
+async fn execute_sql_returns_err_not_partial_rows_on_join_where_overflow() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("join_overflow.db"))
+        .await
+        .unwrap();
+
+    db.execute_sql("CREATE TABLE l (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
+    db.execute_sql("CREATE TABLE r (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO l VALUES (1), (2)")
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO r VALUES (1), (2)")
+        .await
+        .unwrap();
+
+    let error = db
+        .execute_sql(
+            "SELECT l.id FROM l JOIN r ON l.id = r.id \
+             WHERE abs(CASE WHEN l.id = 2 THEN 0 - 9223372036854775807 - 1 ELSE l.id END) > 0",
+        )
+        .await
+        .expect_err("predicate overflow must fail the whole statement");
+    assert!(
+        error.to_string().contains("Integer overflow in abs"),
+        "unexpected error: {error}"
+    );
 
     Ok(())
 }

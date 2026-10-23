@@ -1,6 +1,7 @@
 //! Sort executor - ORDER BY clause sorting
 
 use crate::executor::apply_projection;
+use crate::executor::query_budget::{row_bytes, unlimited_budget, SharedBudget};
 use crate::executor::{ExecResult, Executor, OrderByColumn, Value};
 use crate::storage::Result;
 use std::cmp::Ordering;
@@ -14,6 +15,11 @@ pub struct SortExecutor {
     /// materializing the sorted buffer so comparisons still see the input
     /// row shape (design D10: sort keys may live outside the projection).
     projection: Vec<usize>,
+    /// MS32 Iter002（design D3）：LIMIT 直接约束排序时的驻留上限
+    /// （`offset + limit`）。`None` = 全量排序（既有 collect-then-sort）。
+    bounded: Option<usize>,
+    /// MS32 Iter003（design D5）：语句级查询内存预算——驻留行逐行入账。
+    budget: SharedBudget,
     sorted_rows: Vec<Vec<Value>>,
     position: usize,
     initialized: bool,
@@ -31,6 +37,8 @@ impl SortExecutor {
             order_by,
             columns,
             projection: Vec::new(),
+            bounded: None,
+            budget: unlimited_budget(),
             sorted_rows: Vec::new(),
             position: 0,
             initialized: false,
@@ -44,74 +52,159 @@ impl SortExecutor {
         self
     }
 
+    /// MS32 Iter002（design D3）：设置 LIMIT 直接约束下的驻留上限。
+    /// 仅由 pipeline 的 Sort 臂从 `SortNode::bounded` 传入。
+    pub fn with_bounded(mut self, bounded: Option<usize>) -> Self {
+        self.bounded = bounded;
+        self
+    }
+
+    /// MS32 Iter003（design D5）：注入语句级预算（pipeline 构造臂）。
+    pub(crate) fn with_budget(mut self, budget: SharedBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
     /// Initialize: collect all rows and sort them
     async fn initialize(&mut self) -> Result<()> {
-        let mut rows = Vec::new();
+        match self.bounded {
+            None => {
+                let mut rows = Vec::new();
 
-        // Collect all rows from input
-        while let Some(result) = self.input.next().await? {
-            match result {
-                ExecResult::Row(row) => rows.push(row),
-                ExecResult::AffectedRows(_) | ExecResult::RowId(_) => {
-                    // Skip non-row results during sorting
-                }
-            }
-        }
-
-        // MS25 T7（design D8）：表达式键（输出别名键）逐行 decorate——在**未
-        // 投影的输入行**上求值键表达式，与 planner 编译时的行形状同源（Sort 恒
-        // 位于顶层 Projection 之下）。求值错误经 `Result` 传播，不被吞进比较
-        // 闭包（闭包只能返回 `Ordering`）。无表达式键时返回 `None`——比较路径
-        // 与既有逐字节相同。
-        //
-        // owned `Expression::evaluate` 是唯一允许的求值路径：`evaluate_ref`
-        // 零拷贝入口对 String 结果显式报错（同 ProjectionExecutor 约束）。
-        let keys: Option<Vec<Vec<Value>>> = if self.order_by.iter().all(|o| o.expr.is_none()) {
-            None
-        } else {
-            let mut decorated = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let mut row_keys = Vec::new();
-                for order_col in &self.order_by {
-                    if let Some(expr) = &order_col.expr {
-                        row_keys.push(expr.evaluate(row).map_err(|e| {
-                            crate::storage::StorageError::ExecutionError(format!(
-                                "Expression evaluation error: {}",
-                                e
-                            ))
-                        })?);
+                // Collect all rows from input
+                while let Some(result) = self.input.next().await? {
+                    match result {
+                        ExecResult::Row(row) => {
+                            // MS32 Iter003（design D5）：全量排序逐行入账，
+                            // 驻留持续到语句结束（无出账点）。
+                            self.budget.charge(row_bytes(&row))?;
+                            rows.push(row);
+                        }
+                        ExecResult::AffectedRows(_) | ExecResult::RowId(_) => {
+                            // Skip non-row results during sorting
+                        }
                     }
                 }
-                decorated.push(row_keys);
-            }
-            Some(decorated)
-        };
 
-        // Sort rows using the order_by specification (on the input row shape)
-        match keys {
-            None => rows.sort_unstable_by(|a, b| self.compare_rows(a, b, &[], &[])),
-            Some(keys) => {
-                // decorate 后每行携带「键值 + 行」，排序键在键值上比较，
-                // undecorate 交回原始输入行（投影裁剪在其后）。
-                let mut decorated: Vec<(Vec<Value>, Vec<Value>)> = rows
+                // MS25 T7（design D8）：表达式键（输出别名键）逐行 decorate——在**未
+                // 投影的输入行**上求值键表达式，与 planner 编译时的行形状同源（Sort 恒
+                // 位于顶层 Projection 之下）。求值错误经 `Result` 传播，不被吞进比较
+                // 闭包（闭包只能返回 `Ordering`）。无表达式键时返回 `None`——比较路径
+                // 与既有逐字节相同。
+                //
+                // owned `Expression::evaluate` 是唯一允许的求值路径：`evaluate_ref`
+                // 零拷贝入口对 String 结果显式报错（同 ProjectionExecutor 约束）。
+                let keys: Option<Vec<Vec<Value>>> =
+                    if self.order_by.iter().all(|o| o.expr.is_none()) {
+                        None
+                    } else {
+                        let mut decorated = Vec::with_capacity(rows.len());
+                        for row in &rows {
+                            decorated.push(self.decorate_row_keys(row)?);
+                        }
+                        Some(decorated)
+                    };
+
+                // Sort rows using the order_by specification (on the input row shape)
+                match keys {
+                    None => rows.sort_unstable_by(|a, b| self.compare_rows(a, b, &[], &[])),
+                    Some(keys) => {
+                        // decorate 后每行携带「键值 + 行」，排序键在键值上比较，
+                        // undecorate 交回原始输入行（投影裁剪在其后）。
+                        let mut decorated: Vec<(Vec<Value>, Vec<Value>)> = rows
+                            .into_iter()
+                            .zip(keys)
+                            .map(|(row, row_keys)| (row_keys, row))
+                            .collect();
+                        decorated.sort_unstable_by(|(a_keys, a), (b_keys, b)| {
+                            self.compare_rows(a, b, a_keys, b_keys)
+                        });
+                        rows = decorated.into_iter().map(|(_, row)| row).collect();
+                    }
+                }
+
+                // MS10-T01 Iter001: apply the output projection after sorting.
+                self.sorted_rows = rows
                     .into_iter()
-                    .zip(keys)
-                    .map(|(row, row_keys)| (row_keys, row))
+                    .map(|row| apply_projection(&self.projection, row))
                     .collect();
-                decorated.sort_unstable_by(|(a_keys, a), (b_keys, b)| {
+            }
+            Some(k) => {
+                // MS32 Iter002（design D3）：有界驻留——任意时刻至多保留 k 行
+                // 「当前最优集」，输入耗尽后按同一比较器排序输出。新行仅在严格
+                // 小于当前最差行时替换（相等键不新增决胜，保留先到行）——截断界
+                // 上的相等键保留集差异属既有 unstable 语义。
+                // `k == 0` 时驻留为空（Limit(limit=0) 本就不拉输入，防御面）。
+                let mut retained: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
+                while let Some(result) = self.input.next().await? {
+                    match result {
+                        ExecResult::Row(row) => {
+                            if k == 0 {
+                                continue;
+                            }
+                            let row_keys = self.decorate_row_keys(&row)?;
+                            if retained.len() < k {
+                                self.budget.charge(row_bytes(&row))?;
+                                retained.push((row_keys, row));
+                            } else {
+                                let worst_idx = retained
+                                    .iter()
+                                    .enumerate()
+                                    .max_by(|(_, (a_keys, a)), (_, (b_keys, b))| {
+                                        self.compare_rows(a, b, a_keys, b_keys)
+                                    })
+                                    .map(|(idx, _)| idx)
+                                    .expect("retained is at capacity k > 0");
+                                let (worst_keys, worst_row) = &retained[worst_idx];
+                                if self.compare_rows(&row, worst_row, &row_keys, worst_keys)
+                                    == Ordering::Less
+                                {
+                                    // MS32 Iter003（design D5）：替换时先出账被逐
+                                    // 出行、再入账新行——驻留恒 ≤ k 行。行内容
+                                    // 自入账后不变，重算字节与入账时同值。
+                                    let evicted = row_bytes(worst_row);
+                                    self.budget.release(evicted);
+                                    self.budget.charge(row_bytes(&row))?;
+                                    retained[worst_idx] = (row_keys, row);
+                                }
+                            }
+                        }
+                        ExecResult::AffectedRows(_) | ExecResult::RowId(_) => {
+                            // Skip non-row results during sorting
+                        }
+                    }
+                }
+
+                // 与全量路径同一比较器排序 ≤ k 行的保留集，再走同一投影裁剪。
+                retained.sort_unstable_by(|(a_keys, a), (b_keys, b)| {
                     self.compare_rows(a, b, a_keys, b_keys)
                 });
-                rows = decorated.into_iter().map(|(_, row)| row).collect();
+                self.sorted_rows = retained
+                    .into_iter()
+                    .map(|(_, row)| apply_projection(&self.projection, row))
+                    .collect();
             }
         }
-
-        // MS10-T01 Iter001: apply the output projection after sorting.
-        self.sorted_rows = rows
-            .into_iter()
-            .map(|row| apply_projection(&self.projection, row))
-            .collect();
         self.initialized = true;
         Ok(())
+    }
+
+    /// MS32 Iter002：对单行求值表达式键（无表达式键时返回空——`compare_rows`
+    /// 仅在 `order_by` 含表达式键时索引键切片，空切片即既有无装饰比较路径）。
+    /// 求值错误经 `Result` 传播，与全量路径 decorate 同源。
+    fn decorate_row_keys(&self, row: &[Value]) -> Result<Vec<Value>> {
+        let mut row_keys = Vec::new();
+        for order_col in &self.order_by {
+            if let Some(expr) = &order_col.expr {
+                row_keys.push(expr.evaluate(row).map_err(|e| {
+                    crate::storage::StorageError::ExecutionError(format!(
+                        "Expression evaluation error: {}",
+                        e
+                    ))
+                })?);
+            }
+        }
+        Ok(row_keys)
     }
 
     /// Compare two rows based on order_by specification.

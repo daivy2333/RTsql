@@ -301,6 +301,11 @@ async fn execute_command(args: &CliArgs) -> ExitStatus {
     if let Err(message) = checkpoint_bytes_from_env() {
         return ExitStatus::Usage(message);
     }
+    // MS32 Iter003（`query-memory-budget` R2）：非法查询内存上限配置同款
+    // ——打开前点名拒绝 exit 2（零副作用），校验只对开库路径生效。
+    if let Err(message) = query_memory_bytes_from_env() {
+        return ExitStatus::Usage(message);
+    }
     // MS26 T4（`in-memory-database` R3）：生命周期子命令对 `:memory:` 点名拒绝
     // exit 2——守卫在名称解析与任何文件创建之前（`new` 是唯一会创建父目录的
     // 入口，故必须早于分派）。MS29 T3：import 豁免（`lifecycle_db_target`
@@ -412,6 +417,9 @@ fn busy_timeout_from_env() -> Result<Option<u64>, String> {
 /// WAL 字节水位的环境变量名（MS26 T5/T6，`wal-auto-checkpoint` R2）。
 const ENV_WAL_CHECKPOINT_BYTES: &str = "RTSQL_WAL_CHECKPOINT_BYTES";
 
+/// 查询内存上限的环境变量名（MS32 Iter003，`query-memory-budget` R2）。
+const ENV_QUERY_MEMORY_BYTES: &str = "RTSQL_QUERY_MEMORY_BYTES";
+
 /// 解析 `RTSQL_WAL_CHECKPOINT_BYTES`（`wal-auto-checkpoint` R2）。
 ///
 /// `Ok(None)` = 未设置，保持 `WalWriter` 的 16 MiB 默认值；`Ok(Some(n))` =
@@ -426,6 +434,24 @@ fn checkpoint_bytes_from_env() -> Result<Option<u64>, String> {
             Ok(bytes) => Ok(Some(bytes)),
             Err(_) => Err(format!(
                 "{ENV_WAL_CHECKPOINT_BYTES} must be a non-negative byte count (0 disables auto checkpoint), got {raw:?}"
+            )),
+        },
+    }
+}
+
+/// 解析 `RTSQL_QUERY_MEMORY_BYTES`（MS32 Iter003，`query-memory-budget`
+/// R2）——通道形态与 `checkpoint_bytes_from_env` 同款。
+///
+/// `Ok(None)` = 未设置，上限保持 0（不限制）；`Ok(Some(n))` = 合法字节数
+/// （`0` 表示不限制）；`Err(msg)` = 非法值，文案点名变量名与回显非法值，
+/// 由调用方映射为 `Usage`（exit 2）。
+fn query_memory_bytes_from_env() -> Result<Option<u64>, String> {
+    match std::env::var(ENV_QUERY_MEMORY_BYTES) {
+        Err(_) => Ok(None),
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(_) => Err(format!(
+                "{ENV_QUERY_MEMORY_BYTES} must be a non-negative byte count (0 disables the query memory limit), got {raw:?}"
             )),
         },
     }
@@ -656,6 +682,13 @@ async fn execute_command_inner_mode(
         db.set_checkpoint_bytes_threshold(bytes);
     }
 
+    // MS32 Iter003（`query-memory-budget` R1/R2）：查询内存上限 env 通道的
+    // 应用位——与水位通道同点，覆盖主命令与全部开库生命周期子命令。合法
+    // 性已在 `execute_command` 顶部（打开前）判定，此处只剩应用。
+    if let Ok(Some(bytes)) = query_memory_bytes_from_env() {
+        db.set_query_memory_limit(bytes);
+    }
+
     // MS20-T02（design D3）：附加库注册表由取消边界外的编排器持有——work 只
     // 借用。正常结束、SQL/输出错误与信号取消三条退出路径都在此处统一关闭
     // 全部已注册附加库，再走原主库 close；此前提前 return 绕过尾部关闭的
@@ -783,6 +816,11 @@ async fn attach_database(
     // mode 入口应用）——打开成功后在此应用，使每个提交库按自身阈值检查水位。
     if let Ok(Some(bytes)) = checkpoint_bytes_from_env() {
         db.set_checkpoint_bytes_threshold(bytes);
+    }
+    // MS32 Iter003：附加库沿用查询内存上限 env 通道（主库在 mode 入口应用）
+    // ——每个附加库的语句按同一上限构建语句级预算。
+    if let Ok(Some(bytes)) = query_memory_bytes_from_env() {
+        db.set_query_memory_limit(bytes);
     }
     session.register(info.alias.clone(), db);
     Ok(())
