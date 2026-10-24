@@ -1,7 +1,7 @@
 # 引擎模式与历史知识沉淀（knowledge spec 退役迁移）
 
 - 日期: 2026-09-24
-- 性质: 2026-09-24 knowledge spec 退役（用户指令，CLAUDE.md 信息路由不再设 K 域）时的逐字迁移；条目按原 K 编号保留，内容未改写
+- 性质: 2026-09-24 knowledge spec 退役（用户指令，AGENTS.md 信息路由不再设 K 域）时的逐字迁移；条目按原 K 编号保留，内容未改写
 - 去向分工: 当前约束类 K10/K11 → project-model M17；K38 → project-model M18；基准方法论 K20/K21/K34/K35 → runbook `test-bench-diagnosis.md`（R27）；已陈旧/被取代的 K05/K12/K13/K36/K37 未迁移，全文在清理 carrier（经 `openspec/specs/knowledge/spec.md` 底部 arc 指引定位）
 - 阅读提示: 条目内引用的历史编号（M19/M20/M36 等旧优化项编号、Dxx、Lxx）为采集时现场；历史性能数据不代表当前基线（现状见双语 README 对比板块与 `benches/`）
 

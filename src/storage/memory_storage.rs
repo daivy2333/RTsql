@@ -82,7 +82,7 @@ impl AsyncStorage for MemoryStorage {
             Some(id) => PageId(id),
             None => PageId(self.next_page_id.fetch_add(1, Ordering::SeqCst)),
         };
-        // 复用页必须读到全零空页：与 FileStorage 回收时写零页同型
+        // 复用页必须读到全零空页：与 FileStorage 分配时写零页同型
         self.write_page_sync(page_id, &Page::new(page_id));
         Ok(page_id)
     }

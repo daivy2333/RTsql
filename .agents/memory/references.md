@@ -135,7 +135,7 @@
 - **类型**: change-archive
 - **路径**: `openspec/changes/archive/2026-06-03-consolidate-rules-into-claude-md/`
 - **状态**: archived
-- **内容**: 废弃 `openspec/specs/rules/`，规则合并到 CLAUDE.md
+- **内容**: 废弃 `openspec/specs/rules/`，规则合并到 AGENTS.md
 - **legacy carrier**: `openspec/changes/archive/2026-06-03-consolidate-rules-into-claude-md/archive/spec.md`（旧 rules.md 内容）+ `archive/CLAUDE.md.before`（旧 CLAUDE.md 内容）
 
 ## R10: 2026-06-03-m20-zero-copy-slotted-page-ref
@@ -443,5 +443,21 @@
 - **日期**: 2026-10-15
 - **用途**: 执行器子查询路径 `Execution error: execution error:` 双层前缀文案缺陷台账（ISS11 修复 parse/plan 漏斗后的执行器漏网点）；错误面断言校准与顺手收敛输入
 - **状态**: closed（2026-10-15 fixed → 同 change T3，`StorageError::ExecutionError` Display 去 thiserror 前缀、单层 `Execution error: ` 由 pipeline 漏斗唯一赋予；锚点 `subquery_test.rs:632` 校准 + e2e 端到端断言）
+
+## R48: M19 分批全量回归执行配方 Runbook
+
+- **类型**: runbook
+- **路径**: `.agents/runbooks/m19-batched-full-regression.md`
+- **日期**: 2026-10-23
+- **用途**: 给出「全量回归通过」结论时的分批执行配方（公共规则 M19）——`--lib --bins` 一批 + `tests/*.rs` 按文件名字典序每 10 个一批，每批一次独立 `cargo test … -- --test-threads=1`、批间顺序执行、同一时刻只跑一批，逐批记录 passed/failed/ignored 计数；含「cargo 在首个失败目标后中止该批后续目标」这一实测坑与失败复核方式；写作全量验证交付记录、复现某次全量结论或排查批次缺漏时使用（来源 MS33 Iteration 000，14 批 2151/0/2 实证）
+- **状态**: active
+
+## R49: 进程内 checkpoint 前崩溃的复现与判别配方 Runbook
+
+- **类型**: runbook
+- **路径**: `.agents/runbooks/in-process-crash-simulation.md`
+- **日期**: 2026-10-23
+- **用途**: 在同一进程内构造「checkpoint 之前进程结束」的持久化状态并观察重开结果的测试配方——崩溃助手形态 `wal_buffer.shutdown()` 后 `drop(db)` 不 `close`，两段会话（先 `close()`+`drop` 让行落盘且 WAL 截断，再执行被观察语句并崩溃），以及关键判别点「WAL 重放按 logical_id 幂等补回尚在 WAL 里的行，会掩盖持久化缺口，使用例改前即通过」；含清零索引树页导致重开栈溢出 abort 的实证形态；写 DROP/TRUNCATE 类语句的崩溃语义见证或判别「缺口是否真实存在」时使用（来源 MS33 Iteration 000，7 个崩溃用例实证）
+- **状态**: active
 
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

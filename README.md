@@ -372,8 +372,8 @@ Reading the numbers: RTsql's per-statement insert path and index lookups are fas
 
 - [简体中文 README](README.zh-CN.md)
 - [Agent operations guide](rtsql-docs/SKILL.md)
-- [Project snapshot](.claude/docs/SNAPSHOT.md)
-- [Project roadmap](.claude/docs/tasks.md)
+- [Project snapshot](.agents/docs/SNAPSHOT.md)
+- [Project roadmap](.agents/docs/tasks.md)
 - [OpenSpec behavior specifications](openspec/specs/)
 
 Package metadata declares `MIT OR Apache-2.0`.

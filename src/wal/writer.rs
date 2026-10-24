@@ -3,6 +3,7 @@
 //! 负责将 WAL 记录持久化到磁盘
 
 use super::record::{WalError, WalRecord};
+use crate::storage::{consume_io_failpoint, IoFailPoint, IoFailPointSlot};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -31,11 +32,23 @@ pub struct WalWriter {
     bytes_appended: AtomicU64,
     /// MS26 T5：字节水位阈值；`0` 禁用自动 checkpoint。
     checkpoint_bytes_threshold: AtomicU64,
+    /// MS33 Iter001（T2.1）：受控 I/O 失败开关单元——`Database` 打开时分发
+    /// 同一单元（`open_with_io_failpoint`），未接线时保持空开关。
+    io_failpoint: IoFailPointSlot,
 }
 
 impl WalWriter {
     /// 打开或创建 WAL 文件
     pub fn open(db_path: &std::path::Path) -> Result<Self, WalError> {
+        Self::open_with_io_failpoint(db_path, Arc::new(Mutex::new(None)))
+    }
+
+    /// MS33 Iter001（T2.1）：内部构造变体——语义与 [`Self::open`] 逐字节
+    /// 一致，仅注入 `Database` 持有的共享失败开关单元。
+    pub(crate) fn open_with_io_failpoint(
+        db_path: &std::path::Path,
+        io_failpoint: IoFailPointSlot,
+    ) -> Result<Self, WalError> {
         let wal_path = db_path.with_extension("wal");
 
         let file = OpenOptions::new()
@@ -51,6 +64,7 @@ impl WalWriter {
             write_count: AtomicU64::new(0),
             bytes_appended: AtomicU64::new(0),
             checkpoint_bytes_threshold: AtomicU64::new(DEFAULT_CHECKPOINT_BYTES),
+            io_failpoint,
         })
     }
 
@@ -86,6 +100,12 @@ impl WalWriter {
 
     /// fsync WAL 文件
     pub async fn fsync(&self) -> Result<(), WalError> {
+        // MS33 Iter001（T2.1）：armed 的 WalFsync 在 sync_all 之前消费——
+        // 注入失败不触碰 WAL 文件。全库唯一生产调用点是 checkpoint 步骤 3；
+        // 组提交走 `write_batch` 内部的 sync_all，不经过本方法。
+        if consume_io_failpoint(&self.io_failpoint, IoFailPoint::WalFsync) {
+            return Err(WalError::IoError("injected io failure (wal fsync)".into()));
+        }
         let file = Arc::clone(&self.file);
 
         spawn_blocking(move || {

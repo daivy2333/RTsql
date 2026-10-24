@@ -33,7 +33,8 @@ pub use data_page::{
 };
 pub use error::{Result, StorageError};
 pub use file_header::{FileHeader, FLAG_ENCRYPTED, FORMAT_VERSION, HEADER_SIZE, KNOWN_FLAGS_MASK};
-pub use file_storage::FileStorage;
+pub(crate) use file_storage::{consume_io_failpoint, IoFailPointSlot};
+pub use file_storage::{FileStorage, IoFailPoint};
 pub use memory_storage::MemoryStorage;
 pub use page::Page;
 pub use page_format::{ColumnType, Key, RowId, MAX_KEY_LEN};

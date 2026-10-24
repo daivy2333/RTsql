@@ -1,6 +1,6 @@
 # 产品可用性与 CLI 形态差距分析
 
-- SNAPSHOT: `.claude/docs/SNAPSHOT.md`（2026-09-05，current；注意其"支持内存模式"描述已过期，见主题 5）
+- SNAPSHOT: `.agents/docs/SNAPSHOT.md`（2026-09-05，current；注意其"支持内存模式"描述已过期，见主题 5）
 - 采集 revision: `709c85d`（master，2026-09-05；含 MS08-T01/T02 与文档 sync）
 - 分支: master；环境: Linux x86_64 WSL2
 - 分析日期: 2026-09-05（三轮：① 形态/SQL 面/交互缺口；② 文件模型/初始化/隔离；③ 用户形态决策细化——非交互 CLI + sudo 式密钥 + 集中存储 + 分析能力，主题 7）
