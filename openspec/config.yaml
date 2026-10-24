@@ -14,12 +14,12 @@ rules:
     - 包含回滚方案
     - 说明为什么做、做什么、不做什么
     - 标注影响范围
-    - 引用相关 M/D/K/R/I 编号
+    - 引用相关 M/R/I 编号
   specs:
-    - 使用 Given/When/Then 或 WHEN/THEN 格式描述行为
+    - 使用 Requirement + Scenario 结构描述行为，Scenario 以 WHEN/THEN 陈述，前置条件可用 GIVEN
     - 跨模块约束写 project-model（Mxx）
-    - 长期选择写 decisions（Dxx）
-    - 已验证知识写 knowledge（Kxx）
+    - 长期选择及其理由写 change 的 design.md，随 change 归档
+    - 已验证结论写 analysis，可重复操作流程写 Runbook，缺陷写 Issue
     - 索引元数据写 references（Rxx）
     - 未承诺改进写 improvements（Ixx）
   design:
@@ -30,4 +30,4 @@ rules:
     - 每个任务可独立验证
     - 标注依赖关系
     - 包含验收标准
-    - 关联里程碑编号（M19-M48）
+    - 关联里程碑编号（MSxx）

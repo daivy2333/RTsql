@@ -73,7 +73,7 @@ cargo bench <name> -- --sample-size 10 --measurement-time 2
 
 ## 失败处理
 
-- 判定一律用 cargo/criterion 自身退出码与原生输出；不新增判定脚本（CLAUDE.md 验证纪律）。
+- 判定一律用 cargo/criterion 自身退出码与原生输出；不新增判定脚本（AGENTS.md 验证纪律）。
 - baseline 缺失且改动已落地：不伪造 before 数据——以改动后数据 + 机制归因记录，标注「无 before 基线」（K18 先例），或回退改动重走流程。
 
 ## 回滚

@@ -7,8 +7,8 @@ use crate::executor::{PhysicalPlan, Value};
 use crate::plan_cache::PlanCache;
 use crate::result::{SqlError, SqlOutcome};
 use crate::storage::{
-    BufferPool, CatalogKind, ColumnType, FileStorage, MemoryStorage, Result, StorageError,
-    TableManager, TableMeta,
+    BufferPool, CatalogKind, ColumnType, FileStorage, IoFailPoint, IoFailPointSlot, MemoryStorage,
+    Result, StorageError, TableManager, TableMeta,
 };
 use crate::transaction::{IsolationLevel, Snapshot, Transaction, TransactionManager};
 use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalReader, WalRecord, WalWriter};
@@ -66,13 +66,19 @@ async fn construct_file_storage(
     path: &Path,
     key: Option<&str>,
     lock_wait: Option<Duration>,
+    io_failpoint: IoFailPointSlot,
 ) -> Result<FileStorage> {
     let path = path.to_path_buf();
     let key = key.map(str::to_string);
     let (tx, rx) = oneshot::channel();
     std::thread::spawn(move || {
         let result = match mode {
-            OpenMode::ReadWrite => FileStorage::open_with_lock(&path, key.as_deref(), lock_wait),
+            OpenMode::ReadWrite => FileStorage::open_with_lock_io_failpoint(
+                &path,
+                key.as_deref(),
+                lock_wait,
+                io_failpoint,
+            ),
             OpenMode::ReadOnly => {
                 FileStorage::open_readonly_with_lock(&path, key.as_deref(), lock_wait)
             }
@@ -130,6 +136,10 @@ pub struct Database {
     /// `schema_version` 先例（`AtomicU64` 不实现 `Clone`）；克隆共享不改
     /// 变快照语义——上限变更只影响之后开始的语句。
     query_memory_limit: Arc<AtomicU64>,
+    /// MS33 Iter001（T2.1）：受控 I/O 失败开关单元——主库 `FileStorage` 与
+    /// `WalWriter` 持同一单元，`arm_io_failure` 按型注入一次性失败。只读/
+    /// 内存臂无写通道不接线；ATTACH 附加库持有各自独立单元，arm 不波及。
+    io_failpoint: IoFailPointSlot,
 }
 
 impl Database {
@@ -252,18 +262,24 @@ impl Database {
         key: Option<&str>,
         lock_wait: Option<Duration>,
     ) -> Result<Self> {
+        // MS33 Iter001（T2.1）：主库受控 I/O 失败开关单元——创建后分发同
+        // 一单元给 FileStorage（ReadWrite）与 WalWriter；armed 前不改变任何
+        // 写入行为。
+        let io_failpoint: IoFailPointSlot = Arc::new(std::sync::Mutex::new(None));
         // 1. Initialize storage
         let storage: Arc<dyn crate::storage::AsyncStorage> = match mode {
             // MS28 T2（design D5）：FileStorage 构造移入专用 std::thread +
             // oneshot 回传——锁等待期间 open future 真实让出，CLI 阶段 1
             // select! 的信号分支可达（等待可被 SIGINT/SIGTERM 即时中断）。
-            OpenMode::ReadWrite => {
-                Arc::new(construct_file_storage(mode, path, key, lock_wait).await?)
-            }
+            OpenMode::ReadWrite => Arc::new(
+                construct_file_storage(mode, path, key, lock_wait, io_failpoint.clone()).await?,
+            ),
             // 只读：共享锁 + 只读句柄。与读写构造同纪律——锁先于伴生文件
             // 判定，被拒的第二打开者不触碰任何文件（MS10-T02 R2）。
             OpenMode::ReadOnly => {
-                let storage = construct_file_storage(mode, path, key, lock_wait).await?;
+                let storage =
+                    construct_file_storage(mode, path, key, lock_wait, io_failpoint.clone())
+                        .await?;
                 // WAL 未决谓词先于任何页写入与重放（`readonly-open-mode` R2）。
                 assert_no_pending_wal(path)?;
                 Arc::new(storage)
@@ -306,7 +322,7 @@ impl Database {
         // 2. Initialize WAL（只读模式不持有 WAL 句柄——R3 零写入）
         let (wal_writer, wal_buffer) = if mode == OpenMode::ReadWrite {
             let wal_writer = Arc::new(
-                WalWriter::open(path)
+                WalWriter::open_with_io_failpoint(path, io_failpoint.clone())
                     .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))?,
             );
 
@@ -393,6 +409,7 @@ impl Database {
             views,
             mode,
             query_memory_limit: Arc::new(AtomicU64::new(0)),
+            io_failpoint,
         })
     }
 
@@ -697,6 +714,16 @@ impl Database {
             .await
             .map(|_captured_lsn| ())
             .map_err(|e| crate::storage::StorageError::WalError(e.to_string()))
+    }
+
+    /// MS33 Iteration 001（T2.1）：受控 I/O 失败开关——arm 一次后，主库下一
+    /// 次同型数据页写入 / WAL fsync 在系统调用前返回携带固定标记的错误并自
+    /// 清除（`injected io failure (write_page)` / `injected io failure (wal
+    /// fsync)`）。共享单元经 `Arc` 克隆共享（`schema_version` 先例）；只接线
+    /// 主库 `FileStorage` / `WalWriter`——`:memory:` 无文件通道，ATTACH 附加
+    /// 库持有各自独立的单元，arm 不波及。
+    pub fn arm_io_failure(&self, point: IoFailPoint) {
+        *self.io_failpoint.lock().unwrap() = Some(point);
     }
 }
 

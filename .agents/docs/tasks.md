@@ -1,6 +1,6 @@
 # tasks — 任务与里程碑路线
 
-> 最后更新：2026-10-23（**MS32 完成收尾**：执行器批量接口与查询资源契约经单 change `2026-10-23-ms32-executor-batch-and-query-memory` 交付归档——四 Iteration 全 accepted：000 批量接口〔`Executor::next_batch` 默认方法保留；DataScan 生产攒批未过 10% 时间门，接线撤回、生产路径保持逐行〕/ 001 哈希 JOIN 左表逐行〔经 replan Cycle：见证改 WHERE 谓词溢出；`left_rows` 整表缓存与匹配桶整桶克隆删除，BuildRight → Output 两阶段〕/ 002 有界排序〔`SortNode.bounded` 两 Limit 包装点形状赋值，驻留 ≤ offset+limit，EXPLAIN 不变，Distinct 形态不越界〕/ 003 查询内存上限〔语句级预算 + `set_query_memory_limit`/`RTSQL_QUERY_MEMORY_BYTES` 双通道 + D5 驻留点计费 + 三入口 53200 错误面；`ScanExecutor.results` 经 spec 场景裁定不计费〕；全量终态 2144/0/2；行为规格新增 executor-batch-interface、query-memory-budget 两域。底层设计批（MS30–MS32）全部完成，执行序仅余 MS22 性能批）
+> 最后更新：2026-10-24（**MS33 完成收尾**：持久化失败与 DROP 边界经单 change `2026-10-23-ms33-drop-persistence-failure` 交付归档——两 Iteration 全 accepted：000 checkpoint 前崩溃〔D1 页清零从释放时移到空闲页弹出时——释放不写盘、分配先写全零页、写零失败页号回退；7 用例覆盖 DROP TABLE/INDEX/VIEW 崩溃保留、同会话再分配、删列、加密建表/删表；改前基线 DROP TABLE/加密删表丢行、DROP INDEX 重开 abort〕/ 001 受控 I/O 失败〔类型化开关 `arm_io_failure`（DataWrite/WalFsync，系统调用前失败一次自清除）+ 三恢复用例——数据文件写失败回 DROP 前状态，WAL fsync 与位点目录失败 DROP 已生效且 check 无 error；Review 期修正 spec 类属：WAL fsync 为九步第 3 步晚于 flush_all、数据文件 sync 无调用点不设开关位、R1 复用窗口界定留 MS35〕；全量终态 2155/0/2；行为规格新增 drop-persistence-boundary 域〔5 Requirement/10 Scenario〕+ wal-recovery-replay-integrity 的 DDL 边界 requirement 修改。引擎正确性批下一项 MS34，MS35/MS36 依赖已满足）
 > 同步状态: current
 > 由 openspec-docs-maintainer 维护
 
@@ -12,25 +12,18 @@
 
 ## 路线图结构
 
-33 个 Milestone：22 completed + 6 superseded（历史段已归档至 carrier `ARC-202609242151`，本文件仅保留活跃路线）+ 5 planned（初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档），MS30 于 2026-10-21 完成（change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration accepted 归档——单 change 承载两任务为 2026-10-20 用户指令，T03/T04 为裁定增补段），MS31 于 2026-10-23 完成（change `2026-10-21-ms31-typed-api-param-binding` 三 Iteration accepted 归档——单 change 承载 T01+T02 为 2026-10-21 用户裁定），MS32 于 2026-10-23 完成（change `2026-10-23-ms32-executor-batch-and-query-memory` 四 Iteration accepted 归档——000 生产攒批未过时间门撤回、001 经 replan Cycle；单 change 承载 T01+T02 为计划期裁定））。★初版达成★。
+当前活跃路线有 3 个 planned 里程碑：MS34–MS36（2026-10-23 用户批准，承接 I090、I092、I087；对 MS33 的依赖已满足）。MS22 于 2026-10-23 superseded 退回 improvements；MS30–MS33 为 completed。历史总数曾写作 33（22 completed + 6 superseded + 5 planned，6 个历史段在 carrier `ARC-202609242151`），该算术未按本次状态重算已归档段。初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档），MS30 于 2026-10-21 完成（change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration accepted 归档——单 change 承载两任务为 2026-10-20 用户指令，T03/T04 为裁定增补段），MS31 于 2026-10-23 完成（change `2026-10-21-ms31-typed-api-param-binding` 三 Iteration accepted 归档——单 change 承载 T01+T02 为 2026-10-21 用户裁定），MS32 于 2026-10-23 完成（change `2026-10-23-ms32-executor-batch-and-query-memory` 四 Iteration accepted 归档——000 生产攒批未过时间门撤回、001 经 replan Cycle；单 change 承载 T01+T02 为计划期裁定）），MS33 于 2026-10-24 完成（change `2026-10-23-ms33-drop-persistence-failure` 两 Iteration accepted 归档——Review 期修正 spec 类属）。★初版达成★。
 
-统一执行序（2026-10-01 用户裁定重排——功能补齐前置、性能优化殿后独立成批；沿用「批准执行序与编号无关」既定先例，编号只表规划先后，执行以本序为准）：**MS28 CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint）→ MS29 输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验）→ MS20-T02 跨文件 DML 二期 → MS27 存储演进批（超页溢出 + 完整性校验）→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）**。顺序为建议序非硬依赖（各项无环、前置均已满足）。编排依据（2026-10-01）：外部评审实证的自动化使用摩擦先行收口——并发硬失败 exit 4 → 可配置等待是多 agent 并发使用的语义前提，也是 MS22 持锁窗口治理的前置；输入通道与声明语义同代码面相邻（lifecycle.rs import + ddl_dml.rs 建表/类型面）；存储格式演进体量最大放功能带末尾；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DETACH（I076）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）、WAL fsync 组提交（I049——串行单写者模型下无效，MS22 量化时剔除）等留 improvements 域未排期。
+统一执行序（2026-10-01 用户裁定重排——功能补齐前置、性能优化殿后独立成批；沿用「批准执行序与编号无关」既定先例，编号只表规划先后，执行以本序为准）：**MS28 CLI 并发与生命周期小收口（busy-timeout 串行化 + 显式 checkpoint）→ MS29 输入面与写面声明收口（stdin/免建表导入 + DEFAULT 声明期校验）→ MS20-T02 跨文件 DML 二期 → MS27 存储演进批（超页溢出 + 完整性校验）**。MS22 已于 2026-10-23 退出本序并退回 improvements。同日批准的后续执行序：**MS33 持久化失败与 DROP 边界 → MS34 取消、超时与事务收尾**；**MS33 → MS35 空闲页跨重启复用**；**MS33 → MS36 历史库与 dump 兼容**。MS35 与 MS36 互不依赖。此前各项顺序为建议序非硬依赖（无环、前置均已满足）。编排依据（2026-10-01）：外部评审实证的自动化使用摩擦先行收口——并发硬失败 exit 4 → 可配置等待是多 agent 并发使用的语义前提，也是当时持锁窗口治理的前置；输入通道与声明语义同代码面相邻（lifecycle.rs import + ddl_dml.rs 建表/类型面）；存储格式演进体量最大放功能带末尾；性能殿后、先量化再决定（MS08 纪律）。首批排除域维持：微内核重构 I074/I012、加密便利层 I054-I057/I060、构建实测 I073、分发 I051-I053/I058。REPL（I067）、DETACH（I076）、DECIMAL/BLOB（I069）、撕裂树（I031）、代价模型（I016）、流式化（I065）、B+Tree 节点锁（I025）、io_uring（I028）、WAL fsync 组提交（I049——串行单写者模型下无效）等留 improvements 域未排期。MS22 候选池于 2026-10-23 整体退回该域。
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
 ## Milestone Roadmap
 
-### MS22：实测驱动性能优化（第一批） — planned（范围量化定稿后转 ready）
+### MS22：实测驱动性能优化（第一批） — superseded（2026-10-23 退回 improvements）
 
-- **Status**: planned（候选范围经 profile/bench 定稿后转 ready——沿用 MS08「先量化再决定」纪律；2026-10-01 重排定位殿后独立成批，功能补齐带完成后启动）
-- **Dependencies**: None 硬前置（建议序殿后——MS28 busy-timeout 等待语义先行，持锁窗口治理在其上才有意义；I062 已随 MS18 收口）
-- **Outcome**: 经量化证实的性能积压按收益排序清收（第一批）。候选池：I049 WAL fsync 合并（组提交）/ I021 INSERT 多值批量 / I026 脏页 writev 批量写回 / I050 RowLockTable DashMap 化 / I024 Varint Key 变长编码 / I038 GC 无键行盲区 / I020 clone 消除 / I066 分配器评估（jemalloc/mimalloc）/ import 逐行 auto-commit 吞吐（I077-② 持锁窗口治理侧——攒批提交压缩最长持锁尾，与 MS28 busy-timeout 等待语义配套；2026-09-30 实测 ≈4.1 ms/行、2000 行 8.246s、30000 行 ≈123s，逐行提交含 `sync_all`；量化来源 change `2026-09-30-catalog-durability-and-cli-surface` Iteration 000 Act 实测）——每项先 bench/profile，达标立项，不达标退还 improvements 并留量化记录。**避坑注记（2026-10-01 重排）**：I049 组提交在串行单写者模型（one-shot + MS28 busy-timeout）下无效——单写者无并发提交可攒，量化定稿时剔除，除非 I071 serve 扩容路径启动
-- **Rationale**: MS08 实测驱动批处理先例的复活（2026-09-14 剥离时各项「先量化再决定」纪律随条目保留）；各项独立故障域但共享同一验收主题「实测证实的性能收益」，每项独立 change 独立验收，单项失败不阻塞其余
-- **Scope**: 候选池见 Outcome；定稿范围以量化数据为准（规模：小-中 change × N）
-- **Non-goals**: 撕裂树运行期根修（I031 中-大，量化后另行评估）、代价模型（I016）、扫描流式化（I065）、B+Tree 节点级锁（I025）、io_uring（I028）、瘦内部节点（I029）、合并 Tag byte（I030）——全部留 improvements 域
-- **Workload**: 视定稿范围 N 个独立小-中 change，每 change 前后 bench
-- **Stable baseline**: 定稿项各有 before/after bench 对比数据且全量零回归；未达标项有量化记录可退还
-- **Verification boundary**: 每项 bench 对比（`--save-baseline` 纪律，R26/ms08-bench runbook）+ 全量测试零回归
-- **Diagnostic boundary**: 各候选项在 improvements 条目自带诊断面
-- **Split signals**: 定稿项 ≥4 或出现跨域大项（如 I031 入选）时拆第二批
+- **Status**: superseded（2026-10-23 用户指令：本里程碑退出路线，退回 `.agents/memory/improvements.md`。不由其他里程碑替代。原候选不再是已承诺工作。）
+- **Dependencies**: None
+- **Outcome**: 未形成阶段成果。原候选恢复为未承诺改进方向：I020、I021、I024、I026、I038、I049、I050、I066，以及 I077 的持锁窗口余项。I031 仍留在 improvements，不挂本里程碑。
+- **Rationale**: 性能批在范围量化定稿前保持 planned。用户于 2026-10-23 要求将其退回改进台账；「先量化再决定」留在对应条目，不再占用路线。
 - **Related changes**: None
 
 ### MS30：SQL 语义绑定层一期（差分测试保护网 + JOIN/子查询收口） — completed
@@ -88,13 +81,93 @@
 | MS32-T01 | I081：执行器批量异步接口（量化装箱/调度开销 → `next_batch`，热点算子逐步转换、复用现有 Value 与行容器，保留 `dyn Executor` 装配） | improvements I081（2026-10-18 用户接受方向，先测量） |
 | MS32-T02 | I082：JOIN 流水处理（左侧逐行探测/减少集合复制）+ Top-N + 查询内存预算与超限错误（外部排序/溢写确有需求才另行设计；INSERT SELECT 同表源物化快照语义保持） | improvements I082（2026-10-18 用户接受方向） |
 
-- **Non-goals**: Arrow/完整向量化框架（I081 明示不预设）；外部排序与分区 JOIN 溢写（I082 确有需求才设计）；Value 表示层改动（I020 维持 MS22 候选池）；分配器更换（I066 维持 MS22 候选池）
+- **Non-goals**: Arrow/完整向量化框架（I081 明示不预设）；外部排序与分区 JOIN 溢写（I082 确有需求才设计）；Value 表示层改动（I020 留在 improvements）；分配器更换（I066 留在 improvements）
 - **Workload**: 中，约 2 个 change（每任务各一；量化结果允许裁剪范围）
 - **Stable baseline**: 执行器公共契约含批量接口与内存上限——大表/大值/多匹配键组合的首行等待与内存峰值有明确预算边界
 - **Verification boundary**: 量化基线（装箱开销/克隆规模 before/after bench，`--save-baseline` 纪律）+ 内存预算超限拒绝矩阵 + 既有 JOIN/Sort/大值用例零回归 + 全量分批回归（M19）
 - **Diagnostic boundary**: `src/executor/executor_trait.rs` + `src/executor/sort.rs::initialize` + `src/executor/join.rs::next` 三阶段 + 热点算子转换清单
 - **Split signals**: `next_batch` 若需改变 `dyn Executor` 装配协议（牵动全执行器）时拆独立设计 change；内存预算若牵动跨算子资源管理器时单独收口
 - **Related changes**: `openspec/changes/archive/2026-10-23-ms32-executor-batch-and-query-memory/`（2026-10-23 归档）
+
+### MS33：持久化失败与 DROP 边界 — completed
+
+- **Status**: completed（2026-10-24；change `2026-10-23-ms33-drop-persistence-failure` 两 Iteration 全部 accepted 归档——Iteration 000 checkpoint 前崩溃〔T01：D1 把页清零从 `free_page` 移到 `allocate_page` 弹出空闲页时——释放不写盘、分配先写全零页、写零失败页号回退错误返回；`tests/drop_persistence_test.rs` 7 用例：DROP TABLE/INDEX/VIEW 崩溃保留对象与已提交内容且 `check_integrity` error 为 0、同会话再分配只见新行、删列崩溃保留窄表、加密库建表/删表同类；改前基线见证 DROP TABLE 与加密删表丢行、DROP INDEX 重开 abort——清零树页遍历不收敛〕、Iteration 001 受控 I/O 失败〔T01 后半：类型化失败开关 `Database::arm_io_failure`〔`IoFailPoint::{DataWrite, WalFsync}`，下一次同型调用在系统调用前失败一次并自清除；未设置时字节行为不变；主库 FileStorage/WalWriter 接线、`:memory:`/ATTACH/readonly 不波及、无 CLI flag 不入用户文档〕+ 三恢复用例——数据文件写失败〔九步第 2 步之前〕checkpoint 返回错误且重开回 DROP 前状态，WAL fsync 与位点目录失败〔脏页已写完〕DROP 已生效且 check error 为 0；Plan Review 期修正 spec 类属——WAL fsync 为九步第 3 步晚于 flush_all 归「DROP 已生效」类、数据文件 sync 无生产调用点不设开关位、R1 复用窗口界定留 MS35〕；全量终态 2155/0/2；崩溃模型为进程内丢弃句柄，真实断电结论未宣称）
+- **Dependencies**: None
+- **Outcome**: 已盘点的持久化失败类各有可观察的恢复结果。现有测试已经覆盖的记入范围；确认有缺口的路径才加固
+- **Rationale**: I086 仍是未验证的引擎正确性边界。DROP、断电、磁盘满、短写和同步失败不能从进程崩溃记录直接推定
+- **Scope**:
+
+| Task | 目标 | 依据 |
+|---|---|---|
+| MS33-T01 | 盘点 DROP 与持久化失败的现有覆盖，给每类失败写下可恢复结果；只加固盘点确认的缺口 | improvements I086 |
+
+- **Non-goals**: 空闲页跨重启复用（MS35）、历史库兼容（MS36）、伴生文件加密（I060）、撕裂树运行期根修（I031）
+- **Workload**: 中。盘点与加固可在同一阶段完成；若加固要求改变刷盘策略或 WAL 格式，停止并另立里程碑
+- **Stable baseline**: 后续取消语义和兼容样本可以依赖这里写明的提交与恢复结果
+- **Verification boundary**: 在现有测试中直接观察打开、查询和已提交状态。进程终止、受控 I/O 失败和真实断电的结论分开记录。全量回归沿用 M19
+- **Diagnostic boundary**: DROP、checkpoint、WAL 与存储写入失败路径
+- **Split signals**: 盘点要求改变刷盘策略或 WAL 格式时拆出，不把 I031 纳入本阶段
+- **Related changes**: `openspec/changes/archive/2026-10-23-ms33-drop-persistence-failure/`（2026-10-24 归档）
+
+### MS34：取消、超时与事务收尾 — planned
+
+- **Status**: planned（2026-10-23 用户批准。依赖 MS33 的提交边界，MS33 完成前不转 ready）
+- **Dependencies**: MS33
+- **Outcome**: 提交前中断、提交已完成但调用方尚未收到、显式事务继续还是回滚，这三种结果有确定约定。超时不代替回滚
+- **Rationale**: I090 与 MS33 都触及提交是否完成，但故障域不同：这里是取消和调用方生命周期，不是磁盘失败
+- **Scope**:
+
+| Task | 目标 | 依据 |
+|---|---|---|
+| MS34-T01 | 约定库入口在丢弃、超时和断开后的事务、锁和句柄结果，并核对执行、事务与后台 I/O 的收尾 | improvements I090 |
+
+- **Non-goals**: 完整分级诊断系统（I096）；不重复已有的 CLI 信号停机行为
+- **Workload**: 中
+- **Stable baseline**: 调用方可以依据约定判断取消后语句是否提交、锁是否释放、句柄能否继续使用
+- **Verification boundary**: 三种结果都能从库入口观察到。全量回归沿用 M19
+- **Diagnostic boundary**: 执行入口、事务会话、后台 I/O 的取消与收尾
+- **Split signals**: 若最小约定必须变成完整诊断系统，停止并留在 I096
+- **Related changes**: None
+
+### MS35：空闲页跨重启复用 — planned
+
+- **Status**: planned（2026-10-23 用户批准。依赖 MS33，避免与 DROP 失败路径同时改空闲页；MS33 完成前不转 ready）
+- **Dependencies**: MS33
+- **Outcome**: 已释放的页在重新打开后仍可安全复用，并覆盖再次分配与崩溃恢复
+- **Rationale**: I087 是存储资源行为：空闲页列表目前只在当次打开有效。它和 MS33 的失败语义不是同一层，但两边都会碰到页释放
+- **Scope**:
+
+| Task | 目标 | 依据 |
+|---|---|---|
+| MS35-T01 | 使释放页在重新打开后可复用，覆盖重分配和崩溃恢复。不把内存空闲列表原样写成持久格式作为唯一方案 | improvements I087 |
+
+- **Non-goals**: 尾部截断和整库整理；无键行旧版本 GC（I038）
+- **Workload**: 中
+- **Stable baseline**: 反复打开并删除表之后，已释放空间仍可被后续分配使用，崩溃后不把未完成释放当成可分配页
+- **Verification boundary**: 释放、重新打开、再分配和崩溃恢复的结果可直接观察。全量回归沿用 M19
+- **Diagnostic boundary**: 页分配、释放和重新打开
+- **Split signals**: 尾部截断或整库整理单独评估，不并入本阶段
+- **Related changes**: None
+
+### MS36：历史库与 dump 兼容 — planned
+
+- **Status**: planned（2026-10-23 用户批准。依赖 MS33，使兼容样本覆盖当时的恢复行为；MS33 完成前不转 ready）
+- **Dependencies**: MS33
+- **Outcome**: 写明支持的旧库格式和旧 dump 范围。范围内可以打开、查询、写入和恢复；范围外给出明确拒绝或迁移路径
+- **Rationale**: I092 与 MS33 的故障域不同。兼容样本放在恢复边界确定之后，避免样本还在跟随未完成的恢复改动
+- **Scope**:
+
+| Task | 目标 | 依据 |
+|---|---|---|
+| MS36-T01 | 定义旧格式与旧 dump 的支持范围，并用少量样本断言打开、查询、写入和恢复 | improvements I092 |
+
+- **Non-goals**: CI、预编译发布和 crates.io 发布（I051–I053）；键编码格式变更（I024）；伴生文件加密（I060）
+- **Workload**: 小到中
+- **Stable baseline**: 后续格式变更可以对照这份支持范围判断是否破坏已有数据
+- **Verification boundary**: 样本直接断言打开、查询、写入和恢复结果。版本是产品格式契约。全量回归沿用 M19
+- **Diagnostic boundary**: 文件头版本判断与 dump 恢复
+- **Split signals**: 若要启用已暂缓的 CI 或发布设施，停止，不在本阶段打开
+- **Related changes**: None
 
 ## D-candidates（不归入当前 MS，待后续决定）
 
@@ -114,22 +187,24 @@
 
 ## 依赖关系图
 
-初版后统一路线（2026-09-24 规划、2026-10-01 用户批准重排：功能补齐前置、性能殿后独立，均无硬前置，编号与执行序无关；2026-10-19 用户批准底层设计批 MS30–MS32 前置、性能批殿后不变）：
+初版后统一路线（2026-09-24 规划、2026-10-01 用户批准重排：功能补齐前置、性能优化殿后独立，均无硬前置，编号与执行序无关；2026-10-19 用户批准底层设计批 MS30–MS32 前置。2026-10-23 性能批 MS22 退出本图，退回 improvements）：
 
 ```
 MS23 约束面 ──(唯一索引/约束语义)──→ MS24 写面
 MS23 ──(索引基建)──→ MS21 DDL/二级索引
 MS18 one-shot 性能 ──(checkpoint 策略面)──→ MS26 运行形态 ──(存储后端)──→ MS27 存储演进
 MS25 SQL 读面 · MS20 ATTACH 跨库（独立，序自由）
-MS28 并发等待语义 ──(持锁窗口治理前提)──→ MS22 import 攒批（性能批候选）
 MS30 语义绑定层 ──(绑定结果/参数定型输入)──→ MS31 类型化 API
 MS32 执行资源契约（无硬前置，建议序 MS30 后避开 JOIN 同面并发改动）
-全部功能带（MS28/MS29/MS20-T02/MS27）──→ 底层设计批（MS30–MS32，2026-10-19 批准）──→ MS22 实测驱动性能批（殿后独立，量化定稿后转 ready）
+全部功能带（MS28/MS29/MS20-T02/MS27）──→ 底层设计批（MS30–MS32，2026-10-19 批准）
+MS33 持久化失败与 DROP 边界（无硬前置）──→ MS34 取消与事务收尾
+MS33 ──→ MS35 空闲页跨重启复用
+MS33 ──→ MS36 历史库与 dump 兼容
 ```
 
-建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 ✓ → MS32 ✓ → MS22**（截至 2026-10-23 前十五项已完成，底层设计批 MS30–MS32 全部收口；执行序仅余 MS22 实测驱动性能批〔殿后独立，候选范围量化定稿后转 ready；I081/I082 的批量接线与 JOIN 流水已随 MS32 量化落地或收敛，剩余候选按各自量化数据决定〕）
+建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 ✓ → MS32 ✓ → MS33 ✓ → MS34**，同时 **MS33 ✓ → MS35**、**MS33 ✓ → MS36**（MS35 与 MS36 互不依赖）。截至 2026-10-24，MS33 及之前的执行序各项已完成。MS22 已 superseded，退回 improvements。MS34–MS36 为 planned 里程碑，对 MS33 的依赖已满足。
 
-无环；所有依赖均已满足。初版后工作（MS18-MS32）按上方统一执行序推进，编号只表规划先后；已完成历史全部随 `ARC-202609242151` 归档。
+无环。MS33 已完成；MS34、MS35、MS36 对 MS33 的依赖已满足。已完成历史段随 `ARC-202609242151` 归档。
 
 ## 进行中
 

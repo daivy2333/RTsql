@@ -1,6 +1,6 @@
 ## Purpose
 
-记录 RTsql 项目的重要架构决策（ADR）。**2026-09-24 起本域退役**（用户指令）：现行 `CLAUDE.md` 信息路由不再设决策域——长期选择及其理由写入 change 的 `design.md` 随 change 归档；历史条目 D01-D12 全文保存于清理 carrier，经下方 arc 指引定位。
+记录 RTsql 项目的重要架构决策（ADR）。**2026-09-24 起本域退役**（用户指令）：现行 `AGENTS.md` 信息路由不再设决策域——长期选择及其理由写入 change 的 `design.md` 随 change 归档；历史条目 D01-D12 全文保存于清理 carrier，经下方 arc 指引定位。
 
 ## Requirements
 

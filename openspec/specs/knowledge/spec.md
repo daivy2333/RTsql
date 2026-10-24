@@ -1,6 +1,6 @@
 ## Purpose
 
-记录已验证、非显然且可复用的项目知识。**2026-09-24 起本域退役**（用户指令）：已验证结论按 `CLAUDE.md` 信息路由沉淀 `.claude/analysis/`，可复用操作流程入 `.claude/runbooks/`，当前约束入 project-model；历史条目 K01-K38 全文保存于清理 carrier（迁移去向见 proposal 映射表），经下方 arc 指引定位。
+记录已验证、非显然且可复用的项目知识。**2026-09-24 起本域退役**（用户指令）：已验证结论按 `AGENTS.md` 信息路由沉淀 `.agents/analysis/`，可复用操作流程入 `.agents/runbooks/`，当前约束入 project-model；历史条目 K01-K38 全文保存于清理 carrier（迁移去向见 proposal 映射表），经下方 arc 指引定位。
 
 ## Requirements
 

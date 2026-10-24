@@ -53,6 +53,9 @@ pub struct FileStorage {
     /// pipeline 层先被拒，见 `pipeline::readonly_rejection`），此处为
     /// 结构性兜底。
     readonly: bool,
+    /// MS33 Iter001（T2.1）：受控 I/O 失败开关单元——`Database` 打开时分发
+    /// 同一单元（`open_with_lock_io_failpoint`），未接线时保持空开关。
+    io_failpoint: IoFailPointSlot,
 }
 
 /// 只读实例写方法的统一拒绝文案（`readonly-open-mode` R3）。
@@ -68,6 +71,32 @@ fn read_only_violation(op: &str) -> StorageError {
 /// （proposal 默认假设 1）。
 const LOCK_VISIBILITY_FLOOR: Duration = Duration::from_millis(8);
 const DEFAULT_LOCK_WAIT: Duration = Duration::from_millis(5000);
+
+/// MS33 Iteration 001（T2.1）：受控 I/O 失败注入点。armed 值由同型注入点
+/// 消费——数据页写入与 WAL fsync 各自独立判定，互不干扰。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoFailPoint {
+    /// 下一次数据文件页写入在任何字节落盘之前失败。
+    DataWrite,
+    /// 下一次 WAL fsync 在 `sync_all` 之前失败。
+    WalFsync,
+}
+
+/// 共享失败开关单元：`Database` 持有并分发给主库 `FileStorage` 与
+/// `WalWriter`，armed 值被同型注入点一次性消费（自清除）。
+pub(crate) type IoFailPointSlot = Arc<Mutex<Option<IoFailPoint>>>;
+
+/// 注入点消费：仅当 armed 值与 `point` 同型时取出并返回 true，否则保持
+/// 原样返回 false。
+pub(crate) fn consume_io_failpoint(slot: &IoFailPointSlot, point: IoFailPoint) -> bool {
+    let mut guard = slot.lock().unwrap();
+    if *guard == Some(point) {
+        *guard = None;
+        true
+    } else {
+        false
+    }
+}
 
 /// MS28 T1（`database-file-lock` R1 MODIFIED）：advisory 锁获取的 deadline
 /// 循环——首次尝试失败后以 2ms 间隔重试，直至 `Instant::now()` 越过
@@ -121,6 +150,17 @@ impl FileStorage {
         key: Option<&str>,
         lock_wait: Option<Duration>,
     ) -> Result<Self> {
+        Self::open_with_lock_io_failpoint(path, key, lock_wait, Arc::new(Mutex::new(None)))
+    }
+
+    /// MS33 Iter001（T2.1）：内部构造变体——语义与 [`Self::open_with_lock`]
+    /// 逐字节一致，仅注入 `Database` 持有的共享失败开关单元。
+    pub(crate) fn open_with_lock_io_failpoint(
+        path: &Path,
+        key: Option<&str>,
+        lock_wait: Option<Duration>,
+        io_failpoint: IoFailPointSlot,
+    ) -> Result<Self> {
         let wait = lock_wait.unwrap_or(DEFAULT_LOCK_WAIT);
         let file = OpenOptions::new()
             .read(true)
@@ -156,6 +196,7 @@ impl FileStorage {
             file_len: AtomicU64::new(page_count),
             free_pages: Mutex::new(Vec::new()),
             readonly: false,
+            io_failpoint,
         })
     }
 
@@ -211,6 +252,7 @@ impl FileStorage {
             file_len: AtomicU64::new(page_count),
             free_pages: Mutex::new(Vec::new()),
             readonly: true,
+            io_failpoint: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -374,6 +416,14 @@ impl AsyncStorage for FileStorage {
         if self.readonly {
             return Err(read_only_violation("write a page"));
         }
+        // MS33 Iter001（T2.1）：armed 的 DataWrite 在任何字节落盘（含
+        // spawn_blocking 内的 write_all_at）之前消费——注入失败不产生半页、
+        // 不触碰文件。
+        if consume_io_failpoint(&self.io_failpoint, IoFailPoint::DataWrite) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected io failure (write_page)",
+            )));
+        }
         let file = self.file.clone();
         let cipher = self.cipher.clone();
         let record_size = self.record_size;
@@ -386,9 +436,25 @@ impl AsyncStorage for FileStorage {
         if self.readonly {
             return Err(read_only_violation("allocate a page"));
         }
-        // Try free list first
-        if let Some(freed_id) = self.free_pages.lock().unwrap().pop() {
-            return Ok(PageId(freed_id));
+        // Try free list first.
+        //
+        // MS33 D1：清零发生在「弹出空闲页」这一刻，不在释放时。释放后若
+        // 进程在 checkpoint 前结束，磁盘页仍留着原内容——catalog 仍登记
+        // 该对象时重开可读回；同会话再次分配到该页号时先写零页，读不到
+        // 已释放页上的旧行。
+        //
+        // 弹栈与写零分两步：空闲列表的锁在 await 之前释放，不跨 await
+        // 持有 std MutexGuard。
+        let freed_id = self.free_pages.lock().unwrap().pop();
+        if let Some(freed_id) = freed_id {
+            let page_id = PageId(freed_id);
+            let zero_page = Page::new(page_id);
+            if let Err(e) = self.write_page(page_id, &zero_page).await {
+                // 写零失败：页号回到空闲列表，不把未清零的页交给调用者。
+                self.free_pages.lock().unwrap().push(freed_id);
+                return Err(e);
+            }
+            return Ok(page_id);
         }
         // Otherwise allocate new
         let page_id = self.file_len.fetch_add(1, Ordering::SeqCst);
@@ -426,9 +492,8 @@ impl AsyncStorage for FileStorage {
             return Err(read_only_violation("free a page"));
         }
         self.free_pages.lock().unwrap().push(page_id.0);
-        // Zero the page on disk
-        let zero_page = Page::new(page_id);
-        self.write_page(page_id, &zero_page).await?;
+        // MS33 D1：释放时不写零页。checkpoint 前崩溃时磁盘页保留原内容，
+        // 清零移到 `allocate_page` 弹出该页号时。
         Ok(())
     }
 

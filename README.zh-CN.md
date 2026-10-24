@@ -372,8 +372,8 @@ CLI 级资源占用（一次性进程，加载 2,000 行后执行 `SELECT COUNT(
 
 - [English README](README.md)
 - [Agent 操作手册](rtsql-docs/SKILL.md)
-- [项目快照](.claude/docs/SNAPSHOT.md)
-- [项目路线](.claude/docs/tasks.md)
+- [项目快照](.agents/docs/SNAPSHOT.md)
+- [项目路线](.agents/docs/tasks.md)
 - [OpenSpec 行为规格](openspec/specs/)
 
 Cargo 包元数据声明的许可为 `MIT OR Apache-2.0`。
