@@ -295,10 +295,10 @@
 ## R29: ISS04 非键列 INSERT/UPDATE 写入值类型校验缺失（类型不匹配值静默持久化）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS04-non-key-column-write-type-validation-missing.md`
+- **路径**: `git show e9c7735:.agents/issues/ISS04-non-key-column-write-type-validation-missing.md`
 - **日期**: 2026-09-25（关闭 2026-09-26）
 - **用途**: 非键非唯一列的写入值与列声明类型全程无校验（String/Float 静默写入 INT 列，读回才暴露）的缺陷台账——`build_update`/`extract_insert_values` 无计划期类型门、执行器类型门仅覆盖 PK 与唯一列、`serialize_tuple` 无 schema 交叉校验；类型校验面立项裁定的输入（MS23 Iteration 001 Plan Review F4 裁定残留；唯一列与 PK 键列边缘已分别由 MS23 F1 修复与 MS16 收口）。**已关闭**：`fixed`——由 change `2026-09-25-ms24-write-surface-completion` Iteration 000（R2 写入值类型一致门）端到端修复，行为规格 `openspec/specs/sql-write-surface/spec.md` R2，测试 `tests/write_type_conformance_test.rs`；台账保留为该修复面（`ColumnTypeMismatch` 错误面、FLOAT 升格、dump/restore/import 通道覆盖）的来源与边界记录
-- **状态**: closed（2026-09-26 fixed → change `2026-09-25-ms24-write-surface-completion` Iteration 000 R2 写入值类型一致门；台账保留为该修复面的来源与边界记录）
+- **状态**: closed（2026-09-26 fixed → change `2026-09-25-ms24-write-surface-completion` Iteration 000 R2 写入值类型一致门；台账保留为该修复面的来源与边界记录）[ARCHIVED 2026-10-25]
 
 ## R30: 文件对备份边界实测 Runbook（.db + .wal 配对行为矩阵）
 
@@ -463,42 +463,42 @@
 ## R50: ISS20 取消 + 回滚下索引写侧无原子性（B 树结构损坏致进程 abort；键残留在主键索引）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS20-index-write-side-atomicity.md`
+- **路径**: `git show e9c7735:.agents/issues/ISS20-index-write-side-atomicity.md`
 - **日期**: 2026-10-24（关闭 2026-10-24）
 - **用途**: 取消 + 回滚后索引写侧无原子性的缺陷台账——`IndexManager::insert` 把正向条目（`spawn_blocking` 内完成、tokio blocking 任务不可取消）与反向映射（await 之后才写）分两段写，`IndexManager::delete` 的合并/换根与 `insert` 之间无写者串行化，根页 id 与树内容不在同一临界区（E1：B 树结构损坏 → 后续索引插入沿内部节点子指针 0 无限下降 → 栈溢出 → 进程 SIGABRT；机制经读码确认、复现为竞态依赖）；`abort_cleanup_versions` 只按反向映射分桶 → 有正向条目、反向映射缺失的行被误判为墓碑而跳过（E2：首个键之外的键残留占位，同键再插报 `DuplicateKey`，行不可见；显式与隐式路径、RR 与 RC 同形）；存储/索引侧后续 change 的修复输入与回归判据来源（键释放的行为规格随该 change 进入 `openspec/specs/`）；MS34 规格收窄时留下的「键的释放不属本域保证面」已知边界注记的缺陷本体。**已关闭**：由 change `2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog` Iteration 000 端到端修复（写单元原子化 + 写侧串行化 + 取消/回滚释放全部键 + 索引结构自洽），行为规格 `openspec/specs/index-write-side-atomicity/spec.md`（4 Requirement / 5 Scenario）；台账保留为该修复面的来源与边界记录
-- **状态**: closed（2026-10-24 fixed → change `2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog` Iteration 000「索引写侧原子性」；行为规格 `openspec/specs/index-write-side-atomicity/spec.md` 4 Requirement / 5 Scenario；台账保留为该修复面的来源与边界记录）
+- **状态**: closed（2026-10-24 fixed → change `2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog` Iteration 000「索引写侧原子性」；行为规格 `openspec/specs/index-write-side-atomicity/spec.md` 4 Requirement / 5 Scenario；台账保留为该修复面的来源与边界记录）[ARCHIVED 2026-10-25]
 
 ## R51: ISS21 被放弃的 ALTER TABLE DROP COLUMN 后目录已窄化、数据面仍为混合宽度（DDL 目录变更不在事务内）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS21-ddl-catalog-transactional.md`
+- **路径**: `git show e9c7735:.agents/issues/ISS21-ddl-catalog-transactional.md`
 - **日期**: 2026-10-24（关闭 2026-10-24）
 - **用途**: DDL 目录变更的事务化缺陷台账——`alter_drop_column` 先改目录（列行改写 + 列数更新）并 `flush_all`、窄化不在事务边界内，事务只覆盖随后的逐行 DELETE + INSERT 数据面改写，被放弃的 DDL 语句留下「目录已窄化 + 数据面仍为混合宽度」的不一致形态（后续查询按窄化后的目录解释旧数据）；MS34 实施期未重新复现，最短可观察步骤由 MS34 Plan Review 补齐（放弃 `ALTER TABLE t DROP COLUMN v` → 触发回收 → 重开库 → 对比目录列数与行宽）；DDL 目录事务化主题后续 change 的修复输入，与 MS36「历史库与 dump 兼容」相邻排期、由 milestone-planner 统一裁定。**已关闭**：由 change `2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog` Iteration 001 端到端修复（目录窄化延后到提交点：`PendingColumnDrop` + `apply_column_drop`，先列行、后列数、再切 live meta；被放弃/失败的 DDL 不留目录面变更；放弃后重开库目录与数据面一致），行为规格 `openspec/specs/ddl-catalog-transactional/spec.md`（3 Requirement / 4 Scenario）；台账保留为该修复面的来源与边界记录
-- **状态**: closed（2026-10-24 fixed → change `2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog` Iteration 001「DDL 目录事务化」；行为规格 `openspec/specs/ddl-catalog-transactional/spec.md` 3 Requirement / 4 Scenario；台账保留为该修复面的来源与边界记录）
+- **状态**: closed（2026-10-24 fixed → change `2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog` Iteration 001「DDL 目录事务化」；行为规格 `openspec/specs/ddl-catalog-transactional/spec.md` 3 Requirement / 4 Scenario；台账保留为该修复面的来源与边界记录）[ARCHIVED 2026-10-25]
 
 ## R52: ISS22 完成的 ALTER TABLE DROP COLUMN 在数据页写满后丢行（多页改写丢行）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS22-drop-column-data-page-full-loses-rows.md`
+- **路径**: `git show e9c7735:.agents/issues/ISS22-drop-column-data-page-full-loses-rows.md`
 - **日期**: 2026-10-24
 - **用途**: 完成路径的删列在数据页写满后静默丢行的缺陷台账——`alter_drop_column` 的逐行改写循环中 DELETE 腿（写墓碑到 `old` 元数据）与 INSERT 腿（写窄化行到 `new_meta`）各持一条独立的 `data_page_tail` 却指向同一条物理页链，页写满时两腿各自新分配页并互相覆盖链上 `next` 指针 ⇒ 先前分配的页成为孤儿（实测 40→25、60→10、80→50、100→35 行，N≤30 行数完整）；根因位置 `src/storage/data/table_manager.rs:897-1007` 与 `src/storage/data_page.rs:18`；数据面改写域后续 change 的修复输入与「多页改写行数守恒」的回归判据来源，与 MS35「空闲页跨重启复用」相邻排期建议（由 milestone-planner 统一裁定）。**已关闭**：由 change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 001「DDL 改写一致性」端到端修复（DELETE 腿与 INSERT 腿统一经同一条尾游标 `self.write_tuple(&old, …)`，改写后 `*new_meta.data_page_tail` 同步为 `*old.data_page_tail`），行为规格 `openspec/specs/ddl-rewrite-consistency/spec.md`；回归承载 `tests/ddl_rewrite_consistency_test.rs`（修复前 RED `got 25 of 40` → 修复后 6/0）；台账保留为该修复面的来源与边界记录
-- **状态**: closed（2026-10-25 fixed → change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 001「DDL 改写一致性」；行为规格 `openspec/specs/ddl-rewrite-consistency/spec.md`；台账保留为该修复面的来源与边界记录）
+- **状态**: closed（2026-10-25 fixed → change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 001「DDL 改写一致性」；行为规格 `openspec/specs/ddl-rewrite-consistency/spec.md`；台账保留为该修复面的来源与边界记录）[ARCHIVED 2026-10-25]
 
 ## R53: ISS23 B 树插入路径无限递归致栈溢出（约 300 行以上触发，进程 abort）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS23-btree-insert-infinite-recursion-stack-overflow.md`
+- **路径**: `git show e9c7735:.agents/issues/ISS23-btree-insert-infinite-recursion-stack-overflow.md`
 - **日期**: 2026-10-24
 - **用途**: 行数约 300 以上时 B 树插入路径无限递归 → 栈溢出 → SIGABRT（signal 6）致整个测试进程 abort 的缺陷台账——gdb 现场显示 35+ 层递归帧停在 `src/storage/btree/btree.rs:327` 的内部节点下降递归点，同一 `page_id`、同一 key 指针 ⇒ 下降形成环（机制待独立复核，该文件未被承载 change 修改）；与 ISS20 的 E1 边界（E1 是取消落在「结构变更已生效、根页 id 未发布」窗口后的树损坏，本条出现在完成路径、由行数规模触发，与取消无关）明确分开，需在承载 change 中独立判定二者是否同一根因的不同表现；存储 / 索引域后续 change 的修复输入，与 MS35 相邻排期建议（由 milestone-planner 统一裁定）。**已关闭（归因更正）**：承载 change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 000「索引页归属」复核确认本条**不是独立成因**，而是 B-2（`btree.rs:610` `merge_leaves` → `:672` `handle_child_merge` 同一页被释放两次 ⇒ 同一页号进空闲列表两次并被交给两个对象）的**下游后果**；修复 B-2（移除重复释放 + 删除 `MergeInfo.freed_page_id` 字段 ⇒ 结构性防回归）后栈溢出不再复现（250 行 / 625 行均干净），另加 `BTree::insert_into_page` 下降路径成环守卫作为第二道防线（成环 ⇒ 返回 `StorageError::Internal`）；行为规格 `openspec/specs/index-page-ownership/spec.md`；台账保留为该修复面的来源与归因更正记录
-- **状态**: closed（2026-10-25 fixed → change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 000「索引页归属」；归因更正为 B-2 的下游后果；行为规格 `openspec/specs/index-page-ownership/spec.md`；台账保留为该修复面的来源与归因更正记录）
+- **状态**: closed（2026-10-25 fixed → change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 000「索引页归属」；归因更正为 B-2 的下游后果；行为规格 `openspec/specs/index-page-ownership/spec.md`；台账保留为该修复面的来源与归因更正记录）[ARCHIVED 2026-10-25]
 
 ## R54: ISS24 被放弃的 DDL 语句隐藏了它开始改写的那一行
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS24-abandoned-ddl-hides-rewritten-row.md`
+- **路径**: `git show e9c7735:.agents/issues/ISS24-abandoned-ddl-hides-rewritten-row.md`
 - **日期**: 2026-10-24
 - **用途**: 被放弃的 DDL 语句在回收后让「它已开始改写的那一行」从扫描结果中消失的缺陷台账——被放弃语句已为该行写下墓碑，回收把该墓碑标为 aborted（`src/transaction/manager.rs` 的 `abort_cleanup_versions` → `mark_aborted`），但该行仍不出现在扫描结果里（实测 30 行 → 29 行、2000 行 → 1999 行，缺 `id=2`；承载 change 修复前后同为 29/30）；中止 / 回收语义域后续 change 的修复输入，需与 MS34 已验收的库属隐式事务回收语义对齐。**已关闭**：由 change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 001「DDL 改写一致性」端到端修复——四层判别读数把缺失行钉到**第 4 层（墓碑未中和）+ 第 2 层（主键条目被删未还原）**，M1（链可达性）排除，M2（`pointed` 抑制集合不识别 aborted 标记）作为独立缺陷一并修复；修复形态为墓碑改为「无链指针写入 → 注册 → 链接 → 索引清理」的写入次序，`abort_cleanup_versions` 新增 `versions_created_by`（按创建者事务 id 取回被放弃事务创建但从未注册的版本，带环守卫）；行为规格 `openspec/specs/ddl-rewrite-consistency/spec.md` 与 `openspec/specs/mvcc-tombstone-visibility/spec.md`；台账保留为该修复面的来源与边界记录
-- **状态**: closed（2026-10-25 fixed → change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 001「DDL 改写一致性」；行为规格 `openspec/specs/ddl-rewrite-consistency/spec.md` + `openspec/specs/mvcc-tombstone-visibility/spec.md`；台账保留为该修复面的来源与边界记录）
+- **状态**: closed（2026-10-25 fixed → change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 001「DDL 改写一致性」；行为规格 `openspec/specs/ddl-rewrite-consistency/spec.md` + `openspec/specs/mvcc-tombstone-visibility/spec.md`；台账保留为该修复面的来源与边界记录）[ARCHIVED 2026-10-25]
 
 ## R55: ISS25 DDL 提交点窗口内的位置性错读（窄 tuple 在未移位目录下按位置取值）
 
