@@ -35,4 +35,9 @@ impl SyncPageLoader {
     pub fn free_page(&self, page_id: PageId) -> Result<()> {
         self.runtime.block_on(self.buffer_pool.free_page(page_id))
     }
+
+    /// MS35（`free-page-lifecycle` R3）：释放操作的完成标记（同步）。
+    pub fn complete_free_release(&self, pages: &[PageId]) {
+        self.buffer_pool.complete_free_release(pages);
+    }
 }

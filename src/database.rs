@@ -12,10 +12,10 @@ use crate::storage::{
 };
 use crate::transaction::{IsolationLevel, Snapshot, Transaction, TransactionManager};
 use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalReader, WalRecord, WalWriter};
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, RwLock};
 
@@ -140,6 +140,59 @@ pub struct Database {
     /// `WalWriter` 持同一单元，`arm_io_failure` 按型注入一次性失败。只读/
     /// 内存臂无写通道不接线；ATTACH 附加库持有各自独立单元，arm 不波及。
     io_failpoint: IoFailPointSlot,
+    /// MS34 Iter000（T01）：被放弃的库属隐式事务登记表——登记项只表示
+    /// 「持有它的语句 future 已被放弃」。
+    ///
+    /// 登记项的唯一来源是语句作用域守卫的 `Drop`（语句被放弃 → 守卫析构
+    /// → 记入）；语句正常提交或中止成功后守卫显式解除，不产生登记项。
+    /// 回收入口在下一个触发点（下一条隐式写语句、checkpoint、自动 checkpoint
+    /// 判定）中止它。登记与摘除本身不做 I/O。
+    implicit_transactions: Arc<Mutex<HashSet<u64>>>,
+    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+    /// Iteration 003（T10）：本会话的数据库文件路径——内存会话为占位值
+    /// `":memory:"`。测试支撑的注入点按路径限定（并行测试二进制互不抢对方
+    /// 的注入点，先例 `src/storage/free_page_rebuild.rs`）。
+    path: PathBuf,
+}
+
+/// MS34 Iter000（T01）：库属隐式语句的作用域守卫。
+///
+/// 登记表语义是「调用方已放弃其语句的事务」——只有守卫析构（语句 future
+/// 被放弃）才把 tx id 记入登记表；仍在并发执行中的语句不持有登记项，
+/// 因此另一条语句的回收不会中止它。
+///
+/// 语句正常结束（提交或中止成功）时调用方显式 [`ImplicitTxGuard::disarm`]，
+/// `Drop` 不记入；提交/中止失败时保持武装 → 登记项留下，由下一个触发点
+/// 重试回收。
+pub(crate) struct ImplicitTxGuard {
+    registry: Arc<Mutex<HashSet<u64>>>,
+    tx_id: u64,
+    armed: bool,
+}
+
+impl ImplicitTxGuard {
+    fn new(registry: Arc<Mutex<HashSet<u64>>>, tx_id: u64) -> Self {
+        Self {
+            registry,
+            tx_id,
+            armed: true,
+        }
+    }
+
+    /// 语句正常结束（提交或中止成功）——解除守卫，`Drop` 不再记入登记表。
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ImplicitTxGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // 同步插入，无 I/O、不 spawn 任务——回收的时序保证仍由三个库
+            // 自有触发点承担（design D2）。
+            self.registry.lock().unwrap().insert(self.tx_id);
+        }
+    }
 }
 
 impl Database {
@@ -246,6 +299,15 @@ impl Database {
     /// `Memory` sessions are writable, so they report `false`.
     pub fn is_readonly(&self) -> bool {
         self.mode == OpenMode::ReadOnly
+    }
+
+    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+    /// Iteration 003（T10）：本会话的数据库文件路径（内存会话为 `":memory:"`）。
+    ///
+    /// 仅供测试支撑的注入点按路径限定使用（`executor::ddl_commit_window`）；
+    /// 产品读写路径不经此字段。
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// 各打开模式共用的构造链。`ReadWrite` 走既有全部步骤（存储 → 缓冲池
@@ -377,6 +439,17 @@ impl Database {
             // replay-time root changes must not be persisted (the recovery load
             // point stays fixed across re-recoveries).
             table_manager.attach_index_catalog_contexts().await;
+
+            // MS35（`free-page-lifecycle` R2）：恢复之后按持久目录重建本次
+            // 打开的可分配页集合——恢复会重建索引树并分配新页（页数上界必须
+            // 在重建时重取），且恢复期换根会让内存根与目录登记根不同（两棵
+            // 树的页都算活页）。重建只读既有页，不写任何数据文件字节。
+            //
+            // 失败安全（R3）：任一次遍历出错 ⇒ 整次重建放弃（不注入任何页），
+            // 打开仍成功，既有表照常可读。
+            if let Err(e) = table_manager.rebuild_free_page_set(path).await {
+                eprintln!("[free-page-rebuild] rebuild abandoned: {}", e);
+            }
         }
 
         // 4. Initialize plan cache
@@ -410,6 +483,8 @@ impl Database {
             mode,
             query_memory_limit: Arc::new(AtomicU64::new(0)),
             io_failpoint,
+            implicit_transactions: Arc::new(Mutex::new(HashSet::new())),
+            path: path.to_path_buf(),
         })
     }
 
@@ -502,6 +577,94 @@ impl Database {
         self.maybe_auto_checkpoint().await
     }
 
+    /// MS34 Iter000（T01）：为本条库属隐式语句创建作用域守卫。
+    ///
+    /// 语句正常结束（提交或中止成功）时调用方显式解除；语句 future 被放弃
+    /// 时守卫随 future 析构 → tx id 记入登记表 → 下一个回收触发点按既有
+    /// 中止路径回收它。仍在并发执行中的语句不产生登记项，因此同一句柄上
+    /// 另一条语句的回收不会中止它。
+    pub(crate) fn implicit_tx_guard(&self, tx_id: u64) -> ImplicitTxGuard {
+        ImplicitTxGuard::new(self.implicit_transactions.clone(), tx_id)
+    }
+
+    /// MS34 Iter000（T01）：回收被放弃的库属隐式事务。
+    ///
+    /// 登记项只表示「持有它的语句 future 已被放弃」——仍在执行中的语句不在
+    /// 登记表内，回收不会碰它。回收走既有中止路径（写 `AbortTxn`、墓碑化
+    /// 未提交版本、还原索引条目、移出活跃集、清版本条目）。表已不存在（被
+    /// 放弃之后被 DROP）时先摘掉该事务在这些表上的版本条目——表的数据与
+    /// 索引已随 DROP 释放，没有可还原的东西，摘条目让中止能进行到底。
+    ///
+    /// 中止本身失败（I/O 错误）时保留登记项，由下一个触发点重试；错误点名
+    /// 返回给触发方（下一次写语句 / checkpoint）。
+    pub(crate) async fn reclaim_abandoned_implicit_transactions(&self) -> Result<()> {
+        let pending: Vec<u64> = {
+            let mut registry = self.implicit_transactions.lock().unwrap();
+            registry.drain().collect()
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut failed: Vec<u64> = Vec::new();
+        let mut first_error: Option<StorageError> = None;
+        for tx_id in pending {
+            if let Err(e) = self.reclaim_implicit_tx(tx_id).await {
+                failed.push(tx_id);
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+        if !failed.is_empty() {
+            self.implicit_transactions.lock().unwrap().extend(failed);
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// 单个被放弃事务的回收（MS34 Iter000，T01）。
+    async fn reclaim_implicit_tx(&self, tx_id: u64) -> Result<()> {
+        // 已提交 / 已中止的事务不再是「被放弃的那一条」——登记项是残留，
+        // 摘掉即可，不写 WAL、不碰版本。
+        if !self
+            .transaction_manager
+            .active_transactions()
+            .await
+            .contains(&tx_id)
+        {
+            return Ok(());
+        }
+        // 解析该事务触及的表（与 `Database::rollback` 同源）。
+        let version_tables = self.transaction_manager.tx_version_tables(tx_id).await;
+        let mut tables: HashMap<String, Arc<TableMeta>> = HashMap::new();
+        let mut dropped_tables: Vec<String> = Vec::new();
+        for name in version_tables.keys() {
+            match self.table_manager.get_table(name).await {
+                Ok(meta) => {
+                    tables.insert(name.clone(), meta);
+                }
+                Err(_) => dropped_tables.push(name.clone()),
+            }
+        }
+        // 表已不存在：先摘掉这些表上的版本条目，让中止能进行到底。
+        if !dropped_tables.is_empty() {
+            self.transaction_manager
+                .discard_tx_version_tables(tx_id, &dropped_tables)
+                .await;
+        }
+        self.transaction_manager
+            .abort_by_id(tx_id, &self.buffer_pool, &tables)
+            .await
+            .map_err(|e| {
+                StorageError::ExecutionError(format!(
+                    "abandoned implicit transaction {} reclaim failed: {}",
+                    tx_id, e
+                ))
+            })
+    }
+
     /// 提交边界字节水位检查（MS26 T5，`wal-auto-checkpoint` R1/R3/R4）。
     ///
     /// 触发条件（四项合取）：本会话持有 WAL 通道（`ReadWrite`）∧ 阈值非 0
@@ -515,6 +678,10 @@ impl Database {
     /// 返回给触发该边界的语句；此时事务早已提交，已提交数据不受影响
     /// （`R4`），后续提交边界自然重试（字节计数未归零）。
     pub async fn maybe_auto_checkpoint(&self) -> Result<()> {
+        // MS34 Iter000（T01）：回收先于活跃集判定——被放弃的事务留在活跃集
+        // 里会让 R3 顺延条件永远为真（自动 checkpoint 无限顺延、WAL 不再被
+        // 截断）。
+        self.reclaim_abandoned_implicit_transactions().await?;
         // 只读 / 内存会话结构性无 WAL 通道（R3 零写入），直接返回。
         let Some(writer) = &self.wal_writer else {
             return Ok(());
@@ -709,6 +876,10 @@ impl Database {
         let Some(manager) = &self.checkpoint_manager else {
             return Ok(());
         };
+        // MS34 Iter000（T01）：回收先于 checkpoint——被放弃事务的未提交页不
+        // 应随 checkpoint 落盘（WAL 证据随截断消失后无从判断其归属）。本
+        // 点覆盖 `close()`、显式 checkpoint 命令与自动 checkpoint。
+        self.reclaim_abandoned_implicit_transactions().await?;
         manager
             .checkpoint(|| self.transaction_manager.current_tx_id())
             .await

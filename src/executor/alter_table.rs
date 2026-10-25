@@ -80,8 +80,24 @@ impl Executor for AlterTableExecutor {
             crate::executor::AlterTableOp::DropColumn { column_name } => {
                 // 隐式事务（D10）：重写 DELETE/INSERT 全在一个事务内提交，
                 // 崩溃恢复全有或全无。
+                //
+                // MS34 Iter000（T01）：回收先于本语句的隐式事务——被放弃的
+                // 上一条隐式语句必须在下一条隐式写语句开始之前完成回滚。
+                self.database
+                    .reclaim_abandoned_implicit_transactions()
+                    .await
+                    .map_err(|e| {
+                        crate::storage::StorageError::ExecutionError(format!(
+                            "Reclaim failed: {}",
+                            e
+                        ))
+                    })?;
                 let tx = self.database.transaction_manager.begin().await;
                 let tx_id = tx.id();
+                // MS34 Iter000（T01）：语句作用域守卫——语句 future 被放弃时
+                // 守卫析构，tx id 记入登记表，由下一个触发点回收；正常提交或
+                // 中止成功后显式解除。
+                let mut guard = self.database.implicit_tx_guard(tx_id);
                 let result = self
                     .database
                     .table_manager
@@ -94,15 +110,32 @@ impl Executor for AlterTableExecutor {
                     )
                     .await;
                 match result {
-                    Ok(()) => {
+                    Ok(pending) => {
                         self.database
                             .transaction_manager
                             .commit(tx, &self.database.buffer_pool)
                             .await?;
+                        // 库属隐式事务已提交 → 解除语句作用域守卫。
+                        guard.disarm();
+                        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                        // Iteration 003（T10）：测试支撑注入点——布防时把语句停在
+                        // 「提交完成 → 目录应用」窗口内（未布防 ⇒ 立即返回，零
+                        // 行为变化）。窄化行此时已提交可见而目录仍是旧布局，
+                        // ISS25 的错读窗口由此可被测试真实观测。
+                        crate::executor::ddl_commit_window::pause_at_ddl_commit_window(
+                            self.database.path(),
+                        )
+                        .await;
+                        // ISS21 / D5：目录窄化在提交点之后生效——提交完成前
+                        // 目录仍是旧布局，被放弃/失败的语句不留目录面变更。
+                        self.database
+                            .table_manager
+                            .apply_column_drop(&pending)
+                            .await?;
                         Ok(Some(ExecResult::AffectedRows(0)))
                     }
                     Err(e) => {
-                        let _ = self
+                        let aborted = self
                             .database
                             .transaction_manager
                             .abort(
@@ -110,7 +143,12 @@ impl Executor for AlterTableExecutor {
                                 &self.database.buffer_pool,
                                 &std::collections::HashMap::new(),
                             )
-                            .await;
+                            .await
+                            .is_ok();
+                        // 中止失败时保留登记项——下一个触发点重试回收。
+                        if aborted {
+                            guard.disarm();
+                        }
                         Err(e)
                     }
                 }

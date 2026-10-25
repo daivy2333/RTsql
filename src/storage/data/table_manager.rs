@@ -1,14 +1,19 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 use crate::executor::Value;
-use crate::storage::btree::{CatalogRootSlot, IndexManager};
+use crate::storage::btree::{CatalogRootSlot, IndexManager, LEAF_NODE};
 use crate::storage::catalog::{
-    Catalog, CatalogColumnRow, CatalogKind, CatalogRow, CatalogSecondaryIndex, COLUMNS_SYSTEM_NAME,
-    TABLES_SYSTEM_NAME,
+    Catalog, CatalogColumnRow, CatalogKind, CatalogRow, CatalogSecondaryIndex, COLUMNS_PAGE_ID,
+    COLUMNS_SYSTEM_NAME, TABLES_PAGE_ID, TABLES_SYSTEM_NAME,
 };
+use crate::storage::data_page::update_version_header_in_data_page;
 use crate::storage::data_page::write_tuple_to_data_page;
+use crate::storage::free_page_rebuild::take_free_page_rebuild_fault;
+use crate::storage::integrity::{check_data_page, check_tree_page, violation_summary};
 use crate::storage::page_format::{overflow, ColumnType, SlottedPage, SlottedPageRef};
 use crate::storage::page_id::PageId;
 use crate::storage::{
@@ -83,6 +88,89 @@ impl DataChainStatus {
     }
 }
 
+/// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+/// Iteration 003（design D7 / ISS25）：每表共享的「在途窄化」状态单元。
+///
+/// 状态与**表**绑定，不与某个 `TableMeta` 版本绑定——同一张表的任何活布局
+/// 版本都指向**同一**单元（见 `TableMeta::narrowing`）。读者持有的是计划期
+/// 快照（旧 `TableMeta`），因此单元必须随活布局一起被读者观察到，否则窗口
+/// 内的拒绝对计划期快照失效。
+///
+/// 纯内存状态：不持久化、不进 WAL / 目录 ⇒ 磁盘格式不变（MS36 的 G1/G2/G3
+/// 兼容面不受影响）。单元不携带任何运行身份（无 hash / 指纹 / revision /
+/// run-id / 时间戳）。
+#[derive(Debug)]
+pub struct NarrowingState {
+    /// 该单元所属的表名——拒绝信息据此点名表。
+    table: String,
+    /// 是否正处于「改写已开始、目录窄化尚未生效」的窗口内。
+    in_flight: AtomicBool,
+}
+
+impl NarrowingState {
+    /// 新建一个未发布在途状态的单元。
+    pub fn new(table: impl Into<String>) -> Self {
+        Self {
+            table: table.into(),
+            in_flight: AtomicBool::new(false),
+        }
+    }
+
+    /// 在途窄化中——读者据此拒绝解码。
+    fn is_in_flight(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// 发布在途窄化（改写开始处）。
+    pub fn publish(&self) {
+        self.in_flight.store(true, Ordering::SeqCst);
+    }
+
+    /// 清除在途窄化（目录窄化生效后 / 语句异常或放弃路径）。
+    pub fn clear(&self) {
+        self.in_flight.store(false, Ordering::SeqCst);
+    }
+
+    /// 读者侧检查：窗口内拒绝解码，点名该表正在被修改。
+    ///
+    /// 拒绝面按**表**（不是按库 / 全局）：未改写的表不受影响。
+    pub fn ensure_readable(&self) -> Result<()> {
+        if self.is_in_flight() {
+            return Err(StorageError::ExecutionError(format!(
+                "table '{}' is being modified by an in-flight ALTER TABLE DROP COLUMN; read refused",
+                self.table
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+/// Iteration 003（design D7 / ISS25）：`ALTER TABLE DROP COLUMN` 的语句作用域
+/// 守卫——语句异常或被放弃（语句 future 被丢弃）时清除该表的「在途窄化」状态。
+///
+/// 守卫在改写开始处（发布点）创建，随 [`PendingColumnDrop`] 一路活到语句结束：
+/// 正常路径由 `apply_column_drop` 在目录窄化生效后清除；异常 / 放弃路径由守卫
+/// 析构兜底清除 ⇒ 该表不会因失败的 DDL 而永久不可读（那比 ISS25 原缺陷更
+/// 严重）。守卫不携带任何运行身份。
+pub struct NarrowingGuard {
+    state: Arc<NarrowingState>,
+}
+
+impl NarrowingGuard {
+    fn new(state: Arc<NarrowingState>) -> Self {
+        Self { state }
+    }
+}
+
+impl Drop for NarrowingGuard {
+    fn drop(&mut self) {
+        // 语句异常 / 被放弃时的兜底清除——正常路径已由 `apply_column_drop`
+        // 清除（幂等）。
+        self.state.clear();
+    }
+}
+
 /// Table metadata: schema, primary key, per-table index, data page chain.
 pub struct TableMeta {
     pub name: String,
@@ -113,6 +201,39 @@ pub struct TableMeta {
     pub defaults: Vec<Option<Value>>,
     pub data_page_head: PageId,
     pub data_page_tail: Mutex<PageId>,
+    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+    /// Iteration 003（design D7 / ISS25）：该表的「在途窄化」状态单元。
+    ///
+    /// 同一张表的任何活布局版本共享**同一**单元——包括 `ALTER TABLE DROP
+    /// COLUMN` 产出的窄化副本（`new_meta`）与目录窄化生效后接管活布局的新
+    /// 版本 ⇒ 计划期快照（旧 `TableMeta`）也能观察到窗口内状态。
+    pub narrowing: Arc<NarrowingState>,
+}
+
+/// change 2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog /
+/// Iteration 001 (D5, ISS21): a completed `ALTER TABLE DROP COLUMN`'s catalog
+/// change, produced by [`TableManager::alter_drop_column`] and applied at the
+/// statement's commit point by [`TableManager::apply_column_drop`].
+///
+/// The narrowing is deliberately NOT part of the statement's transactional
+/// body: an abandoned or failed DDL must leave no catalog-side change. The
+/// pending change carries everything the application step needs — the table,
+/// the dropped column's full catalog definition (with its original ordinal)
+/// and the column count the table must advertise afterwards.
+pub struct PendingColumnDrop {
+    /// The table the drop applies to.
+    pub table: String,
+    /// The dropped column's catalog definition; `column_index` holds its
+    /// original ordinal.
+    pub removed_column: CatalogColumnRow,
+    /// The column count the table must advertise once the drop is applied.
+    pub new_column_count: u32,
+    /// The narrowed in-memory layout the data-plane rewrite wrote against.
+    pub new_meta: Arc<TableMeta>,
+    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+    /// Iteration 003（design D7 / ISS25）：语句作用域守卫——本 pending 值被
+    /// 丢弃（语句异常 / 被放弃）时清除在途窄化状态。
+    _narrowing_guard: NarrowingGuard,
 }
 
 impl TableMeta {
@@ -164,6 +285,9 @@ pub struct TableManager {
     tables: RwLock<HashMap<String, Arc<TableMeta>>>,
     buffer_pool: Arc<BufferPool>,
     catalog: Arc<Catalog>,
+    /// MS35 (`free-page-lifecycle` R2): the persisted directory as read at
+    /// open time (before crash recovery). Empty until `open_or_init` runs.
+    persisted_catalog_rows: RwLock<Vec<CatalogRow>>,
 }
 
 impl TableManager {
@@ -186,6 +310,7 @@ impl TableManager {
             tables: RwLock::new(HashMap::new()),
             buffer_pool,
             catalog,
+            persisted_catalog_rows: RwLock::new(Vec::new()),
         }))
     }
 
@@ -246,6 +371,13 @@ impl TableManager {
     /// restores every persisted `TableMeta` so subsequent DML works.
     pub async fn open_or_init(&self) -> Result<()> {
         let rows = self.catalog.scan_tables().await?;
+        // MS35 (`free-page-lifecycle` R2): keep the persisted directory as
+        // read at open time (before crash recovery runs). Recovery may
+        // re-root an index tree and persist the new root into the in-memory
+        // catalog row — the persisted directory still registers the old
+        // tree, whose pages must stay non-allocatable (they are the load
+        // point of the next recovery).
+        *self.persisted_catalog_rows.write().await = rows.clone();
         if rows.is_empty() {
             return Ok(());
         }
@@ -356,6 +488,8 @@ impl TableManager {
                 secondary_indexes,
                 data_page_head,
                 data_page_tail: Mutex::new(data_page_tail),
+                // Iteration 003（D7）：新建表 ⇒ 全新状态单元。
+                narrowing: Arc::new(NarrowingState::new(row.table_name.clone())),
             });
             tables.insert(row.table_name, table_meta);
         }
@@ -518,6 +652,8 @@ impl TableManager {
             secondary_indexes: Vec::new(),
             data_page_head: page_id,
             data_page_tail: Mutex::new(page_id),
+            // Iteration 003（D7）：新建表 ⇒ 全新状态单元。
+            narrowing: Arc::new(NarrowingState::new(name.to_string())),
         });
 
         // --- atomically insert under write lock (TOCTOU-safe double-check) ---
@@ -581,14 +717,19 @@ impl TableManager {
                 tables.remove(name);
             }
             let _ = self.catalog.delete_table(name).await;
-            let _ = self.buffer_pool.free_page(page_id).await;
-            let _ = self
-                .buffer_pool
-                .free_page(table_meta.index_manager.root_page_id())
-                .await;
-            for (_, uindex) in table_meta.unique_indexes.iter() {
-                let _ = self.buffer_pool.free_page(uindex.root_page_id()).await;
+            let mut released: Vec<PageId> = Vec::new();
+            let root = table_meta.index_manager.root_page_id();
+            for page in [page_id, root]
+                .into_iter()
+                .chain(table_meta.unique_indexes.iter().map(|(_, u)| u.root_page_id()))
+            {
+                if self.buffer_pool.free_page(page).await.is_ok() {
+                    released.push(page);
+                }
             }
+            // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放没有
+            // 锚点写（该表从未登记进目录），按保守方向等下一次成功刷盘。
+            self.buffer_pool.complete_free_release(&released);
             return Err(e);
         }
 
@@ -665,28 +806,30 @@ impl TableManager {
             secondary_indexes: old.secondary_indexes.clone(),
             data_page_head: old.data_page_head,
             data_page_tail: Mutex::new(*old.data_page_tail.lock().unwrap()),
+            // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
+            narrowing: old.narrowing.clone(),
         });
         tables.insert(table.to_string(), meta);
         Ok(())
     }
 
-    /// MS21 Iter003 (T3-c/D10): ALTER TABLE DROP COLUMN — remove a
-    /// non-key column. Crash-consistent ordering (CTAS precedent
-    /// generalised, superseding D10's draft ordering per the approved
-    /// Risks mitigation ③): catalog rewrite + `flush_all()` FIRST, then
-    /// one implicit transaction rewrites every live row DELETE+INSERT,
-    /// then commit. Every crash window is then a readable state:
+    /// change 2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog /
+    /// Iteration 001 (D5, ISS21): ALTER TABLE DROP COLUMN — remove a
+    /// non-key column.
     ///
-    /// 1. before catalog rewrite → old schema + old wide rows;
-    /// 2. after catalog write, before flush → pages lost on crash → all
-    ///    old (WAL holds BeginTxn only — no data records yet);
-    /// 3. after flush, during rewrite → replayed tombstones + narrow rows
-    ///    against the *persisted* new schema (exact width);
-    /// 4. after commit → replay is complete.
+    /// The catalog narrowing is NOT part of this statement's transactional
+    /// body. The body does the guard checks, computes the narrowed layout and
+    /// rewrites every live row DELETE+INSERT inside the caller's transaction;
+    /// the catalog change is handed back as a [`PendingColumnDrop`] and
+    /// applied at the statement's commit point by
+    /// [`TableManager::apply_column_drop`].
     ///
-    /// The narrow-row × old-schema mid-row shift (the one form the draft
-    /// ordering could produce) never occurs: no data WAL record exists
-    /// before the new schema is durable.
+    /// Rationale (ISS21): narrowing the catalog *before* the data-plane
+    /// rewrite left an abandoned or failed DDL with a narrowed catalog and
+    /// unwritten rows — the directory advertised 2 columns while the rows
+    /// still carried 3. Deferring the narrowing to the commit point makes the
+    /// directory change and the data-plane rewrite live and die together: an
+    /// abandoned or failed statement leaves neither.
     ///
     /// Guard matrix (defense arm — the planner rejects these earlier):
     /// last column / PK / UNIQUE-declared / secondary-indexed column.
@@ -697,7 +840,7 @@ impl TableManager {
         tx_id: u64,
         tx_manager: Arc<crate::transaction::TransactionManager>,
         wal: Option<Arc<crate::wal::WALBuffer>>,
-    ) -> Result<()> {
+    ) -> Result<PendingColumnDrop> {
         let old = self.get_table(table).await?;
 
         // Defense guards (planner rejects earlier; direct construction only)
@@ -789,19 +932,26 @@ impl TableManager {
             })
             .collect();
 
-        // 1. Catalog rewrite (column row delete + ordinal shift in place,
-        // preserving the chain-order invariant) + column_count.
-        self.catalog
-            .rewrite_column_rows_drop(&old.name, removed as u32)
-            .await?;
-        self.catalog
-            .update_table_column_count(&old.name, new_columns.len() as u32)
-            .await?;
+        // 1. The dropped column's catalog definition, with its original
+        // ordinal. Read while the catalog still describes the old layout —
+        // the narrowing itself is deferred to the commit point.
+        let removed_column = self
+            .catalog
+            .scan_columns(&old.name)
+            .await?
+            .into_iter()
+            .find(|c| c.column_index == removed as u32)
+            .ok_or_else(|| {
+                StorageError::Internal(format!(
+                    "alter_drop_column: no catalog column row at ordinal {} for table '{}'",
+                    removed, old.name
+                ))
+            })?;
+        let new_column_count = new_columns.len() as u32;
 
-        // 2. Durable new schema before any data WAL record (crash window 3).
-        self.buffer_pool.flush_all().await?;
-
-        // 3. Swap the in-memory TableMeta to the new layout.
+        // 2. The narrowed in-memory layout — the rewrite writes the narrowed
+        // tuples and their index keys against it. The live table mapping is
+        // switched only at the commit point (`apply_column_drop`).
         let new_meta = Arc::new(TableMeta {
             name: old.name.clone(),
             columns: new_columns,
@@ -814,17 +964,25 @@ impl TableManager {
             secondary_indexes: new_secondary_indexes,
             data_page_head: old.data_page_head,
             data_page_tail: Mutex::new(*old.data_page_tail.lock().unwrap()),
+            // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
+            narrowing: old.narrowing.clone(),
         });
-        self.tables
-            .write()
-            .await
-            .insert(old.name.clone(), new_meta.clone());
 
-        // 4. Implicit-transaction row rewrite: every live (chain-tail,
+        // 3. Implicit-transaction row rewrite: every live (chain-tail,
         // non-tombstone) row is deleted (tombstone + index cleanup + WAL)
         // and re-inserted as the narrowed row (fresh tuple + index rebuild
         // + WAL). All through the same WAL records / version chain /
         // index paths the DML executors use.
+        //
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 003（design D7 / ISS25）：**改写开始处发布在途窄化状态**
+        // ——发布后到目录窄化生效前，读路径对该表给出明确拒绝，绝不返回按位置
+        // 错位的值。清除点：`apply_column_drop`（目录窄化生效后）与语句作用域
+        // 守卫（异常 / 放弃路径）。
+        old.narrowing.publish();
+        // 守卫随 `PendingColumnDrop` 活到语句结束——异常 / 放弃路径由它兜底
+        // 清除，避免该表永久不可读。
+        let narrowing_guard = NarrowingGuard::new(old.narrowing.clone());
         let old_schema: Vec<ColumnType> = old.columns.iter().map(|(_, ct)| ct.clone()).collect();
         let new_schema: Vec<ColumnType> =
             new_meta.columns.iter().map(|(_, ct)| ct.clone()).collect();
@@ -850,8 +1008,15 @@ impl TableManager {
                         else {
                             continue;
                         };
-                        if let Some(target) = vh.next_version() {
-                            pointed.insert(target);
+                        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                        // Iteration 001（MTV R1 / ISS24 的 M2）：抑制集合只承认
+                        // 「指向者未被回滚」的链接——已回滚（`create_tx_id == 0`）
+                        // 的指向者不抑制其前驱版本，与
+                        // `DataScanExecutor::superseder_suppresses` 同源。
+                        if vh.create_tx_id() != 0 {
+                            if let Some(target) = vh.next_version() {
+                                pointed.insert(target);
+                            }
                         }
                         if !vh.is_deleted() {
                             rids.push(RowId::new(pid.0 as u32, slot.logical_id));
@@ -899,16 +1064,53 @@ impl TableManager {
                 .collect();
 
             // DELETE leg: independent tombstone slot (DeleteExecutor shape).
-            let tombstone = VersionHeader::new(tx_id, None)
-                .with_next_version(*rid)
-                .mark_deleted();
-            let tombstone_rid =
-                write_tuple_to_data_page(&self.buffer_pool, &old, &tombstone, &[]).await?;
+            //
+            // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+            // Iteration 001 (ISS22): both legs append through the LIVE table
+            // meta (`old`), so the rewrite owns exactly one tail pointer and
+            // one chain-advance path. Two independent tails (`old` for the
+            // DELETE leg, `new_meta` for the INSERT leg) each allocate a new
+            // page when the tail page fills and each overwrite the chain's
+            // `next` pointer — the page allocated first falls out of the
+            // chain and the rows written there become unreachable.
+            //
+            // Iteration 001 (ISS24): the tombstone is written **without** its
+            // chain pointer, registered with the transaction manager, and only
+            // then linked to the old row. The abandon window (the statement
+            // future is dropped) may land between "the version slot is
+            // written" and "the version is registered" — a tombstone that
+            // already carries its chain pointer suppresses its predecessor by
+            // the deleter's transaction state, and the reclaim cannot see the
+            // unregistered version ⇒ the abandoned rewrite hides the row it
+            // started rewriting. A tombstone without a chain pointer
+            // suppresses nothing, so that window is harmless. The slot's final
+            // content (create_tx / delete sentinel / chain pointer) is
+            // byte-identical to the DeleteExecutor shape.
+            let tombstone = VersionHeader::new(tx_id, None).mark_deleted();
+            let tombstone_rid = self.write_tuple(&old, &tombstone, &[]).await?;
             self.buffer_pool
                 .clear_all_visible(PageId(tombstone_rid.page_id as u64));
             self.buffer_pool
                 .clear_all_visible(PageId(rid.page_id as u64));
 
+            // 登记在链指针之前——登记之后回收才看得见这个版本（放弃窗口内的
+            // 墓碑必须能被中和）。
+            tx_manager
+                .record_version(tx_id, &old.name, tombstone_rid)
+                .await;
+
+            // 补链指针：墓碑指向被删的旧行。
+            update_version_header_in_data_page(
+                &self.buffer_pool,
+                tombstone_rid,
+                VersionHeader::new(tx_id, None)
+                    .with_next_version(*rid)
+                    .mark_deleted(),
+                &[],
+            )
+            .await?;
+
+            // 索引条目清理在链指针之后——放弃窗口落在链指针之前时，条目仍在位。
             if let Some(key) = &old_pk_key {
                 old.index_manager.delete(key.as_bytes()).await?;
             }
@@ -919,9 +1121,6 @@ impl TableManager {
                 sindex.delete_exact(key, *rid).await?;
             }
 
-            tx_manager
-                .record_version(tx_id, &old.name, tombstone_rid)
-                .await;
             if let Some(wal) = &wal {
                 wal.append(crate::wal::WalRecord::Delete {
                     tx_id,
@@ -945,7 +1144,9 @@ impl TableManager {
             buf.truncate(written);
 
             let vh = VersionHeader::new(tx_id, None);
-            let new_rid = self.write_tuple(&new_meta, &vh, &buf).await?;
+            // ISS22: same live-table append path as the DELETE leg — one
+            // tail pointer, one chain-advance path for the whole rewrite.
+            let new_rid = self.write_tuple(&old, &vh, &buf).await?;
             self.buffer_pool
                 .clear_all_visible(PageId(new_rid.page_id as u64));
 
@@ -981,6 +1182,54 @@ impl TableManager {
             }
         }
 
+        // ISS22: the rewrite appended through the live table meta, so the
+        // narrowed meta's own tail pointer never advanced. `apply_column_drop`
+        // installs `new_meta` as the live mapping at the commit point — hand
+        // it the real chain terminal, otherwise the next append would start
+        // from a stale page and fork the chain again.
+        *new_meta.data_page_tail.lock().unwrap() = *old.data_page_tail.lock().unwrap();
+
+        Ok(PendingColumnDrop {
+            table: old.name.clone(),
+            removed_column,
+            new_column_count,
+            new_meta,
+            _narrowing_guard: narrowing_guard,
+        })
+    }
+
+    /// Apply a completed `ALTER TABLE DROP COLUMN`'s catalog change and switch
+    /// the live table mapping to the narrowed layout.
+    ///
+    /// This is the statement's commit point (ISS21 / design D5): it runs
+    /// **after** the statement's transaction has committed, never inside the
+    /// transactional body. An abandoned or failed DDL therefore applies
+    /// nothing — the catalog keeps the pre-statement column definition and
+    /// count, and the live layout stays the old one.
+    ///
+    /// The catalog change is applied in the ADD COLUMN commit-point order:
+    /// the column rows first, the advertising column count last.
+    /// `update_table_column_count_ddl` flushes every dirty page except the
+    /// count page first and the count page last, so a crash can never leave a
+    /// durable count that the column rows do not back.
+    pub async fn apply_column_drop(&self, pending: &PendingColumnDrop) -> Result<()> {
+        self.catalog
+            .rewrite_column_rows_drop(&pending.table, pending.removed_column.column_index)
+            .await?;
+        self.catalog
+            .update_table_column_count_ddl(&pending.table, pending.new_column_count)
+            .await?;
+        // The live mapping switches only once the catalog advertises the
+        // narrowed layout.
+        self.tables
+            .write()
+            .await
+            .insert(pending.table.clone(), pending.new_meta.clone());
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 003（design D7 / ISS25）：目录窄化已生效 ⇒ 清除在途窄化
+        // 状态，读路径恢复正常。单元与旧活布局共享 ⇒ 持有计划期快照的读者
+        // 也一并恢复。
+        pending.new_meta.narrowing.clear();
         Ok(())
     }
 
@@ -1013,8 +1262,15 @@ impl TableManager {
                         else {
                             continue;
                         };
-                        if let Some(target) = vh.next_version() {
-                            pointed.insert(target);
+                        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                        // Iteration 001（MTV R1 / ISS24 的 M2）：抑制集合只承认
+                        // 「指向者未被回滚」的链接——已回滚（`create_tx_id == 0`）
+                        // 的指向者不抑制其前驱版本，与
+                        // `DataScanExecutor::superseder_suppresses` 同源。
+                        if vh.create_tx_id() != 0 {
+                            if let Some(target) = vh.next_version() {
+                                pointed.insert(target);
+                            }
                         }
                         if !vh.is_deleted() {
                             slots.push(RowId::new(pid.0 as u32, slot.logical_id));
@@ -1114,6 +1370,8 @@ impl TableManager {
             secondary_indexes: old.secondary_indexes.clone(),
             data_page_head: old.data_page_head,
             data_page_tail: Mutex::new(data_page_tail),
+            // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
+            narrowing: old.narrowing.clone(),
         });
         tables.insert(name.to_string(), meta);
         Ok(old_index)
@@ -1159,6 +1417,8 @@ impl TableManager {
             secondary_indexes: new_secondaries,
             data_page_head: old.data_page_head,
             data_page_tail: Mutex::new(data_page_tail),
+            // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
+            narrowing: old.narrowing.clone(),
         });
         tables.insert(name.to_string(), meta);
         Ok((old_index, old_uniques, old_secondaries))
@@ -1221,6 +1481,8 @@ impl TableManager {
             secondary_indexes,
             data_page_head: old.data_page_head,
             data_page_tail: Mutex::new(*old.data_page_tail.lock().unwrap()),
+            // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
+            narrowing: old.narrowing.clone(),
         });
         tables.insert(table.to_string(), meta);
         Ok(())
@@ -1280,6 +1542,8 @@ impl TableManager {
             data_page_head: old.data_page_head,
             data_page_tail: Mutex::new(*old.data_page_tail.lock().unwrap()),
             secondary_indexes,
+            // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
+            narrowing: old.narrowing.clone(),
         });
         tables.insert(table.clone(), meta.clone());
 
@@ -1391,15 +1655,21 @@ impl TableManager {
         // free them with everything else, best-effort.
         let overflow_pages = self.collect_overflow_chain_pages(&data_pages).await;
 
+        let mut released: Vec<PageId> = Vec::new();
         for page in index_pages
             .into_iter()
             .chain(overflow_pages)
             .chain(data_pages)
         {
-            if let Err(e) = self.buffer_pool.free_page(page).await {
-                eprintln!("[drop_table] free_page({}) failed: {}", page.0, e);
+            match self.buffer_pool.free_page(page).await {
+                Ok(()) => released.push(page),
+                Err(e) => eprintln!("[drop_table] free_page({}) failed: {}", page.0, e),
             }
         }
+
+        // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
+        // （目录删除，`:1414`）已经发出。标记之前，这些页不得可分配。
+        self.buffer_pool.complete_free_release(&released);
 
         Ok(())
     }
@@ -1436,34 +1706,46 @@ impl TableManager {
     }
 
     /// MS27 T6 (design D5): scan the given data pages' slots for overflow
-    /// locators and collect every referenced chain page id (header-only slot
-    /// reads — chains are independent pages, never in `next_page_id` links).
+    /// locators and collect every referenced chain page id (chains are
+    /// independent pages, never in `next_page_id` links).
+    ///
+    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+    /// Iteration 002 (B-4): the slot payloads are read through the integrity
+    /// module's bounded reader (`check_data_page`) — the production accessor
+    /// (`SlottedPageRef::get_slot_data`) slices the page unchecked and panics
+    /// on a damaged slot offset, and this scan runs on the release path.
     ///
     /// Best-effort, same policy as `collect_data_pages`: a data page read or
     /// a chain walk error warns and skips that page/chain, returning what was
-    /// collected so far.
+    /// collected so far. A damaged page is additionally counted and reported
+    /// (its locators are not used, so its chains stay unreleased).
     async fn collect_overflow_chain_pages(&self, data_pages: &[PageId]) -> Vec<PageId> {
         let mut chain_heads: Vec<u32> = Vec::new();
         for &pid in data_pages {
             let heads: Vec<u32> = match self
                 .buffer_pool
                 .with_page_data(pid, |data| {
-                    let slotted = SlottedPageRef::new(data);
+                    // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                    // Iteration 002 (B-4): bounded read — the integrity
+                    // module's data-page check yields the slot locators only
+                    // for in-bounds slots. The previous unchecked
+                    // `get_slot_data` slice panicked on an out-of-bounds slot
+                    // offset (release path ⇒ process abort). A damaged page
+                    // is counted, reported and skipped: its locators are not
+                    // used, so its overflow chains stay unreleased.
+                    let step = check_data_page(data);
+                    if !step.violations.is_empty() {
+                        eprintln!(
+                            "[overflow-release] data page {} is damaged: {}",
+                            pid.0,
+                            violation_summary(&step.violations)
+                        );
+                        return Ok(Vec::new());
+                    }
                     let mut heads = Vec::new();
-                    for index in 0..slotted.slot_count() {
-                        let Some(slot) = slotted.get_slot(index) else {
-                            continue;
-                        };
-                        let slot_data = slotted.get_slot_data(&slot);
-                        if slot_data.len() < VersionHeader::SIZE {
-                            continue;
-                        }
-                        if let Some((_, first)) =
-                            overflow::decode_locator(&slot_data[VersionHeader::SIZE..])
-                        {
-                            if first != 0 {
-                                heads.push(first);
-                            }
+                    for (_total_len, first) in step.locators {
+                        if first != 0 {
+                            heads.push(first);
                         }
                     }
                     Ok(heads)
@@ -1497,6 +1779,227 @@ impl TableManager {
             }
         }
         pages
+    }
+
+    /// MS35 (`free-page-lifecycle` R2): rebuild this session's allocatable
+    /// page set from the persisted directory.
+    ///
+    /// The live-page set covers every page owner (the exhaustive set of
+    /// `allocate_page` call sites):
+    ///
+    /// - both catalog chains (`__tables` page 0, `__columns` page 1, walked
+    ///   along `next_page_id` until 0);
+    /// - each base table's data-page chain (from the row's `data_page_head`);
+    /// - the overflow-chain pages the data pages' slot locators point to;
+    /// - each table's PK tree (`index_root_page_id`), UNIQUE trees
+    ///   (`unique_roots`) and secondary trees (`secondary_indexes[].root`).
+    ///
+    /// The registered tree pages and the in-memory index managers' tree pages
+    /// are unioned: a recovery that re-rooted an index tree leaves the
+    /// persisted directory registering the old tree while memory holds the
+    /// new one — both page sets are live.
+    ///
+    /// The allocatable set is the page-count bound minus the live-page set.
+    /// View rows own no pages.
+    ///
+    /// Failure safety (R3): any traversal error abandons the whole rebuild —
+    /// nothing is injected, and the caller keeps the open successful.
+    pub async fn rebuild_free_page_set(&self, db_path: &Path) -> Result<()> {
+        // The bound is taken BEFORE the traversal: the recovery may have
+        // allocated pages while opening, and pages allocated after the
+        // snapshot must not be judged free.
+        let page_bound = self.buffer_pool.storage().page_count();
+        let live = self.collect_live_pages(db_path).await?;
+        let free: Vec<u64> = (0..page_bound).filter(|page| !live.contains(page)).collect();
+        self.buffer_pool.storage().inject_free_pages(free);
+        Ok(())
+    }
+
+    /// The live-page set behind [`Self::rebuild_free_page_set`].
+    ///
+    /// Strict by construction: a read error propagates so the caller can
+    /// abandon the whole rebuild (R3) instead of judging a partially walked
+    /// ownership graph.
+    async fn collect_live_pages(&self, db_path: &Path) -> Result<HashSet<u64>> {
+        // MS35 (`free-page-lifecycle` R3): a controlled page-read failure
+        // aborts the traversal — the rebuild is abandoned whole, nothing is
+        // injected and the open stays successful. The injection stands in
+        // for the page read that fails; it fires before the first read of
+        // the traversal.
+        if take_free_page_rebuild_fault(db_path) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected page read failure (free-page rebuild)",
+            )));
+        }
+
+        let mut live: HashSet<u64> = HashSet::new();
+
+        // Catalog chains (both). A chain only ever grows (rows are deleted
+        // in place, pages are appended), so the current chain covers the
+        // persisted one — walking it covers both.
+        for root in [PageId(TABLES_PAGE_ID), PageId(COLUMNS_PAGE_ID)] {
+            for page in self.catalog.collect_chain_pages(root).await? {
+                live.insert(page.0);
+            }
+        }
+
+        // Catalog rows: the persisted directory (read at open) and the
+        // current one (after recovery). Both register pages that must stay
+        // non-allocatable.
+        let persisted_rows = self.persisted_catalog_rows.read().await.clone();
+        let current_rows = self.catalog.scan_tables().await?;
+        for row in persisted_rows.iter().chain(current_rows.iter()) {
+            if row.kind != CatalogKind::Table {
+                // View rows own no pages.
+                continue;
+            }
+            let (data_pages, chain_heads) = self
+                .collect_data_chain_strict(PageId(row.data_page_head as u64))
+                .await?;
+            live.extend(data_pages.iter().map(|page| page.0));
+            for page in self.collect_overflow_chain_pages_strict(&chain_heads).await? {
+                live.insert(page.0);
+            }
+            // The trees the directory registers.
+            for page in self
+                .collect_tree_pages(PageId(row.index_root_page_id as u64))
+                .await?
+            {
+                live.insert(page);
+            }
+            for root in &row.unique_roots {
+                for page in self.collect_tree_pages(PageId(*root as u64)).await? {
+                    live.insert(page);
+                }
+            }
+            for entry in &row.secondary_indexes {
+                for page in self.collect_tree_pages(PageId(entry.root as u64)).await? {
+                    live.insert(page);
+                }
+            }
+        }
+
+        // The trees the in-memory index managers hold (recovery re-rooting
+        // ⇒ union with the registered trees).
+        {
+            let tables = self.tables.read().await;
+            for meta in tables.values() {
+                for page in self.collect_tree_pages(meta.index_manager.root_page_id()).await? {
+                    live.insert(page);
+                }
+                for (_, uindex) in &meta.unique_indexes {
+                    for page in self.collect_tree_pages(uindex.root_page_id()).await? {
+                        live.insert(page);
+                    }
+                }
+                for sindex in &meta.secondary_indexes {
+                    for page in self.collect_tree_pages(sindex.index.root_page_id()).await? {
+                        live.insert(page);
+                    }
+                }
+            }
+        }
+
+        // MS35 (`free-page-lifecycle` R3): a controlled page-read failure
+        // aborts the traversal — the rebuild is abandoned whole, nothing is
+        // injected and the open stays successful.
+        Ok(live)
+    }
+
+    /// Strict data-page chain walk.
+    ///
+    /// The page image is parsed through the integrity module's bounds-checked
+    /// reader (`check_data_page`): the production accessors index unchecked
+    /// into a page and would panic on a damaged page, while the rebuild runs
+    /// on every open and must never crash the open. A damaged page is an
+    /// error (R3) — the rebuild is abandoned rather than judged on a
+    /// half-read ownership graph.
+    async fn collect_data_chain_strict(
+        &self,
+        head: PageId,
+    ) -> Result<(Vec<PageId>, Vec<u32>)> {
+        let mut pages = Vec::new();
+        let mut chain_heads: Vec<u32> = Vec::new();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut current = head;
+        while current.0 != 0 && visited.insert(current.0) {
+            let step = self
+                .buffer_pool
+                .with_page_data(current, |data| Ok(check_data_page(data)))
+                .await?;
+            if !step.violations.is_empty() {
+                return Err(StorageError::Internal(format!(
+                    "data page {} of the persisted directory is damaged: {}",
+                    current.0,
+                    step.violations.join("; ")
+                )));
+            }
+            pages.push(current);
+            for (_, first) in step.locators {
+                if first != 0 {
+                    chain_heads.push(first);
+                }
+            }
+            current = PageId(step.next_page_id as u64);
+        }
+        Ok((pages, chain_heads))
+    }
+
+    /// Strict overflow-chain collection: the locators found in the data pages
+    /// are followed to their chain pages; a read error or a malformed chain is
+    /// an error (R3).
+    async fn collect_overflow_chain_pages_strict(&self, chain_heads: &[u32]) -> Result<Vec<PageId>> {
+        let mut pages = Vec::new();
+        for first in chain_heads {
+            for raw in overflow::collect_overflow_pages(&self.buffer_pool, *first).await? {
+                pages.push(PageId(raw as u64));
+            }
+        }
+        Ok(pages)
+    }
+
+    /// The pages of the tree rooted at `root`.
+    ///
+    /// The tree is walked from the directory's registered root through the
+    /// integrity module's bounds-checked reader (`check_tree_page`) — a
+    /// damaged tree page is an error (R3), never a panic.
+    async fn collect_tree_pages(&self, root: PageId) -> Result<Vec<u64>> {
+        if root.0 == 0 {
+            // No tree registered (legacy row / no index) — page 0 is the
+            // catalog page and is never a tree root.
+            return Ok(Vec::new());
+        }
+        let mut pages = Vec::new();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut stack = vec![root.0];
+        while let Some(raw) = stack.pop() {
+            if !visited.insert(raw) {
+                continue;
+            }
+            let step = self
+                .buffer_pool
+                .with_page_data(PageId(raw), |data| Ok(check_tree_page(data)))
+                .await?;
+            if let Some(actual) = step.invalid_type {
+                return Err(StorageError::InvalidPageType {
+                    expected: LEAF_NODE,
+                    actual,
+                });
+            }
+            if !step.violations.is_empty() {
+                return Err(StorageError::Internal(format!(
+                    "index tree page {raw} is damaged: {}",
+                    step.violations.join("; ")
+                )));
+            }
+            pages.push(raw);
+            for child in step.children {
+                if child != 0 {
+                    stack.push(child as u64);
+                }
+            }
+        }
+        Ok(pages)
     }
 
     /// TRUNCATE a table: physically free all data pages, keep the definition.
@@ -1540,17 +2043,20 @@ impl TableManager {
         //    slot (head included) are collected first and freed before the
         //    data pages go — best-effort, same policy as the page frees.
         let data_pages = self.collect_data_pages(head).await;
+        let mut released: Vec<PageId> = Vec::new();
         for page in self.collect_overflow_chain_pages(&data_pages).await {
-            if let Err(e) = self.buffer_pool.free_page(page).await {
-                eprintln!(
+            match self.buffer_pool.free_page(page).await {
+                Ok(()) => released.push(page),
+                Err(e) => eprintln!(
                     "[truncate_table] free overflow page({}) failed: {}",
                     page.0, e
-                );
+                ),
             }
         }
         for page in data_pages.into_iter().skip(1) {
-            if let Err(e) = self.buffer_pool.free_page(page).await {
-                eprintln!("[truncate_table] free_page({}) failed: {}", page.0, e);
+            match self.buffer_pool.free_page(page).await {
+                Ok(()) => released.push(page),
+                Err(e) => eprintln!("[truncate_table] free_page({}) failed: {}", page.0, e),
             }
         }
         let guard = self.buffer_pool.get_page(head).await?;
@@ -1563,6 +2069,11 @@ impl TableManager {
         //    inherits it into the rebuilt TableMeta), then the catalog row.
         *table_meta.data_page_tail.lock().unwrap() = head;
         self.catalog.update_table_tail(name, head.0 as u32).await?;
+
+        // MS35（`free-page-lifecycle` R3）：步骤 1 的释放（溢出链页 + 尾数据
+        // 页）的锚点写 = 表头原地重置 + 目录尾指针更新，两者此刻都已发出 ⇒
+        // 释放完成标记。标记之前这些页不得可分配。
+        self.buffer_pool.complete_free_release(&released);
 
         // 3. Empty trees for all three index classes; catalog-first root
         //    write-back, then the whole-table swap (a failed catalog write
@@ -1617,14 +2128,20 @@ impl TableManager {
         }
         .await;
         if let Err(e) = build_result {
+            let mut released: Vec<PageId> = Vec::new();
             for tree in std::iter::once(&new_pk)
                 .chain(new_uniques.iter().map(|(_, t)| t))
                 .chain(new_secondaries.iter().map(|s| &s.index))
             {
                 for page in tree.collect_all_pages_tolerant().await {
-                    let _ = self.buffer_pool.free_page(page).await;
+                    if self.buffer_pool.free_page(page).await.is_ok() {
+                        released.push(page);
+                    }
                 }
             }
+            // MS35（`free-page-lifecycle` R3）：释放完成标记——新建的树从未
+            // 登记进目录（无锚点写），按保守方向等下一次成功刷盘。
+            self.buffer_pool.complete_free_release(&released);
             return Err(e);
         }
         let (old_pk, old_uniques, old_secondaries) = self
@@ -1633,6 +2150,7 @@ impl TableManager {
 
         // 4. Old trees best-effort release (drop_table policy: collect
         //    failure warns and gives up, free failures warn per page).
+        let mut released: Vec<PageId> = Vec::new();
         for tree in std::iter::once(old_pk)
             .chain(old_uniques.into_iter().map(|(_, t)| t))
             .chain(old_secondaries.into_iter().map(|s| s.index))
@@ -1640,8 +2158,11 @@ impl TableManager {
             match tree.collect_all_pages().await {
                 Ok(pages) => {
                     for page in pages {
-                        if let Err(e) = self.buffer_pool.free_page(page).await {
-                            eprintln!("[truncate_table] free_page({}) failed: {}", page.0, e);
+                        match self.buffer_pool.free_page(page).await {
+                            Ok(()) => released.push(page),
+                            Err(e) => {
+                                eprintln!("[truncate_table] free_page({}) failed: {}", page.0, e)
+                            }
                         }
                     }
                 }
@@ -1650,6 +2171,10 @@ impl TableManager {
                 }
             }
         }
+
+        // MS35（`free-page-lifecycle` R3）：旧树的释放完成标记——本次释放的
+        // 锚点写 = 步骤 3 的目录 root 更新（PK / 唯一 / 二级），已发出。
+        self.buffer_pool.complete_free_release(&released);
 
         // 5. Statement-return-is-durable: persist the head reset and every
         //    catalog rewrite (alter_drop_column precedent).

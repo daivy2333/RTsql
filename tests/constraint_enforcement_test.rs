@@ -615,6 +615,8 @@ async fn drop_table_with_unique_index_releases_pages_for_reuse() {
         other => panic!("Expected AffectedRows for DROP, got {:?}", other),
     }
 
+    // (a) 未 checkpoint：释放未持久化 ⇒ 被释放的页不得可分配——新建表拿到
+    //     的是新页（页数上界增长）。
     to_response(
         db.execute_sql("CREATE TABLE fresh (id INT PRIMARY KEY)")
             .await,
@@ -622,10 +624,27 @@ async fn drop_table_with_unique_index_releases_pages_for_reuse() {
     expect_affected(&db, "INSERT INTO fresh VALUES (1)", 1).await;
     expect_count(&db, "fresh", 1).await;
 
+    let pages_after_unpersisted = db.buffer_pool.storage().page_count();
+    assert!(
+        pages_after_unpersisted > pages_before,
+        "before the release is persisted the new table must not reuse the freed pages: before={pages_before} after={pages_after_unpersisted}"
+    );
+
+    // (b) checkpoint 之后：释放已持久化 ⇒ 被释放的页可分配——新建表复用它们
+    //     （页数上界不增长）。
+    db.checkpoint().await.unwrap();
+    let pages_before_reuse = db.buffer_pool.storage().page_count();
+    to_response(
+        db.execute_sql("CREATE TABLE fresh2 (id INT PRIMARY KEY)")
+            .await,
+    );
+    expect_affected(&db, "INSERT INTO fresh2 VALUES (1)", 1).await;
+    expect_count(&db, "fresh2", 1).await;
+
     let pages_after = db.buffer_pool.storage().page_count();
     assert!(
-        pages_after <= pages_before,
-        "drop must release data+pk+unique pages for reuse: before={pages_before} after={pages_after}"
+        pages_after <= pages_before_reuse,
+        "drop must release data+pk+unique pages for reuse: before={pages_before_reuse} after={pages_after}"
     );
 
     db.wal_buffer.as_ref().unwrap().shutdown().await;

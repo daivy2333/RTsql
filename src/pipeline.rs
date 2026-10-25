@@ -554,10 +554,25 @@ pub async fn execute_stage_routed(
                 return Err(rejection);
             }
 
+            // MS34 Iter000（T01）：回收先于本语句的隐式事务——被放弃的上一条
+            // 隐式语句必须在下一条写语句之前完成回滚（活跃集清空、索引条目
+            // 还原、同一个键可以再次插入）。
+            if let Err(reclaim_err) = target_db.reclaim_abandoned_implicit_transactions().await {
+                return Err(SqlError {
+                    message: format!("Reclaim failed: {}", reclaim_err),
+                    sqlstate: None,
+                });
+            }
+
             // DML must run inside a real transaction (MS06-T01 spec) — the
             // transaction, buffer pool and WAL all belong to the target db.
             let tx = target_db.transaction_manager.begin().await;
             let tx_id = tx.id();
+            // MS34 Iter000（T01）：语句作用域守卫——语句 future 被放弃时守卫
+            // 析构，tx id 记入登记表，由下一个触发点回收；仍在并发执行中的
+            // 语句不产生登记项，另一条语句的回收不会中止它。正常提交或中止
+            // 成功后显式解除。
+            let mut guard = target_db.implicit_tx_guard(tx_id);
 
             let abort_tables = target_db
                 .table_manager
@@ -577,11 +592,17 @@ pub async fn execute_stage_routed(
                 {
                     Ok(e) => e,
                     Err(e) => {
-                        if let Some(abort_tables) = &abort_tables {
-                            let _ = target_db
+                        // 中止失败时保留登记项——下一个触发点重试回收。
+                        let aborted = match &abort_tables {
+                            Some(abort_tables) => target_db
                                 .transaction_manager
                                 .abort(tx, &target_db.buffer_pool, abort_tables)
-                                .await;
+                                .await
+                                .is_ok(),
+                            None => false,
+                        };
+                        if aborted {
+                            guard.disarm();
                         }
                         return Err(executor_creation_error(e));
                     }
@@ -608,11 +629,13 @@ pub async fn execute_stage_routed(
                             .abort(tx, &target_db.buffer_pool, abort_tables)
                             .await
                         {
+                            // 中止失败：登记项保留——下一个触发点重试回收。
                             return Err(SqlError {
                                 message: format!("Abort failed: {}", abort_err),
                                 sqlstate: None,
                             });
                         }
+                        guard.disarm();
                     }
                 }
                 _ => {
@@ -626,6 +649,7 @@ pub async fn execute_stage_routed(
                             sqlstate: None,
                         });
                     }
+                    guard.disarm();
                 }
             }
             response
@@ -854,6 +878,16 @@ async fn execute_ctas_routed(
     routed: &RoutedTables,
     budget: &SharedBudget,
 ) -> std::result::Result<SqlOutcome, SqlError> {
+    // MS34 Iter000（T01）：回收先于本语句的隐式事务——被放弃的上一条隐式
+    // 语句必须在下一条写语句之前完成回滚。放在建表之前：回收失败不留半张
+    // 表（既有表零变化）。
+    if let Err(reclaim_err) = database.reclaim_abandoned_implicit_transactions().await {
+        return Err(SqlError {
+            message: format!("Reclaim failed: {}", reclaim_err),
+            sqlstate: None,
+        });
+    }
+
     // 0. 目标已存在 → 与建表通道同型（`DuplicateTable`）拒绝。提前于物化，
     //    免去为注定失败的语句跑完整个源结果集；错误面与「物化后建表被拒」
     //    一致，既有表零变化。
@@ -970,13 +1004,21 @@ async fn execute_ctas_routed(
     // 6. 隐式事务落行。
     let tx = database.transaction_manager.begin().await;
     let tx_id = tx.id();
+    // MS34 Iter000（T01）：语句作用域守卫——语句 future 被放弃时守卫析构，
+    // tx id 记入登记表，由下一个触发点回收；正常提交或中止成功后显式解除。
+    let mut guard = database.implicit_tx_guard(tx_id);
     let table_meta = match database.table_manager.get_table(&node.table_name).await {
         Ok(table_meta) => table_meta,
         Err(e) => {
-            let _ = database
+            let aborted = database
                 .transaction_manager
                 .abort(tx, &database.buffer_pool, &HashMap::new())
-                .await;
+                .await
+                .is_ok();
+            // 中止失败时保留登记项——下一个触发点重试回收。
+            if aborted {
+                guard.disarm();
+            }
             let _ = database.table_manager.drop_table(&node.table_name).await;
             return Err(SqlError {
                 message: e.to_string(),
@@ -1009,10 +1051,15 @@ async fn execute_ctas_routed(
     // 7. 收口：失败 → abort + 尽力 drop_table（零副作用：同名可重试）。
     if let Some(message) = insert_failure {
         let abort_tables = HashMap::from([(node.table_name.clone(), table_meta)]);
-        let _ = database
+        let aborted = database
             .transaction_manager
             .abort(tx, &database.buffer_pool, &abort_tables)
-            .await;
+            .await
+            .is_ok();
+        // 中止失败时保留登记项——下一个触发点重试回收。
+        if aborted {
+            guard.disarm();
+        }
         let _ = database.table_manager.drop_table(&node.table_name).await;
         return Err(SqlError {
             message,
@@ -1029,12 +1076,16 @@ async fn execute_ctas_routed(
         .commit(tx, &database.buffer_pool)
         .await
     {
+        // 提交失败：事务可能仍活跃——登记项保留，由下一个触发点回收。
         let _ = database.table_manager.drop_table(&node.table_name).await;
         return Err(SqlError {
             message: format!("Commit failed: {e}"),
             sqlstate: None,
         });
     }
+    // MS34 Iter000（T01）：库属隐式事务已提交 → 解除语句作用域守卫（守卫
+    // 析构时不再记入登记表）。
+    guard.disarm();
     if let Err(e) = database.maybe_auto_checkpoint().await {
         return Err(SqlError {
             message: e.to_string(),

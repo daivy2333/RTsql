@@ -6,7 +6,7 @@
 
 use crate::database::Database;
 use crate::executor::{ExecResult, Executor, PhysicalPlan};
-use crate::storage::{Result, StorageError};
+use crate::storage::{PageId, Result, StorageError};
 use std::sync::Arc;
 
 /// DROP INDEX 执行器
@@ -56,11 +56,15 @@ impl Executor for DropIndexExecutor {
         };
 
         // 物理释放（best-effort：collect 失败 warn + 放弃，先例 drop_table）
+        let mut released: Vec<PageId> = Vec::new();
         match old_tree.collect_all_pages().await {
             Ok(pages) => {
                 for page in pages {
-                    if let Err(e) = self.database.buffer_pool.free_page(page).await {
-                        eprintln!("[drop_index] free_page({:?}) failed: {}", page, e);
+                    match self.database.buffer_pool.free_page(page).await {
+                        Ok(()) => released.push(page),
+                        Err(e) => {
+                            eprintln!("[drop_index] free_page({:?}) failed: {}", page, e)
+                        }
                     }
                 }
             }
@@ -71,6 +75,10 @@ impl Executor for DropIndexExecutor {
                 );
             }
         }
+
+        // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
+        // = 目录摘除（`take_secondary_index`），已发出。
+        self.database.buffer_pool.complete_free_release(&released);
 
         Ok(Some(ExecResult::AffectedRows(0)))
     }

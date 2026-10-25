@@ -1,0 +1,2 @@
+CREATE TABLE "nipk" ("id" STRING PRIMARY KEY, "v" STRING);
+INSERT INTO "nipk" VALUES ('k1', 'x');

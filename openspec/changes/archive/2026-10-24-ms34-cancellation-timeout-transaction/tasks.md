@@ -1,0 +1,74 @@
+# Tasks: 取消、超时与事务收尾
+
+来源：proposal；设计 D1-D6。里程碑 MS34（I090）。
+
+> Status: 计划已批准。Gate 1 与 Gate 2 的「用户批准」检查点按 2026-10-24 用户原话「/openspec-autopilot 把已经规划的三个ms逐步完成，要求遵守各种规范，尤其是全量测试时候的多批次串行」与补充「因为这个项目有点大，三个ms也是串行实施就好」记为**已批准**（不是跳过——BDD 缺口扫描、实现调查、RTM、设计闭合与 Iteration 平衡审计均已完整执行）。
+
+## 1. 被放弃的隐式事务回收（Iteration 000）
+
+> Iteration 000 状态：**已接受**（`accepted`）。2026-10-24 Plan Review 对 Cycle `000-initial` 判 `rework-required`：`GAP-1` 阻塞——回收把「同一 `Database` 句柄上并发执行中仍活着的隐式事务」误判为「被放弃的事务」并中止它（未取消的语句被改变行为，违反 requirement「取消触发集合是语句 future 被放弃」与 Invariant「未发生取消的语句行为不变」；分类：Plan 遗漏）；`GAP-2` 阻塞——第三处库属隐式事务站点 ALTER TABLE DROP COLUMN 零用例覆盖。修复以 rework Cycle `iterations/000-abandoned-implicit-transaction-reclaim/001-rework.md` 的本地 repair item `T1-R1`、`T1-R2` 承载（repair item 形式，不改 Iteration Map）。2026-10-24 rework Cycle 获 `accepted`：登记表语义改为「登记项只表示『持有它的语句 future 已被放弃』」（`ImplicitTxGuard`，守卫析构是登记项的唯一来源），并发执行中的活事务不再被另一条语句的回收中止；ALTER TABLE DROP COLUMN 站点补齐回收回归用例（只断言回收契约）。本 Review 独立复核（完整 diff 逐点追踪 + 复刻父 Review 探针形态的独立探针 + 独立重跑）确认两个 GAP 均闭合；遗留四条非阻塞 Minor 与一条须在 Iteration 001 承接的事实（`TransactionManager::commit` 内的极窄提交中断窗口），均已在 Iteration 001 的 Plan Context 中登记。Iteration 001 已展开：`iterations/001-caller-visible-outcomes-and-final-regression/000-initial.md`。
+
+- [x] 1.1 先写 `abandoned_implicit_statement_is_not_committed`，确认当前是 RED：隐式语句在执行中被放弃后，同一句柄上的下一条写语句执行完，活跃事务集合仍非空，且同一个键再次插入报 `DuplicateKey`。依赖：无。验收：`cargo test --test statement_cancellation_test abandoned_implicit_statement_is_not_committed -- --test-threads=1` 失败，且失败原因是「活跃事务集合非空」或「`DuplicateKey`」，不是编译错误或用例本身写错。
+- [x] 1.2 按 D2 实现库属隐式事务登记与回收：`Database` 持有隐式事务登记表；`src/pipeline.rs` 的 DML 臂与 CTAS 路径、`src/executor/alter_table.rs` 的 ALTER TABLE DROP COLUMN 臂（三处库属隐式事务，站点清单由 2026-10-24 Plan Review 独立核对全仓 `transaction_manager.begin()` 后补记）在 `begin()` 之后登记、`commit`/`abort` 之后摘除；新增回收入口，在目标库下一次隐式写语句开始之前、`Database::checkpoint()` 之前、`Database::maybe_auto_checkpoint()` 的活跃集判定之前触发；回收走既有中止路径（`AbortTxn`、版本墓碑化、索引还原、移出活跃集、清版本条目）。按 D6 处理「表已不存在」与「中止本身失败」两种情形。依赖：1.1。验收：1.1 的用例通过；`tests/explicit_tx_test.rs`、`tests/mvcc_abort_test.rs`、`tests/mvcc_commit_test.rs`、`tests/dml_tx_id_test.rs` 仍全部通过（变更前基线：21/3/4/6 用例全绿）。**已按 rework Cycle `001-rework.md` 修正并验收**：`T1-R1` 把登记时机与登记表语义改为「登记项只表示『持有它的语句 future 已被放弃』」（`ImplicitTxGuard`，`Drop` 是登记项的唯一来源，commit/abort 成功后显式解除），并发执行中的活事务不再被另一条语句的回收中止；`T1-R2` 为第三处站点补回归用例 `abandoned_alter_table_drop_column_is_reclaimed`（只断言回收契约：回收成功返回、活跃集清空、无悬空事务；不断言数据面形态）。
+  - **2026-10-24 收窄边界对齐（措辞对齐，不改变本条的实现与完成状态）**：上句「回收走既有中止路径（`AbortTxn`、版本墓碑化、索引还原、移出活跃集、清版本条目）」描述的是**中止路径的既有语义**，不是取消场景下的无条件保证——与 `design.md` D2 的「索引条目还原的边界」注记、规格 delta 的「已知边界」三处一致：取消若落在索引写入中途，被取消语句的**行**不可见（本 change 的验收面），但它的**键**仍可能占用主键索引（再插同键被拒）；键的释放不属本 change 的验收面，由存储域的索引写侧契约承载（Issue 候选 E2，修复落在后续 change）。
+- [x] 1.3 补 `abandoned_statement_does_not_survive_reopen`：`close()` 后重开，被放弃语句写入的行不存在且同一个键可以再次插入成功（未提交页与索引条目没有随 checkpoint 落盘）。依赖：1.2。验收：`cargo test --test statement_cancellation_test -- --test-threads=1` 通过，且 1.1、1.3 两个用例的失败原因互不相同（1.1 看活跃集与同键再插，1.3 看重开后的同键再插）。
+  - **2026-10-24 Review 边界修正（不改变本条的完成状态）**：本条「同一个键可以再次插入成功」的已验收范围仅限被放弃语句的**首个键**。取消若落在索引写入中途，被取消语句的其余键仍占用主键索引（再插同键报 `DuplicateKey`）——Plan Review 的 Issue 候选 E2（已独立复现，见 `iterations/001-caller-visible-outcomes-and-final-regression/000-initial.md` 的 Plan Review）。本条「行不存在」「未提交数据不随 checkpoint 落盘」的验收面不受影响。键的释放由 2.6 收窄后的规格标注为存储域边界，修复由存储域的后续 change 承担。
+
+## 2. 调用方可见的三种结果与收尾回归（Iteration 001）
+
+- [x] 2.1 先写 `committed_statement_survives_undelivered_result`：显式事务内插入一行，在提交完成之后放弃 `Database::commit` 的 future，该行仍已提交（同会话读得到、`close` 后重开仍在）。依赖：Iteration 000。验收：先确认 RED 或「场景不成立」的判据——若放弃点实际落在提交完成之前，该用例必须失败而不是误判为通过；测试用 `TransactionManager::active_transactions()` 变空作为「提交已完成」的锚点，锚点用 `yield_now` 轮询，不得引入定时器阈值或身份机制。
+- [x] 2.2 先写 `abandoned_statement_in_explicit_tx_keeps_tx_open`：显式事务内的语句被放弃后，事务仍然活跃可用，调用方回滚后该语句的效果消失、调用方提交后该效果持久。依赖：2.1。验收：`cargo test --test statement_cancellation_test abandoned_statement_in_explicit_tx_keeps_tx_open -- --test-threads=1` 通过。
+- [x] 2.3 先写 `timeout_in_explicit_tx_is_not_a_rollback`：显式事务内的语句被 `tokio::time::timeout` 放弃后，事务仍然活跃、行仍在事务内，只有调用方显式回滚才撤销它。依赖：2.2。验收：`cargo test --test statement_cancellation_test timeout_in_explicit_tx_is_not_a_rollback -- --test-threads=1` 通过。
+- [x] 2.4 先写 `session_keeps_working_after_abandoned_statement`：一条语句被放弃后同一会话继续写入并 `close` 后重开，后续写入正常提交、重开后数据完整。依赖：2.3。验收：`cargo test --test statement_cancellation_test -- --test-threads=1` 全部通过。
+- [x] 2.5 按 M19 做全量分批回归（收尾验证，整个 change 一次）。依赖：2.4。验收：`--lib --bins` 一批；`tests/*.rs` 按文件名字典序分组，每批 8-12 个测试目标，每批一次独立的 `cargo test --test <f1> ... --test <fn> -- --test-threads=1` 调用；批间顺序执行、同一时刻只有一批在跑；每批退出码为 0 且 `test result:` 的 failed 计数为 0；记录各批 passed/failed 计数并与变更前的目标清单做覆盖对账（不重不漏）。
+
+> 2026-10-24：Cycle `iterations/001-caller-visible-outcomes-and-final-regression/000-initial.md` 实施完成（Act Response 状态 `reported`）。Plan Review 判 `replan-required`（判定与证据见该 Cycle 的 Plan Review）：`GAP-1` 阻塞——规格无条件断言的「索引条目被还原 / 同一个键可以再次插入成功」在取消落在索引写入中途时不成立（只对被取消语句的**首个键**成立；Issue 候选 E2 已独立复现），合并进权威规格库会把未验收行为写进规格；收窄由 2.6 承担，缺陷由 Issue 承载。四个新用例都在 `tests/statement_cancellation_test.rs`；产品代码零改动。
+- [x] 2.6 规格收窄与边界回归（replan 追加）：把 `specs/statement-cancellation-outcome/spec.md` 收窄到本 change 已验收的行为边界——requirement「提交前被取消的语句不提交」不再无条件断言「索引条目被还原」，两个场景不再断言「同一个键可以再次插入成功」；改为记录已知边界（取消落在索引写入中途时，被放弃语句的**行**不可见、但其**键**仍可能占用主键索引；键的释放由存储域的索引写侧契约承载，作为 Issue 候选另行处置）。同时在 `tests/statement_cancellation_test.rs` 的 2.4 用例上补一条**同一会话**形态的断言（回收完成后同一会话读不到被放弃语句写入的行），使收窄后场景 1 保留的「被放弃语句写入的行不可见」在仓库里有直接断言（此前只有重开后的形态被断言）。依赖：2.5。验收：`cargo test --test statement_cancellation_test -- --test-threads=1` 退出码 0（八个用例全部通过、failed 计数 0，用例数不变）；batch 10（`statement_cancellation_test` 所在批）单独重跑退出码 0 且 failed 计数 0；收窄后的每条规格断言都能映射到一个用例。
+  - **已验收（2026-10-24，replan Cycle `iterations/001-caller-visible-outcomes-and-final-regression/001-replan.md`）**：规格 delta / `tasks.md` / `design.md` 三处措辞一致，取消场景下不再有「索引条目被还原」「同一个键可以再次插入成功」的**无条件**断言（`tasks.md` 任务 1.2 的「索引还原」补了与 `design.md` D2 同形的边界对齐注记；1.3 与 Iteration 000 Stable result 的原文保留，各自带已写明的 Review 边界修正）；`tests/statement_cancellation_test.rs` 的 2.4 用例新增**同一会话**形态断言（回收完成后同一会话读不到被放弃语句写入的键 1..2000），用例数仍为 8；`cargo test --test statement_cancellation_test -- --test-threads=1` 退出码 0（8 passed / 0 failed）；batch 10 单独重跑退出码 0（168 passed / 0 failed）；收窄后的每条规格断言都能映射到一个用例（映射表见该 Cycle 的 Act Response）。E1 / E2 / C1 三个 Issue 候选按「可承载」格式在 Act Response 报告，只报告不登记。产品代码零改动。
+  - **Plan Review 2026-10-24**：2.6 的 (a)(b)(c)(d) 四项判定满足；判**当前 Cycle 修复**——repair item `2.6-R1`（规格 delta 与 design/proposal/README 的「取消触发来源」枚举与实现不符，须改为与实现一致的陈述），`Review Result` 保持 `pending`。本条的完成状态不变，修复细节见 `iterations/001-caller-visible-outcomes-and-final-regression/001-replan.md` 的 Plan Review。
+  - **repair item `2.6-R1` 已实施（2026-10-24，当前 Cycle `001-replan.md`；Act Response 状态 `reported`，待 Plan 重新 Review）**：按 Plan Review 的 F1 / GAP-1 修正「取消触发来源」的枚举——规格 delta 的 Purpose（`:5`）与 R1 正文（`:11`）、场景标题与 WHEN（`:13`、`:15`）、`design.md` D1（`:21`）与时序图 Note（`:56`）、`proposal.md`（`:11`、`:41`）、`README.md`（`:3`）不再把「网络连接在结果送达前断开」列为取消触发来源；R1 内补入准确陈述「客户端连接在结果送达前断开时，库入口 SHALL NOT 放弃正在执行的语句——语句执行完毕并提交，调用方得到的只是未送达的结果，按『提交已完成但调用方未收到结果时语句已提交』处理」。requirement / scenario 数量不变（6 / 10），用例数仍为 8，产品代码与测试文件零改动。
+  - **第二次 Plan Review（复审 `2.6-R1` 的实施，2026-10-24）**：判**当前 Cycle 修复**——repair item `2.6-R2`（`tests/statement_cancellation_test.rs:579-580` 的用例注释仍把「连接断开」列为与丢弃/超时同类的取消事件，与实现和已修正的规格 delta 相反；仅注释，不改行为、不改用例数、不改断言），`Review Result` 保持 `pending`。上一版 F1 / GAP-1 已闭合：delta 的 R1 / Purpose / 场景与 `design.md` / `proposal.md` / `README.md` 的同源措辞已与实现一致（断开不是取消触发来源），requirement / scenario 仍为 6 / 10，delta 的每条行为性断言都已由本 change 的用例验收（已知边界注记只描述「行不可见 / 键可能仍占用」，未把未验收行为写成已验收）；2.5 的 2163 / 0 / 2 继续成立（产品代码自该结论产生后未变，其余 12 批覆盖范围未变，未重跑全量）。本条的完成状态不变，修复细节见 `iterations/001-caller-visible-outcomes-and-final-regression/001-replan.md` 的 Plan Review。
+  - **repair item `2.6-R2` 已实施（2026-10-24，当前 Cycle `001-replan.md`；Act Response 状态 `reported`，待 Plan 重新 Review）**：按 Plan Review 的 F3 / GAP-2 修正 `tests/statement_cancellation_test.rs:579-580`（用例 `timeout_in_explicit_tx_is_not_a_rollback` 的文档注释）——原「丢弃、超时与断开在库入口是同一类事件」改为「丢弃与超时在库入口是同一类事件；连接断开不是取消触发来源——语句照常执行完毕并提交，调用方得到的只是未送达的结果」。**仅注释**：断言、夹具（隔离级别、键取值范围、`ABANDONED_SQL`、`SOURCE_ROWS`、两个定时量）与用例数（仍为 8）均未改，requirement / scenario 数量不变（6 / 10），产品代码零改动；`cargo test --test statement_cancellation_test -- --test-threads=1` 退出码 0（8 passed / 0 failed），`cargo fmt --check` 退出码 0。全仓检索确认不再残留「断开 = 取消」的表述（`tests/` 内的唯一命中即上述准确陈述；`openspec/specs/` 72 域 0 命中）。
+  - **第三次 Plan Review（最终，2026-10-24）**：判 **`accepted`**——GAP-1 / GAP-2 闭合；delta 的 6 / 10 每条行为性断言均由本 change 的用例验收，已知边界注记准确，**delta 可合并**；deviation 6 裁定为正确（执行依据优先于与之冲突的派生计数判据，本 Review 不再要求「0 命中」）；2163 / 0 / 2 沿用成立；E1 / E2 / C1 可承载格式复核通过。遗留非阻塞 Minor 五条与收尾交接见 `iterations/001-caller-visible-outcomes-and-final-regression/001-replan.md` 的 Plan Review（F7 与「收尾交接」段）。本条完成状态不变。
+
+## Requirements Traceability Matrix
+
+| Requirement | Task | First Test | Status |
+|---|---|---|---|
+| 取消触发集合是语句 future 被放弃 | 1.2 | `abandoned_implicit_statement_is_not_committed` | Covered |
+| 提交前被取消的语句不提交 | 1.1、1.2、1.3 | `abandoned_implicit_statement_is_not_committed` | Covered |
+| 取消不留下悬空事务（`提交前被取消的语句不提交` 的场景） | 1.2 | `abandoned_implicit_statement_is_not_committed` | Covered |
+| 提交已完成但调用方未收到结果时语句已提交 | 2.1 | `committed_statement_survives_undelivered_result` | Covered |
+| 显式事务继续还是回滚由调用方决定 | 2.2 | `abandoned_statement_in_explicit_tx_keeps_tx_open` | Covered |
+| 超时不代替回滚 | 2.3 | `timeout_in_explicit_tx_is_not_a_rollback` | Covered |
+| 取消之后后台 I/O 按会话级生命周期收尾 | 2.4 | `session_keeps_working_after_abandoned_statement` | Covered |
+
+> **2026-10-24 Review 边界修正（RTM 的 requirement 映射不变）**：「提交前被取消的语句不提交」的验收面由 2.6 收窄为——被放弃语句的**行**不可见、其隐式事务在下一条写语句之前已回滚（活跃集为空）、未提交数据不随 checkpoint 落盘；**键**的索引条目释放被标注为存储域边界（Issue 候选 E2，已独立复现），不属本 change 的验收面，修复由存储域的后续 change 承担。
+
+## Iteration Plan
+
+### Iteration 000: 被放弃的隐式事务回收
+
+- Tasks: 1.1、1.2、1.3
+- Depends on: None
+- 状态：**已接受**（2026-10-24）。两 Cycle：`000-initial` 经 Plan Review 判 `rework-required`（`GAP-1` 并发误伤、`GAP-2` 第三站点零覆盖，均为 Plan 遗漏）→ `001-rework` 以 repair item `T1-R1` / `T1-R2` 修复后判 `accepted`。稳定结果由「被放弃即登记 + 三点回收」机制承载，登记表语义为「持有它的语句 future 已被放弃」。
+- Stable result: 被放弃的隐式语句不提交；它的隐式事务在同一句柄的下一次写语句和下一次 checkpoint 之前已回滚（活跃事务集合为空、索引条目已还原、同键可再插）；被放弃语句的未提交数据不随 checkpoint 落盘，重开后不存在。
+  - **2026-10-24 Review 边界修正（Iteration 000 的 Cycle 文件不变）**：上句「索引条目已还原、同键可再插」的已验收范围仅限被放弃语句的**首个键**（取消落在索引写入中途时，其余键仍占用主键索引——Issue 候选 E2，已独立复现）。「活跃事务集合为空」「被放弃语句写入的行不可见」「未提交数据不随 checkpoint 落盘」的验收面不受影响。
+- Verification boundary: `tests/statement_cancellation_test.rs` 的 1.1、1.3 两个用例，外加既有事务类用例不回归（`explicit_tx_test`、`mvcc_abort_test`、`mvcc_commit_test`、`dml_tx_id_test`）。**本 Iteration 不做全量回归**——高开销验证按 change 预算，整个 change 一次，收尾验证在 Iteration 001（2.5）。
+- Diagnostic boundary: `src/pipeline.rs` 的 DML 臂与 CTAS 路径、`src/database.rs` 的登记表与回收挂载点、`src/transaction/manager.rs` 的中止路径与版本条目
+- Non-goals: 调用方可见的三种结果约定（场景 3/4/5）、提交已完成但未送达的场景、后台 I/O 收尾的会话级核对、公共取消或 deadline API、CLI 信号停机行为
+
+### Iteration 001: 调用方可见的三种结果与收尾回归
+
+- Tasks: 2.1、2.2、2.3、2.4、2.5、2.6
+- Depends on: Iteration 000
+- 状态：**已接受**（2026-10-24）。初始 Cycle `iterations/001-caller-visible-outcomes-and-final-regression/000-initial.md`（`Plan Context` 状态 `ready`，Gate 2 PASS）实施完成，Act Response 状态 `reported`；Plan Review 判 **`replan-required`**——2.1–2.5 的 Acceptance 全部满足，但规格无条件断言的「索引条目已还原 / 同一个键可以再次插入成功」在取消落在索引写入中途时不成立（只对被取消语句的首个键成立），规格需收窄（新增任务 2.6），缺陷由 Issue 承载（不在本 change 修）。replan Cycle `iterations/001-caller-visible-outcomes-and-final-regression/001-replan.md`（`Plan Context` 状态 `ready`，Gate 2 PASS）实施完成 2.6（Act Response 状态 `reported`）。2026-10-24 Plan Review 判**当前 Cycle 修复**（repair item `2.6-R1`，`Review Result` 保持 `pending`，不创建后继 Cycle）：规格 delta 把「网络连接在结果送达前断开」写成与丢弃/超时同类的取消触发来源，但实现不会因客户端断开而放弃在飞语句（`src/network/connection.rs:18-35` 顺序执行 → 先 `await` 完语句再写响应；`src/network/server.rs:40-65` 的 `select!` 只用于 accept/停机），该断开实际落在「提交已完成但未送达 → 已提交」一侧，并与同一 delta 的 R3 冲突。repair item `2.6-R1` 已于当前 Cycle 实施（Act Response 状态 `reported`，待 Plan 重新 Review）：规格 delta 的 Purpose 与 R1、`design.md` D1 与时序图 Note、`proposal.md`、`README.md` 的「取消触发来源」枚举改为只列丢弃与超时，并补入「断开不是取消触发来源——语句照常执行完毕并提交，调用方得到的只是未送达的结果」的准确陈述（详见该 Cycle 的 Act Response）。2.2 / 2.3 / 2.4 为表征用例（行为当前已成立，首次运行即通过并记录基线）；2.1 需用 `set_checkpoint_bytes_threshold(1)` 把 `Database::commit` 的尾段拉宽成一个真 checkpoint，「提交已完成但未送达」的窗口才稳定可达。2026-10-24 第二次 Plan Review（复审 `2.6-R1` 的实施）判**当前 Cycle 修复**——repair item `2.6-R2`（`tests/statement_cancellation_test.rs:579-580` 的用例注释仍把「连接断开」列为与丢弃/超时同类的取消事件，与实现和已修正的规格 delta 相反），`Review Result` 保持 `pending`、不创建后继 Cycle；GAP-1 已闭合，规格 delta 的每条行为性断言都已由本 change 的用例验收，2.5 的 2163 / 0 / 2 继续成立。repair item `2.6-R2` 已于当前 Cycle 实施（Act Response 状态 `reported`，待 Plan 重新 Review）：`tests/statement_cancellation_test.rs:579-580` 的用例注释改为「丢弃与超时在库入口是同一类事件；连接断开不是取消触发来源——语句照常执行完毕并提交，调用方得到的只是未送达的结果」（仅注释；断言、夹具、用例数 8、requirement / scenario 6 / 10 均未改；`cargo test --test statement_cancellation_test -- --test-threads=1` 退出码 0、8 passed / 0 failed；全仓检索无「断开 = 取消」残留）。2026-10-24 第三次 Plan Review（最终，复审 repair item `2.6-R2` 的实施）判 **`accepted`**：GAP-1 / GAP-2 均已闭合——测试文件的用例注释已改为与实现和规格 delta 一致的准确陈述，全仓无「断开 = 取消」的残留表述；规格 delta 的 6 条 Requirement / 10 条 Scenario 的每一条行为性断言都已由本 change 的用例验收，已知边界注记准确（行不可见 / 键可能仍占用 / 键释放不属本域保证面），**可合并**；deviation 6（字面判据「0 命中」与规定的替换文本互斥）经裁定为正确——执行依据优先于派生计数判据，本 Review 不再要求「0 命中」；2.5 的 2163 / 0 / 2 继续成立（产品代码未变、受影响批次已单独重跑，其余 12 批沿用，本轮未重跑全量）；Issue 候选 E1 / E2 / C1 的可承载格式复核通过（根因位置与行号经独立读码核对）。遗留非阻塞 Minor 五条见该 Cycle 的 Plan Review F7（键复用的无条件表述残留在 `proposal.md` 与 Iteration 000 两个用例注释、`README.md` 状态行过时、全局 `tasks.md` 的 MS34-T01 行仍列「断开」、Act Response 行号引用笔误）。`Review Result` 为 `accepted`，**无后继 Cycle、无后继 Iteration**；规格合并、全局 tasks / SNAPSHOT / M / R / I 同步、Issue 登记与 change 归档属 docs-maintainer 的收尾职责（交接说明见该 Cycle 的 Plan Review）。
+- Next Iteration: None——Iteration 001 是本 change 的最后一个 Iteration。change 的 **Iteration Map 终态**：Iteration 000 `accepted`（Cycle 000 `rework-required` → Cycle 001 `accepted`）+ Iteration 001 `accepted`（Cycle 000 `replan-required` → Cycle 001 `accepted`）。
+- Stable result: 三种结果都能从库入口观察到——提交前被取消则未提交、提交已完成但未送达则已提交、显式事务由调用方继续或回滚；超时不代替回滚；取消之后会话与后台 I/O 仍按会话级生命周期工作；全量分批回归 0 failed；**行为规格只描述本 change 已验收的行为**（未验收的键释放能力标注为存储域边界，不写进权威规格库）。
+- Verification boundary: `tests/statement_cancellation_test.rs` 的 2.1-2.4 四个用例 + M19 分批全量回归（收尾验证，2.5）；2.6 只重跑受影响目标（`statement_cancellation_test` 单文件与 batch 10），**不重跑全量**——2.5 的其余 12 批覆盖范围未变，其结论沿用。
+- Diagnostic boundary: `Database::commit` 的提交边界与自动 checkpoint 窗口、显式事务句柄的收尾路径、`src/network/connection.rs` 的结果送达路径（只作为触发来源核对，不改协议面）
+- Non-goals: 协作式取消上下文与 deadline 公共 API、完整分级诊断（I096）、真实断电与 `kill -9` 语义、WAL 格式与 checkpoint 九步；**索引写侧原子性 / 键释放的修复**（Issue 候选 E1、E2，落在存储/索引层，不在本 change 修）
+
+## 平衡审计
+
+000 回答「语句被放弃之后，库自己的隐式事务怎么收尾」——故障域是写路径的事务生命周期：被放弃的事务留在活跃集，索引条目没还原，未提交页会被 checkpoint 写盘。001 回答「调用方从库入口能判断出什么」——故障域是调用方可见语义：提交已完成但未送达、显式事务继续还是回滚、超时不代替回滚、后台 I/O 收尾。两段的验证命令不同（000 只跑事务类目标，001 跑取消类目标加收尾全量），合成一段会在同一次失败里分不清是回收机制没生效还是约定不成立。001 依赖 000：场景 3/4/5 都要先制造一次放弃，000 的回收机制决定了这些场景的现场是确定的。再往下拆不成立——1.1 单个用例只证明「回收没发生」，形不成可依赖的稳定结果；2.1-2.4 四个用例共享同一条「放弃—观察」夹具，拆开会让夹具重复四次。最后一个 Iteration 承担整个 change 唯一一次全量分批回归（M19），不追加中间全量。

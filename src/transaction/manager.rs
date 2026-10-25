@@ -1,8 +1,9 @@
+use crate::storage::page_format::SlottedPageRef;
 use crate::storage::{
     read_tuple_from_data_page, update_version_header_in_data_page, BufferPool, PageId, Result,
     RowId, StorageError, TableMeta,
 };
-use crate::transaction::{Snapshot, TransactionError, TransactionId};
+use crate::transaction::{Snapshot, TransactionError, TransactionId, VersionHeader};
 use crate::wal::{WALBuffer, WalRecord};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -146,7 +147,23 @@ impl TransactionManager {
         tables: &HashMap<String, Arc<TableMeta>>,
     ) -> Result<()> {
         let tx_id = tx.id();
+        self.abort_by_id(tx_id, buffer_pool, tables).await
+    }
 
+    /// Abort a transaction addressed by id (MS34 Iter000, T01).
+    ///
+    /// Same path as [`TransactionManager::abort`] — WAL `AbortTxn` record,
+    /// uncommitted version cleanup (index entries restored, versions
+    /// tombstoned), removal from the active list, `tx_versions` cleared —
+    /// but the transaction is addressed by id instead of by an owned handle.
+    /// The abandoned-implicit-transaction reclaim holds only the id (the
+    /// statement future that owned the handle is gone).
+    pub async fn abort_by_id(
+        &self,
+        tx_id: u64,
+        buffer_pool: &BufferPool,
+        tables: &HashMap<String, Arc<TableMeta>>,
+    ) -> Result<()> {
         // WAL: write AbortTxn record (no need to wait for persistence)
         if let Some(wal) = self.wal_buffer.read().await.as_ref() {
             wal.append(WalRecord::AbortTxn { tx_id }).await;
@@ -166,6 +183,29 @@ impl TransactionManager {
         self.tx_versions.write().await.remove(&tx_id);
 
         Ok(())
+    }
+
+    /// Drop the version entries a transaction holds on the named tables
+    /// (MS34 Iter000, T01).
+    ///
+    /// Used by the abandoned-implicit-transaction reclaim: a table that no
+    /// longer exists (dropped after the statement was abandoned) has no data
+    /// and no index entry left to restore — the drop already released them —
+    /// so its version entries are removed from the manager before the abort
+    /// runs. Otherwise the abort stops at the missing table meta and the
+    /// transaction stays active.
+    pub async fn discard_tx_version_tables(&self, tx_id: u64, table_names: &[String]) {
+        let mut versions = self.tx_versions.write().await;
+        let mut drop_tx = false;
+        if let Some(entry) = versions.get_mut(&tx_id) {
+            for name in table_names {
+                entry.remove(name);
+            }
+            drop_tx = entry.is_empty();
+        }
+        if drop_tx {
+            versions.remove(&tx_id);
+        }
     }
 
     /// Get current active transactions
@@ -300,6 +340,16 @@ impl TransactionManager {
             // A 趟 / B 趟划分（MS24 replan 2.9）：按「当前是否持有索引条目」
             // 分桶——A 趟为 INSERT / UPDATE 形态（条目在位，现状回退或移除），
             // B 趟为条目已随删除清理的墓碑（需从前驱存活版本还原）。
+            //
+            // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+            // Iteration 001（ISS24）：登记到 `tx_versions` 的版本之外，还要
+            // 收回本事务在数据链上创建、但**未被登记**的版本——放弃窗口可能
+            // 落在「写出版本槽」与「登记版本」之间，墓碑已在链上（按其删除者
+            // 的事务状态压制前驱版本），而事务管理器看不到它 ⇒ 中止清理无法
+            // 中和它 ⇒ 被放弃的改写隐藏了它已开始改写的行。
+            let mut row_ids = row_ids;
+            row_ids.extend(versions_created_by(buffer_pool, table_meta, tx_id).await?);
+
             let mut indexed = Vec::new();
             let mut tombstones = Vec::new();
             for row_id in row_ids {
@@ -478,6 +528,68 @@ impl TransactionManager {
 
         Ok(())
     }
+}
+
+/// 数据链上由 `tx_id` 创建的版本（墓碑与其新版本）。
+///
+/// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+/// Iteration 001（ISS24）：放弃（语句 future 被丢弃）可能落在「写出版本槽」
+/// 与「登记版本到事务管理器」之间——版本槽已经在链上（墓碑按其删除者的事务
+/// 状态压制前驱版本），而事务管理器看不到它 ⇒ 中止清理无法中和它 ⇒ 被放弃
+/// 的改写隐藏了它已开始改写的行、且其主键条目不再被还原。
+///
+/// 按**创建者事务 id**在链上找回这些版本，使中止清理覆盖完整。已登记的版本
+/// 同样在链上（重复登记由调用方的集合去重），因此本函数只增不减。
+///
+/// 终止条件：沿 `next_page_id` 走链至 terminal（`next_page_id == 0`）为止；
+/// 损坏页 / 越界页按既有页读错误面显式传播，不静默。链成环时按既有
+/// `data_chain_status` / `heal_stale_tail` 的形态显式报错，不无限走查。
+async fn versions_created_by(
+    buffer_pool: &BufferPool,
+    table_meta: &Arc<TableMeta>,
+    tx_id: u64,
+) -> Result<Vec<RowId>> {
+    let mut found = Vec::new();
+    let mut visited: HashSet<PageId> = HashSet::new();
+    let mut page_id = Some(table_meta.data_page_head);
+    while let Some(pid) = page_id {
+        if !visited.insert(pid) {
+            return Err(StorageError::Internal(format!(
+                "data page chain cycle while scanning versions of tx {} for table '{}'",
+                tx_id, table_meta.name
+            )));
+        }
+        let (next_page, rids) = buffer_pool
+            .with_page_data(pid, |data| -> Result<(u32, Vec<RowId>)> {
+                let slotted = SlottedPageRef::new(data);
+                let mut rids = Vec::new();
+                for index in 0..slotted.slot_count() {
+                    let Some(slot) = slotted.get_slot(index) else {
+                        continue;
+                    };
+                    let slot_data = slotted.get_slot_data(&slot);
+                    if slot_data.len() < VersionHeader::SIZE {
+                        continue;
+                    }
+                    let Some(vh) = VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE])
+                    else {
+                        continue;
+                    };
+                    if vh.create_tx_id() == tx_id {
+                        rids.push(RowId::new(pid.0 as u32, slot.logical_id));
+                    }
+                }
+                Ok((slotted.header().next_page_id, rids))
+            })
+            .await?;
+        found.extend(rids);
+        page_id = if next_page == 0 {
+            None
+        } else {
+            Some(PageId(next_page as u64))
+        };
+    }
+    Ok(found)
 }
 
 /// 墓碑行索引条目还原（MS24 Iter001 replan 2.9 / design D9）：从墓碑的

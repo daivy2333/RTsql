@@ -1,4 +1,5 @@
 use crate::storage::{
+    integrity,
     page_format::{Key, RowId, Slot, SlottedPage, SlottedPageHeader, SlottedPageRef, MAX_KEY_LEN},
     Page, PageId, StorageError,
 };
@@ -6,6 +7,82 @@ use crate::storage::{
 // B-Tree 常量
 pub const LEAF_NODE: u8 = 0x01;
 pub const INTERNAL_NODE: u8 = 0x02;
+
+/// 页内槽目录的最大条目数——槽目录自页尾向上生长（每项 `Slot::SIZE` 字节），
+/// 不得触及页头。页头声称的槽数超过该上限时，槽目录定位会下溢成越界切片，
+/// 故访问器在读槽**之前**先做此界限判断。
+const MAX_PAGE_SLOTS: usize = (Page::PAGE_SIZE - SlottedPageHeader::SIZE) / Slot::SIZE;
+
+/// 槽负载是否完整落在页的数据区内——判据与 `integrity::validate_slots` 一致：
+/// 不与页头重叠、不越过槽目录区。
+///
+/// 越界的槽偏移 / 长度判为 `false`：调用方据此**不得**切页字节（无界切片
+/// 在读 / 写热路径上造成进程 abort——本 change Iteration 006 承载的缺陷）。
+fn slot_payload_in_bounds(header: &SlottedPageHeader, slot: &Slot) -> bool {
+    let slot_area_start = Page::PAGE_SIZE.saturating_sub(header.slot_count as usize * Slot::SIZE);
+    let start = slot.offset as usize;
+    let Some(end) = start.checked_add(slot.length as usize) else {
+        return false;
+    };
+    start >= SlottedPageHeader::SIZE && end <= slot_area_start
+}
+
+/// 只读页的有界槽读——越界槽返回 `None`（不切越界区间）。
+fn bounded_slot_data_ref<'a>(slotted: &'a SlottedPageRef<'_>, index: usize) -> Option<&'a [u8]> {
+    if index >= MAX_PAGE_SLOTS {
+        return None;
+    }
+    let slot = slotted.get_slot(index)?;
+    if !slot_payload_in_bounds(slotted.header(), &slot) {
+        return None;
+    }
+    Some(slotted.get_slot_data(&slot))
+}
+
+/// 可写页的有界槽读——越界槽返回 `None`（不切越界区间）。
+fn bounded_slot_data_mut<'a>(slotted: &'a SlottedPage<'_>, index: usize) -> Option<&'a [u8]> {
+    if index >= MAX_PAGE_SLOTS {
+        return None;
+    }
+    let slot = slotted.get_slot(index)?;
+    if !slot_payload_in_bounds(slotted.header(), &slot) {
+        return None;
+    }
+    Some(slotted.get_slot_data(&slot))
+}
+
+/// 读 / 写路径上的**索引树页校验闸门**。
+///
+/// 损坏的索引页在读 / 写路径上**不得**被跳过：跳过该页所在的子树会让确实
+/// 存在的行得到「行不存在」的答案（静默错读）。因此每一次「据索引树页字节
+/// 决定下降 / 取条目 / 取子指针」的访问都先过这道闸门，损坏页让语句以点名
+/// 损坏页与索引树根页的错误结束。
+///
+/// 释放路径的处置方向相反（计数 + 告警 + 跳过——Iteration 002 已确立），
+/// 本闸门不改变它。
+pub(crate) fn ensure_index_page_intact(
+    data: &[u8],
+    page_id: u64,
+    index_root_page_id: u64,
+) -> crate::storage::Result<()> {
+    let check = integrity::check_tree_page(data);
+    if let Some(actual) = check.invalid_type {
+        // 页类型不属于任何树——沿用既有 `InvalidPageType` 形态（与释放路径
+        // `IndexManager::collect_all_pages` 同款），本 Cycle 不改该变体。
+        return Err(StorageError::InvalidPageType {
+            expected: LEAF_NODE,
+            actual,
+        });
+    }
+    if !check.violations.is_empty() {
+        return Err(StorageError::CorruptedIndexPage {
+            page_id,
+            index_root_page_id,
+            detail: integrity::violation_summary(&check.violations),
+        });
+    }
+    Ok(())
+}
 
 /// Leaf split 操作的中间数据（由 BTree 层消费）
 pub struct LeafSplitData {
@@ -80,10 +157,9 @@ impl<'a> LeafNode<'a> {
 
     /// 获取某个 key
     pub fn get_key(&self, index: usize) -> Option<Key> {
-        let slot = self.slotted.get_slot(index)?;
+        let data = bounded_slot_data_mut(&self.slotted, index)?;
 
         // 每个 slot 存储 Key (32 bytes) + RowId (6 bytes)
-        let data = self.slotted.get_slot_data(&slot);
         if data.len() < MAX_KEY_LEN + RowId::SIZE {
             return None;
         }
@@ -93,9 +169,8 @@ impl<'a> LeafNode<'a> {
 
     /// 获取某个 RowId
     pub fn get_row_id(&self, index: usize) -> Option<RowId> {
-        let slot = self.slotted.get_slot(index)?;
+        let data = bounded_slot_data_mut(&self.slotted, index)?;
 
-        let data = self.slotted.get_slot_data(&slot);
         if data.len() < MAX_KEY_LEN + RowId::SIZE {
             return None;
         }
@@ -551,8 +626,7 @@ impl<'a> LeafNodeRef<'a> {
 
     /// 获取某个 key
     pub fn get_key(&self, index: usize) -> Option<Key> {
-        let slot = self.slotted.get_slot(index)?;
-        let data = self.slotted.get_slot_data(&slot);
+        let data = bounded_slot_data_ref(&self.slotted, index)?;
         if data.len() < MAX_KEY_LEN + RowId::SIZE {
             return None;
         }
@@ -561,8 +635,7 @@ impl<'a> LeafNodeRef<'a> {
 
     /// 获取某个 RowId
     pub fn get_row_id(&self, index: usize) -> Option<RowId> {
-        let slot = self.slotted.get_slot(index)?;
-        let data = self.slotted.get_slot_data(&slot);
+        let data = bounded_slot_data_ref(&self.slotted, index)?;
         if data.len() < MAX_KEY_LEN + RowId::SIZE {
             return None;
         }
@@ -667,10 +740,9 @@ impl<'a> InternalNode<'a> {
 
     /// 获取某个 key
     pub fn get_key(&self, index: usize) -> Option<Key> {
-        let slot = self.slotted.get_slot(index)?;
+        let data = bounded_slot_data_mut(&self.slotted, index)?;
 
         // 每个 slot 存储 Key (32 bytes) + ChildPageId (4 bytes)
-        let data = self.slotted.get_slot_data(&slot);
         if data.len() < MAX_KEY_LEN + 4 {
             return None;
         }
@@ -680,9 +752,8 @@ impl<'a> InternalNode<'a> {
 
     /// 获取某个 child_page_id
     pub fn get_child_page_id(&self, index: usize) -> Option<u32> {
-        let slot = self.slotted.get_slot(index)?;
+        let data = bounded_slot_data_mut(&self.slotted, index)?;
 
-        let data = self.slotted.get_slot_data(&slot);
         if data.len() < MAX_KEY_LEN + 4 {
             return None;
         }
@@ -1037,8 +1108,7 @@ impl<'a> InternalNodeRef<'a> {
 
     /// 获取某个 key
     pub fn get_key(&self, index: usize) -> Option<Key> {
-        let slot = self.slotted.get_slot(index)?;
-        let data = self.slotted.get_slot_data(&slot);
+        let data = bounded_slot_data_ref(&self.slotted, index)?;
         if data.len() < MAX_KEY_LEN + 4 {
             return None;
         }
@@ -1047,8 +1117,7 @@ impl<'a> InternalNodeRef<'a> {
 
     /// 获取某个 child_page_id
     pub fn get_child_page_id(&self, index: usize) -> Option<u32> {
-        let slot = self.slotted.get_slot(index)?;
-        let data = self.slotted.get_slot_data(&slot);
+        let data = bounded_slot_data_ref(&self.slotted, index)?;
         if data.len() < MAX_KEY_LEN + 4 {
             return None;
         }

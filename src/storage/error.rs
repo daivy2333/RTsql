@@ -50,6 +50,20 @@ pub enum StorageError {
     #[error("Invalid page type: expected {expected:#x}, got {actual:#x}")]
     InvalidPageType { expected: u8, actual: u8 },
 
+    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+    /// Iteration 006（IRBR）：读 / 写路径上的**损坏索引页**——专用变体同时
+    /// 点名损坏页号与该索引树的根页号（索引身份）。
+    ///
+    /// 读 / 写路径**绝不**跳过损坏页所在的子树：跳过一个子树会让确实存在的
+    /// 行得到「行不存在」的答案（静默错读）。释放路径的处置方向相反（计数 +
+    /// 告警 + 跳过——Iteration 002 已确立），本变体不改变它。
+    #[error("corrupted index page {page_id} (index root page {index_root_page_id}): {detail}")]
+    CorruptedIndexPage {
+        page_id: u64,
+        index_root_page_id: u64,
+        detail: String,
+    },
+
     #[error("Duplicate key")]
     DuplicateKey,
 
