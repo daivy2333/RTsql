@@ -225,11 +225,37 @@ impl BufferPool {
         }
 
         // Phase 2: write to storage (no locks held).
-        for (page_id, page) in to_write {
-            self.storage.write_page(page_id, &page).await?;
+        //
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 004 (RDP R1): the dirty bit is cleared in phase 1, so a
+        // failure in phase 2 must hand the bit back for **every** page this
+        // flush cleared but did not write — the failing page *and* the pages
+        // after it that were never attempted. Restoring only the failing page
+        // would leave the same hole: those pages would never be rewritten and
+        // their content would be lost silently.
+        let mut written = 0usize;
+        for (page_id, page) in to_write.iter() {
+            if let Err(e) = self.storage.write_page(*page_id, page).await {
+                self.restore_dirty_from(&to_write, written);
+                return Err(e);
+            }
+            written += 1;
         }
 
         Ok(())
+    }
+
+    /// Give the dirty bit back to every page of `collected` from index
+    /// `from` on — the pages this flush cleared but did not successfully
+    /// write. A page that a concurrent writer re-dirtied in the meantime
+    /// stays dirty (the bit is set again, which is its correct state).
+    fn restore_dirty_from(&self, collected: &[(PageId, Page)], from: usize) {
+        for (page_id, _) in collected.iter().skip(from) {
+            if let Some(entry) = self.pages.get(page_id) {
+                let mut frame_guard = entry.value().lock().unwrap();
+                frame_guard.dirty = true;
+            }
+        }
     }
 
     /// change 2026-10-13 T3 (design D4): flush the given pages in the given
@@ -252,7 +278,14 @@ impl BufferPool {
                 }
             };
             if let Some(page) = page_copy {
-                self.storage.write_page(page_id, &page).await?;
+                // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                // Iteration 004 (RDP R1): a failed write must hand the dirty
+                // bit back — the page keeps its content pending instead of
+                // being treated as already persisted.
+                if let Err(e) = self.storage.write_page(page_id, &page).await {
+                    self.restore_dirty_from(&[(page_id, page)], 0);
+                    return Err(e);
+                }
             }
         }
         Ok(())
@@ -279,8 +312,18 @@ impl BufferPool {
         }
 
         // Phase 2: write to storage (no locks held).
-        for (page_id, page) in to_write {
-            self.storage.write_page(page_id, &page).await?;
+        //
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 004 (RDP R1): same discipline as `flush_all` — a failure
+        // hands the dirty bit back to every page this flush cleared but did
+        // not write.
+        let mut written = 0usize;
+        for (page_id, page) in to_write.iter() {
+            if let Err(e) = self.storage.write_page(*page_id, page).await {
+                self.restore_dirty_from(&to_write, written);
+                return Err(e);
+            }
+            written += 1;
         }
 
         Ok(())
@@ -496,6 +539,13 @@ impl BufferPool {
         let mut hand = self.clock_hand.write().await;
         hand.retain(|id| *id != page_id);
         self.storage.free_page(page_id).await
+    }
+
+    /// MS35（`free-page-lifecycle` R3）：释放操作的完成标记——本次释放的
+    /// 锚点写已经发出。释放点必须在锚点写发出**之后**调用它：释放的页在
+    /// 此之前不得进入可分配集合。
+    pub fn complete_free_release(&self, pages: &[PageId]) {
+        self.storage.complete_free_release(pages);
     }
 
     /// Get the current visibility info for a page. Returns None if no entry exists

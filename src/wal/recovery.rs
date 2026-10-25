@@ -1183,8 +1183,15 @@ impl RecoveryManager {
                             else {
                                 continue;
                             };
-                            if let Some(target) = vh.next_version() {
-                                pointed.insert(target);
+                            // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                            // Iteration 001（MTV R1 / ISS24 的 M2）：抑制集合只
+                            // 承认「指向者未被回滚」的链接——已回滚
+                            // （`create_tx_id == 0`）的指向者不抑制其前驱版本，
+                            // 与 `DataScanExecutor::superseder_suppresses` 同源。
+                            if vh.create_tx_id() != 0 {
+                                if let Some(target) = vh.next_version() {
+                                    pointed.insert(target);
+                                }
                             }
                             let tuple_ref = overflow::TupleRef::from_slot_tuple(
                                 &slot_data[VersionHeader::SIZE..],
@@ -1235,6 +1242,14 @@ impl RecoveryManager {
                 .collect();
             for tail_rid in slots.keys().copied().collect::<Vec<_>>() {
                 if pointed.contains(&tail_rid) {
+                    continue;
+                }
+                // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                // Iteration 001（MTV R1 / ISS24 的 M2）：已回滚的版本不是存活
+                // 版本——扫描跳过它、它也不抑制其前驱版本 ⇒ 其前驱版本自身即
+                // 链尾（由前驱那条链回溯覆盖）。从已回滚版本起回溯会与那条链
+                // 重复命中同一存活版本（同一主键被建两次条目）。
+                if slots[&tail_rid].0.create_tx_id() == 0 {
                     continue;
                 }
                 let mut rid = tail_rid;
@@ -1373,12 +1388,15 @@ impl RecoveryManager {
 
             // 5. 旧树释放（PK + 旧唯一树 + 旧二级树；洞容忍；失败 warn + 泄漏，
             //    先例 drop_table）
+            let mut released: Vec<PageId> = Vec::new();
             for page in old_index.collect_all_pages_tolerant().await {
                 if let Err(e) = buffer_pool.free_page(page).await {
                     eprintln!(
                         "[recovery] free old index page {:?} of '{}' failed: {}",
                         page, table_name, e
                     );
+                } else {
+                    released.push(page);
                 }
             }
             for (_, old_uindex) in &old_uniques {
@@ -1388,6 +1406,8 @@ impl RecoveryManager {
                             "[recovery] free old unique index page {:?} of '{}' failed: {}",
                             page, table_name, e
                         );
+                    } else {
+                        released.push(page);
                     }
                 }
             }
@@ -1398,9 +1418,14 @@ impl RecoveryManager {
                             "[recovery] free old secondary index page {:?} of '{}' failed: {}",
                             page, table_name, e
                         );
+                    } else {
+                        released.push(page);
                     }
                 }
             }
+            // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
+            // = 上面的目录 root 更新（步骤 4），已发出。
+            buffer_pool.complete_free_release(&released);
         }
 
         Ok(())

@@ -16,8 +16,8 @@ use crate::storage::page_format::{
     compute_tuple_size, deserialize_row, serialize_tuple, ColumnType,
 };
 use crate::storage::{
-    read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, PageId, Result, RowId,
-    StorageError, TableMeta,
+    read_tuple_from_data_page, update_version_header_in_data_page, write_tuple_to_data_page,
+    BufferPool, PageId, Result, RowId, StorageError, TableMeta,
 };
 use crate::transaction::{TransactionManager, VersionHeader};
 use crate::wal::{WALBuffer, WalRecord};
@@ -346,6 +346,11 @@ impl UpsertExecutor {
             .await?;
         // MS21 Iter003 (T3-a/D9): width-aware read-back + DEFAULT overlay（窄行
         // 读回全宽；写新版本恒全宽，行自愈）。
+        //
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 003（design D7 / ISS25）：在途窄化的表被读 ⇒ **明确拒绝**
+        // ——DML 的旧行读取不得按位置解码出错位的值。
+        self.table_meta.narrowing.ensure_readable()?;
         let mut values =
             deserialize_row(&old_tuple_bytes, &self.schema, &self.table_meta.defaults)?;
 
@@ -598,8 +603,8 @@ impl UpsertExecutor {
     }
 
     /// REPLACE 冲突行删除（design D5 步骤 6）——镜像 `DeleteExecutor`：
-    /// 唯一列键值提取 → 墓碑版本（`mark_deleted` + `with_next_version(rid)`）→
-    /// visibility → PK 条目删除 → 唯一条目删除 → record_version（墓碑槽位）
+    /// 唯一列键值提取 → 墓碑版本（`mark_deleted`，链指针后补）→ visibility →
+    /// record_version（墓碑槽位）→ 链指针补写 → PK 条目删除 → 唯一条目删除
     /// → WAL Delete。
     ///
     /// MS21 Iter000 (design D2)：`hit_pk_key` 为仲裁命中的 PK 搜索键——slot
@@ -613,6 +618,11 @@ impl UpsertExecutor {
             {
                 Ok(tuple) => {
                     // MS21 Iter003 (T3-a/D9): width-aware + DEFAULT overlay。
+                    //
+                    // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                    // Iteration 003（design D7 / ISS25）：在途窄化的表被读 ⇒
+                    // **明确拒绝**——DML 的旧行读取不得按位置解码出错位的值。
+                    self.table_meta.narrowing.ensure_readable()?;
                     let values = deserialize_row(&tuple, &self.schema, &self.table_meta.defaults)?;
                     let mut keys = Vec::new();
                     for (col_idx, uindex) in &self.table_meta.unique_indexes {
@@ -639,9 +649,13 @@ impl UpsertExecutor {
         let mut tombstone_rid: Option<RowId> = None;
         match self.buffer_pool.read_version_header(rid).await {
             Ok(_) => {
-                let tombstone = VersionHeader::new(self.tx_id, None)
-                    .with_next_version(rid)
-                    .mark_deleted();
+                // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                // Iteration 005（ISS24，DML 同形面）：墓碑**不带链指针**写入
+                // ——与 `DeleteExecutor` 及 DDL 改写路径同形。放弃窗口落在
+                // 「写出版本槽」与「登记版本」之间时，带链指针的墓碑按删除者的
+                // 事务状态压制其前驱版本，而回收看不到未登记的版本 ⇒ 被放弃的
+                // REPLACE 隐藏了它的冲突行。不带链指针的墓碑不压制任何前驱版本。
+                let tombstone = VersionHeader::new(self.tx_id, None).mark_deleted();
                 let written =
                     write_tuple_to_data_page(&self.buffer_pool, &self.table_meta, &tombstone, &[])
                         .await?;
@@ -655,6 +669,34 @@ impl UpsertExecutor {
             Err(e) => return Err(e),
         }
 
+        // MS21 Iter000 (design D2): 容忍臂（墓碑写入被 SlotNotFound 跳过且
+        // 无元组可读）不记录悬空 rid——不可读 slot 入 `tx_versions` 会让
+        // `commit_mark_versions` / abort 对它读 slot 报错，事务无法终结。
+        // WAL Delete 记录仍携带原 rid（形态不变）。
+        //
+        // 登记在链指针之前——登记之后回收才看得见这个版本（放弃窗口内的墓碑
+        // 必须能被中和）。
+        let recorded = tombstone_rid.or_else(|| old_values.is_some().then_some(rid));
+        if let Some(recorded) = recorded {
+            self.tx_manager
+                .record_version(self.tx_id, &self.table_meta.name, recorded)
+                .await;
+        }
+
+        // 补链指针：墓碑指向被删的冲突行（终态与修复前逐字节相同）。
+        if let Some(tombstone) = tombstone_rid {
+            update_version_header_in_data_page(
+                &self.buffer_pool,
+                tombstone,
+                VersionHeader::new(self.tx_id, None)
+                    .with_next_version(rid)
+                    .mark_deleted(),
+                &[],
+            )
+            .await?;
+        }
+
+        // 索引条目清理在链指针之后——放弃窗口落在链指针之前时，条目仍在位。
         if let Some(values) = &old_values {
             if let Some(key) = values[self.pk_index].to_key() {
                 self.table_meta.index_manager.delete(key.as_bytes()).await?;
@@ -678,17 +720,6 @@ impl UpsertExecutor {
         // （tuple 派生键精确定位；容忍臂无元组可派生，与唯一键同型跳过）。
         for (sindex, key) in &secondary_keys {
             sindex.delete_exact(key, rid).await?;
-        }
-
-        // MS21 Iter000 (design D2)：容忍臂（墓碑写入被 SlotNotFound 跳过且
-        // 无元组可读）不记录悬空 rid——不可读 slot 入 `tx_versions` 会让
-        // `commit_mark_versions` / abort 对它读 slot 报错，事务无法终结。
-        // WAL Delete 记录仍携带原 rid（形态不变）。
-        let recorded = tombstone_rid.or_else(|| old_values.is_some().then_some(rid));
-        if let Some(recorded) = recorded {
-            self.tx_manager
-                .record_version(self.tx_id, &self.table_meta.name, recorded)
-                .await;
         }
 
         if let Some(wal) = &self.wal_buffer {

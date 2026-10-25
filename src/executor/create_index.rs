@@ -15,7 +15,7 @@ use crate::database::Database;
 use crate::executor::{ExecResult, Executor, PhysicalPlan};
 use crate::storage::btree::IndexManager;
 use crate::storage::page_format::{deserialize_row, overflow, ColumnType, SlottedPageRef};
-use crate::storage::{BufferPool, Result, RowId};
+use crate::storage::{BufferPool, PageId, Result, RowId};
 use crate::transaction::VersionHeader;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -79,9 +79,15 @@ impl Executor for CreateIndexExecutor {
 
         if let Err(e) = backfill {
             // 失败零副作用：树页 best-effort 释放（先例 drop_table），登记未发生
+            let mut released: Vec<PageId> = Vec::new();
             for page in new_index.collect_all_pages_tolerant().await {
-                let _ = self.database.buffer_pool.free_page(page).await;
+                if self.database.buffer_pool.free_page(page).await.is_ok() {
+                    released.push(page);
+                }
             }
+            // MS35（`free-page-lifecycle` R3）：释放完成标记——该索引从未登记
+            // 进目录（无锚点写），按保守方向等下一次成功刷盘。
+            self.database.buffer_pool.complete_free_release(&released);
             return Err(e);
         }
 
@@ -134,8 +140,15 @@ async fn backfill_tree(
                     else {
                         continue;
                     };
-                    if let Some(target) = vh.next_version() {
-                        pointed.insert(target);
+                    // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                    // Iteration 001（MTV R1 / ISS24 的 M2）：抑制集合只承认
+                    // 「指向者未被回滚」的链接——已回滚（`create_tx_id == 0`）
+                    // 的指向者不抑制其前驱版本，与
+                    // `DataScanExecutor::superseder_suppresses` 同源。
+                    if vh.create_tx_id() != 0 {
+                        if let Some(target) = vh.next_version() {
+                            pointed.insert(target);
+                        }
                     }
                     let tuple_ref =
                         overflow::TupleRef::from_slot_tuple(&slot_data[VersionHeader::SIZE..]);
@@ -167,6 +180,11 @@ async fn backfill_tree(
             // COLUMN 后对尾列建索引时，窄行按声明 DEFAULT 入索引（与扫描读
             // 回同源）。MS27 T5：超页行出页闭包装配后派生（键与运行期写路径
             // 一致）。
+            //
+            // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+            // Iteration 003（design D7 / ISS25）：在途窄化的表被读 ⇒ **明确
+            // 拒绝**——索引回填的旧行读取不得按位置解码出错位的值。
+            table_meta.narrowing.ensure_readable()?;
             let tuple_bytes = tuple_ref.resolve(buffer_pool).await?;
             let values = deserialize_row(&tuple_bytes, &schema, &table_meta.defaults)?;
             if let Some(key) = values

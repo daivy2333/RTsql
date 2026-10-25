@@ -372,6 +372,7 @@ async fn test_delete_from_single_leaf() {
 async fn test_free_page_reuse() {
     let pool = create_test_pool();
     let pool_clone = pool.clone();
+    let pool_for_promote = pool.clone();
 
     tokio::task::spawn_blocking(move || {
         let loader = Arc::new(SyncPageLoader::new(pool_clone));
@@ -379,8 +380,22 @@ async fn test_free_page_reuse() {
         let page_a = loader.allocate_page().unwrap();
         loader.free_page(page_a).unwrap();
 
+        // 释放进入待释放集合：释放未持久化前，释放的页**不得**立即可分配。
         let page_b = loader.allocate_page().unwrap();
-        assert_eq!(page_a, page_b, "Freed page must be reused");
+        assert_ne!(
+            page_a, page_b,
+            "the freed page must not be allocatable before the release is durable"
+        );
+
+        // 持久化边界（存储层的提升入口——与 checkpoint 钩子同一条）：释放完成
+        // 并提升之后，释放的页必须被复用。
+        pool_for_promote
+            .storage()
+            .complete_free_release(&[rtsql::storage::PageId(page_a.0)]);
+        let limit = pool_for_promote.storage().release_completion_limit();
+        pool_for_promote.storage().promote_free_releases(limit);
+        let page_c = loader.allocate_page().unwrap();
+        assert_eq!(page_a, page_c, "Freed page must be reused");
 
         let mut btree = BTree::new(loader.clone()).unwrap();
         for i in 0..150u32 {

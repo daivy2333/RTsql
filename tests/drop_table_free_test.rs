@@ -48,20 +48,55 @@ async fn test_simple_drop_releases_data_and_btree() {
     let db = Database::open(&path).await.unwrap();
     create_users(&db).await;
     let count_after_create = page_count(&path);
+    // 被释放的页（数据页头 + 索引树根）——释放列表按后进先出弹出，数据页头
+    // 最先被发放，故它足以判定「被释放的页是否被复用」。
+    let meta = db.get_table("users").await.unwrap();
+    let released = [meta.data_page_head.0, meta.index_manager.root_page_id().0];
 
     db.table_manager.drop_table("users").await.unwrap();
 
     // After drop the high-water mark is unchanged (pages moved to the
-    // free-list, not truncated), and a recreate reuses the freed pages so
-    // the file does not grow.
+    // free-list, not truncated).
     let count_after_drop = page_count(&path);
     assert_eq!(count_after_drop, count_after_create);
 
+    // (a) 未 checkpoint：释放未持久化 ⇒ 被释放的页不得可分配——新建表拿到
+    //     的是新页（文件页数上界增长），且不占用被释放的页。
+    db.create_table("probe", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await
+        .unwrap();
+    let count_after_probe = page_count(&path);
+    assert!(
+        count_after_probe > count_after_create,
+        "before the release is persisted the recreated table must not reuse the freed pages (file grew {} pages)",
+        count_after_probe - count_after_create
+    );
+    let probe_meta = db.get_table("probe").await.unwrap();
+    assert!(
+        !released.contains(&probe_meta.data_page_head.0),
+        "the probe table must not take a released page {released:?}"
+    );
+
+    // (b) checkpoint 之后：释放已持久化 ⇒ 被释放的页可分配——重建 `users`
+    //     复用被释放的页，文件不再增长。
+    db.checkpoint().await.unwrap();
+    let count_before_recreate = page_count(&path);
     create_users(&db).await;
     let count_after_recreate = page_count(&path);
     assert_eq!(
-        count_after_recreate, count_after_create,
+        count_after_recreate, count_before_recreate,
         "recreating users must reuse freed pages (free-list) without growing the file"
+    );
+    let users_meta = db.get_table("users").await.unwrap();
+    assert!(
+        released.contains(&users_meta.data_page_head.0),
+        "the recreated table's data page {} must come from the released pages {released:?}",
+        users_meta.data_page_head.0
+    );
+    assert!(
+        released.contains(&users_meta.index_manager.root_page_id().0),
+        "the recreated table's index root {} must come from the released pages {released:?}",
+        users_meta.index_manager.root_page_id().0
     );
 }
 
@@ -85,16 +120,48 @@ async fn test_long_data_page_chain_all_released() {
         count_filled - count_empty
     );
 
+    // 释放前的页数上界：被释放的页号都小于它，其后新分配的页号都大于等于它。
+    let high_water = page_count(&path);
+
     db.table_manager.drop_table("users").await.unwrap();
 
-    // Recreate table `t`: it must reuse freed pages (no file growth).
+    // (a) 未 checkpoint：释放未持久化 ⇒ 被释放的页不得可分配——新建表拿到
+    //     的是新页（文件页数上界增长），且不占用被释放的页。
+    db.create_table("probe", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await
+        .unwrap();
+    let count_after_probe = page_count(&path);
+    assert!(
+        count_after_probe > count_filled,
+        "before the release is persisted the new table must not reuse the freed pages (file grew {} pages)",
+        count_after_probe - count_filled
+    );
+    let probe_meta = db.get_table("probe").await.unwrap();
+    assert!(
+        probe_meta.data_page_head.0 >= high_water,
+        "the probe table must not take a released page (page {} < high water {})",
+        probe_meta.data_page_head.0,
+        high_water
+    );
+
+    // (b) checkpoint 之后：释放已持久化 ⇒ 被释放的页可分配——新建表 `t` 复用
+    //     被释放的页，文件不再增长。
+    db.checkpoint().await.unwrap();
+    let count_before_recreate = page_count(&path);
     db.create_table("t", vec![("id".to_string(), ColumnType::Int)], "id")
         .await
         .unwrap();
     let count_after = page_count(&path);
     assert_eq!(
-        count_after, count_filled,
+        count_after, count_before_recreate,
         "creating a new table after dropping a multi-page table must not grow the file"
+    );
+    let t_meta = db.get_table("t").await.unwrap();
+    assert!(
+        t_meta.data_page_head.0 < high_water,
+        "the new table's data page {} must be one of the released pages (high water {})",
+        t_meta.data_page_head.0,
+        high_water
     );
 }
 
@@ -120,16 +187,48 @@ async fn test_btree_height_gt_1_all_pages_released() {
         "expected a height>=2 BTree (>=3 pages), got {} pages",
         index_pages.len()
     );
+    // 释放前的页数上界：被释放的页号都小于它，其后新分配的页号都大于等于它。
+    let high_water = page_count(&path);
 
     db.table_manager.drop_table("users").await.unwrap();
 
+    // (a) 未 checkpoint：释放未持久化 ⇒ 被释放的页不得可分配——新建表拿到
+    //     的是新页（文件页数上界增长），且不占用被释放的页。
+    db.create_table("probe", vec![("id".to_string(), ColumnType::Int)], "id")
+        .await
+        .unwrap();
+    let count_after_probe = page_count(&path);
+    assert!(
+        count_after_probe > count_filled,
+        "before the release is persisted the new table must not reuse the freed pages (file grew {} pages)",
+        count_after_probe - count_filled
+    );
+    let probe_meta = db.get_table("probe").await.unwrap();
+    assert!(
+        probe_meta.data_page_head.0 >= high_water,
+        "the probe table must not take a released page (page {} < high water {})",
+        probe_meta.data_page_head.0,
+        high_water
+    );
+
+    // (b) checkpoint 之后：释放已持久化 ⇒ 被释放的页可分配——新建表 `t` 复用
+    //     被释放的页，文件不再增长。
+    db.checkpoint().await.unwrap();
+    let count_before_recreate = page_count(&path);
     db.create_table("t", vec![("id".to_string(), ColumnType::Int)], "id")
         .await
         .unwrap();
     let count_after = page_count(&path);
     assert_eq!(
-        count_after, count_filled,
+        count_after, count_before_recreate,
         "dropping a height>=2 BTree must release all index pages to the free-list"
+    );
+    let t_meta = db.get_table("t").await.unwrap();
+    assert!(
+        t_meta.data_page_head.0 < high_water,
+        "the new table's data page {} must be one of the released pages (high water {})",
+        t_meta.data_page_head.0,
+        high_water
     );
 }
 
@@ -144,19 +243,44 @@ async fn test_same_process_free_list_reuse() {
         insert_one(&db, i, &format!("user_{:06}", i)).await;
     }
     let count_before_drop = page_count(&path);
+    let meta = db.get_table("users").await.unwrap();
+    let released = [meta.data_page_head.0, meta.index_manager.root_page_id().0];
 
     db.table_manager.drop_table("users").await.unwrap();
 
-    // Recreate the SAME name; growth must stay within drop-before + 1 page.
+    // (a) 未 checkpoint：被释放的页不可分配 ⇒ 旧上限（增长 ≤ 1 页）不再成立。
+    // Recreate the SAME name; the recreated table must not take a released page.
+    create_users(&db).await;
+    for i in 0..100i64 {
+        insert_one(&db, i, &format!("user_{:06}", i)).await;
+    }
+    let count_after_unpersisted = page_count(&path);
+    assert!(
+        count_after_unpersisted > count_before_drop + 1,
+        "before the release is persisted the file must grow by more than 1 page (grew {} pages)",
+        count_after_unpersisted - count_before_drop
+    );
+    let meta = db.get_table("users").await.unwrap();
+    assert!(
+        !released.contains(&meta.data_page_head.0),
+        "the recreated table must not take a released page {released:?}"
+    );
+
+    // (b) checkpoint 之后：释放已持久化 ⇒ 被释放的页可分配 ⇒ 旧上限恢复。
+    // 释放 (a) 段的表并再次 checkpoint，使 (b) 段的重建同样复用被释放的页。
+    db.checkpoint().await.unwrap();
+    db.table_manager.drop_table("users").await.unwrap();
+    db.checkpoint().await.unwrap();
+    let count_before_recreate = page_count(&path);
     create_users(&db).await;
     for i in 0..100i64 {
         insert_one(&db, i, &format!("user_{:06}", i)).await;
     }
     let count_after = page_count(&path);
     assert!(
-        count_after <= count_before_drop + 1,
-        "recreate+reinsert after drop grew file by {} pages (expected <= 1)",
-        count_after - count_before_drop
+        count_after <= count_before_recreate + 1,
+        "recreate+reinsert after a persisted release must stay within drop-before + 1 page (grew {} pages)",
+        count_after - count_before_recreate
     );
 
     // And the recreated table is fully usable.
@@ -227,6 +351,9 @@ async fn test_concurrent_drop_different_tables() {
         .unwrap();
     }
 
+    // 释放前的页数上界：被释放的页号都小于它，其后新分配的页号都大于等于它。
+    let high_water = page_count(&path);
+
     // 10 concurrent drops of distinct tables.
     let tm = db.table_manager.clone();
     let mut handles = Vec::new();
@@ -247,6 +374,9 @@ async fn test_concurrent_drop_different_tables() {
     // Recreating all 10 must reuse the freed pages (no file growth), which
     // also indirectly verifies the free-list holds 10 distinct page pairs.
     let count_after_drop = page_count(&path);
+
+    // (a) 未 checkpoint：被释放的页不可分配 ⇒ 重建的 10 张表拿到的是新页
+    //     （文件页数上界增长），且不占用被释放的页。
     for k in 0..10 {
         db.create_table(
             &format!("t{}", k),
@@ -257,8 +387,46 @@ async fn test_concurrent_drop_different_tables() {
         .unwrap();
     }
     let count_after_recreate = page_count(&path);
+    assert!(
+        count_after_recreate > count_after_drop,
+        "before the release is persisted the recreated tables must not reuse the freed pages (file grew {} pages)",
+        count_after_recreate - count_after_drop
+    );
+    for k in 0..10 {
+        let meta = db.get_table(&format!("t{}", k)).await.unwrap();
+        assert!(
+            meta.data_page_head.0 >= high_water,
+            "the recreated table t{k} must not take a released page (page {} < high water {})",
+            meta.data_page_head.0,
+            high_water
+        );
+    }
+
+    // (b) checkpoint 之后：被释放的页可分配 ⇒ 重建的 10 张表复用被释放的页
+    //     （文件页数上界不增长）。
+    db.checkpoint().await.unwrap();
+    let count_before_recreate = page_count(&path);
+    for k in 0..10 {
+        db.create_table(
+            &format!("u{}", k),
+            vec![("id".to_string(), ColumnType::Int)],
+            "id",
+        )
+        .await
+        .unwrap();
+    }
+    let count_after_reuse = page_count(&path);
     assert_eq!(
-        count_after_recreate, count_after_drop,
+        count_after_reuse, count_before_recreate,
         "recreating 10 dropped tables must reuse the free-list"
     );
+    for k in 0..10 {
+        let meta = db.get_table(&format!("u{}", k)).await.unwrap();
+        assert!(
+            meta.data_page_head.0 < high_water,
+            "the recreated table u{k}'s data page {} must be one of the released pages (high water {})",
+            meta.data_page_head.0,
+            high_water
+        );
+    }
 }

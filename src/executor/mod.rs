@@ -14,6 +14,9 @@ mod create_table;
 mod create_view;
 mod data_scan;
 pub(crate) mod datetime;
+/// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+/// Iteration 003（T10）：DDL 提交窗口的受控暂停点（测试支撑，默认不生效）。
+pub mod ddl_commit_window;
 mod delete;
 mod derived_scan;
 mod distinct;

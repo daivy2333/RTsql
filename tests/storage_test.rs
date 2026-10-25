@@ -253,9 +253,24 @@ mod tests {
 
         storage.free_page(page1).await.unwrap();
 
+        // (a) 释放进入待释放集合：释放未持久化前，释放的页**不得**立即可
+        //     分配——这里分配到的是新页。
+        let fresh = storage.allocate_page().await.unwrap();
+        assert_ne!(
+            fresh,
+            PageId(1),
+            "the freed page must not be allocatable before the release is durable"
+        );
+        let count_after_fresh = storage.page_count();
+
+        // (b) 持久化边界（存储层的提升入口——与 checkpoint 钩子同一条）：释放
+        //     完成并提升之后，释放的页被复用，文件页数不再增长。
+        storage.complete_free_release(&[PageId(1)]);
+        let limit = storage.release_completion_limit();
+        storage.promote_free_releases(limit);
         let reused = storage.allocate_page().await.unwrap();
         assert_eq!(reused, PageId(1));
-        assert_eq!(storage.page_count(), 3);
+        assert_eq!(storage.page_count(), count_after_fresh);
     }
 
     #[tokio::test]
@@ -272,6 +287,18 @@ mod tests {
 
         storage.free_page(page_id).await.unwrap();
 
+        // (a) 释放未持久化前，释放的页不得立即可分配——这里分配到的是新页。
+        let fresh = storage.allocate_page().await.unwrap();
+        assert_ne!(
+            fresh, page_id,
+            "the freed page must not be allocatable before the release is durable"
+        );
+
+        // (b) 持久化边界（存储层的提升入口——与 checkpoint 钩子同一条）：释放
+        //     完成并提升之后，释放的页被复用。
+        storage.complete_free_release(&[page_id]);
+        let limit = storage.release_completion_limit();
+        storage.promote_free_releases(limit);
         let reused = storage.allocate_page().await.unwrap();
         assert_eq!(reused, page_id);
 

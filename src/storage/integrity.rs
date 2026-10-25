@@ -469,13 +469,29 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// Summary of a damaged page's violations for the release paths' warnings.
+///
+/// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+/// Iteration 002 (B-4): a damaged page must be **counted** and reported — the
+/// count is part of the message ("1 violation" / "3 violations: …"), not just
+/// a bare "damaged" remark. Shared by the data-page and index-tree release
+/// paths so both report the same shape.
+pub(crate) fn violation_summary(violations: &[String]) -> String {
+    let count = violations.len();
+    let noun = if count == 1 { "violation" } else { "violations" };
+    format!("{count} {noun}: {}", violations.join("; "))
+}
+
 /// Outcome of validating one data page image inside the page lock.
-struct DataPageCheck {
-    page_type: u8,
-    next_page_id: u32,
+///
+/// MS35 (`free-page-lifecycle` R2): `pub(crate)` — the free-page rebuild
+/// walks the same page images and must not panic on a damaged page.
+pub(crate) struct DataPageCheck {
+    pub(crate) page_type: u8,
+    pub(crate) next_page_id: u32,
     /// `(total_len, first_overflow_page)` per overflow-referencing slot.
-    locators: Vec<(u32, u32)>,
-    violations: Vec<String>,
+    pub(crate) locators: Vec<(u32, u32)>,
+    pub(crate) violations: Vec<String>,
 }
 
 /// Validate a slotted page image without panicking: every header/slot field
@@ -483,7 +499,7 @@ struct DataPageCheck {
 /// unsafely into well-formed pages). The overflow marker is probed on the
 /// tuple segment (`slot_data[VersionHeader::SIZE..]`), matching the read
 /// path — never on the version header itself.
-fn check_data_page(data: &[u8]) -> DataPageCheck {
+pub(crate) fn check_data_page(data: &[u8]) -> DataPageCheck {
     let mut violations = Vec::new();
     if data.len() < SlottedPageHeader::SIZE {
         violations.push("page is shorter than a page header".to_string());
@@ -560,18 +576,21 @@ fn validate_slots(
 }
 
 /// Outcome of validating one index-tree page image.
-struct TreePageCheck {
-    children: Vec<u32>,
+///
+/// MS35 (`free-page-lifecycle` R2): `pub(crate)` — the free-page rebuild
+/// walks the same page images and must not panic on a damaged page.
+pub(crate) struct TreePageCheck {
+    pub(crate) children: Vec<u32>,
     /// Set when the page's type belongs to no tree (subtree not traversed).
-    invalid_type: Option<u8>,
-    violations: Vec<String>,
+    pub(crate) invalid_type: Option<u8>,
+    pub(crate) violations: Vec<String>,
 }
 
 /// Validate an index-tree page: leaf pages get the same slot bounds check as
 /// data pages (no locator probing — leaf entries are `[Key][RowId]` and can
 /// legitimately start with any byte); internal pages additionally yield their
 /// child pointers, each entry validated to carry `[Key][child u32]`.
-fn check_tree_page(data: &[u8]) -> TreePageCheck {
+pub(crate) fn check_tree_page(data: &[u8]) -> TreePageCheck {
     let mut out = TreePageCheck {
         children: Vec::new(),
         invalid_type: None,

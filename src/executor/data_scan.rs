@@ -22,7 +22,7 @@ use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, PredicateRef, Value};
 use crate::storage::page_format::{deserialize_row, overflow, ColumnType, RowId, SlottedPageRef};
 use crate::storage::PageId;
-use crate::storage::{read_tuple_from_data_page, BufferPool, Result, TableMeta};
+use crate::storage::{read_tuple_from_data_page, BufferPool, NarrowingState, Result, TableMeta};
 use crate::transaction::{Snapshot, TransactionManager, VersionHeader};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -110,6 +110,10 @@ pub struct DataScanExecutor {
     /// `next()` — the scan-start view for tombstone suppression. `None` until
     /// captured.
     active_tx_ids: Option<HashSet<u64>>,
+    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+    /// Iteration 003（design D7 / ISS25）：该表的「在途窄化」状态单元——与活
+    /// 布局共享 ⇒ 计划期快照也能观察到窗口内状态。
+    narrowing: Arc<NarrowingState>,
 }
 
 impl DataScanExecutor {
@@ -148,6 +152,7 @@ impl DataScanExecutor {
             superseded_map: None,
             tx_manager,
             active_tx_ids: None,
+            narrowing: table_meta.narrowing.clone(),
         }
     }
 
@@ -368,6 +373,11 @@ impl DataScanExecutor {
 #[async_trait::async_trait]
 impl Executor for DataScanExecutor {
     async fn next(&mut self) -> Result<Option<ExecResult>> {
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 003（design D7 / ISS25）：在途窄化的表被读 ⇒ **明确拒绝**
+        // ——不得返回按位置错位的值，也不得静默返回空结果。检查在扫描初始化
+        // 之前：拒绝后重试仍是同一拒绝。
+        self.narrowing.ensure_readable()?;
         // R-T0b-R6 (G5): build the superseded-version map once, before the
         // first slot visit — skip decisions need the whole-chain view.
         if self.superseded_map.is_none() {

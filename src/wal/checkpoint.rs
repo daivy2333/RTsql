@@ -178,6 +178,15 @@ impl CheckpointManager {
             && self.wal_writer.get_write_count() == 0
             && !self.buffer_pool.has_dirty_pages()
         {
+            // MS35（`free-page-lifecycle` R3）：零工作早退也要提升已完成的
+            // 释放——此刻磁盘已处于 checkpoint-clean 态（没有任何未刷出的
+            // 页）⇒ 已发出的锚点写都已落盘 ⇒ 该批释放在崩溃边界上成立 ⇒
+            // 其页变为可分配。否则它们要等到下一次全量 checkpoint 才可分配，
+            // 而释放早已持久化。
+            let release_limit = self.buffer_pool.storage().release_completion_limit();
+            self.buffer_pool
+                .storage()
+                .promote_free_releases(release_limit);
             return Ok(0);
         }
 
@@ -188,10 +197,27 @@ impl CheckpointManager {
         let watermark = tx_watermark();
 
         // 2. 刷所有脏页：位点前缀的页效果全部落盘
-        self.buffer_pool
-            .flush_all()
-            .await
-            .map_err(|e| WalError::IoError(e.to_string()))?;
+        //
+        //    MS35（`free-page-lifecycle` R3）：释放的持久化判定挂在这里。
+        //    刷盘**开始前**取样释放完成编号——样本覆盖的释放，其锚点写
+        //    必在本次刷盘前发出（否则释放未完成、编号未推进），因此这次
+        //    刷盘必然把锚点写落盘 ⇒ 该批释放在崩溃边界上成立 ⇒ 提升。
+        //    刷盘失败 ⇒ 锚点写可能永远没有落盘 ⇒ 丢弃（不提升），磁盘上
+        //    这些页仍归旧主人，重开时按持久目录重建判成空闲。
+        let release_limit = self.buffer_pool.storage().release_completion_limit();
+        match self.buffer_pool.flush_all().await {
+            Ok(()) => {
+                self.buffer_pool
+                    .storage()
+                    .promote_free_releases(release_limit);
+            }
+            Err(e) => {
+                self.buffer_pool
+                    .storage()
+                    .discard_free_releases(release_limit);
+                return Err(WalError::IoError(e.to_string()));
+            }
+        }
 
         // 3. fsync WAL：位点之前的记录持久
         self.wal_writer.fsync().await?;

@@ -4,13 +4,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::storage::{
-    btree::node::{InternalNodeRef, LeafNodeRef, INTERNAL_NODE, LEAF_NODE},
+    btree::node::{
+        ensure_index_page_intact, InternalNodeRef, LeafNodeRef, INTERNAL_NODE, LEAF_NODE,
+    },
     catalog::Catalog,
+    integrity::{check_tree_page, violation_summary},
     page_format::{Key, RowId},
     BufferPool, PageId, Result, StorageError,
 };
+use std::sync::Condvar;
 use std::sync::Mutex;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 use super::{AsyncPageLoader, BTree, SyncPageLoader};
 
@@ -34,14 +38,118 @@ pub enum CatalogRootSlot {
     Secondary { table: String, ordinal: usize },
 }
 
+/// MS34 Iteration 000（ISS20 / D4）：写侧暂停点位置。
+///
+/// 语义位置固定为「结构变更已生效、根页 id 尚未发布」——修复前后一致，
+/// 因此同一个夹具在修复前后落在同一个窗口上。位置不携带任何运行身份
+/// （无 run-id / 指纹 / 时间戳），也不承载任何判定逻辑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritePausePosition {
+    /// 结构变更已生效、根页 id 尚未发布。
+    AfterStructureChangeBeforeRootPublish,
+}
+
+/// MS34 Iteration 000（ISS20 / D4）：写侧暂停点槽位。
+///
+/// `None` = 未装载——写路径零行为差异（写单元只多做一次未命中检查）。
+type WritePauseSlot = Arc<Mutex<Option<Arc<WritePauseInner>>>>;
+
+/// MS34 Iteration 000（ISS20 / D4）：写侧暂停点内核（写侧与测试侧共享）。
+#[derive(Debug)]
+struct WritePauseInner {
+    /// 装载的位置——只有匹配的位置才停住。
+    position: WritePausePosition,
+    /// 到达次数：写单元到达暂停点的累计次数（测试侧轮询的「到达」信号）。
+    arrivals: AtomicU64,
+    /// 已放行的到达次数。
+    released: Mutex<u64>,
+    /// 放行通知——写侧（阻塞线程）在此等待。
+    condvar: Condvar,
+}
+
+impl WritePauseInner {
+    /// 写侧命中：登记到达并等待放行。
+    ///
+    /// 位置不匹配时不等待——语义位置唯一，匹配才停住。
+    fn arrive_and_wait(&self, position: WritePausePosition) {
+        if self.position != position {
+            return;
+        }
+        let arrival = self.arrivals.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut released = self.released.lock().unwrap();
+        while *released < arrival {
+            released = self.condvar.wait(released).unwrap();
+        }
+    }
+}
+
+/// MS34 Iteration 000（ISS20 / D4）：写侧暂停点句柄（测试支持夹具）。
+///
+/// 「到达」= 写单元到达暂停点的累计次数（可轮询）；「放行」= 允许当前到达
+/// 继续；「卸载」= 之后的写单元不再被停住。
+#[derive(Debug, Clone)]
+pub struct WritePauseHandle {
+    inner: Arc<WritePauseInner>,
+    slot: WritePauseSlot,
+}
+
+impl WritePauseHandle {
+    fn new(position: WritePausePosition, slot: WritePauseSlot) -> Self {
+        Self {
+            inner: Arc::new(WritePauseInner {
+                position,
+                arrivals: AtomicU64::new(0),
+                released: Mutex::new(0),
+                condvar: Condvar::new(),
+            }),
+            slot,
+        }
+    }
+
+    /// 写单元到达暂停点的累计次数——测试侧轮询的「到达」信号。
+    pub fn arrivals(&self) -> u64 {
+        self.inner.arrivals.load(Ordering::Acquire)
+    }
+
+    /// 放行：允许当前到达继续（若尚未到达则允许下一次到达）。
+    pub fn release(&self) {
+        let mut released = self.inner.released.lock().unwrap();
+        *released += 1;
+        self.inner.condvar.notify_all();
+    }
+
+    /// 卸载暂停点——之后的写单元不再被停住。
+    pub fn disarm(&self) {
+        let mut slot = self.slot.lock().unwrap();
+        if slot
+            .as_ref()
+            .map(|inner| Arc::ptr_eq(inner, &self.inner))
+            .unwrap_or(false)
+        {
+            *slot = None;
+        }
+    }
+}
+
+/// 写侧暂停点命中检查——未装载时立即返回（未装载 = 零行为差异）。
+fn pause_at(slot: &WritePauseSlot, position: WritePausePosition) {
+    let inner = slot.lock().unwrap().clone();
+    if let Some(inner) = inner {
+        inner.arrive_and_wait(position);
+    }
+}
+
 /// IndexManager: Async API wrapper for BTree
 /// Uses AtomicPageId for lock-free root page access (read operations)
 /// Write operations use spawn_blocking + temporary BTree instance
 pub struct IndexManager {
-    root_page_id: AtomicU64,          // 无锁访问根页
+    root_page_id: Arc<AtomicU64>,     // 无锁访问根页
     sync_loader: Arc<SyncPageLoader>, // 写操作仍用 sync
     async_loader: AsyncPageLoader,    // 读操作用 async
-    row_to_key: RwLock<HashMap<RowId, Vec<u8>>>,
+    /// MS34 Iteration 000（ISS20 / D4）：反向映射容器改为同步 `RwLock`——
+    /// 写单元在阻塞线程内同步访问；公开的 `find_key_by_row_id` 签名保持
+    /// `async` 不变，调用点不跨 await 持锁（M13）。
+    row_to_key: Arc<RwLock<HashMap<RowId, Vec<u8>>>>,
     /// MS10-T02 Iter000 003-rework (R-T0b-R5): optional catalog context
     /// `(catalog, root slot)` for root-change persistence. Attached by
     /// `TableManager` — at `create_table` directly, and for restored tables
@@ -51,6 +159,12 @@ pub struct IndexManager {
     /// MS23 Iteration 001 (D5): the slot generalizes the context from "the
     /// table's PK root" to "PK root or the Nth UNIQUE root".
     catalog_ctx: Mutex<Option<(Arc<Catalog>, CatalogRootSlot)>>,
+    /// MS34 Iteration 000（ISS20 / D2）：写侧闸门——同一索引的结构变更串行
+    /// 执行，并发写者不会读到彼此的中间结构（不会产生结构分叉）。
+    write_gate: Arc<Mutex<()>>,
+    /// MS34 Iteration 000（ISS20 / D4）：写侧暂停点槽位——`None` 时写路径
+    /// 零行为差异。
+    write_pause: WritePauseSlot,
 }
 
 impl IndexManager {
@@ -68,11 +182,13 @@ impl IndexManager {
         let root_page_id = btree.root_page_id().0;
 
         Ok(Self {
-            root_page_id: AtomicU64::new(root_page_id),
+            root_page_id: Arc::new(AtomicU64::new(root_page_id)),
             sync_loader,
             async_loader,
-            row_to_key: RwLock::new(HashMap::new()),
+            row_to_key: Arc::new(RwLock::new(HashMap::new())),
             catalog_ctx: Mutex::new(None),
+            write_gate: Arc::new(Mutex::new(())),
+            write_pause: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -85,11 +201,13 @@ impl IndexManager {
         let async_loader = AsyncPageLoader::new(buffer_pool.clone());
 
         Ok(Self {
-            root_page_id: AtomicU64::new(root_page_id.0),
+            root_page_id: Arc::new(AtomicU64::new(root_page_id.0)),
             sync_loader,
             async_loader,
-            row_to_key: RwLock::new(HashMap::new()),
+            row_to_key: Arc::new(RwLock::new(HashMap::new())),
             catalog_ctx: Mutex::new(None),
+            write_gate: Arc::new(Mutex::new(())),
+            write_pause: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -110,6 +228,18 @@ impl IndexManager {
     /// without a context).
     pub fn set_catalog_context(&self, catalog: Arc<Catalog>, slot: CatalogRootSlot) {
         *self.catalog_ctx.lock().unwrap() = Some((catalog, slot));
+    }
+
+    /// MS34 Iteration 000（ISS20 / D4）：装载写侧暂停点。
+    ///
+    /// 装载后，到达该位置的写单元被确定性地停住，直到
+    /// [`WritePauseHandle::release`]；[`WritePauseHandle::disarm`] 卸载。
+    /// 未装载时写路径零行为差异——写单元只多做一次未命中检查。
+    pub fn arm_write_pause(&self, position: WritePausePosition) -> WritePauseHandle {
+        let slot = self.write_pause.clone();
+        let handle = WritePauseHandle::new(position, slot.clone());
+        *slot.lock().unwrap() = Some(handle.inner.clone());
+        handle
     }
 
     /// Persist a root change to the catalog row (R-T0b-R5). No-op without a
@@ -168,6 +298,12 @@ impl IndexManager {
                 let guard = self.async_loader.load_page(page_id).await?;
                 let data_guard = guard.page_data();
 
+                ensure_index_page_intact(
+                    &data_guard,
+                    page_id.0,
+                    self.root_page_id.load(Ordering::Acquire),
+                )?;
+
                 if data_guard[0] == LEAF_NODE {
                     let leaf = LeafNodeRef::new(&data_guard);
                     let (found, pos) = leaf.find_key_position_binary(key);
@@ -198,6 +334,12 @@ impl IndexManager {
             let child_page_ids = {
                 let guard = self.async_loader.load_page(page_id).await?;
                 let data_guard = guard.page_data();
+
+                ensure_index_page_intact(
+                    &data_guard,
+                    page_id.0,
+                    self.root_page_id.load(Ordering::Acquire),
+                )?;
 
                 if data_guard[0] == LEAF_NODE {
                     // Leaf: collect all matching RowIds
@@ -236,46 +378,102 @@ impl IndexManager {
 
     /// Insert a key-value pair — spawn_blocking with temporary BTree instance
     /// Updates root_page_id atomically if a root split occurred
+    ///
+    /// MS34 Iteration 000（ISS20 / D1–D2）：结构变更、根页 id 发布与反向映射
+    /// 更新构成**同一个写单元**——三者都在同一个 blocking 闭包内完成。tokio 的
+    /// blocking 任务在 JoinHandle 被丢弃后仍会跑完，因此语句被取消时该写单元
+    /// 整体落地或整体未开始，不会留下「结构已变、根未发布」或「条目已写、
+    /// 反向映射缺失」的半写状态。同一索引的写单元经写侧闸门串行化。
+    ///
+    /// 目录根同步留在写单元之外（既有持久化语义不变）。
     pub async fn insert(&self, key: &[u8], row_id: RowId) -> Result<()> {
-        let root_page_id = self.root_page_id.load(Ordering::Acquire);
         let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
+        let root_page_id = self.root_page_id.clone();
+        let row_to_key = self.row_to_key.clone();
+        let write_gate = self.write_gate.clone();
+        let write_pause = self.write_pause.clone();
 
         let new_root = tokio::task::spawn_blocking(move || {
-            let mut btree = BTree::from_root(PageId(root_page_id), sync_loader);
-            btree.insert(&key_vec, row_id)
+            // 写侧串行化（D2）：同一索引的结构变更串行执行。
+            let _gate = write_gate.lock().unwrap();
+
+            let mut btree =
+                BTree::from_root(PageId(root_page_id.load(Ordering::Acquire)), sync_loader);
+            let new_root = btree.insert(&key_vec, row_id)?;
+
+            // MS34 Iteration 000（ISS20 / D4）：写侧暂停点——结构变更已生效、
+            // 根页 id 尚未发布。修复前后语义位置一致。
+            pause_at(
+                &write_pause,
+                WritePausePosition::AfterStructureChangeBeforeRootPublish,
+            );
+
+            // 根页 id 发布（D1）：与结构变更同单元。
+            if let Some(new_root_id) = new_root {
+                root_page_id.store(new_root_id.0, Ordering::Release);
+            }
+
+            // 反向映射更新（D1）：与结构变更同单元。
+            row_to_key.write().unwrap().insert(row_id, key_vec.clone());
+
+            Ok::<Option<PageId>, StorageError>(new_root)
         })
         .await??;
 
-        // If root split occurred, update the atomic root page id
+        // If root split occurred, persist the new root to the catalog.
         if let Some(new_root_id) = new_root {
-            self.root_page_id.store(new_root_id.0, Ordering::Release);
             self.sync_root_to_catalog(new_root_id).await?;
         }
-
-        self.row_to_key.write().await.insert(row_id, key.to_vec());
         Ok(())
     }
 
     /// Delete a key — spawn_blocking with temporary BTree instance
+    ///
+    /// MS34 Iteration 000（ISS20 / D1–D3）：正向条目删除与反向映射清理构成
+    /// **同一个写单元**，顺序为「先删正向条目、后删反向映射」——取消落在两者
+    /// 之间不再产生同形半写状态。
     pub async fn delete(&self, key: &[u8]) -> Result<()> {
-        if let Some(row_id) = self.search(key).await? {
-            self.row_to_key.write().await.remove(&row_id);
-        }
-
-        let root_page_id = self.root_page_id.load(Ordering::Acquire);
         let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
+        let root_page_id = self.root_page_id.clone();
+        let row_to_key = self.row_to_key.clone();
+        let write_gate = self.write_gate.clone();
+        let write_pause = self.write_pause.clone();
 
-        let new_root = tokio::task::spawn_blocking(move || {
-            let mut btree = BTree::from_root(PageId(root_page_id), sync_loader);
-            btree.delete(&key_vec)
+        let (new_root, old_root) = tokio::task::spawn_blocking(move || {
+            let _gate = write_gate.lock().unwrap();
+
+            let old_root = PageId(root_page_id.load(Ordering::Acquire));
+            let mut btree = BTree::from_root(old_root, sync_loader);
+            // 正向条目定位——与既有 `search` 同语义（精确匹配）。
+            let found = btree.search(&key_vec)?;
+            let new_root = btree.delete(&key_vec)?;
+
+            pause_at(
+                &write_pause,
+                WritePausePosition::AfterStructureChangeBeforeRootPublish,
+            );
+
+            // 根页 id 发布（D1/D3）：与结构变更同单元。
+            if let Some(new_root_id) = new_root {
+                root_page_id.store(new_root_id.0, Ordering::Release);
+            }
+
+            // 反向映射清理（D3）：正向条目已删后才清理。
+            if let Some(row_id) = found {
+                row_to_key.write().unwrap().remove(&row_id);
+            }
+
+            Ok::<(Option<PageId>, PageId), StorageError>((new_root, old_root))
         })
         .await??;
 
         if let Some(new_root_id) = new_root {
-            self.root_page_id.store(new_root_id.0, Ordering::Release);
             self.sync_root_to_catalog(new_root_id).await?;
+            // MS35（`free-page-lifecycle` R3）：缩根释放的锚点写 = 目录 root
+            // 更新，此刻已发出 ⇒ 释放完成标记（旧根页）。
+            self.sync_loader.complete_free_release(&[old_root]);
         }
 
         Ok(())
@@ -294,22 +492,29 @@ impl IndexManager {
     /// to this exact key. Key present but rid mismatched → `KeyNotFound`
     /// (same error surface as the leaf-level exact delete).
     pub async fn delete_exact(&self, key: &[u8], row_id: RowId) -> Result<()> {
-        let root_page_id = self.root_page_id.load(Ordering::Acquire);
         let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
+        let root_page_id = self.root_page_id.clone();
+        let row_to_key = self.row_to_key.clone();
+        let write_gate = self.write_gate.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut btree = BTree::from_root(PageId(root_page_id), sync_loader);
-            btree.delete_exact(&key_vec, row_id)
+            let _gate = write_gate.lock().unwrap();
+
+            let mut btree =
+                BTree::from_root(PageId(root_page_id.load(Ordering::Acquire)), sync_loader);
+            let _ = btree.delete_exact(&key_vec, row_id)?;
+
+            // Reverse mapping (D5): clear the rid's entry only when it still
+            // names this key (an entry re-pointed by a later writer must
+            // survive) — in the same write unit as the structural change.
+            let mut map = row_to_key.write().unwrap();
+            if map.get(&row_id).map(|k| k.as_slice()) == Some(key_vec.as_slice()) {
+                map.remove(&row_id);
+            }
+            Ok::<(), StorageError>(())
         })
         .await??;
-
-        // Reverse mapping: clear the rid's entry only when it still names
-        // this key (an entry re-pointed by a later writer must survive).
-        let mut map = self.row_to_key.write().await;
-        if map.get(&row_id).map(|k| k.as_slice()) == Some(key) {
-            map.remove(&row_id);
-        }
         Ok(())
     }
 
@@ -336,6 +541,11 @@ impl IndexManager {
             }
             let guard = self.async_loader.load_page(page_id).await?;
             let data_guard = guard.page_data();
+            ensure_index_page_intact(
+                &data_guard,
+                page_id.0,
+                self.root_page_id.load(Ordering::Acquire),
+            )?;
             let page_type = data_guard[0];
 
             if page_type == LEAF_NODE {
@@ -369,27 +579,51 @@ impl IndexManager {
     }
 
     /// Update the RowId for an existing key — spawn_blocking with temporary BTree instance
+    ///
+    /// MS34 Iteration 000（ISS20 / D5）：反向映射更新与结构变更同单元。
     pub async fn update(&self, key: &[u8], new_row_id: RowId) -> Result<()> {
-        let root_page_id = self.root_page_id.load(Ordering::Acquire);
         let sync_loader = self.sync_loader.clone();
         let key_vec = key.to_vec();
+        let root_page_id = self.root_page_id.clone();
+        let row_to_key = self.row_to_key.clone();
+        let write_gate = self.write_gate.clone();
 
         tokio::task::spawn_blocking(move || {
-            let btree = BTree::from_root(PageId(root_page_id), sync_loader);
-            btree.update(&key_vec, new_row_id)
+            let _gate = write_gate.lock().unwrap();
+
+            let btree = BTree::from_root(PageId(root_page_id.load(Ordering::Acquire)), sync_loader);
+            btree.update(&key_vec, new_row_id)?;
+
+            // 反向映射更新（D5）：与结构变更同单元。
+            row_to_key
+                .write()
+                .unwrap()
+                .insert(new_row_id, key_vec.clone());
+            Ok::<(), StorageError>(())
         })
         .await??;
-
-        self.row_to_key
-            .write()
-            .await
-            .insert(new_row_id, key.to_vec());
         Ok(())
     }
 
     /// Find key by RowId (M10 reverse mapping)
+    ///
+    /// MS34 Iteration 000（ISS20 / D4）：容器为同步 `RwLock`，本方法内部同步
+    /// 加锁——不跨 await 持锁（M13）；公开签名保持 `async` 不变。
+    ///
+    /// MS34 Iteration 000（ISS20 / D2）：本次读与写单元串行——读到的反向映射
+    /// 是**写单元落定后**的状态（写单元持写侧闸门期间读不到它的中间态）。
+    /// 理由：回滚/回收按「反向映射是否命中」分桶，若读到写单元尚未落定的中间
+    /// 态，被取消语句写入的键会被误判为墓碑而不被释放。等待发生在 blocking
+    /// 线程上：异步运行时线程不被阻塞，也不跨 await 持锁（M13）。
     pub async fn find_key_by_row_id(&self, row_id: RowId) -> Option<Vec<u8>> {
-        self.row_to_key.read().await.get(&row_id).cloned()
+        let row_to_key = self.row_to_key.clone();
+        let write_gate = self.write_gate.clone();
+        tokio::task::spawn_blocking(move || {
+            let _gate = write_gate.lock().unwrap();
+            row_to_key.read().unwrap().get(&row_id).cloned()
+        })
+        .await
+        .unwrap()
     }
 
     /// Collect every `PageId` occupied by this BTree (root, internal nodes,
@@ -398,6 +632,15 @@ impl IndexManager {
     ///
     /// MS07-T02: used by `TableManager::drop_table` to return the table's
     /// index pages to the storage free-list.
+    ///
+    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+    /// Iteration 002 (B-4): the traversal reads the tree pages through the
+    /// integrity module's bounded reader (`check_tree_page`) — the previous
+    /// `InternalNodeRef::get_child_page_id` path sliced the slot payload
+    /// unchecked and panicked on an out-of-bounds slot offset (release path
+    /// ⇒ process abort). A damaged page is counted, reported and skipped:
+    /// its subtree stays unreleased (the hole-page policy), the pages
+    /// collected so far are kept.
     pub async fn collect_all_pages(&self) -> Result<Vec<PageId>> {
         let root = PageId(self.root_page_id.load(Ordering::Acquire));
         let mut result = Vec::new();
@@ -414,34 +657,26 @@ impl IndexManager {
                 let guard = self.async_loader.load_page(page_id).await?;
                 let data_guard = guard.page_data();
 
-                match data_guard[0] {
-                    LEAF_NODE => {
-                        let leaf = LeafNodeRef::new(&data_guard);
-                        let next = leaf.next_leaf_page_id();
-                        if next > 0 {
-                            vec![PageId(next as u64)]
-                        } else {
-                            Vec::new()
-                        }
-                    }
-                    INTERNAL_NODE => {
-                        let internal = InternalNodeRef::new(&data_guard);
-                        let mut pages = Vec::with_capacity(internal.key_count() + 1);
-                        pages.push(PageId(internal.leftmost_child() as u64));
-                        for i in 0..internal.key_count() {
-                            if let Some(child) = internal.get_child_page_id(i) {
-                                pages.push(PageId(child as u64));
-                            }
-                        }
-                        pages
-                    }
-                    other => {
-                        return Err(StorageError::InvalidPageType {
-                            expected: LEAF_NODE,
-                            actual: other,
-                        });
-                    }
+                let step = check_tree_page(&data_guard);
+                if let Some(actual) = step.invalid_type {
+                    return Err(StorageError::InvalidPageType {
+                        expected: LEAF_NODE,
+                        actual,
+                    });
                 }
+                if !step.violations.is_empty() {
+                    // Damaged page — count it, report it, skip its subtree.
+                    eprintln!(
+                        "[index-release] index tree page {} is damaged: {}",
+                        page_id.0,
+                        violation_summary(&step.violations)
+                    );
+                    continue;
+                }
+                step.children
+                    .into_iter()
+                    .map(|child| PageId(child as u64))
+                    .collect::<Vec<_>>()
             };
 
             for child in children {
@@ -491,37 +726,32 @@ impl IndexManager {
                 };
                 let data_guard = guard.page_data();
 
-                match data_guard[0] {
-                    LEAF_NODE => {
-                        let leaf = LeafNodeRef::new(&data_guard);
-                        let next = leaf.next_leaf_page_id();
-                        if next > 0 {
-                            vec![PageId(next as u64)]
-                        } else {
-                            Vec::new()
-                        }
-                    }
-                    INTERNAL_NODE => {
-                        let internal = InternalNodeRef::new(&data_guard);
-                        let mut pages = Vec::with_capacity(internal.key_count() + 1);
-                        pages.push(PageId(internal.leftmost_child() as u64));
-                        for i in 0..internal.key_count() {
-                            if let Some(child) = internal.get_child_page_id(i) {
-                                pages.push(PageId(child as u64));
-                            }
-                        }
-                        pages
-                    }
-                    other => {
-                        // Torn/hole page reached via its parent pointer: free
-                        // it, but its subtree is unnameable — leak with a
-                        // warning (same policy as drop_table free failures).
-                        eprintln!(
-                            "[recovery] old index page {:?} has invalid type {:#04x}, skipping subtree",
-                            page_id, other
-                        );
-                        Vec::new()
-                    }
+                let step = check_tree_page(&data_guard);
+                if let Some(other) = step.invalid_type {
+                    // Torn/hole page reached via its parent pointer: free
+                    // it, but its subtree is unnameable — leak with a
+                    // warning (same policy as drop_table free failures).
+                    eprintln!(
+                        "[recovery] old index page {:?} has invalid type {:#04x}, skipping subtree",
+                        page_id, other
+                    );
+                    Vec::new()
+                } else if !step.violations.is_empty() {
+                    // Damaged page — count it, report it, skip its subtree
+                    // (change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+                    // Iteration 002 / B-4: the previous unchecked slot slice
+                    // panicked here).
+                    eprintln!(
+                        "[recovery] old index page {:?} is damaged: {}, skipping subtree",
+                        page_id,
+                        violation_summary(&step.violations)
+                    );
+                    Vec::new()
+                } else {
+                    step.children
+                        .into_iter()
+                        .map(|child| PageId(child as u64))
+                        .collect::<Vec<_>>()
                 }
             };
 

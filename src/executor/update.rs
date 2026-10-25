@@ -133,6 +133,11 @@ impl UpdateExecutor {
         // coerce → 唯一碰撞预检 → 类型门）逐字节保持。
         // MS21 Iter003 (T3-a/D9): width-aware read-back + DEFAULT overlay —
         // ADD COLUMN 前的窄行读回全宽后自愈（写新版本恒全宽）。
+        //
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 003（design D7 / ISS25）：在途窄化的表被读 ⇒ **明确拒绝**
+        // ——DML 的旧行读取不得按位置解码出错位的值。
+        self.table_meta.narrowing.ensure_readable()?;
         let (_version_header, old_tuple_bytes) =
             read_tuple_from_data_page(&self.buffer_pool, old_row_id, |vh, bytes| {
                 Ok((vh, bytes.to_vec()))

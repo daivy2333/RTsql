@@ -196,6 +196,8 @@
   | data_page.rs | src/storage/data_page.rs | 数据页读写 + VersionHeader |
   | table_manager.rs | src/storage/data/table_manager.rs | TableMeta（data_page_head/tail） |
   | page_visibility.rs | src/storage/page_visibility.rs | PageVisibilityInfo（页面级 MVCC 摘要） |
+  | free_page_rebuild.rs | src/storage/free_page_rebuild.rs | 空闲页重建的受控页读失败注入点（测试支撑，路径限定 + 一次消费 + 默认不生效） |
+  | ddl_commit_window.rs | src/executor/ddl_commit_window.rs | DDL 提交点窗口的受控暂停点（测试支撑，路径限定 + 一次消费 + 默认不生效） |
 - **状态**: active
 - **Legacy**: L002
 
@@ -274,12 +276,25 @@
 - **范围**: 测试执行与验证命令
 - **不变量**:
   - 全量回归验证 SHALL 分批执行：测试目标（`--lib`/`--bins` 与各集成测试文件）按确定性顺序分组，每组一次独立的 `cargo test … --test … -- --test-threads=1` 调用，批间顺序执行、同一时刻只有一批在跑；SHALL NOT 用一次无目标过滤的全量调用跑完（无论串行还是默认并行度），SHALL NOT 用默认并行度跑任何全量批次
-  - 原因：测试规模已过千（2026-09-26 为 1261 tests / 81 个测试二进制，2026-09-29 为 1458 tests），无过滤的全量调用要一次性构建链接全部测试二进制并长时间独占机器，已超出目标开发机的承载能力（2026-09-29 用户指令）；批内保持 `--test-threads=1` 则延续 2026-09-26 的隔离理由——并行执行时大量用例同时持有库文件、跑大 WAL 构建与子进程信号用例，内存与进程余量不足
+  - 原因：测试规模已过千（当前为 2231 tests / 143 个测试目标 / 14 批），无过滤的全量调用要一次性构建链接全部测试二进制并长时间独占机器，已超出目标开发机的承载能力（2026-09-29 用户指令）；批内保持 `--test-threads=1` 则延续 2026-09-26 的隔离理由——并行执行时大量用例同时持有库文件、跑大 WAL 构建与子进程信号用例，内存与进程余量不足
   - 批大小按机器能力调整（经验值 8–12 个目标/批）；分组顺序固定（如目标名字典序），保证覆盖可核对、不重不漏
   - 单次目标验证（`--test <name>` 等定向运行）可用默认并行度；该约束只约束全量
   - 新增测试 SHALL 保持「单用例自带独立 TempDir 现场」形态，不依赖并行度，也不得引入对执行顺序、并发度或批次边界的假设
   - 验证记录中的全量结论 SHALL 注明分批执行方式并保留各批的 passed/failed 计数；全量 Gate 等价于「全部批次各自 0 failed」，缺一批不得声明全量通过
 - **证据**: 2026-09-29 用户指令（全量单次串行负担超过本机能力，改为分批；豁免由 Act 直接修订本条）；溯源 2026-09-26 用户指令（禁并行跑全量）；MS19 两个 Cycle 的全量验证均为 `cargo test -- --test-threads=1`（1246 / 1261 tests）——该形态自 2026-09-29 起由分批执行取代
+- **状态**: active
+- **Legacy**: 无
+
+## M20: 范围外缺陷的承载闭环约束
+
+- **分类**: domain
+- **范围**: 实施与探索中的缺陷发现、报告与处置
+- **不变量**:
+  - 实施或探索中发现的、当前 change 范围外的实质缺陷，SHALL 走完整承载闭环——登记 Issue（openspec-experience-recorder）→ 建 change（openspec-plan）→ 实施修复（openspec-act）→ 收尾合并规格（openspec-docs-maintainer）；SHALL NOT 只做等级分类（严重度、优先级）后搁置
+  - 等级分类只决定承载顺序与排期，不构成处置结论；缺陷不因等级低而免于承载
+  - 承载落点按缺陷所在层确定：落在存储/索引层的由存储域后续 change 承载，落在 DDL 目录面的由 DDL 目录事务化主题承载；与哪一里程碑相邻排期由 milestone-planner 统一裁定
+  - 发现方只报告与移交，不在当前 change 内扩范围修复；当前 change 的验收面只覆盖本 change 范围内的行为
+- **证据**: 2026-10-24 用户指令「对于实施当中发现的所有issue候选，都直接寻找好的承载方式流程进行修复而不是等级」；MS34 实施期间产生的三个 Issue 候选（索引写侧原子性与取消后一致性、DDL 目录事务化）按本条进入承载闭环而非等级分类
 - **状态**: active
 - **Legacy**: 无
 

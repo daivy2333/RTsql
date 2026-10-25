@@ -55,6 +55,11 @@ impl IndexScanExecutor {
 #[async_trait::async_trait]
 impl Executor for IndexScanExecutor {
     async fn next(&mut self) -> Result<Option<ExecResult>> {
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 003（design D7 / ISS25）：在途窄化的表被读 ⇒ **明确拒绝**
+        // ——不得返回按位置错位的值，也不得静默返回空结果。检查在 `executed`
+        // 置位之前：拒绝后重试仍是同一拒绝。
+        self.table_meta.narrowing.ensure_readable()?;
         if self.executed {
             return Ok(None);
         }

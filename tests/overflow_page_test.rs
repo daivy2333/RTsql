@@ -346,7 +346,22 @@ async fn gc_releases_oversized_version_chain() {
     let cleaned = meta.gc_table(&pool).await.unwrap();
     assert_eq!(cleaned, 1, "the oversized committed v1 must be collected");
 
-    // RED：链 A 未释放时这里分配到的是 fresh 页（集合失配）
+    // (a) 释放未持久化（无 checkpoint / 无提升）⇒ 链页不得立即可分配：
+    //     这里分配到的是 fresh 页，不是被释放的链页。
+    let mut fresh = Vec::new();
+    for _ in 0..chain_a.len() {
+        let id = pool.storage().allocate_page().await.unwrap();
+        fresh.push(id.0 as u32);
+    }
+    assert!(
+        !chain_a.iter().any(|raw| fresh.contains(raw)),
+        "the released chain pages must not be allocatable before the release is durable: fresh={fresh:?} chain={chain_a:?}"
+    );
+
+    // (b) 持久化边界（存储层的提升入口——与 checkpoint 钩子同一条）：分配取回
+    //     同一批被释放的链页。
+    let limit = pool.storage().release_completion_limit();
+    pool.storage().promote_free_releases(limit);
     let mut reclaimed = Vec::new();
     for _ in 0..chain_a.len() {
         let id = pool.storage().allocate_page().await.unwrap();
@@ -384,7 +399,22 @@ async fn drop_table_releases_overflow_chain_pages() {
     expected.push(rid.page_id as u32); // 单行表恰一个数据页
     expected.sort();
 
-    // RED：链页未释放时 fresh 分配混入，集合失配
+    // (a) 释放未持久化（无 checkpoint / 无提升）⇒ 被释放的页不得立即可分配：
+    //     这里分配到的是 fresh 页，不是被释放的那一批。
+    let mut fresh = Vec::new();
+    for _ in 0..expected.len() {
+        let id = pool.storage().allocate_page().await.unwrap();
+        fresh.push(id.0 as u32);
+    }
+    assert!(
+        !expected.iter().any(|raw| fresh.contains(raw)),
+        "the released pages must not be allocatable before the release is durable: fresh={fresh:?} released={expected:?}"
+    );
+
+    // (b) 持久化边界（存储层的提升入口——与 checkpoint 钩子同一条）：全量分配
+    //     回收页集合（数据页 + 索引页 + 链页）与被释放的集合相等。
+    let limit = pool.storage().release_completion_limit();
+    pool.storage().promote_free_releases(limit);
     let mut reclaimed = Vec::new();
     for _ in 0..expected.len() {
         let id = pool.storage().allocate_page().await.unwrap();
@@ -415,19 +445,16 @@ async fn truncate_releases_overflow_chain_pages_keeps_definition() {
 
     tm.truncate_table("t").await.unwrap();
 
-    // 表定义保留（同时取新 PK 根）：树重建从 free-list 弹页，被弹中的链页
-    // 合法复用为新根——链页集合必须恰为「清零页 ∪ 新 PK 根」。
+    // 表定义保留（同时取新 PK 根）：释放未持久化（无 checkpoint / 无提升）
+    // ⇒ 树重建拿不到被释放的链页——新根取的是新页。
     let meta2 = tm.get_table("t").await.unwrap();
     let new_pk_root = meta2.index_manager.root_page_id().0 as u32;
     assert!(
-        chain.contains(&new_pk_root),
-        "rebuilt PK root must be reclaimed from the freed chain pages, got {new_pk_root}"
+        !chain.contains(&new_pk_root),
+        "the rebuilt PK root must not be reclaimed from the not-yet-durable chain pages, got {new_pk_root}"
     );
-    // RED：链页未释放时磁盘上仍是 0x04 溢出页映像，非零
+    // 链页在磁盘上仍为零（释放不写零页，清零在分配时）。
     for raw in &chain {
-        if *raw == new_pk_root {
-            continue;
-        }
         let page = pool.storage().read_page(PageId(*raw as u64)).await.unwrap();
         assert!(
             page.data.iter().all(|&b| b == 0),
@@ -443,6 +470,20 @@ async fn truncate_releases_overflow_chain_pages_keeps_definition() {
             .await
             .unwrap();
     assert_eq!(read_back, b"after");
+
+    // (b) 持久化边界（存储层的提升入口——与 checkpoint 钩子同一条）：被释放的
+    //     链页变为可分配——分配取回该链页集合。
+    let limit = pool.storage().release_completion_limit();
+    pool.storage().promote_free_releases(limit);
+    let mut reclaimed = Vec::new();
+    for _ in 0..chain.len() + 4 {
+        let id = pool.storage().allocate_page().await.unwrap();
+        reclaimed.push(id.0 as u32);
+    }
+    assert!(
+        chain.iter().all(|raw| reclaimed.contains(raw)),
+        "the released chain pages must be allocatable once the release is durable: reclaimed={reclaimed:?} chain={chain:?}"
+    );
 }
 
 // ===========================================================================

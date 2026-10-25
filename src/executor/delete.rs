@@ -4,8 +4,8 @@ use crate::executor::{ExecResult, Executor};
 use crate::storage::btree::IndexManager;
 use crate::storage::page_format::{deserialize_row, ColumnType};
 use crate::storage::{
-    read_tuple_from_data_page, write_tuple_to_data_page, BufferPool, PageId, Result, RowId,
-    StorageError, TableMeta,
+    read_tuple_from_data_page, update_version_header_in_data_page, write_tuple_to_data_page,
+    BufferPool, PageId, Result, RowId, StorageError, TableMeta,
 };
 use crate::transaction::{TransactionManager, VersionHeader};
 use crate::wal::{WALBuffer, WalRecord};
@@ -79,6 +79,11 @@ impl DeleteExecutor {
             .collect();
         // MS21 Iter003 (T3-a/D9): width-aware read-back + DEFAULT overlay
         // ——窄行的键派生（含尾列二级索引的 DEFAULT 键）与扫描读回同源。
+        //
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 003（design D7 / ISS25）：在途窄化的表被读 ⇒ **明确拒绝**
+        // ——DML 的旧行读取不得按位置解码出错位的值。
+        self.table_meta.narrowing.ensure_readable()?;
         let values = deserialize_row(&tuple, &schema, &self.table_meta.defaults)?;
         let mut keys = Vec::new();
         for (col_idx, uindex) in &self.table_meta.unique_indexes {
@@ -129,8 +134,8 @@ impl Executor for DeleteExecutor {
 
 impl DeleteExecutor {
     /// 既有单行删除路径逐字节承载（T6 提取共享——禁止复制墓碑/索引清理序）：
-    /// 定位、未命中零副作用早退、墓碑写、PK/唯一/二级条目清理、WAL 与版本
-    /// 记账。返回实际删除行数（命中 1 / 未命中 0）。
+    /// 定位、未命中零副作用早退、墓碑写、版本登记、链指针补写、PK/唯一/二级条目
+    /// 清理、WAL。返回实际删除行数（命中 1 / 未命中 0）。
     async fn delete_row(&mut self, key: &[u8]) -> Result<u64> {
         // Search for row_id before deleting
         let row_id = self.table_meta.index_manager.search(key).await?;
@@ -159,13 +164,21 @@ impl DeleteExecutor {
         // tombstone stays self-describing for the deleter-commit-state
         // suppression decision. The header read doubles as the existence
         // probe for the pre-existing SlotNotFound tolerance (test fixtures).
+        //
+        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
+        // Iteration 005 (ISS24, DML 同形面)：写序与 DDL 改写路径
+        // （`src/storage/data/table_manager.rs` 的 `alter_drop_column` DELETE
+        // 腿）**同形**——不带链指针写 → 登记 → 补链指针 → 再清理索引条目。
+        // 放弃（语句 future 被丢弃）可能落在「写出版本槽」与「登记版本」之间：
+        // 带链指针的墓碑按删除者的事务状态压制其前驱版本，而回收的覆盖面由
+        // 登记的时点决定 ⇒ 看不到未登记的墓碑 ⇒ 被放弃的 `DELETE` 隐藏了它
+        // 已删除的那一行。不带链指针的墓碑不压制任何前驱版本 ⇒ 该窗口无害。
+        // 槽的终态内容（create_tx / 删除哨兵 / 链指针）与修复前逐字节相同。
         let mut tombstone_rid: Option<RowId> = None;
         if let Some(rid) = &row_id {
             match self.buffer_pool.read_version_header(*rid).await {
                 Ok(_) => {
-                    let tombstone = VersionHeader::new(self.tx_id, None)
-                        .with_next_version(*rid)
-                        .mark_deleted();
+                    let tombstone = VersionHeader::new(self.tx_id, None).mark_deleted();
                     let written = write_tuple_to_data_page(
                         &self.buffer_pool,
                         &self.table_meta,
@@ -188,6 +201,30 @@ impl DeleteExecutor {
             }
         }
 
+        // 登记在链指针之前——登记之后回收才看得见这个版本（放弃窗口内的墓碑
+        // 必须能被中和）。登记对象与既有形态逐字节相同：写了墓碑就登记墓碑槽，
+        // 否则登记被删行的 rid（slot-missing 容忍臂的既有形状）。
+        if let Some(rid) = row_id {
+            let recorded = tombstone_rid.unwrap_or(rid);
+            self.tx_manager
+                .record_version(self.tx_id, &self.table_meta.name, recorded)
+                .await;
+        }
+
+        // 补链指针：墓碑指向被删的旧行（终态与修复前逐字节相同）。
+        if let (Some(tombstone), Some(rid)) = (tombstone_rid, row_id) {
+            update_version_header_in_data_page(
+                &self.buffer_pool,
+                tombstone,
+                VersionHeader::new(self.tx_id, None)
+                    .with_next_version(rid)
+                    .mark_deleted(),
+                &[],
+            )
+            .await?;
+        }
+
+        // 索引条目清理在链指针之后——放弃窗口落在链指针之前时，条目仍在位。
         self.table_meta.index_manager.delete(key).await?;
 
         // MS23 Iteration 001 (2.7/D7): 删 PK 条目同区逐唯一列移除条目——
@@ -209,17 +246,13 @@ impl DeleteExecutor {
         // otherwise (slot-missing tolerance keeps its pre-change shape).
         // commit() keeps the tombstone sentinel (version_chain commit guard);
         // abort neutralizes the tombstone slot (manager abort cleanup).
+        //
+        // WAL: Delete record carrying the deleted row's rid (record
+        // format and field semantics unchanged; recovery rebuilds the
+        // tombstone slot from it). BeginTxn/CommitTxn are written by
+        // TransactionManager::begin()/commit() (the single source of
+        // truth).
         if let Some(rid) = row_id {
-            let recorded = tombstone_rid.unwrap_or(rid);
-            self.tx_manager
-                .record_version(self.tx_id, &self.table_meta.name, recorded)
-                .await;
-
-            // WAL: Delete record carrying the deleted row's rid (record
-            // format and field semantics unchanged; recovery rebuilds the
-            // tombstone slot from it). BeginTxn/CommitTxn are written by
-            // TransactionManager::begin()/commit() (the single source of
-            // truth).
             if let Some(wal) = &self.wal_buffer {
                 wal.append(WalRecord::Delete {
                     tx_id: self.tx_id,

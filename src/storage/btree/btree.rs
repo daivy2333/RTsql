@@ -2,7 +2,10 @@
 use std::sync::Arc;
 
 use crate::storage::{
-    btree::node::{InternalNode, InternalNodeRef, LeafNode, LeafNodeRef, INTERNAL_NODE, LEAF_NODE},
+    btree::node::{
+        ensure_index_page_intact, InternalNode, InternalNodeRef, LeafNode, LeafNodeRef,
+        INTERNAL_NODE, LEAF_NODE,
+    },
     page_format::{Key, RowId},
     PageGuard, PageId, Result, StorageError,
 };
@@ -31,8 +34,11 @@ pub struct SplitResult {
 }
 
 /// Merge 操作的结果（用于 merge 传播）
+///
+/// 被合并掉的页由它的产出方（`merge_leaves` / `merge_internal_nodes`）释放并
+/// 发出释放完成标记，**不再**随传播携带页号——页号一旦随合并结果上浮，就
+/// 会在下游被重复释放（B-2 / `index-page-ownership` R1）。
 pub struct MergeInfo {
-    pub freed_page_id: PageId,
     pub separator_key: Key,
     pub new_root: Option<PageId>,
 }
@@ -69,8 +75,14 @@ fn find_child_position(iref: &InternalNodeRef, key: &Key) -> (PageId, usize) {
     }
 }
 
-fn sibling_ids(parent_guard: &PageGuard, child_index: usize) -> (Option<PageId>, Option<PageId>) {
+fn sibling_ids(
+    parent_guard: &PageGuard,
+    parent_id: PageId,
+    child_index: usize,
+    index_root_page_id: u64,
+) -> Result<(Option<PageId>, Option<PageId>)> {
     let d = parent_guard.page_data();
+    ensure_index_page_intact(&d, parent_id.0, index_root_page_id)?;
     let iref = InternalNodeRef::new(&d);
     let leftmost = iref.leftmost_child();
     let total_children = iref.key_count() + 1;
@@ -93,7 +105,7 @@ fn sibling_ids(parent_guard: &PageGuard, child_index: usize) -> (Option<PageId>,
         None
     };
 
-    (left, right)
+    Ok((left, right))
 }
 
 pub struct BTree {
@@ -146,6 +158,8 @@ impl BTree {
         let guard = self.loader.load_page(page_id)?;
         let data_guard = guard.page_data();
 
+        ensure_index_page_intact(&data_guard, page_id.0, self.root_page_id.0)?;
+
         if data_guard[0] == LEAF_NODE {
             let leaf = LeafNodeRef::new(&data_guard);
             let (found, pos) = leaf.find_key_position_binary(key);
@@ -182,6 +196,12 @@ impl BTree {
                 let guard = loader.load_page(page_id).await?;
                 let data_guard = guard.page_data();
 
+                ensure_index_page_intact(
+                    &data_guard,
+                    page_id.0,
+                    self.root_page_id.0,
+                )?;
+
                 if data_guard[0] == LEAF_NODE {
                     let leaf = LeafNodeRef::new(&data_guard);
                     let (found, pos) = leaf.find_key_position_binary(key);
@@ -207,7 +227,10 @@ impl BTree {
     pub fn insert(&mut self, key: &[u8], row_id: RowId) -> Result<Option<PageId>> {
         let key_obj = Key::new(key);
 
-        let split = self.insert_into_page(self.root_page_id, &key_obj, &row_id)?;
+        // IPO R3：下降路径上的页号。下降必然终止——结构被破坏到某节点可达
+        // 自身时，下降会成环（递归永不返回，栈被耗尽，进程 abort）。
+        let mut descent = Vec::new();
+        let split = self.insert_into_page(self.root_page_id, &key_obj, &row_id, &mut descent)?;
 
         if let Some(split_result) = split {
             // Root split: create a new root InternalNode
@@ -234,17 +257,43 @@ impl BTree {
 
     /// Recursive insert into a page. Returns Some(SplitResult) if the page split,
     /// None if insertion completed without split.
+    ///
+    /// `descent` 是本次下降路径上的页号（IPO R3）。下降必然终止：路径上的页号
+    /// 必须互不相同——出现重复即下降成环（结构已被破坏到某节点可达自身），
+    /// 此时返回错误而不是继续递归耗尽栈。
     fn insert_into_page(
         &self,
         page_id: PageId,
         key: &Key,
         row_id: &RowId,
+        descent: &mut Vec<PageId>,
+    ) -> Result<Option<SplitResult>> {
+        if descent.contains(&page_id) {
+            return Err(StorageError::Internal(format!(
+                "index descent cycle detected at page {}",
+                page_id.0
+            )));
+        }
+        descent.push(page_id);
+        let result = self.insert_into_page_step(page_id, key, row_id, descent);
+        descent.pop();
+        result
+    }
+
+    /// `insert_into_page` 的下降步骤（下降路径由 `insert_into_page` 守卫）。
+    fn insert_into_page_step(
+        &self,
+        page_id: PageId,
+        key: &Key,
+        row_id: &RowId,
+        descent: &mut Vec<PageId>,
     ) -> Result<Option<SplitResult>> {
         let guard = self.loader.load_page(page_id)?;
 
         // Determine node type using zero-copy read
         let is_leaf = {
             let data_guard = guard.page_data();
+            ensure_index_page_intact(&data_guard, page_id.0, self.root_page_id.0)?;
             data_guard[0] == LEAF_NODE
         };
 
@@ -324,7 +373,7 @@ impl BTree {
             let child_page_id = PageId(child_page_id_u32 as u64);
 
             // Recursively insert into child
-            let child_split = self.insert_into_page(child_page_id, key, row_id)?;
+            let child_split = self.insert_into_page(child_page_id, key, row_id, descent)?;
 
             if let Some(child_split_result) = child_split {
                 // Child split: need to insert a separator into this internal node
@@ -428,6 +477,7 @@ impl BTree {
         let guard = self.loader.load_page(page_id)?;
         let is_leaf = {
             let d = guard.page_data();
+            ensure_index_page_intact(&d, page_id.0, self.root_page_id.0)?;
             d[0] == LEAF_NODE
         };
         drop(guard);
@@ -479,7 +529,7 @@ impl BTree {
         parent_id: PageId,
     ) -> Result<Option<MergeInfo>> {
         let parent_guard = self.loader.load_page(parent_id)?;
-        let (left_sib, right_sib) = sibling_ids(&parent_guard, child_index);
+        let (left_sib, right_sib) = sibling_ids(&parent_guard, parent_id, child_index, self.root_page_id.0)?;
         drop(parent_guard);
 
         if let Some(right_id) = right_sib {
@@ -516,7 +566,6 @@ impl BTree {
             drop(guard);
             if is_internal && parent_kc == 0 {
                 Ok(Some(MergeInfo {
-                    freed_page_id: PageId(0),
                     separator_key: Key::new(b""),
                     new_root: Some(page_id),
                 }))
@@ -531,12 +580,14 @@ impl BTree {
     fn leaf_key_count(&self, page_id: PageId) -> Result<usize> {
         let guard = self.loader.load_page(page_id)?;
         let d = guard.page_data();
+        ensure_index_page_intact(&d, page_id.0, self.root_page_id.0)?;
         Ok(LeafNodeRef::new(&d).key_count())
     }
 
     fn internal_key_count(&self, page_id: PageId) -> Result<usize> {
         let guard = self.loader.load_page(page_id)?;
         let d = guard.page_data();
+        ensure_index_page_intact(&d, page_id.0, self.root_page_id.0)?;
         Ok(InternalNodeRef::new(&d).key_count())
     }
 
@@ -617,8 +668,11 @@ impl BTree {
             Ok::<(), StorageError>(())
         })?;
 
+        // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
+        // = 父节点的分隔键移除（同一写单元内的树页写），此刻已发出。
+        self.loader.complete_free_release(&[right_id]);
+
         Ok(MergeInfo {
-            freed_page_id: right_id,
             separator_key: sep_key,
             new_root: None,
         })
@@ -634,6 +688,7 @@ impl BTree {
         let (child_page_id, child_index) = {
             let guard = self.loader.load_page(page_id)?;
             let d = guard.page_data();
+            ensure_index_page_intact(&d, page_id.0, self.root_page_id.0)?;
             find_child_position(&InternalNodeRef::new(&d), key)
         };
 
@@ -664,9 +719,14 @@ impl BTree {
                 Ok::<(), StorageError>(())
             })?;
         }
-        if merge_info.freed_page_id.0 != 0 {
-            self.loader.free_page(merge_info.freed_page_id)?;
-        }
+        // B-2（`index-page-ownership` R1）：被合并掉的页**只释放一次**。
+        //
+        // 释放与释放完成标记由它的产出方发出：`merge_leaves`（叶合并）与
+        // `merge_internal_nodes`（内部节点合并）都在各自「父节点分隔键移除」
+        // 这一锚点写之后释放该页并发出完成标记。本函数是两条合并路径的
+        // 公共下游，**不负责**释放——在此重复释放会让同一页号两次进入待
+        // 释放集合，提升后同一页号在可分配集合里出现两次，同一页号会被
+        // 交给两个对象（页归属被破坏）。
 
         let guard = self.loader.load_page(page_id)?;
         let needs_action = {
@@ -687,7 +747,6 @@ impl BTree {
             None => {
                 let nr = self.shrink_root(page_id)?;
                 Ok(Some(MergeInfo {
-                    freed_page_id: PageId(0),
                     separator_key: merge_info.separator_key,
                     new_root: nr,
                 }))
@@ -703,6 +762,7 @@ impl BTree {
     fn find_separator_slot(&self, page_id: PageId, target: &Key) -> Result<Option<usize>> {
         let guard = self.loader.load_page(page_id)?;
         let d = guard.page_data();
+        ensure_index_page_intact(&d, page_id.0, self.root_page_id.0)?;
         let iref = InternalNodeRef::new(&d);
         for i in 0..iref.key_count() {
             if let Some(k) = iref.get_key(i) {
@@ -721,7 +781,7 @@ impl BTree {
         parent_id: PageId,
     ) -> Result<Option<MergeInfo>> {
         let parent_guard = self.loader.load_page(parent_id)?;
-        let (left_sib, right_sib) = sibling_ids(&parent_guard, child_index);
+        let (left_sib, right_sib) = sibling_ids(&parent_guard, parent_id, child_index, self.root_page_id.0)?;
         drop(parent_guard);
 
         if let Some(right_id) = right_sib {
@@ -772,6 +832,8 @@ impl BTree {
         if is_internal && kc == 0 {
             let new_root = PageId(leftmost as u64);
             self.loader.free_page(root_id)?;
+            // MS35（`free-page-lifecycle` R3）：此处**不发**释放完成标记——
+            // 旧根的锚点写是目录 root 更新，由调用方在目录更新之后发出。
             Ok(Some(new_root))
         } else {
             Ok(None)
@@ -875,8 +937,11 @@ impl BTree {
             Ok::<(), StorageError>(())
         })?;
 
+        // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
+        // = 父节点的分隔键移除（同一写单元内的树页写），此刻已发出。
+        self.loader.complete_free_release(&[right_id]);
+
         Ok(MergeInfo {
-            freed_page_id: right_id,
             separator_key: merged_sep,
             new_root: None,
         })
@@ -885,6 +950,7 @@ impl BTree {
     fn get_parent_separator_key(&self, parent_id: PageId, slot: usize) -> Result<Option<Key>> {
         let guard = self.loader.load_page(parent_id)?;
         let d = guard.page_data();
+        ensure_index_page_intact(&d, parent_id.0, self.root_page_id.0)?;
         Ok(InternalNodeRef::new(&d).get_key(slot))
     }
 
@@ -896,6 +962,12 @@ impl BTree {
         new_child: PageId,
     ) -> Result<()> {
         let guard = self.loader.load_page(parent_id)?;
+        {
+            // 闸门先行：分隔键原槽改写（`replace_separator` → `update_slot_in_place`）
+            // 会按槽的 offset / length 切页字节——损坏页不得走到那里。
+            let data_guard = guard.page_data();
+            ensure_index_page_intact(&data_guard, parent_id.0, self.root_page_id.0)?;
+        }
         guard.modify_page(|page_mut| {
             let mut internal = InternalNode::from_page(page_mut)?;
             internal.replace_separator(slot, new_key, new_child)?;
@@ -917,6 +989,8 @@ impl BTree {
         rd.copy_from_slice(rg.page().data.as_ref());
         drop(lg);
         drop(rg);
+        ensure_index_page_intact(&ld, left_id.0, self.root_page_id.0)?;
+        ensure_index_page_intact(&rd, right_id.0, self.root_page_id.0)?;
         let lref = LeafNodeRef::new(&ld);
         let rref = LeafNodeRef::new(&rd);
         let left = (0..lref.key_count())
@@ -950,6 +1024,7 @@ impl BTree {
         let mut data = vec![0u8; 4096];
         data.copy_from_slice(guard.page().data.as_ref());
         drop(guard);
+        ensure_index_page_intact(&data, page_id.0, self.root_page_id.0)?;
         let iref = InternalNodeRef::new(&data);
         let leftmost = iref.leftmost_child();
         let seps = (0..iref.key_count())
@@ -981,6 +1056,8 @@ impl BTree {
         loop {
             let guard = self.loader.load_page(page_id)?;
             let data_guard = guard.page_data();
+
+            ensure_index_page_intact(&data_guard, page_id.0, self.root_page_id.0)?;
 
             // Check if it's a leaf node
             if data_guard[0] != LEAF_NODE {
@@ -1038,6 +1115,10 @@ impl BTree {
     /// 保持 `KeyNotFound`（K05 对齐）。
     fn update_in_page(&self, page_id: PageId, key: &Key, new_row_id: &RowId) -> Result<()> {
         let guard = self.loader.load_page(page_id)?;
+        {
+            let data_guard = guard.page_data();
+            ensure_index_page_intact(&data_guard, page_id.0, self.root_page_id.0)?;
+        }
         let page = guard.page();
 
         if page.data[0] == LEAF_NODE {
@@ -1070,6 +1151,8 @@ impl BTree {
     fn search_all_from_page(&self, page_id: PageId, key: &Key) -> Result<Vec<RowId>> {
         let guard = self.loader.load_page(page_id)?;
         let data_guard = guard.page_data();
+
+        ensure_index_page_intact(&data_guard, page_id.0, self.root_page_id.0)?;
 
         if data_guard[0] == LEAF_NODE {
             let leaf = LeafNodeRef::new(&data_guard);
@@ -1141,6 +1224,8 @@ impl BTree {
         let guard = self.loader.load_page(page_id)?;
         let data_guard = guard.page_data();
 
+        ensure_index_page_intact(&data_guard, page_id.0, self.root_page_id.0)?;
+
         if data_guard[0] == LEAF_NODE {
             let leaf_ref = LeafNodeRef::new(&data_guard);
             let matches = leaf_ref.find_all_matches(key);
@@ -1210,6 +1295,8 @@ impl BTree {
     fn delete_exact_from_page(&self, page_id: PageId, key: &Key, row_id: &RowId) -> Result<()> {
         let guard = self.loader.load_page(page_id)?;
         let data_guard = guard.page_data();
+
+        ensure_index_page_intact(&data_guard, page_id.0, self.root_page_id.0)?;
 
         if data_guard[0] == LEAF_NODE {
             let leaf_ref = LeafNodeRef::new(&data_guard);

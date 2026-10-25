@@ -324,6 +324,39 @@ impl Catalog {
             .collect())
     }
 
+    /// MS35 (`free-page-lifecycle` R2): collect every page the chain
+    /// starting at `root` occupies (walk `next_page_id` until 0).
+    ///
+    /// Read-only. A page read failure is returned as an error — the free-page
+    /// rebuild treats any traversal error as "abandon the whole rebuild"
+    /// (R3), so this helper must not degrade to a partial result.
+    pub async fn collect_chain_pages(&self, root: PageId) -> Result<Vec<PageId>> {
+        let _guard = self.lock.lock().await;
+        let mut pages = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut current = Some(root);
+        while let Some(page_id) = current {
+            if !visited.insert(page_id.0) {
+                // Defensive: `next_page_id` cycle — stop instead of looping.
+                break;
+            }
+            pages.push(page_id);
+            let next = self
+                .buffer_pool
+                .with_page_data(page_id, |data| {
+                    let slotted = SlottedPageRef::new(data);
+                    Ok(slotted.header().next_page_id)
+                })
+                .await?;
+            current = if next == 0 {
+                None
+            } else {
+                Some(PageId(next as u64))
+            };
+        }
+        Ok(pages)
+    }
+
     /// MS21 Iter003 (T3-b/D9): append one column row to `__columns` for the
     /// ALTER TABLE ADD COLUMN write. The row carries its own table name and
     /// trailing `column_index` (chain append preserves the chain-order
@@ -374,38 +407,20 @@ impl Catalog {
             .collect())
     }
 
-    /// MS21 Iter003 (T3-b/D9): rewrite the `column_count` field of an
-    /// existing `__tables` row (ADD +1 / DROP -1). Same
-    /// deserialize→mutate→serialize shape as `update_table_tail`.
+    /// change 2026-10-13 T3 (D4/D5): the ALTER TABLE column-count rewrite on
+    /// the `__tables` row is the statement commit point: the column rows must
+    /// be durable BEFORE the count that advertises them, so the updated row's
+    /// page is flushed last (referenced pages first).
     ///
-    /// No-op if the table does not exist.
-    pub async fn update_table_column_count(&self, name: &str, new_count: u32) -> Result<()> {
-        let _guard = self.lock.lock().await;
-        update_field_in_chain(
-            &self.buffer_pool,
-            &self.storage,
-            PageId(TABLES_PAGE_ID),
-            name,
-            |data| {
-                let mut row = deserialize_catalog_row(data)?;
-                if row.table_name != name {
-                    return Ok(None);
-                }
-                row.column_count = new_count;
-                Ok(Some(serialize_catalog_row(&row)))
-            },
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// change 2026-10-13 T3 (D4/D5): ALTER TABLE ADD COLUMN variant of
-    /// [`Self::update_table_column_count`]. The column-count rewrite on the
-    /// `__tables` row is the statement commit point: the new column row must
-    /// be durable BEFORE the count that advertises it, so the updated row's
-    /// page is flushed last (referenced pages first). ALTER DROP COLUMN
-    /// keeps the plain method — DROP-class DDL retains its checkpoint-based
-    /// crash boundary (design D4 wiring list).
+    /// change 2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog /
+    /// Iteration 001 (D5): ALTER TABLE DROP COLUMN uses this method too — its
+    /// catalog narrowing moved to the statement's commit point (ISS21), so the
+    /// drop applies the column rows first and the count last, the same order
+    /// as ADD COLUMN. The intermediate state of a crash inside the drop's
+    /// commit point is the narrowed column rows with the not-yet-lowered
+    /// count: the reopen path derives the live layout from the column rows
+    /// (`open_or_init` truncates to the count), so the narrowed layout stays
+    /// readable.
     pub async fn update_table_column_count_ddl(&self, name: &str, new_count: u32) -> Result<()> {
         let _guard = self.lock.lock().await;
         let page = update_field_in_chain(

@@ -136,9 +136,15 @@ pub async fn write_overflow_chain(buffer_pool: &BufferPool, data: &[u8]) -> Resu
 
     let result = write_chain_pages(buffer_pool, data, &chunks, &mut allocated).await;
     if result.is_err() {
+        let mut released: Vec<PageId> = Vec::with_capacity(allocated.len());
         for raw_id in allocated.drain(..) {
-            let _ = buffer_pool.free_page(PageId(raw_id as u64)).await;
+            let page = PageId(raw_id as u64);
+            let _ = buffer_pool.free_page(page).await;
+            released.push(page);
         }
+        // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放没有
+        // 锚点写（链页从未被登记），按保守方向等下一次成功刷盘。
+        buffer_pool.complete_free_release(&released);
     }
     result
 }
@@ -251,9 +257,15 @@ pub async fn collect_overflow_pages(buffer_pool: &BufferPool, first_page: u32) -
 /// Free every page of the chain starting at `first_page` (no-op for 0).
 pub async fn free_overflow_chain(buffer_pool: &BufferPool, first_page: u32) -> Result<()> {
     let pages = collect_overflow_pages(buffer_pool, first_page).await?;
+    let mut released: Vec<PageId> = Vec::with_capacity(pages.len());
     for raw_id in pages {
-        buffer_pool.free_page(PageId(raw_id as u64)).await?;
+        let page = PageId(raw_id as u64);
+        buffer_pool.free_page(page).await?;
+        released.push(page);
     }
+    // MS35（`free-page-lifecycle` R3）：释放完成标记——调用方的锚点写
+    // （GC 路径的数据页写 / 失败清理无锚点）此刻都已发出。
+    buffer_pool.complete_free_release(&released);
     Ok(())
 }
 
@@ -480,7 +492,21 @@ mod tests {
 
         free_overflow_chain(&pool, first).await.unwrap();
 
-        // freed ids are reusable (free-list semantics) — the chain is gone
+        // 释放进入待释放集合：释放未持久化前，立即分配**不得**取回这些页。
+        let mut fresh = Vec::new();
+        for _ in 0..pages.len() {
+            let id = pool.storage().allocate_page().await.unwrap();
+            fresh.push(id.0 as u32);
+        }
+        assert!(
+            !pages.iter().any(|raw| fresh.contains(raw)),
+            "the freed chain pages must not be allocatable before the release is durable: fresh={fresh:?} pages={pages:?}"
+        );
+
+        // 持久化边界（与 checkpoint 钩子同一条存储层提升入口——该层没有
+        // `Database`）：提升之后，分配**必须**取回同一批页。
+        let limit = pool.storage().release_completion_limit();
+        pool.storage().promote_free_releases(limit);
         let mut reclaimed = Vec::new();
         for _ in 0..pages.len() {
             let id = pool.storage().allocate_page().await.unwrap();
@@ -562,6 +588,24 @@ mod tests {
         // it only gates the injected failure during the write under test.)
         let issued = storage.successful.lock().unwrap().clone();
         assert_eq!(issued.len(), 1, "only the first allocation succeeded");
+        *storage.remaining.lock().unwrap() = 1;
+
+        // 释放进入待释放集合：释放未持久化前，清理掉的页**不得**立即可分配。
+        let fresh = pool.storage().allocate_page().await.unwrap();
+        assert_ne!(
+            fresh.0 as u32, issued[0],
+            "the freed page must not be allocatable before the release is durable"
+        );
+
+        // 持久化边界（与 checkpoint 钩子同一条存储层提升入口——该层没有
+        // `Database`）：释放完成并提升之后，分配取回同一页。
+        // 注：测试替身 `FailAfterNAllocs` 不实现释放生命周期的新增能力（保持
+        // 零改动），生命周期落在它内部的 `FileStorage` 上，故直接驱动内层。
+        storage
+            .inner
+            .complete_free_release(&[PageId(issued[0] as u64)]);
+        let limit = storage.inner.release_completion_limit();
+        storage.inner.promote_free_releases(limit);
         *storage.remaining.lock().unwrap() = 1;
         let reclaimed = pool.storage().allocate_page().await.unwrap();
         assert_eq!(
