@@ -1,6 +1,6 @@
 # `dump` 对非整数 `UNIQUE` 列无条件渲染 ⇒ 该类旧表的 dump 不可恢复
 
-- Status: open
+- Status: closed（2026-10-26 fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`）
 - Filed: 2026-10-25
 - Source: Act Response 的 Issue 候选（MS36 的 M 系列观察之一）+ Plan Review 的判为 Minor / 非阻塞（并明确「这不是缺陷」），change `2026-10-24-ms36-legacy-format-and-dump-compat` Iteration 001 Cycle `000-initial.md`（Review Result `accepted`）；该形态由 MS36 的 `design.md` D9「可选改进」显式记录
 - Environment: Linux x86_64 / WSL2 6.18.40.1、rustc 1.99.1 / cargo 1.99.1、RTsql `rtsql` CLI 的 `dump` / `restore` 路径（`src/cli/`）；登记时工作区 HEAD `0a08b14`（ahead of origin 9），产品改动未提交
@@ -28,8 +28,10 @@
 - 处置指针：**待建 change 承载**（change 建好后由 Recorder 更新本指针）。
 - 承载落点：落在 **`dump` 的 DDL 渲染规则**（`src/cli/` 的 `create_table_sql`）→ 建议独立 change 承载，修复形态即 D9 给出的「按 `PRIMARY KEY` 的同型规则条件渲染 `UNIQUE`」；改动会**改变 dump 的产物内容**（旧库 dump 的 DDL 文本）⇒ 属**功能语义变更**，需要独立验收，并须复核与 `legacy-format-compat` 拒绝面的关系（渲染条件化后，这类表是否从「范围外」变成「支持范围内」）。
 - 与 ISS32 的边界：本条是**dump 产物生成侧**的渲染规则，ISS32 是**restore 执行侧**的提交语义，根因不同，**不合并**。
+- 2026-10-26 关闭。原因：`dump` 对 `UNIQUE` 的渲染已按整数类型加条件，由归档变更 Iteration 008 任务 T11 处置。该 Cycle `iterations/008-dump-restore-contract/000-initial.md` 的 Plan Review 为 `accepted`。处置指针：fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`。
 
 ## 证据
 
+- 2026-10-26 关闭依据：`openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure/iterations/008-dump-restore-contract/000-initial.md` 的 Plan Review 为 `accepted`（T11）。
 - 调查与结论正文（不在本 Issue 复制）：`openspec/changes/archive/2026-10-24-ms36-legacy-format-and-dump-compat/design.md`（D9「可选改进（不在本 change 范围）」——现状、参照规则、修复形态与「这不是缺陷」的判定）；`openspec/changes/archive/2026-10-24-ms36-legacy-format-and-dump-compat/iterations/001-contract-and-baseline/000-initial.md`（Plan Review 的 M 系列判定）。
 - 相关行为规格与文档：`openspec/specs/legacy-format-compat/spec.md`（范围外拒绝面与迁移路径）、`tests/fixtures/legacy/README.md`（旧库 dump / restore 的迁移路径说明）。

@@ -57,6 +57,10 @@ fn render_node(plan: &PhysicalPlan, depth: usize, out: &mut Vec<String>) {
             render_node(&node.left, depth + 1, out);
             render_node(&node.right, depth + 1, out);
         }
+        PhysicalPlan::SortMergeJoin(node) => {
+            render_node(&node.left, depth + 1, out);
+            render_node(&node.right, depth + 1, out);
+        }
         PhysicalPlan::NestedLoopJoin(node) => {
             render_node(&node.left, depth + 1, out);
             render_node(&node.right, depth + 1, out);
@@ -288,6 +292,10 @@ fn describe(plan: &PhysicalPlan) -> String {
             let conditions: Vec<String> = node.conditions.iter().map(join_condition_text).collect();
             format!("Join [Inner] (on=[{}])", conditions.join(", "))
         }
+        PhysicalPlan::SortMergeJoin(node) => {
+            let conditions: Vec<String> = node.conditions.iter().map(join_condition_text).collect();
+            format!("SortMergeJoin (on=[{}])", conditions.join(", "))
+        }
         PhysicalPlan::NestedLoopJoin(node) => format!(
             "NestedLoopJoin [{}] (on={:?})",
             match node.join_type {
@@ -475,5 +483,33 @@ mod tests {
                 "    SingleRow".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn sort_merge_join_plan_text_names_node() {
+        use crate::executor::plan::{ColumnRef, JoinNode};
+
+        let plan = PhysicalPlan::SortMergeJoin(JoinNode {
+            left: Box::new(PhysicalPlan::SingleRow),
+            right: Box::new(PhysicalPlan::SingleRow),
+            conditions: vec![JoinCondition {
+                left_column: ColumnRef {
+                    table: Some("r".to_string()),
+                    column: "a".to_string(),
+                },
+                right_column: ColumnRef {
+                    table: Some("s".to_string()),
+                    column: "b".to_string(),
+                },
+            }],
+            output_columns: Vec::new(),
+            output_sides: Vec::new(),
+        });
+        let text = render_plan_tree(&plan).join("\n");
+        assert!(
+            text.contains("SortMergeJoin"),
+            "计划文本应点名排序合并节点: {text}"
+        );
+        assert!(text.contains("r.a = s.b"), "计划文本应包含等值条件: {text}");
     }
 }

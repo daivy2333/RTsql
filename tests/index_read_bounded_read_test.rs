@@ -18,6 +18,11 @@
 //!   abort、不静默错读；
 //! - 未损坏库上的同样语句行为零变化。
 //!
+//! 另含**短叶条目**形态（槽负载长度短于条目格式 38 字节而偏移仍落在页内）：
+//! 该条目解不出来，未纳入页级判据时会被当作「没有这个条目」静默跳过 ⇒
+//! 点查得到「查不到该行」（静默错读）。纳入页级判据后，读 / 写路径以点名
+//! 损坏页与索引树根页的明确错误结束。
+//!
 //! 释放路径（`DROP TABLE` / `TRUNCATE` / `DROP INDEX`）的处置方向相反
 //! （计数 + 告警 + 跳过——Iteration 002 已确立），本文件不触碰它。
 
@@ -62,6 +67,29 @@ fn corrupt_slot_offset(path: &Path, page: u32, slot_index: usize) {
     )))
     .unwrap();
     f.write_all(&0xFFFFu16.to_le_bytes()).unwrap();
+    f.flush().unwrap();
+}
+
+/// 槽目录项的 **length 字段**位置——布局 `[logical_id:2][offset:2][length:2]`，
+/// 既有 `slot_offset_field_offset` 返回 offset 字段（起点 +2），length 字段再 +2。
+fn slot_length_field_offset(slot_index: usize) -> usize {
+    Page::PAGE_SIZE - (slot_index + 1) * Slot::SIZE + 4
+}
+
+/// 把某页某槽的**负载长度**改成给定值——偏移不动 ⇒ 负载仍落在页内
+/// （真实改坏页字节，不是替身）。
+///
+/// 长度短于条目格式（`MAX_KEY_LEN + RowId::SIZE` = 38 字节）时，槽本身**合法**
+/// （边界检查通过），但条目解不出来 ⇒ 这是与「越界槽」不同的缺陷形态。
+fn corrupt_slot_length(path: &Path, page: u32, slot_index: usize, new_len: u16) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(page_file_offset(
+        page,
+        slot_length_field_offset(slot_index),
+    )))
+    .unwrap();
+    f.write_all(&new_len.to_le_bytes()).unwrap();
     f.flush().unwrap();
 }
 
@@ -119,9 +147,9 @@ fn assert_damaged_index_error(resp: &Response, page_id: u32, index_root_page_id:
                 "the error must name the index tree root page {index_root_page_id}: {message}"
             );
         }
-        other => panic!(
-            "a damaged index page must fail the statement with a named error, got {other:?}"
-        ),
+        other => {
+            panic!("a damaged index page must fail the statement with a named error, got {other:?}")
+        }
     }
 }
 
@@ -163,7 +191,10 @@ async fn damaged_index_page_makes_select_fail_with_a_named_error() {
 
     // 全索引扫描（复合 PK 谓词 → Filter(Scan) → scan_all 遍历全部叶）⇒
     // 同样以明确错误结束。
-    let resp = to_response(db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 1").await);
+    let resp = to_response(
+        db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 1")
+            .await,
+    );
     assert_damaged_index_error(&resp, leftmost_leaf, pk_root);
 
     // 无 WHERE 的 SELECT 走数据页通道（M19 路由），本就不读索引树页 ⇒
@@ -270,7 +301,10 @@ async fn undamaged_index_reads_and_writes_are_unchanged() {
     assert_eq!(row_count(&resp), 1);
 
     // 全索引扫描（复合 PK 谓词 → Filter(Scan)）。
-    let resp = to_response(db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 1").await);
+    let resp = to_response(
+        db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 1")
+            .await,
+    );
     assert_eq!(row_count(&resp), 1);
 
     // 无 WHERE 的全表扫描。
@@ -280,9 +314,15 @@ async fn undamaged_index_reads_and_writes_are_unchanged() {
     // UPDATE：单行命中，影响 1 行；旧值不再命中、新值命中。
     let resp = to_response(db.execute_sql("UPDATE t SET v = 999 WHERE id = 1").await);
     assert_eq!(affected_rows(&resp), 1);
-    let resp = to_response(db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 1").await);
+    let resp = to_response(
+        db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 1")
+            .await,
+    );
     assert_eq!(row_count(&resp), 0);
-    let resp = to_response(db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 999").await);
+    let resp = to_response(
+        db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 999")
+            .await,
+    );
     assert_eq!(row_count(&resp), 1);
 
     // INSERT：新键落位，影响 1 行；表多一行。
@@ -296,6 +336,57 @@ async fn undamaged_index_reads_and_writes_are_unchanged() {
     assert_eq!(affected_rows(&resp), 1);
     let resp = to_response(db.execute_sql("SELECT * FROM t").await);
     assert_eq!(row_count(&resp), 100);
-    let resp = to_response(db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 999").await);
+    let resp = to_response(
+        db.execute_sql("SELECT * FROM t WHERE id = 1 AND v = 999")
+            .await,
+    );
     assert_eq!(row_count(&resp), 0);
+}
+
+// ===========================================================================
+// 短叶条目：负载长度短于条目格式（38 字节）而偏移仍落在页内
+// ===========================================================================
+
+/// 叶页槽的负载长度短于条目格式时，该条目**解不出来**（`get_key` /
+/// `get_row_id` 因长度不足返回 `None`）⇒ 未纳入页级判据时它被当作「没有这个
+/// 条目」静默跳过 ⇒ 点查得到「查不到该行」（静默错读）。
+///
+/// 判据纳入后：读 / 写路径以**点名损坏页与索引树根页**的明确错误结束。
+#[tokio::test]
+async fn short_leaf_entry_makes_select_fail_with_a_named_error() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    let (pk_root, leftmost_leaf) = seed_pk_tree(&path).await;
+
+    // 损坏点落在点查真正下降到的**最左叶页**上：槽 0 的负载长度 38 → 10
+    // 字节，偏移不动 ⇒ 槽仍落在页内（不是越界槽）。
+    corrupt_slot_length(&path, leftmost_leaf, 0, 10);
+
+    let db = Database::open(&path).await.unwrap();
+
+    // 点查：根页健康 → 下降到最左叶 → 短叶条目 ⇒ 明确错误（不是空结果）。
+    let resp = to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await);
+    assert_damaged_index_error(&resp, leftmost_leaf, pk_root);
+}
+
+/// 未损坏库上的同样语句**零变化**（判据扩展不误报健康页）。
+#[tokio::test]
+async fn short_leaf_entry_does_not_change_undamaged_reads() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    seed_pk_tree(&path).await;
+
+    let db = Database::open(&path).await.unwrap();
+
+    // 读：行集合不变。
+    let resp = to_response(db.execute_sql("SELECT * FROM t").await);
+    assert_eq!(row_count(&resp), 100);
+    let resp = to_response(db.execute_sql("SELECT * FROM t WHERE id = 1").await);
+    assert_eq!(row_count(&resp), 1);
+
+    // 写：INSERT 仍成功。
+    let resp = to_response(db.execute_sql("INSERT INTO t VALUES (101, 101)").await);
+    assert_eq!(affected_rows(&resp), 1);
+    let resp = to_response(db.execute_sql("SELECT * FROM t").await);
+    assert_eq!(row_count(&resp), 101);
 }

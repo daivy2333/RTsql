@@ -1,6 +1,6 @@
 # 索引树页级判据缺叶页条目长度检查（短于条目格式的叶条目被静默跳过）
 
-- Status: open
+- Status: closed（2026-10-26 fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`）
 - Filed: 2026-10-25
 - Source: Act Response 的 Issue 候选 **IC-1** + Plan Review 的 F6（叶页短条目缺口非回归、明确在 Plan 范围外），change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 006 Cycle `000-initial.md`（Review Result `accepted`）；Iteration 007 的 Issue 候选 1 沿用同一编号
 - Environment: Linux x86_64 / WSL2 6.18.40.1、rustc 1.99.1 / cargo 1.99.1、RTsql `tests/index_read_bounded_read_test.rs` 集成测试、tokio 多线程 test runtime、单用例自带 `tempfile::tempdir()` 现场；登记时工作区 HEAD `0a08b14`（ahead of origin 9），产品改动未提交
@@ -32,9 +32,11 @@
 - 夹具可复用：字节级损坏注入手法已在承载 change 中验证（`tests/release_path_bounded_read_test.rs` / `tests/index_read_bounded_read_test.rs` 共用的 `slot_offset_field_offset` / `page_file_offset` / `corrupt_slot_offset`）。
 - 与 IC-2 的边界：本条是**索引树叶页条目长度**这一具体判据缺口，IC-2 是**其余页型**（数据页 / 目录页 / 恢复面 / 缓冲池）的无界读点，根因位置与承载面不同，**不合并**。
 - **编号说明（避免交叉引用误读）**：MS36 的 Plan Review 曾把它的两条 Minor finding / Acceptance Gap 以「**ISS26** / **ISS27**」之**候选名**报告（见 `.agents/docs/tasks.md` 的 MS36 段），但那两条**从未登记为 Issue 文件**，且已由缺陷修复 change 的 Iteration 007 闭合（G2 文件级样本 E7 与其四项断言已落地；矩阵 G2 行已升格为「文件级样本（E7）」）⇒ 本 Issue 与那两条候选**无主题关系**，编号自 ISS26 起顺接（既有登记最大为 ISS25）。
+- 2026-10-26 关闭。原因：叶页条目长度已纳入页级判据，由归档变更 Iteration 000 任务 T1 / T2 处置。该 Cycle `iterations/000-index-leaf-entry-criterion/000-initial.md` 的 Plan Review 为 `accepted`。处置指针：fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`。
 
 ## 证据
 
+- 2026-10-26 关闭依据：`openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure/iterations/000-index-leaf-entry-criterion/000-initial.md` 的 Plan Review 为 `accepted`（T1 / T2）。
 - 调查与结论正文（不在本 Issue 复制）：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/iterations/006-index-read-bounded-read/000-initial.md` —— Act Response 的 Issue 候选 IC-1、Plan Review 的 F6。
 - 沿用与措辞收敛：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/iterations/007-legacy-compat-evidence/000-initial.md` —— Issue 候选 IC-1（沿用 Iteration 006 的登记，本 Cycle 未改变其状态）、Plan Review 的 F14（IRBR 标题措辞残余）。
 - 移交记录：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/tasks.md`（收尾交接清单第 4 条「Iteration 006 登记的两条 Issue 候选（IC-1 / IC-2）的移交」）。

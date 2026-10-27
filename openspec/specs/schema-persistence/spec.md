@@ -1,7 +1,7 @@
 # schema-persistence Specification
 
 ## Purpose
-TBD - created by archiving change 2026-08-26-ms07-t01-schema-persistence. Update Purpose after archive.
+表定义写入系统表 `__tables` 与 `__columns`，`Database::open` 读取这两张表，在进程重启后重建全部 `TableMeta`。来源：`2026-08-26-ms07-t01-schema-persistence`
 ## Requirements
 ### Requirement: 系统表持久化 schema
 

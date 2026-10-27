@@ -65,17 +65,35 @@ impl Executor for AlterTableExecutor {
                     crate::executor::ColumnType::Date => StorageColumnType::Date,
                     crate::executor::ColumnType::Timestamp => StorageColumnType::Timestamp,
                 };
-                self.database
-                    .table_manager
-                    .alter_add_column(
-                        &node.table_name,
-                        column_name,
-                        storage_type,
-                        *not_null,
-                        default_value.clone(),
-                    )
-                    .await?;
-                Ok(Some(ExecResult::AffectedRows(0)))
+                // 加列放进独立任务。语句 future 只等结果通道；丢弃它会关掉接收端，
+                // 任务继续做提交或回退，不随这次丢弃取消。
+                let table_manager = std::sync::Arc::clone(&self.database.table_manager);
+                let table_name = node.table_name.clone();
+                let column_name = column_name.clone();
+                let not_null = *not_null;
+                let default_value = default_value.clone();
+                let path = self.database.path().to_path_buf();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = tokio::spawn(async move {
+                    let _ = table_manager
+                        .alter_add_column(
+                            &table_name,
+                            &column_name,
+                            storage_type,
+                            not_null,
+                            default_value,
+                            &path,
+                            tx,
+                        )
+                        .await;
+                });
+                match rx.await {
+                    Ok(Ok(())) => Ok(Some(ExecResult::AffectedRows(0))),
+                    Ok(Err(error)) => Err(error),
+                    Err(_closed) => Err(crate::storage::StorageError::Internal(
+                        "ADD COLUMN ended before reporting a result".to_string(),
+                    )),
+                }
             }
             crate::executor::AlterTableOp::DropColumn { column_name } => {
                 // 隐式事务（D10）：重写 DELETE/INSERT 全在一个事务内提交，
@@ -117,6 +135,16 @@ impl Executor for AlterTableExecutor {
                             .await?;
                         // 库属隐式事务已提交 → 解除语句作用域守卫。
                         guard.disarm();
+                        // change 2026-10-25-ms37-defect-ledger-closure
+                        // Iteration 006 / Cycle 000（T6 / M5）：登记「已提交但
+                        // 未发布」的窄化意图——checkpoint 据此**不得**让该意图
+                        // 随 WAL 截断丢失（截断前先发布在途窄化）。
+                        //
+                        // 登记是**同步**的：与提交之间没有让出点 ⇒ 不出现「已
+                        // 提交但未登记」的窗口。
+                        self.database
+                            .table_manager
+                            .register_committed_narrowing(&pending);
                         // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
                         // Iteration 003（T10）：测试支撑注入点——布防时把语句停在
                         // 「提交完成 → 目录应用」窗口内（未布防 ⇒ 立即返回，零

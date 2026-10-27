@@ -421,14 +421,14 @@ impl UpdateExecutor {
         // `update`/`delete` 歧义原语禁用）。三支形态：
         // 1. 值不变：条目按同键换指新 rid；
         // 2. 置 NULL：删旧条目（NULL 不入索引）；
-        // 3. 改值：删旧键旧条目、插新键新条目（NULL 旧值无条目自然跳过；
-        //    INT 声明列经写入类型门新值必为 Int/NULL，to_key 防御形态同唯一列）。
+        // 3. 改值：删旧键旧条目、插新键新条目。NULL 与不可容纳的值不入树。
         for (pos, sindex) in self.table_meta.secondary_indexes.iter().enumerate() {
             let col = sindex.column_index;
+            let column_type = &self.schema[col];
             let old_v = &secondary_old_values[pos];
             let new_v = &values[col];
-            let old_key = old_v.to_key();
-            let new_key = new_v.to_key();
+            let old_key = old_v.secondary_index_key(column_type);
+            let new_key = new_v.secondary_index_key(column_type);
             if old_v == new_v {
                 if let Some(k) = new_key {
                     sindex.index.delete_exact(k.as_bytes(), old_row_id).await?;

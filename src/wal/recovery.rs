@@ -5,9 +5,10 @@
 use super::{WalError, WalReader, WalRecord};
 use crate::storage::data::{SecondaryIndexMeta, TableMeta};
 use crate::storage::page_format::{
-    deserialize_row, overflow, ColumnType, RowId, SlottedPage, SlottedPageRef,
+    deserialize_row, overflow, ColumnType, RowId, SlottedPage, SlottedPageRef, MAX_PAGE_SLOTS,
 };
 use crate::storage::{
+    corrupted_data_page_slot_count_error, corrupted_data_page_slot_error,
     update_version_header_in_data_page, write_tuple_to_data_page, BufferPool, CatalogKind,
     IndexManager, PageId, StorageError, TableManager,
 };
@@ -119,6 +120,96 @@ enum PrescanSlotKey {
     Keyless(Vec<u8>),
 }
 
+/// change 2026-10-25-ms37-defect-ledger-closure Iteration 005（T5）：恢复面
+/// **扫描类**读点上的损坏槽**跳过记录**。
+///
+/// 两种损坏形态并列：
+/// - **页级形态**：页头声称的槽数超出该页的槽目录容量 ⇒ 该页的槽目录整体
+///   不可定位（`get_slot` 的定位算术整数下溢）⇒ 扫描类跳过**整页**；
+/// - **槽级形态**：单个槽的负载越界 ⇒ 扫描类跳过**该槽**。
+///
+/// 跳过**必须被报出**（不得静默）——计数为**局部**计数（每个扫描点各自
+/// 维护），**不新增** `RecoveryResult` 的公共字段、不新增命令参数 / 配置项。
+#[derive(Debug, Clone, Copy)]
+enum RecoverySkip {
+    /// 页级形态：整页跳过（点名该页与页头声称的槽数）。
+    Page { page_id: u64, slot_count: usize },
+    /// 槽级形态：该槽跳过（点名该页与该槽序号）。
+    Slot {
+        page_id: u64,
+        slot_index: usize,
+        offset: usize,
+        length: usize,
+    },
+}
+
+/// 扫描点的**局部跳过计数**（每个扫描点各自维护——不进公共 API 面）。
+#[derive(Debug, Default, Clone, Copy)]
+struct RecoverySkipCount {
+    /// 整页跳过的页数（页级形态）。
+    pages: usize,
+    /// 单槽跳过的槽数（槽级形态）。
+    slots: usize,
+}
+
+impl RecoverySkipCount {
+    /// 由跳过记录汇总出局部计数。
+    fn of(skips: &[RecoverySkip]) -> Self {
+        let mut count = Self::default();
+        for skip in skips {
+            match skip {
+                RecoverySkip::Page { .. } => count.pages += 1,
+                RecoverySkip::Slot { .. } => count.slots += 1,
+            }
+        }
+        count
+    }
+}
+
+/// 恢复告警的**报出**——沿用本文件既有的 `eprintln!` 形态（stderr）。
+///
+/// 报出内容点名**该页**（页级形态）与**该页的槽序号**（槽级形态）⇒ 跳过
+/// 不得静默。先一行局部计数汇总，再逐条细节。
+fn report_recovery_skips(context: &str, count: &RecoverySkipCount, skips: &[RecoverySkip]) {
+    if count.pages == 0 && count.slots == 0 {
+        return;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if count.pages > 0 {
+        parts.push(format!("{} damaged page(s)", count.pages));
+    }
+    if count.slots > 0 {
+        parts.push(format!("{} damaged slot(s)", count.slots));
+    }
+    eprintln!("[recovery] {}: skipped {}", context, parts.join(", "));
+    for skip in skips {
+        match skip {
+            RecoverySkip::Page {
+                page_id,
+                slot_count,
+            } => eprintln!(
+                "[recovery] {}: skipped page {} (its header claims {} slots, \
+                 the slot directory capacity is {})",
+                context, page_id, slot_count, MAX_PAGE_SLOTS
+            ),
+            RecoverySkip::Slot {
+                page_id,
+                slot_index,
+                offset,
+                length,
+            } => eprintln!(
+                "[recovery] {}: skipped slot {} of page {} (its payload range [{}, {}) \
+                 lies outside the page data area)",
+                context,
+                slot_index,
+                page_id,
+                offset,
+                offset + length
+            ),
+        }
+    }
+}
+
 /// 位置寻址写入 helper：把 (vh + tuple_bytes) 落到 WAL 记录的 (page, slot)。
 ///
 /// 行为：
@@ -158,13 +249,30 @@ async fn redo_tuple_at_row_id(
         let guard = buffer_pool.get_page(page_id).await.map_err(|e| {
             WalError::RedoFailed(format!("get_page for row_id {:?} failed: {}", row_id, e))
         })?;
-        guard.modify_page(|page| {
+        // MS37 T5（T5）：**页级判据前置**——`get_slot_by_logical_id` 按页头
+        // 声称的槽数迭代槽目录；槽数超出槽目录容量时定位算术整数下溢 ⇒ 越界
+        // 切片 panic ⇒ 进程 abort。本点属**已提交记录重放类** ⇒ **不跳过该
+        // 记录** ⇒ 以明确的错误结束恢复与打开（复用 `CorruptedDataPage`，
+        // 不新增错误变体）。
+        let probe: crate::storage::Result<bool> = guard.modify_page(|page| {
             if page.data[0] == 0 {
                 let _ = SlottedPage::init(page, 0x03);
             }
             let slotted = SlottedPage::new(page);
-            slotted.get_slot_by_logical_id(row_id.slot_id).is_some()
-        })
+            if slotted.slot_count_exceeds_capacity() {
+                return Err(corrupted_data_page_slot_count_error(
+                    page_id.0,
+                    slotted.slot_count(),
+                ));
+            }
+            Ok(slotted.get_slot_by_logical_id(row_id.slot_id).is_some())
+        });
+        probe.map_err(|e| {
+            WalError::RedoFailed(format!(
+                "redo_tuple_at_row_id for row_id {:?} idempotency probe failed: {}",
+                row_id, e
+            ))
+        })?
     };
 
     // ② 闭包外拼装落位数据：内联 slot_data，或溢出链 + 31B locator slot。
@@ -211,7 +319,7 @@ async fn redo_tuple_at_row_id(
         if let Err(e) = write_result {
             // locator 未落位——本次已写链页 best-effort 释放（无 dangling）。
             if let Some(first) = overflow_first_page {
-                let _ = overflow::free_overflow_chain(buffer_pool, first).await;
+                let _ = overflow::free_overflow_chain(buffer_pool, first, &[]).await;
             }
             return Err(WalError::RedoFailed(format!(
                 "redo_tuple_at_row_id for row_id {:?} failed: {}",
@@ -313,9 +421,10 @@ pub(crate) fn extract_index_keys(
             let secondaries = secondary_cols
                 .iter()
                 .map(|i| {
+                    let column_type = schema.get(*i)?;
                     values
                         .get(*i)
-                        .and_then(|v| v.to_key())
+                        .and_then(|v| v.secondary_index_key(column_type))
                         .map(|k| k.as_bytes().to_vec())
                 })
                 .collect();
@@ -363,15 +472,39 @@ async fn build_pk_version_maps(
 
         let mut page_id = Some(meta.data_page_head);
         while let Some(pid) = page_id {
+            // MS37 T5（T5）：扫描类的**跳过记录**——跳过必须被报出（不得静默）。
+            // 记录在页闭包内收集、闭包外报出（不在页锁内打印）。
+            let mut skips: Vec<RecoverySkip> = Vec::new();
             let (next_page, entries) = buffer_pool
                 .with_page_data(pid, |data| -> PreScanPage {
                     let slotted = SlottedPageRef::new(data);
                     let mut entries = Vec::new();
+                    // MS37 T5（T5）：**页级判据前置**——页头声称的槽数超出该
+                    // 页的槽目录容量时，取槽的定位算术整数下溢 ⇒ 越界切片
+                    // panic ⇒ 进程 abort。扫描类跳过**整页**（页级形态的粒度
+                    // 是页）并报出，其余页继续扫描。
+                    if slotted.slot_count_exceeds_capacity() {
+                        skips.push(RecoverySkip::Page {
+                            page_id: pid.0,
+                            slot_count: slotted.slot_count(),
+                        });
+                        return Ok((slotted.header().next_page_id, entries));
+                    }
                     for index in 0..slotted.slot_count() {
                         let Some(slot) = slotted.get_slot(index) else {
                             continue;
                         };
-                        let slot_data = slotted.get_slot_data(&slot);
+                        // MS37 T5（T5）：**槽级有界读**——负载越界时跳过该槽
+                        // 并报出（扫描类），其余槽继续入映射。
+                        let Some(slot_data) = slotted.get_slot_data_checked(&slot) else {
+                            skips.push(RecoverySkip::Slot {
+                                page_id: pid.0,
+                                slot_index: index,
+                                offset: slot.offset as usize,
+                                length: slot.length as usize,
+                            });
+                            continue;
+                        };
                         if slot_data.len() < VersionHeader::SIZE {
                             continue;
                         }
@@ -392,6 +525,13 @@ async fn build_pk_version_maps(
                         meta.name, pid, e
                     ))
                 })?;
+
+            // MS37 T5（T5）：扫描类的跳过**报出**（stderr）——不得静默。
+            report_recovery_skips(
+                &format!("pre-scan of table '{}'", meta.name),
+                &RecoverySkipCount::of(&skips),
+                &skips,
+            );
 
             for (tuple_ref, rid) in entries {
                 let slot_tuple = tuple_ref.resolve(buffer_pool).await.map_err(|e| {
@@ -456,10 +596,30 @@ async fn derive_old_row_id(
             PageId(old_row_id.page_id as u64),
             |data| -> crate::storage::Result<overflow::TupleRef> {
                 let slotted = SlottedPageRef::new(data);
-                let Some((slot, _)) = slotted.get_slot_by_logical_id(old_row_id.slot_id) else {
+                // MS37 T5（T5）：**页级判据前置**——页头声称的槽数超出该页
+                // 的槽目录容量时，`get_slot_by_logical_id` 的槽目录定位整数
+                // 下溢 ⇒ 越界切片 panic ⇒ 进程 abort。本点属**已提交记录重
+                // 放类** ⇒ **不跳过该记录** ⇒ 以明确的错误结束恢复与打开
+                // （复用 `CorruptedDataPage`，不新增错误变体）。
+                if slotted.slot_count_exceeds_capacity() {
+                    return Err(corrupted_data_page_slot_count_error(
+                        old_row_id.page_id as u64,
+                        slotted.slot_count(),
+                    ));
+                }
+                let Some((slot, slot_index)) = slotted.get_slot_by_logical_id(old_row_id.slot_id)
+                else {
                     return Err(crate::storage::StorageError::SlotNotFound(old_row_id));
                 };
-                let slot_data = slotted.get_slot_data(&slot);
+                // MS37 T5（T5）：**槽级有界读**——负载越界 ⇒ 明确的错误（不
+                // 跳过该记录）。
+                let Some(slot_data) = slotted.get_slot_data_checked(&slot) else {
+                    return Err(corrupted_data_page_slot_error(
+                        old_row_id.page_id as u64,
+                        slot_index,
+                        &slot,
+                    ));
+                };
                 if slot_data.len() < VersionHeader::SIZE {
                     return Err(crate::storage::StorageError::Internal(format!(
                         "derived slot {:?} shorter than version header",
@@ -583,6 +743,12 @@ impl RecoveryManager {
         let mut committed_tx_ids = HashSet::new();
         let mut aborted_tx_ids = HashSet::new();
         let mut data_records: Vec<(u64, &WalRecord)> = Vec::new();
+        // change 2026-10-25-ms37-defect-ledger-closure
+        // Iteration 006 / Cycle 000（T6）：窄化意图记录（随事务提交落地）。
+        //
+        // 收集**不因位点裁剪**：意图记录可能落在 checkpoint 位点**之前**，
+        // 而「已提交但未发布」的窄化必须**仍**被发布（M5 的可观察要求）。
+        let mut narrowing_intents: Vec<&WalRecord> = Vec::new();
 
         for (lsn, record) in &records {
             match record {
@@ -598,6 +764,9 @@ impl RecoveryManager {
                 WalRecord::Insert { .. } | WalRecord::Update { .. } | WalRecord::Delete { .. } => {
                     data_records.push((*lsn, record));
                 }
+                WalRecord::ColumnNarrowing { .. } => {
+                    narrowing_intents.push(record);
+                }
                 _ => {}
             }
         }
@@ -608,6 +777,39 @@ impl RecoveryManager {
             .difference(&aborted_tx_ids)
             .cloned()
             .collect();
+
+        // Step 1.5 (change 2026-10-25-ms37-defect-ledger-closure
+        // Iteration 006 / Cycle 000 / T6)：**发布已提交的窄化意图**——排在
+        // 重放**之前**。
+        //
+        // 活布局的列定义决定重放与索引重建的**解码宽度** ⇒ 必须先发布（切换
+        // 活布局），再重放；否则窄行按**旧**布局解码 ⇒ 按位置错读（ISS25）。
+        // 事务**未提交**（中止 / 未提交）的意图**不发布**。
+        //
+        // 本阶段是**新增的前置阶段**——既有阶段序（W1 → 重放 → W4 → W3）不变。
+        for record in &narrowing_intents {
+            let WalRecord::ColumnNarrowing {
+                tx_id,
+                table_name,
+                removed_column_index,
+                new_column_count,
+            } = record
+            else {
+                continue;
+            };
+            if !committed_tx_ids.contains(tx_id) {
+                continue;
+            }
+            table_manager
+                .publish_column_narrowing(table_name, *removed_column_index, *new_column_count)
+                .await
+                .map_err(|e| {
+                    WalError::RedoFailed(format!(
+                        "publish committed column narrowing of table '{}': {e}",
+                        table_name
+                    ))
+                })?;
+        }
 
         // Step 2: Redo committed transactions after the checkpoint site
         // （K05 显式化：任何 redo 失败立即返回 Err，不再静默吞掉）
@@ -1166,15 +1368,39 @@ impl RecoveryManager {
             let mut pointed: HashSet<RowId> = HashSet::new();
             let mut page_id = Some(meta.data_page_head);
             while let Some(pid) = page_id {
+                // MS37 T5（T5）：扫描类的**跳过记录**——跳过必须被报出（不得
+                // 静默）。记录在页闭包内收集、闭包外报出。
+                let mut skips: Vec<RecoverySkip> = Vec::new();
                 let (next_page, page_slots) = buffer_pool
                     .with_page_data(pid, |data| -> RebuildScanPage {
                         let slotted = SlottedPageRef::new(data);
                         let mut page_slots = Vec::new();
+                        // MS37 T5（T5）：**页级判据前置**——页头声称的槽数
+                        // 超出该页的槽目录容量时，取槽的定位算术整数下溢 ⇒
+                        // 越界切片 panic ⇒ 进程 abort。扫描类跳过**整页**并
+                        // 报出，其余页继续重建。
+                        if slotted.slot_count_exceeds_capacity() {
+                            skips.push(RecoverySkip::Page {
+                                page_id: pid.0,
+                                slot_count: slotted.slot_count(),
+                            });
+                            return Ok((slotted.header().next_page_id, page_slots));
+                        }
                         for index in 0..slotted.slot_count() {
                             let Some(slot) = slotted.get_slot(index) else {
                                 continue;
                             };
-                            let slot_data = slotted.get_slot_data(&slot);
+                            // MS37 T5（T5）：**槽级有界读**——负载越界时跳过
+                            // 该槽并报出（扫描类），其余槽继续重建索引。
+                            let Some(slot_data) = slotted.get_slot_data_checked(&slot) else {
+                                skips.push(RecoverySkip::Slot {
+                                    page_id: pid.0,
+                                    slot_index: index,
+                                    offset: slot.offset as usize,
+                                    length: slot.length as usize,
+                                });
+                                continue;
+                            };
                             if slot_data.len() < VersionHeader::SIZE {
                                 continue;
                             }
@@ -1211,6 +1437,13 @@ impl RecoveryManager {
                             table_name, pid, e
                         ))
                     })?;
+
+                // MS37 T5（T5）：扫描类的跳过**报出**（stderr）——不得静默。
+                report_recovery_skips(
+                    &format!("index rebuild of table '{}'", table_name),
+                    &RecoverySkipCount::of(&skips),
+                    &skips,
+                );
 
                 for (rid, vh, tuple_ref) in page_slots {
                     let tuple_bytes = tuple_ref.resolve(buffer_pool).await.map_err(|e| {
@@ -1351,7 +1584,8 @@ impl RecoveryManager {
                         table_name, e
                     ))
                 })?;
-            table_manager
+            let mut anchors = Vec::new();
+            if let Some(page) = table_manager
                 .catalog()
                 .update_table_root(&table_name, new_index.root_page_id().0 as u32)
                 .await
@@ -1360,9 +1594,12 @@ impl RecoveryManager {
                         "index rebuild catalog root update for '{}' failed: {}",
                         table_name, e
                     ))
-                })?;
+                })?
+            {
+                anchors.push(page);
+            }
             for (ordinal, root) in unique_roots.iter().enumerate() {
-                table_manager
+                if let Some(page) = table_manager
                     .catalog()
                     .update_unique_index_root(&table_name, ordinal, *root)
                     .await
@@ -1371,10 +1608,13 @@ impl RecoveryManager {
                             "index rebuild catalog unique root update for '{}' failed: {}",
                             table_name, e
                         ))
-                    })?;
+                    })?
+                {
+                    anchors.push(page);
+                }
             }
             for (ordinal, root) in secondary_roots.iter().enumerate() {
-                table_manager
+                if let Some(page) = table_manager
                     .catalog()
                     .update_secondary_index_root(&table_name, ordinal, *root)
                     .await
@@ -1383,7 +1623,10 @@ impl RecoveryManager {
                             "index rebuild catalog secondary root update for '{}' failed: {}",
                             table_name, e
                         ))
-                    })?;
+                    })?
+                {
+                    anchors.push(page);
+                }
             }
 
             // 5. 旧树释放（PK + 旧唯一树 + 旧二级树；洞容忍；失败 warn + 泄漏，
@@ -1425,7 +1668,7 @@ impl RecoveryManager {
             }
             // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
             // = 上面的目录 root 更新（步骤 4），已发出。
-            buffer_pool.complete_free_release(&released);
+            buffer_pool.complete_free_release(&released, &anchors);
         }
 
         Ok(())
@@ -1475,6 +1718,9 @@ impl RecoveryManager {
 
             let mut page_id = Some(meta.data_page_head);
             while let Some(pid) = page_id {
+                // MS37 T5（T5）：扫描类的**跳过记录**——跳过必须被报出（不得
+                // 静默）。记录在页闭包内收集、闭包外报出。
+                let mut skips: Vec<RecoverySkip> = Vec::new();
                 // Collect the fixes inside the page-lock closure, then apply
                 // them through the version-header write path afterwards.
                 let (next_page, fixes) = buffer_pool
@@ -1483,11 +1729,32 @@ impl RecoveryManager {
                         |data| -> crate::storage::Result<(u32, Vec<(u16, VersionHeader)>)> {
                             let slotted = SlottedPageRef::new(data);
                             let mut fixes = Vec::new();
+                            // MS37 T5（T5）：**页级判据前置**——页头声称的
+                            // 槽数超出该页的槽目录容量时，取槽的定位算术整数
+                            // 下溢 ⇒ 越界切片 panic ⇒ 进程 abort。扫描类跳过
+                            // **整页**并报出，其余页继续标记。
+                            if slotted.slot_count_exceeds_capacity() {
+                                skips.push(RecoverySkip::Page {
+                                    page_id: pid.0,
+                                    slot_count: slotted.slot_count(),
+                                });
+                                return Ok((slotted.header().next_page_id, fixes));
+                            }
                             for index in 0..slotted.slot_count() {
                                 let Some(slot) = slotted.get_slot(index) else {
                                     continue;
                                 };
-                                let slot_data = slotted.get_slot_data(&slot);
+                                // MS37 T5（T5）：**槽级有界读**——负载越界时
+                                // 跳过该槽并报出（扫描类），其余槽继续标记。
+                                let Some(slot_data) = slotted.get_slot_data_checked(&slot) else {
+                                    skips.push(RecoverySkip::Slot {
+                                        page_id: pid.0,
+                                        slot_index: index,
+                                        offset: slot.offset as usize,
+                                        length: slot.length as usize,
+                                    });
+                                    continue;
+                                };
                                 if slot_data.len() < VersionHeader::SIZE {
                                     continue;
                                 }
@@ -1513,6 +1780,13 @@ impl RecoveryManager {
                             pid, e
                         ))
                     })?;
+
+                // MS37 T5（T5）：扫描类的跳过**报出**（stderr）——不得静默。
+                report_recovery_skips(
+                    &format!("mark uncommitted aborted of table '{}'", row.table_name),
+                    &RecoverySkipCount::of(&skips),
+                    &skips,
+                );
 
                 for (logical_id, fixed) in fixes {
                     let rid = RowId::new(pid.0 as u32, logical_id);

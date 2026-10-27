@@ -1,7 +1,7 @@
 # plancache-key-normalization Specification
 
 ## Purpose
-TBD - created by archiving change 2026-08-25-ms06-t02-plancache-dashmap. Update Purpose after archive.
+PlanCache 存取时规范化 SQL 文本，只把语义相关的差异识别为不同 key，并发读取同一 SQL 时不阻塞运行时任务。来源：`2026-08-25-ms06-t02-plancache-dashmap`
 ## Requirements
 ### Requirement: PlanCache key 规范化
 

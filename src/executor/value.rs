@@ -1,7 +1,7 @@
 //! SQL value types for physical plan execution
 
 use super::ValueRef;
-use crate::storage::page_format::Key;
+use crate::storage::page_format::{Key, MAX_KEY_LEN};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -99,6 +99,29 @@ impl Value {
             // MS13: Date/Timestamp 不可键控（DA2——Date 列作 PK 走 MS16 非
             // Int 键列路由回退，B-Tree 零改动）
             Value::Date(_) | Value::Timestamp(_) => None,
+        }
+    }
+
+    /// 二级索引键。
+    ///
+    /// `Int` 与 `to_key` 相同。`String` 在完整转义长度不超过 32 字节时入树：
+    /// 非零字节原样写入，输入 `00` 写成 `00 FF`，结果末尾追加 `00 00`。
+    /// 声明长度不参与判断。其余列类型和 `Null` 返回 `None`。
+    pub fn secondary_index_key(
+        &self,
+        column_type: &crate::storage::page_format::ColumnType,
+    ) -> Option<Key> {
+        use crate::storage::page_format::ColumnType as SchemaColumnType;
+        match column_type {
+            SchemaColumnType::Int => self.to_key(),
+            SchemaColumnType::String(_) => match self {
+                Value::String(text) => fixed32_string_key(text),
+                _ => None,
+            },
+            SchemaColumnType::Float
+            | SchemaColumnType::Bool
+            | SchemaColumnType::Date
+            | SchemaColumnType::Timestamp => None,
         }
     }
 
@@ -302,6 +325,34 @@ impl Value {
     }
 }
 
+/// 把字符串编成可放进现有 32 字节键的字节。超长时返回 `None`，不截断。
+fn fixed32_string_key(text: &str) -> Option<Key> {
+    let raw = text.as_bytes();
+    // 每个输入字节至少占 1 字节，再加结尾 `00 00`。超过 30 字节的原文不可能入树。
+    if raw.len() > MAX_KEY_LEN - 2 {
+        return None;
+    }
+    let mut encoded = Vec::with_capacity(raw.len().saturating_add(2));
+    for byte in raw {
+        if *byte == 0 {
+            encoded.push(0x00);
+            encoded.push(0xFF);
+        } else {
+            encoded.push(*byte);
+        }
+        if encoded.len() > MAX_KEY_LEN {
+            return None;
+        }
+    }
+    encoded.push(0x00);
+    encoded.push(0x00);
+    if encoded.len() > MAX_KEY_LEN {
+        None
+    } else {
+        Some(Key::new(&encoded))
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -404,5 +455,89 @@ mod tests {
         // SUM/AVG 经 add/div：保持 Null 兜底（不误加）
         assert_eq!(Value::Date(1).add(&Value::Date(1)), Value::Null);
         assert_eq!(Value::Timestamp(1).div(&Value::Int(2)), Value::Null);
+    }
+
+    #[test]
+    fn secondary_index_key_preserves_int_bytes() {
+        use crate::storage::page_format::ColumnType as SchemaColumnType;
+        let int_col = SchemaColumnType::Int;
+        for n in [0i64, -1, i64::MIN, i64::MAX] {
+            let value = Value::Int(n);
+            let derived = value
+                .secondary_index_key(&int_col)
+                .unwrap_or_else(|| panic!("{n} must produce a key"));
+            let direct = value
+                .to_key()
+                .unwrap_or_else(|| panic!("{n} must be keyable"));
+            assert_eq!(derived.as_bytes(), direct.as_bytes());
+        }
+        assert!(Value::Null.secondary_index_key(&int_col).is_none());
+        assert!(Value::String("1".into())
+            .secondary_index_key(&int_col)
+            .is_none());
+    }
+
+    #[test]
+    fn string_secondary_key_preserves_full_value_within_32() {
+        use crate::storage::page_format::ColumnType as SchemaColumnType;
+
+        fn key_of(text: &str, declared: u16) -> Option<crate::storage::page_format::Key> {
+            Value::String(text.to_string()).secondary_index_key(&SchemaColumnType::String(declared))
+        }
+
+        let empty = key_of("", 8).expect("empty string fits");
+        assert_eq!(empty.as_bytes(), &[0x00, 0x00]);
+
+        let letter = key_of("a", 1).expect("declared length does not reject the key");
+        assert_eq!(letter.as_bytes(), &[0x61, 0x00, 0x00]);
+
+        let nul = key_of("\0", 8).expect("embedded NUL fits");
+        assert_eq!(nul.as_bytes(), &[0x00, 0xFF, 0x00, 0x00]);
+
+        let prefix_a = key_of("prefix-a", 64).expect("shared prefix a");
+        let prefix_b = key_of("prefix-b", 64).expect("shared prefix b");
+        assert!(prefix_a.full_data() < prefix_b.full_data());
+
+        let utf8 = key_of("你好", 64).expect("multibyte UTF-8 fits");
+        assert_eq!(
+            utf8.as_bytes(),
+            &[0xE4, 0xBD, 0xA0, 0xE5, 0xA5, 0xBD, 0x00, 0x00]
+        );
+
+        let trailing = key_of("ab\0", 64).expect("trailing zero byte fits");
+        assert_eq!(trailing.as_bytes(), &[0x61, 0x62, 0x00, 0xFF, 0x00, 0x00]);
+
+        let thirty = "c".repeat(30);
+        let fitted = key_of(&thirty, 1).expect("30 non-zero bytes fit");
+        assert_eq!(fitted.as_bytes().len(), 32);
+        assert!(fitted.as_bytes()[..30].iter().all(|byte| *byte == b'c'));
+        assert_eq!(&fitted.as_bytes()[30..], &[0x00, 0x00]);
+
+        let distinct = [
+            empty.full_data(),
+            letter.full_data(),
+            nul.full_data(),
+            prefix_a.full_data(),
+            prefix_b.full_data(),
+            utf8.full_data(),
+            trailing.full_data(),
+            fitted.full_data(),
+        ];
+        for (i, left) in distinct.iter().enumerate() {
+            for right in distinct.iter().skip(i + 1) {
+                assert_ne!(left, right);
+            }
+        }
+
+        assert!(key_of(&"d".repeat(31), 255).is_none());
+        assert!(Value::Null
+            .secondary_index_key(&SchemaColumnType::String(8))
+            .is_none());
+        assert!(Value::Int(1)
+            .secondary_index_key(&SchemaColumnType::String(8))
+            .is_none());
+        assert!(Value::String("a".into())
+            .secondary_index_key(&SchemaColumnType::Float)
+            .is_none());
     }
 }

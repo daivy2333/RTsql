@@ -1545,6 +1545,68 @@ fn test_restore_fail_fast() {
     );
 }
 
+/// 多表 dump 的靠后语句在计划期被拒绝时，restore 以退出码 3 停下，
+/// 点名语句序号，并写明此前语句已经生效。已执行的表留在库里。
+#[test]
+fn multi_table_restore_reports_the_partial_apply() {
+    let dir = fixture();
+    let out = run_cli(dir.path(), &["new", "b"]);
+    assert_eq!(out.code, Some(0), "new b failed: {}", out.stderr);
+
+    let sql_file = dir.path().join("partial.sql");
+    std::fs::write(
+        &sql_file,
+        "CREATE TABLE \"kept\" (\"id\" INTEGER PRIMARY KEY);\n\
+         INSERT INTO \"kept\" VALUES (1);\n\
+         CREATE TABLE \"later\" (\"id\" INTEGER PRIMARY KEY, \"email\" TEXT UNIQUE);\n\
+         INSERT INTO \"later\" VALUES (1, 'a@b.c');\n",
+    )
+    .unwrap();
+
+    let out = run_cli(dir.path(), &["restore", "b", sql_file.to_str().unwrap()]);
+    assert_eq!(
+        out.code,
+        Some(3),
+        "stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("statement 3 of 4 failed"),
+        "error must locate the failing statement: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("UNIQUE (INT columns only)"),
+        "error must name the rejected constraint: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("previous statement(s) were committed"),
+        "error must note prior statements took effect: {:?}",
+        out.stderr
+    );
+
+    let out = run_cli(dir.path(), &["b", "SELECT id FROM \"kept\""]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1]]),
+        "kept row must remain: {:?}",
+        out.stdout
+    );
+
+    let out = run_cli(dir.path(), &["b", "SELECT id FROM \"later\""]);
+    assert_ne!(
+        out.code,
+        Some(0),
+        "later must not exist: stdout {:?} stderr {}",
+        out.stdout,
+        out.stderr
+    );
+}
+
 /// R-dump-restore-S3：`dump a | restore b -` stdin 管道往返，数据等价。
 #[test]
 fn test_restore_stdin_pipe() {
@@ -1606,6 +1668,7 @@ async fn test_dump_pk_rendering_matches_enforced_semantics() {
                     ("v".to_string(), ColumnType::Int, false, false, None),
                 ],
                 "name",
+                false,
             )
             .await
             .unwrap();
@@ -1617,6 +1680,7 @@ async fn test_dump_pk_rendering_matches_enforced_semantics() {
                     ("v".to_string(), ColumnType::Int, false, false, None),
                 ],
                 "id",
+                false,
             )
             .await
             .unwrap();
@@ -1707,6 +1771,129 @@ async fn test_dump_pk_rendering_matches_enforced_semantics() {
         serde_json::json!([[1]]),
         "ok rows: {:?}",
         out.stdout
+    );
+}
+
+/// 存量非整数 UNIQUE：目录标志为真，但该列不建唯一索引。
+/// dump / schema 不渲染 UNIQUE，dump → restore 往返保留重复值，
+/// 新库再插入相同 email 仍然成功。
+#[tokio::test]
+async fn non_integer_unique_stock_dump_roundtrips_without_the_constraint() {
+    let dir = fixture();
+    let stock = dir.path().join("stock.db");
+    {
+        let db = Database::open(&stock).await.unwrap();
+        db.table_manager
+            .create_table_with_constraints(
+                "s",
+                vec![
+                    ("id".to_string(), ColumnType::Int, false, false, None),
+                    (
+                        "email".to_string(),
+                        ColumnType::String(20),
+                        false,
+                        true,
+                        None,
+                    ),
+                ],
+                "id",
+                false,
+            )
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+    }
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            stock.to_str().unwrap(),
+            "INSERT INTO s VALUES (1, 'a@b.c'), (2, 'a@b.c')",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+
+    let dump = run_cli(dir.path(), &["dump", stock.to_str().unwrap()]);
+    assert_eq!(dump.code, Some(0), "stderr: {}", dump.stderr);
+    assert!(
+        dump.stdout
+            .contains("CREATE TABLE \"s\" (\"id\" INTEGER PRIMARY KEY, \"email\" TEXT);"),
+        "dump must omit UNIQUE on the non-integer column: {:?}",
+        dump.stdout
+    );
+    assert!(
+        !dump.stdout.contains("UNIQUE"),
+        "dump must not render UNIQUE: {:?}",
+        dump.stdout
+    );
+
+    let schema = run_cli(dir.path(), &["schema", stock.to_str().unwrap()]);
+    assert_eq!(schema.code, Some(0), "stderr: {}", schema.stderr);
+    assert!(
+        schema
+            .stdout
+            .contains("CREATE TABLE \"s\" (\"id\" INTEGER PRIMARY KEY, \"email\" TEXT);"),
+        "schema must omit UNIQUE on the non-integer column: {:?}",
+        schema.stdout
+    );
+    assert!(
+        !schema.stdout.contains("UNIQUE"),
+        "schema must not render UNIQUE: {:?}",
+        schema.stdout
+    );
+
+    let dump_file = dir.path().join("dump.sql");
+    std::fs::write(&dump_file, &dump.stdout).unwrap();
+    let restored = dir.path().join("restored.db");
+    let out = run_cli(dir.path(), &["new", restored.to_str().unwrap()]);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let out = run_cli(
+        dir.path(),
+        &[
+            "restore",
+            restored.to_str().unwrap(),
+            dump_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {:?} stderr: {}",
+        out.stdout,
+        out.stderr
+    );
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            restored.to_str().unwrap(),
+            "SELECT id, email FROM \"s\" ORDER BY id",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["rows"],
+        serde_json::json!([[1, "a@b.c"], [2, "a@b.c"]]),
+        "both duplicate emails must survive restore: {:?}",
+        out.stdout
+    );
+
+    let out = run_cli(
+        dir.path(),
+        &[
+            restored.to_str().unwrap(),
+            "INSERT INTO \"s\" VALUES (3, 'a@b.c')",
+        ],
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "a further duplicate email must succeed: stdout {:?} stderr {}",
+        out.stdout,
+        out.stderr
     );
 }
 
@@ -3837,6 +4024,7 @@ async fn legacy_bool_pk_dump_form_restores() {
                     ("v".to_string(), ColumnType::Int, false, false, None),
                 ],
                 "pk",
+                false,
             )
             .await
             .unwrap();

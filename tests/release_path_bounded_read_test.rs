@@ -11,6 +11,10 @@
 //! - 损坏页的溢出链 / 索引子树**不被释放**（损坏被检测到，而不是被当作健康页
 //!   照常释放）——「检测到损坏」与「忽略损坏」是两回事；
 //! - 未损坏库上的释放页集合与既有行为一致（不遗漏、不重复）。
+//!
+//! 另含**短叶条目**形态（槽负载长度短于条目格式 38 字节而偏移仍落在页内，
+//! 且落在**叶页**上）：释放路径按既有语义**计数 + 报出 + 跳过**（处置方向与
+//! 读 / 写路径的点名错误相反）。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -19,8 +23,8 @@ use std::process::Command;
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::page_format::overflow;
-use rtsql::storage::page_format::{SlottedPageRef, Slot};
-use rtsql::storage::{Page, PageId, HEADER_SIZE, INTERNAL_NODE};
+use rtsql::storage::page_format::{Slot, SlottedPageRef};
+use rtsql::storage::{Page, PageId, HEADER_SIZE, INTERNAL_NODE, LEAF_NODE};
 use rtsql::transaction::VersionHeader;
 use tempfile::TempDir;
 
@@ -60,6 +64,29 @@ fn corrupt_slot_offset(path: &Path, page: u32, slot_index: usize) {
     f.flush().unwrap();
 }
 
+/// 槽目录项的 **length 字段**位置——布局 `[logical_id:2][offset:2][length:2]`，
+/// 既有 `slot_offset_field_offset` 返回 offset 字段（起点 +2），length 字段再 +2。
+fn slot_length_field_offset(slot_index: usize) -> usize {
+    Page::PAGE_SIZE - (slot_index + 1) * Slot::SIZE + 4
+}
+
+/// 把某页某槽的**负载长度**改成给定值——偏移不动 ⇒ 负载仍落在页内
+/// （真实改坏页字节，不是替身）。
+///
+/// 长度短于条目格式（`MAX_KEY_LEN + RowId::SIZE` = 38 字节）时，槽本身**合法**
+/// （边界检查通过），但条目解不出来 ⇒ 这是与「越界槽」不同的缺陷形态。
+fn corrupt_slot_length(path: &Path, page: u32, slot_index: usize, new_len: u16) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(page_file_offset(
+        page,
+        slot_length_field_offset(slot_index),
+    )))
+    .unwrap();
+    f.write_all(&new_len.to_le_bytes()).unwrap();
+    f.flush().unwrap();
+}
+
 /// 读出某页首槽的溢出 locator 并展开整条链。
 async fn overflow_chain_of(db: &Database, page: u32) -> Vec<u32> {
     let first = db
@@ -71,8 +98,10 @@ async fn overflow_chain_of(db: &Database, page: u32) -> Vec<u32> {
                 .expect("fixture: the head page holds the overflow locator slot");
             let start = slot.offset as usize;
             let end = start + slot.length as usize;
-            Ok(overflow::decode_locator(&data[start + VersionHeader::SIZE..end])
-                .map(|(_, first)| first))
+            Ok(
+                overflow::decode_locator(&data[start + VersionHeader::SIZE..end])
+                    .map(|(_, first)| first),
+            )
         })
         .await
         .unwrap()
@@ -119,6 +148,26 @@ async fn seed_index_table(path: &Path) -> (u32, u32, u32) {
     db.close().await.unwrap();
     drop(db);
     (sec_root, head, pk_root)
+}
+
+/// 夹具 C：小表（5 行）→ 二级索引树为**单叶**（根页即叶页）。
+///
+/// 叶容量 92 ⇒ 5 行不分裂 ⇒ 索引树的根页就是承载全部条目的叶页。
+/// 返回 (二级索引根页号, PK 树根页号)。
+async fn seed_small_index_table(path: &Path) -> (u32, u32) {
+    let db = Database::open(path).await.unwrap();
+    exec_ok(&db, "CREATE TABLE t (id INT PRIMARY KEY, v INT)").await;
+    exec_ok(&db, "CREATE INDEX idx_v ON t (v)").await;
+    for i in 0..5i32 {
+        exec_ok(&db, &format!("INSERT INTO t VALUES ({i}, {i})")).await;
+    }
+    db.checkpoint().await.unwrap();
+    let meta = db.table_manager.get_table("t").await.unwrap();
+    let pk_root = meta.index_manager.root_page_id().0 as u32;
+    let sec_root = meta.secondary_indexes[0].index.root_page_id().0 as u32;
+    db.close().await.unwrap();
+    drop(db);
+    (sec_root, pk_root)
 }
 
 /// 观测释放路径实际释放的页集合：提升 → 取页 → 收集被复用的页号
@@ -172,8 +221,7 @@ async fn drop_table_on_damaged_data_page_does_not_panic() {
     let db = Database::open(&path).await.unwrap();
     let meta = db.table_manager.get_table("t").await.unwrap();
     assert_eq!(
-        meta.data_page_head.0 as u32,
-        head,
+        meta.data_page_head.0 as u32, head,
         "precondition: the damaged page is still the table's head page"
     );
 
@@ -221,8 +269,7 @@ async fn drop_index_on_damaged_index_page_does_not_panic() {
     let (sec_root, _head, _pk_root) = seed_index_table(&path).await;
 
     // 前置：二级索引树根必须是内部结点（释放扫描才读它的槽位）。
-    let page_type = std::fs::read(&path).unwrap()
-        [page_file_offset(sec_root, 0) as usize] as u8;
+    let page_type = std::fs::read(&path).unwrap()[page_file_offset(sec_root, 0) as usize] as u8;
     assert_eq!(
         page_type, INTERNAL_NODE,
         "fixture precondition: the secondary index root must be an internal node"
@@ -310,7 +357,10 @@ async fn drop_table_cli_reports_the_damaged_page() {
     let dir = TempDir::new().unwrap();
     let path = db_path(&dir);
     let (head, chain, _pk_root) = seed_overflow_table(&path).await;
-    assert!(!chain.is_empty(), "fixture precondition: an overflow chain exists");
+    assert!(
+        !chain.is_empty(),
+        "fixture precondition: an overflow chain exists"
+    );
     corrupt_slot_offset(&path, head, 0);
 
     let (code, stderr) = run_cli_ddl(&dir, &path, "DROP TABLE t");
@@ -326,7 +376,10 @@ async fn truncate_cli_reports_the_damaged_page() {
     let dir = TempDir::new().unwrap();
     let path = db_path(&dir);
     let (head, chain, _pk_root) = seed_overflow_table(&path).await;
-    assert!(!chain.is_empty(), "fixture precondition: an overflow chain exists");
+    assert!(
+        !chain.is_empty(),
+        "fixture precondition: an overflow chain exists"
+    );
     corrupt_slot_offset(&path, head, 0);
 
     let (code, stderr) = run_cli_ddl(&dir, &path, "TRUNCATE TABLE t");
@@ -347,7 +400,57 @@ async fn drop_index_cli_reports_the_damaged_page() {
     let (code, stderr) = run_cli_ddl(&dir, &path, "DROP INDEX idx_v");
     assert_eq!(code, 0, "the DDL must not abort: stderr={stderr}");
     assert!(
-        stderr.contains(&format!("index tree page {sec_root} is damaged: 1 violation")),
+        stderr.contains(&format!(
+            "index tree page {sec_root} is damaged: 1 violation"
+        )),
         "the damaged page must be counted and reported: stderr={stderr}"
+    );
+}
+
+// ===========================================================================
+// 短叶条目：负载长度短于条目格式（38 字节）而偏移仍落在页内
+// ===========================================================================
+
+/// 叶页槽的负载长度短于条目格式时，释放路径上的处置方向与读 / 写路径**相反**：
+/// 计数 + 报出 + 跳过（语句不 abort），而不是点名错误。
+#[tokio::test]
+async fn drop_index_cli_reports_the_short_leaf_entry() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    let (sec_root, _pk_root) = seed_small_index_table(&path).await;
+
+    // 前置：二级索引树根必须是**叶页**——否则长度损坏落在内部页分支上
+    // （内部页已有条目长度判据）⇒ 用例会直接通过而失去判别力。
+    let page_type = std::fs::read(&path).unwrap()[page_file_offset(sec_root, 0) as usize] as u8;
+    assert_eq!(
+        page_type, LEAF_NODE,
+        "fixture precondition: the secondary index root must be a leaf node"
+    );
+
+    // 损坏点：叶页槽 0 的负载长度 38 → 10 字节，偏移不动 ⇒ 槽仍落在页内。
+    corrupt_slot_length(&path, sec_root, 0, 10);
+
+    let (code, stderr) = run_cli_ddl(&dir, &path, "DROP INDEX idx_v");
+    assert_eq!(code, 0, "the DDL must not abort: stderr={stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "index tree page {sec_root} is damaged: 1 violation"
+        )),
+        "the damaged leaf page must be counted and reported: stderr={stderr}"
+    );
+}
+
+/// 未损坏对照：健康的叶根索引树在释放路径上**无告警**（健康页零误报）。
+#[tokio::test]
+async fn drop_index_cli_on_an_undamaged_leaf_tree_reports_nothing() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    let (sec_root, _pk_root) = seed_small_index_table(&path).await;
+
+    let (code, stderr) = run_cli_ddl(&dir, &path, "DROP INDEX idx_v");
+    assert_eq!(code, 0, "the DDL must succeed: stderr={stderr}");
+    assert!(
+        !stderr.contains("is damaged"),
+        "an undamaged index tree (root page {sec_root}) must not be reported as damaged: stderr={stderr}"
     );
 }

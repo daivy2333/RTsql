@@ -1,17 +1,15 @@
 use crate::storage::{
     integrity,
-    page_format::{Key, RowId, Slot, SlottedPage, SlottedPageHeader, SlottedPageRef, MAX_KEY_LEN},
+    page_format::{
+        Key, RowId, Slot, SlottedPage, SlottedPageHeader, SlottedPageRef, MAX_KEY_LEN,
+        MAX_PAGE_SLOTS,
+    },
     Page, PageId, StorageError,
 };
 
 // B-Tree 常量
 pub const LEAF_NODE: u8 = 0x01;
 pub const INTERNAL_NODE: u8 = 0x02;
-
-/// 页内槽目录的最大条目数——槽目录自页尾向上生长（每项 `Slot::SIZE` 字节），
-/// 不得触及页头。页头声称的槽数超过该上限时，槽目录定位会下溢成越界切片，
-/// 故访问器在读槽**之前**先做此界限判断。
-const MAX_PAGE_SLOTS: usize = (Page::PAGE_SIZE - SlottedPageHeader::SIZE) / Slot::SIZE;
 
 /// 槽负载是否完整落在页的数据区内——判据与 `integrity::validate_slots` 一致：
 /// 不与页头重叠、不越过槽目录区。

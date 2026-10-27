@@ -24,9 +24,10 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use crate::storage::data_page::page_write_error_to_storage_error;
 use crate::storage::page_format::{
-    ColumnType, SlottedPage, SlottedPageRef, TAG_BOOL, TAG_DATE, TAG_FLOAT, TAG_INT,
-    TAG_LONG_STRING, TAG_NULL, TAG_STRING, TAG_TIMESTAMP,
+    ColumnType, PageWriteError, Slot, SlottedPage, SlottedPageRef, MAX_PAGE_SLOTS, TAG_BOOL,
+    TAG_DATE, TAG_FLOAT, TAG_INT, TAG_LONG_STRING, TAG_NULL, TAG_STRING, TAG_TIMESTAMP,
 };
 use crate::storage::{AsyncStorage, BufferPool, Page, PageId, Result, StorageError};
 
@@ -108,6 +109,9 @@ pub struct CatalogRow {
     /// MS21 Iteration 005 (T5-a/D12): view definition SQL text (kind=View
     /// rows only, `u16 len | text` tail). `None` for base tables.
     pub view_sql: Option<String>,
+    /// True only when the creating statement wrote `PRIMARY KEY`.
+    /// A missing trailing byte, including every legacy row, reads as false.
+    pub explicit_primary_key: bool,
 }
 
 /// One row in the `__columns` SlottedPage.
@@ -273,26 +277,28 @@ impl Catalog {
         Ok(())
     }
 
-    /// Delete all rows for `table_name` from both chains. Returns `Ok(())`
-    /// even if the table does not exist (idempotent; physical page free
-    /// is out of scope and handled by MS07-T02).
-    pub async fn delete_table(&self, name: &str) -> Result<()> {
+    /// Delete all rows for `table_name` from both chains. Returns the pages
+    /// that were actually modified (empty when the table does not exist).
+    /// Idempotent; physical page free is out of scope.
+    pub async fn delete_table(&self, name: &str) -> Result<Vec<PageId>> {
         let _guard = self.lock.lock().await;
-        delete_from_chain(
+        let mut changed = delete_from_chain(
             &self.buffer_pool,
             &self.storage,
             PageId(TABLES_PAGE_ID),
             |data| matches_catalog_row_name(data, name),
         )
         .await?;
-        delete_from_chain(
-            &self.buffer_pool,
-            &self.storage,
-            PageId(COLUMNS_PAGE_ID),
-            |data| matches_catalog_column_row_table_name(data, name),
-        )
-        .await?;
-        Ok(())
+        changed.extend(
+            delete_from_chain(
+                &self.buffer_pool,
+                &self.storage,
+                PageId(COLUMNS_PAGE_ID),
+                |data| matches_catalog_column_row_table_name(data, name),
+            )
+            .await?,
+        );
+        Ok(changed)
     }
 
     /// Scan all `__tables` rows.
@@ -393,6 +399,7 @@ impl Catalog {
             secondary_indexes: Vec::new(),
             kind: CatalogKind::View,
             view_sql: Some(sql.to_string()),
+            explicit_primary_key: false,
         };
         self.insert_table(&meta, columns).await
     }
@@ -444,10 +451,102 @@ impl Catalog {
         Ok(())
     }
 
+    /// change 2026-10-25-ms37-defect-ledger-closure
+    /// Iteration 006 / Cycle 000（T7 / ISS28）：**非刷盘**的列数恢复入口——
+    /// 把 `__tables` 行的 `column_count` 恢复为语句执行前的值。
+    ///
+    /// 回退**不做存储 IO**（只改缓冲池页）⇒ 在存储正在失败时也能完成 ⇒ 补偿
+    /// 本身不成为新的失败源。与 `update_table_column_count_ddl` 的差别**只有**
+    /// 「不刷盘」——既有方法的刷盘语义零改动。
+    pub async fn restore_table_column_count_no_flush(&self, name: &str, count: u32) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.column_count = count;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// change 2026-10-25-ms37-defect-ledger-closure
+    /// Iteration 006 / Cycle 000（T7 / ISS28）：移除 `__columns` 链上**指定
+    /// 序号**的列行（非刷盘）——回退「本次新增的列」用。
+    ///
+    /// 语义 = `rewrite_column_rows_drop` 的「删除指定序号列行」那一步，**不含**
+    /// 其后的序号平移（新增的列是末列，其后没有列行）。`rewrite_column_rows_drop`
+    /// 本身**零改动**。
+    pub async fn remove_column_row_at(&self, table: &str, column_index: u32) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        delete_from_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(COLUMNS_PAGE_ID),
+            |data| {
+                matches_column_row_of_table(data, table)
+                    && matches_column_row_index(data, column_index)
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// 放弃一次已经刷盘成功的 `ADD COLUMN`：在同一把目录锁里先恢复列数、再移除
+    /// 本次列行，然后只刷列数页，再刷列行改过的页。
+    ///
+    /// 列数页是 `update_field_in_chain` 返回的那一页，列行页是 `delete_from_chain`
+    /// 返回的列表。两次 `flush_pages` 都返回后才释放锁。失败补偿仍走各自不刷盘的入口。
+    pub(crate) async fn rollback_abandoned_add_column(
+        &self,
+        name: &str,
+        column_index: u32,
+        count_before: u32,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let count_page = update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.column_count = count_before;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await?;
+        let column_pages = delete_from_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(COLUMNS_PAGE_ID),
+            |data| {
+                matches_column_row_of_table(data, name)
+                    && matches_column_row_index(data, column_index)
+            },
+        )
+        .await?;
+        let count_pages: Vec<PageId> = count_page.into_iter().collect();
+        self.buffer_pool.flush_pages(&count_pages).await?;
+        self.buffer_pool.flush_pages(&column_pages).await?;
+        Ok(())
+    }
+
     /// Update the `data_page_tail` field of an existing row in `__tables`.
     ///
     /// No-op if the table does not exist.
-    pub async fn update_table_tail(&self, name: &str, new_tail: u32) -> Result<()> {
+    pub async fn update_table_tail(&self, name: &str, new_tail: u32) -> Result<Option<PageId>> {
         let _guard = self.lock.lock().await;
         update_field_in_chain(
             &self.buffer_pool,
@@ -464,7 +563,6 @@ impl Catalog {
             },
         )
         .await
-        .map(|_| ())
     }
 
     /// Update the `index_root_page_id` field of an existing row in `__tables`.
@@ -477,7 +575,7 @@ impl Catalog {
     /// full flush / page eviction).
     ///
     /// No-op if the table does not exist.
-    pub async fn update_table_root(&self, name: &str, new_root: u32) -> Result<()> {
+    pub async fn update_table_root(&self, name: &str, new_root: u32) -> Result<Option<PageId>> {
         let _guard = self.lock.lock().await;
         update_field_in_chain(
             &self.buffer_pool,
@@ -494,7 +592,6 @@ impl Catalog {
             },
         )
         .await
-        .map(|_| ())
     }
 
     /// MS23 Iteration 001 (2.1/D4): update the Nth UNIQUE index root of an
@@ -511,7 +608,7 @@ impl Catalog {
         name: &str,
         ordinal: usize,
         new_root: u32,
-    ) -> Result<()> {
+    ) -> Result<Option<PageId>> {
         let _guard = self.lock.lock().await;
         update_field_in_chain(
             &self.buffer_pool,
@@ -536,7 +633,6 @@ impl Catalog {
             },
         )
         .await
-        .map(|_| ())
     }
 
     /// MS21 Iteration 002 (D4): update the Nth secondary index root of an
@@ -551,7 +647,7 @@ impl Catalog {
         name: &str,
         ordinal: usize,
         new_root: u32,
-    ) -> Result<()> {
+    ) -> Result<Option<PageId>> {
         let _guard = self.lock.lock().await;
         update_field_in_chain(
             &self.buffer_pool,
@@ -576,7 +672,6 @@ impl Catalog {
             },
         )
         .await
-        .map(|_| ())
     }
 
     /// MS21 Iteration 002 (D4/D5): append one secondary-index registration to
@@ -623,7 +718,11 @@ impl Catalog {
     /// by one (callers re-attach `CatalogRootSlot::Secondary` ordinals).
     ///
     /// No-op if the table or index does not exist.
-    pub async fn remove_secondary_index(&self, name: &str, index_name: &str) -> Result<()> {
+    pub async fn remove_secondary_index(
+        &self,
+        name: &str,
+        index_name: &str,
+    ) -> Result<Option<PageId>> {
         let _guard = self.lock.lock().await;
         update_field_in_chain(
             &self.buffer_pool,
@@ -640,7 +739,6 @@ impl Catalog {
             },
         )
         .await
-        .map(|_| ())
     }
 }
 
@@ -700,7 +798,7 @@ async fn append_to_chain(
     let last = chain_head(bp, root).await?;
 
     // Try to append to the last page first.
-    let add_result: std::result::Result<(u16, usize), String> = {
+    let add_result: std::result::Result<(u16, usize), PageWriteError> = {
         let guard = bp.get_page(last).await?;
         guard.modify_page(|page| {
             let mut slotted = SlottedPage::new(page);
@@ -710,8 +808,8 @@ async fn append_to_chain(
 
     match add_result {
         Ok((lid, _)) => Ok((last, lid)),
-        Err(_) => {
-            // Page full — allocate a fresh page, init, link, write.
+        // 页满 —— allocate a fresh page, init, link, write.
+        Err(PageWriteError::PageFull) => {
             let new_id = storage.allocate_page().await?;
             let new_guard = bp.get_page(new_id).await?;
             new_guard.modify_page(|page| {
@@ -726,12 +824,15 @@ async fn append_to_chain(
 
             // Write into the new page.
             let new_guard = bp.get_page(new_id).await?;
-            let write_result: std::result::Result<(u16, usize), String> =
-                new_guard.modify_page(|page| {
+            let write_result: std::result::Result<(u16, usize), PageWriteError> = new_guard
+                .modify_page(|page| {
                     let mut slotted = SlottedPage::new(page);
                     slotted.add_slot(payload)
                 });
-            let (lid, _) = write_result.map_err(|_| StorageError::PageFull)?;
+            let (lid, _) = match write_result {
+                Ok(v) => v,
+                Err(e) => return Err(page_write_error_to_storage_error(new_id.0, e)),
+            };
             // The freshly written page stays cached and dirty: evicting it
             // here would drop the row before it reaches disk (and push the
             // page-id onto the storage free list, where a later allocation
@@ -739,6 +840,9 @@ async fn append_to_chain(
             // paths (checkpoint full flush / eviction) persist it.
             Ok((new_id, lid))
         }
+        // 页损坏 —— **不换页继续**：以点名该页的错误结束写入（损坏页被
+        // 跳过继续写会让目录行静默丢失）。
+        Err(e) => Err(page_write_error_to_storage_error(last.0, e)),
     }
 }
 
@@ -759,11 +863,12 @@ where
         let (rows, next) = bp
             .with_page_data(page_id, |data| -> Result<PageRows> {
                 let slotted = SlottedPageRef::new(data);
+                check_catalog_page_slot_count(&slotted, page_id.0)?;
                 let mut rows = Vec::with_capacity(slotted.slot_count());
                 for i in 0..slotted.slot_count() {
                     if let Some(slot) = slotted.get_slot(i) {
-                        let bytes = slotted.get_slot_data(&slot).to_vec();
-                        rows.push((slot.logical_id, bytes));
+                        let bytes = catalog_slot_payload(&slotted, page_id.0, i, &slot)?;
+                        rows.push((slot.logical_id, bytes.to_vec()));
                     }
                 }
                 Ok((rows, slotted.header().next_page_id))
@@ -781,6 +886,65 @@ where
     Ok(out)
 }
 
+/// 目录页的**页级**损坏错误——点名该页、页头声称的槽数与槽目录容量上限。
+///
+/// 页头声称的槽数超出槽目录容量时，槽目录定位
+/// `PAGE_SIZE - (index + 1) * Slot::SIZE` 会整数下溢 ⇒ 取槽即越界切片 panic
+/// ⇒ 进程 abort。故读点必须在**取槽之前**问该判据。
+fn corrupted_catalog_page_slot_count_error(page_id: u64, slot_count: usize) -> StorageError {
+    StorageError::CorruptedCatalogPage {
+        page_id,
+        detail: format!(
+            "slot count {slot_count} exceeds the page slot directory capacity of {MAX_PAGE_SLOTS} slots"
+        ),
+    }
+}
+
+/// 目录页的**槽级**损坏错误——点名该页与该槽（含越界区间）。
+///
+/// 损坏的目录页**绝不**被跳过：跳过会让确实存在的表得到「表不存在」的答案
+/// （静默错读）⇒ 目录损坏 ⇒ 该库 SHALL NOT 打开。负载读不出来 ⇒ 只点名该页
+/// 与该槽，**不臆造表名**。
+fn corrupted_catalog_page_slot_error(page_id: u64, slot_index: usize, slot: &Slot) -> StorageError {
+    let start = slot.offset as usize;
+    let end = start.saturating_add(slot.length as usize);
+    StorageError::CorruptedCatalogPage {
+        page_id,
+        detail: format!("slot {slot_index} range [{start}, {end}) lies outside the page data area"),
+    }
+}
+
+/// 目录页的**页级判据**——取槽**之前**问：页头声称的槽数是否超出该页的槽
+/// 目录容量。
+///
+/// 判据取页格式层冻结的**唯一**实现（`SlottedPageRef::slot_count_exceeds_
+/// capacity`，与 `integrity::validate_slots` 同源）⇒ 目录路径不另造阈值。
+fn check_catalog_page_slot_count(slotted: &SlottedPageRef<'_>, page_id: u64) -> Result<()> {
+    if slotted.slot_count_exceeds_capacity() {
+        return Err(corrupted_catalog_page_slot_count_error(
+            page_id,
+            slotted.slot_count(),
+        ));
+    }
+    Ok(())
+}
+
+/// 目录页的**有界槽负载**——经 `get_slot_data_checked` 取得（与索引树 / 数据
+/// 页读侧同形）；越界 ⇒ 点名该页与该槽的错误。
+///
+/// 负载越界时**不得**跳过该目录行（会让该表静默消失），**不得**臆造表名。
+fn catalog_slot_payload<'a>(
+    slotted: &SlottedPageRef<'a>,
+    page_id: u64,
+    slot_index: usize,
+    slot: &Slot,
+) -> Result<&'a [u8]> {
+    match slotted.get_slot_data_checked(slot) {
+        Some(bytes) => Ok(bytes),
+        None => Err(corrupted_catalog_page_slot_error(page_id, slot_index, slot)),
+    }
+}
+
 /// Delete every row in the chain whose bytes satisfy `matcher`. Rewrites
 /// each affected page in place (without compaction, since SlottedPage
 /// `delete_slot` already compacts within the page).
@@ -789,10 +953,11 @@ async fn delete_from_chain<F>(
     storage: &Arc<dyn AsyncStorage>,
     root: PageId,
     matcher: F,
-) -> Result<()>
+) -> Result<Vec<PageId>>
 where
     F: Fn(&[u8]) -> bool,
 {
+    let mut changed = Vec::new();
     let mut current = Some(root);
     let mut visited = std::collections::HashSet::new();
     while let Some(page_id) = current {
@@ -803,10 +968,11 @@ where
         let to_delete: Vec<u16> = bp
             .with_page_data(page_id, |data| -> Result<Vec<u16>> {
                 let slotted = SlottedPageRef::new(data);
+                check_catalog_page_slot_count(&slotted, page_id.0)?;
                 let mut del = Vec::new();
                 for i in 0..slotted.slot_count() {
                     if let Some(slot) = slotted.get_slot(i) {
-                        let bytes = slotted.get_slot_data(&slot);
+                        let bytes = catalog_slot_payload(&slotted, page_id.0, i, &slot)?;
                         if matcher(bytes) {
                             del.push(slot.logical_id);
                         }
@@ -824,6 +990,7 @@ where
                     let _ = slotted.delete_slot_by_logical_id(*lid);
                 }
             });
+            changed.push(page_id);
         }
 
         let next = bp
@@ -841,7 +1008,7 @@ where
         // by MS07-T02.
         let _ = storage;
     }
-    Ok(())
+    Ok(changed)
 }
 
 /// Update the bytes of a row whose name matches `target_name`, using
@@ -885,12 +1052,13 @@ where
         let (next, found) = bp
             .with_page_data(page_id, |data| -> Result<(u32, LocatedUpdate)> {
                 let slotted = SlottedPageRef::new(data);
+                check_catalog_page_slot_count(&slotted, page_id.0)?;
                 let mut found = None;
                 for i in 0..slotted.slot_count() {
                     let Some(slot) = slotted.get_slot(i) else {
                         continue;
                     };
-                    let bytes = slotted.get_slot_data(&slot);
+                    let bytes = catalog_slot_payload(&slotted, page_id.0, i, &slot)?;
                     if matches_catalog_row_name(bytes, target_name) {
                         if let Some(new_bytes) = updater(bytes)? {
                             found = Some((slot.logical_id, bytes.len(), new_bytes));
@@ -919,15 +1087,26 @@ where
 
     if new_bytes.len() == old_len {
         let guard = bp.get_page(page_id).await?;
-        let updated: std::result::Result<(), String> = guard.modify_page(|page| {
+        let updated: std::result::Result<(), PageWriteError> = guard.modify_page(|page| {
             let mut slotted = SlottedPage::new(page);
             slotted.update_slot_in_place(lid, &new_bytes)
         });
-        updated.map_err(|e| {
-            StorageError::Internal(format!(
-                "catalog update of table '{target_name}' failed: {e}"
-            ))
-        })?;
+        match updated {
+            Ok(()) => {}
+            // 页损坏 ⇒ 点名该页的错误（**不得**被折叠成「表不存在」或无细节
+            // 的泛化错误）。
+            Err(
+                e @ (PageWriteError::SlotCountExceedsCapacity { .. }
+                | PageWriteError::SlotPayloadOutOfBounds { .. }),
+            ) => {
+                return Err(page_write_error_to_storage_error(page_id.0, e));
+            }
+            Err(e) => {
+                return Err(StorageError::Internal(format!(
+                    "catalog update of table '{target_name}' failed: {e}"
+                )));
+            }
+        }
         return Ok(Some(page_id));
     }
 
@@ -960,6 +1139,7 @@ async fn delete_named_copies_except(
         let (next, to_delete) = bp
             .with_page_data(page_id, |data| -> Result<(u32, Vec<u16>)> {
                 let slotted = SlottedPageRef::new(data);
+                check_catalog_page_slot_count(&slotted, page_id.0)?;
                 let mut del = Vec::new();
                 for i in 0..slotted.slot_count() {
                     let Some(slot) = slotted.get_slot(i) else {
@@ -971,7 +1151,8 @@ async fn delete_named_copies_except(
                     if page_id.0 == keep.0 && slot.logical_id == keep.1 {
                         continue;
                     }
-                    if matches_catalog_row_name(slotted.get_slot_data(&slot), target_name) {
+                    let bytes = catalog_slot_payload(&slotted, page_id.0, i, &slot)?;
+                    if matches_catalog_row_name(bytes, target_name) {
                         del.push(slot.logical_id);
                     }
                 }
@@ -1044,6 +1225,7 @@ fn collapse_newest_same_name(rows: Vec<(u16, CatalogRow)>) -> Vec<CatalogRow> {
 ///           sec_count × (u16 name_len | name | u32 col_index | u32 root) ]
 ///         [ MS21 Iter005 appended: u8 kind; kind=View carries
 ///           u16 sql_len | sql_bytes ]
+///         [ trailing u8 explicit_primary_key: 1 written, 0 not; absent reads 0 ]
 pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
     let name_bytes = row.table_name.as_bytes();
     let pk_bytes = row.pk_column.as_bytes();
@@ -1070,7 +1252,8 @@ pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
         + 4
         + sec_bytes
         + 1
-        + view_bytes;
+        + view_bytes
+        + 1;
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
     buf.extend_from_slice(name_bytes);
@@ -1102,6 +1285,7 @@ pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
         buf.extend_from_slice(&(sql_bytes.len() as u16).to_le_bytes());
         buf.extend_from_slice(sql_bytes);
     }
+    buf.push(if row.explicit_primary_key { 1 } else { 0 });
     debug_assert_eq!(buf.len(), total);
     buf
 }
@@ -1240,29 +1424,34 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
             sec_consumed = off;
         }
     }
-    // MS21 Iter005 (T5-a/D12) compat read: the trailing kind section is a
-    // single `u8 kind` byte; a kind=View row carries `u16 len | text`. A
-    // legacy row (or an incomplete/invalid trailing section) reads as
-    // `Table` with no SQL text — same tolerate-incomplete-trailing-section
-    // pattern as the secondary-index section above.
+    // Kind byte, then view SQL when kind is View. After both are consumed,
+    // one trailing u8 is explicit_primary_key (1 true, 0 false). A missing
+    // byte reads as false and does not reject the row. An incomplete kind
+    // section still reads as Table with no SQL.
     let kind_rest = &sec_rest[sec_consumed..];
-    let (kind, view_sql) = match kind_rest.first() {
-        Some(&ROW_KIND_VIEW) => {
+    let (kind, view_sql, kind_consumed) = match kind_rest.first().copied() {
+        Some(ROW_KIND_VIEW) => {
             if kind_rest.len() >= 3 {
                 let sql_len = u16::from_le_bytes([kind_rest[1], kind_rest[2]]) as usize;
                 if kind_rest.len() >= 3 + sql_len {
                     match std::str::from_utf8(&kind_rest[3..3 + sql_len]) {
-                        Ok(s) => (CatalogKind::View, Some(s.to_string())),
-                        Err(_) => (CatalogKind::Table, None),
+                        Ok(s) => (CatalogKind::View, Some(s.to_string()), 3 + sql_len),
+                        Err(_) => (CatalogKind::Table, None, 0usize),
                     }
                 } else {
-                    (CatalogKind::Table, None)
+                    (CatalogKind::Table, None, 0usize)
                 }
             } else {
-                (CatalogKind::Table, None)
+                (CatalogKind::Table, None, 0usize)
             }
         }
-        _ => (CatalogKind::Table, None),
+        Some(ROW_KIND_TABLE) => (CatalogKind::Table, None, 1usize),
+        _ => (CatalogKind::Table, None, 0usize),
+    };
+    let explicit_primary_key = if kind_consumed > 0 {
+        matches!(kind_rest.get(kind_consumed).copied(), Some(1))
+    } else {
+        false
     };
     Ok(CatalogRow {
         table_name,
@@ -1276,6 +1465,7 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
         secondary_indexes,
         kind,
         view_sql,
+        explicit_primary_key,
     })
 }
 
@@ -1644,12 +1834,13 @@ impl Catalog {
                 .buffer_pool
                 .with_page_data(page_id, |data| -> Result<Vec<(u16, Vec<u8>)>> {
                     let slotted = SlottedPageRef::new(data);
+                    check_catalog_page_slot_count(&slotted, page_id.0)?;
                     let mut out = Vec::new();
                     for i in 0..slotted.slot_count() {
                         let Some(slot) = slotted.get_slot(i) else {
                             continue;
                         };
-                        let bytes = slotted.get_slot_data(&slot);
+                        let bytes = catalog_slot_payload(&slotted, page_id.0, i, &slot)?;
                         if !matches_column_row_of_table(bytes, table) {
                             continue;
                         }
@@ -1756,6 +1947,7 @@ mod tests {
             secondary_indexes: Vec::new(),
             kind: CatalogKind::Table,
             view_sql: None,
+            explicit_primary_key: false,
         }
     }
 
@@ -2199,27 +2391,51 @@ mod tests {
         assert_eq!(row, back);
     }
 
-    /// 旧格式兼容：无 kind 尾段的行（旧版写入）读为 Table / 无 SQL 文本
-    /// （Table 行的 kind 字节是唯一尾随段，截去即旧版布局逐字节）。
+    /// 旧格式兼容：无 kind 尾段的行读为 Table、无 SQL，且没写出 PRIMARY KEY。
+    /// 当前布局末尾是 kind 字节再加 explicit_primary_key 字节，两字节都要截掉。
     #[test]
     fn legacy_row_without_kind_section_reads_as_table() {
         let row = sample_row();
         let mut bytes = serialize_catalog_row(&row);
         bytes.pop();
+        bytes.pop();
         let back = deserialize_catalog_row(&bytes).unwrap();
         assert_eq!(back.kind, CatalogKind::Table);
         assert_eq!(back.view_sql, None);
+        assert!(!back.explicit_primary_key);
     }
 
-    /// kind=View 但 SQL 文本段截断：容忍读为 Table（与既有「不完整尾随段
-    /// 读为空」兼容模式同型——secondary_indexes `ok=false → clear`）。
+    /// 写出 PRIMARY KEY 的表行往返后仍为真。
+    #[test]
+    fn catalog_row_explicit_primary_key_roundtrip() {
+        let mut row = sample_row();
+        row.explicit_primary_key = true;
+        let bytes = serialize_catalog_row(&row);
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(back, row);
+        assert!(back.explicit_primary_key);
+    }
+
+    /// 当前 kind 布局缺尾字节时读回为没写出 PRIMARY KEY，kind 仍是 Table。
+    #[test]
+    fn legacy_row_without_explicit_primary_key_byte_reads_false() {
+        let row = sample_row();
+        let mut bytes = serialize_catalog_row(&row);
+        bytes.pop();
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert!(!back.explicit_primary_key);
+        assert_eq!(back.kind, CatalogKind::Table);
+    }
+
+    /// kind=View 但 SQL 文本段截断：截进 SQL 正文后仍读为 Table。
+    /// 只去掉写出主键的尾字节不会进入正文。
     #[test]
     fn view_row_with_truncated_sql_section_tolerates_as_table() {
         let mut row = sample_row();
         row.kind = CatalogKind::View;
         row.view_sql = Some("SELECT 1".to_string());
         let mut bytes = serialize_catalog_row(&row);
-        bytes.truncate(bytes.len() - 1);
+        bytes.truncate(bytes.len() - 2);
         let back = deserialize_catalog_row(&bytes).unwrap();
         assert_eq!(back.kind, CatalogKind::Table);
         assert_eq!(back.view_sql, None);

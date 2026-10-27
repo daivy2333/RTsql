@@ -37,7 +37,7 @@ impl SyncPageLoader {
     }
 
     /// MS35（`free-page-lifecycle` R3）：释放操作的完成标记（同步）。
-    pub fn complete_free_release(&self, pages: &[PageId]) {
-        self.buffer_pool.complete_free_release(pages);
+    pub fn complete_free_release(&self, pages: &[PageId], anchors: &[PageId]) {
+        self.buffer_pool.complete_free_release(pages, anchors);
     }
 }

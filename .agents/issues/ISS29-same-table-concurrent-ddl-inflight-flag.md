@@ -1,6 +1,6 @@
 # 同表并发 DDL 与在途状态布尔量冲突（后发 DDL 清除先行 DDL 的读拒绝）
 
-- Status: open
+- Status: closed（2026-10-26 fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`）
 - Filed: 2026-10-25
 - Source: Act Response 的 Issue 候选（Iteration 003 的「并发同表 DDL 的交互」）、Plan Review 的 finding 7 附带的范围外缺陷与「Follow-up Decision」，change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 003 Cycle `000-initial.md`（Review Result `accepted`）
 - Environment: Linux x86_64 / WSL2 6.18.40.1、rustc 1.99.1 / cargo 1.99.1、RTsql `tests/ddl_rewrite_consistency_test.rs` 集成测试；登记时工作区 HEAD `0a08b14`（ahead of origin 9），产品改动未提交
@@ -31,8 +31,10 @@
 - 处置指针：**待建 change 承载**（change 建好后由 Recorder 更新本指针）。
 - 承载落点：落在 **DDL 并发控制 / 在途状态建模** → 建议独立 change 承载「同表 DDL 串行化」这一设计决定；在该决定落地前，本条**不**应与其它 DDL 面混在同一承载中。
 - 前置决定：需要先确定「同表 DDL 串行化」的具体形态（库入口拒绝同表并发 DDL / 语句级排队 / 在途状态改为可区分多改写的结构）⇒ 属设计决定，须由用户 / Plan 裁定。
+- 2026-10-26 关闭。原因：同表并发窄化 DDL 的在途状态已改为带所有者令牌，后发窄化在改写开始前被显式拒绝，由归档变更 Iteration 006 任务 T8 处置。该 Cycle 的 Plan Review 为 `accepted`。`ADD COLUMN` 与在途窄化的交错不在本条内（该 Cycle 写明 ISS29 未覆盖这一形态），另见 ISS39。处置指针：fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`。
 
 ## 证据
 
+- 2026-10-26 关闭依据：`openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure/iterations/006-ddl-commit-point-unified-model/000-initial.md` 的 Plan Review 为 `accepted`（T8）。`ADD COLUMN` 交错见 `.agents/issues/ISS39-add-column-races-inflight-narrowing.md`。
 - 调查与结论正文（不在本 Issue 复制）：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/iterations/003-rewrite-window-read-consistency/000-initial.md` —— Act Response 的「并发同表 DDL 的交互」段（该 Cycle 未引入、未修复、需新设计决定）与 Plan Review 的范围外实质缺陷段；Iteration 004 的 Excluded scope（`iterations/004-release-durability-precondition/000-initial.md`）。
 - 相关行为规格：`openspec/specs/ddl-rewrite-consistency/spec.md`（Requirement「改写在途期间读路径不静默错读」——四个 Scenario 全部限定在**单条**改写的进程内窗口，未涵盖同表并发 DDL）。

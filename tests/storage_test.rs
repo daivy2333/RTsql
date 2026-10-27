@@ -265,7 +265,7 @@ mod tests {
 
         // (b) 持久化边界（存储层的提升入口——与 checkpoint 钩子同一条）：释放
         //     完成并提升之后，释放的页被复用，文件页数不再增长。
-        storage.complete_free_release(&[PageId(1)]);
+        storage.complete_free_release(&[PageId(1)], &[]);
         let limit = storage.release_completion_limit();
         storage.promote_free_releases(limit);
         let reused = storage.allocate_page().await.unwrap();
@@ -296,7 +296,7 @@ mod tests {
 
         // (b) 持久化边界（存储层的提升入口——与 checkpoint 钩子同一条）：释放
         //     完成并提升之后，释放的页被复用。
-        storage.complete_free_release(&[page_id]);
+        storage.complete_free_release(&[page_id], &[]);
         let limit = storage.release_completion_limit();
         storage.promote_free_releases(limit);
         let reused = storage.allocate_page().await.unwrap();

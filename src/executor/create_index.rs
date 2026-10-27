@@ -5,8 +5,8 @@
 //!    catalog，登记后由 `register_secondary_index` 统一挂接）；
 //! 2. 全量回填：遍历数据页链收集链尾（不被任何 `next_version` 指向）slot，
 //!    对**非墓碑**链尾无条件建条目（含活跃未提交版本——其回滚由 T2-d 扩展
-//!    后的 abort_cleanup 二级清理兜底，两向一致）；索引列 NULL 跳过
-//!    （`to_key` None，同 PK/唯一语义；写入类型门保证 INT 列无非 Int 值）；
+//!    后的 abort_cleanup 二级清理兜底，两向一致）；索引列经
+//!    `secondary_index_key` 派生，NULL 与不可容纳的值不入树；
 //! 3. 一次性 catalog 登记 + 内存换入（`TableManager::register_secondary_index`）。
 //!
 //! 回填失败：旧树页 best-effort 释放后传播错误——登记未发生，零副作用。
@@ -15,7 +15,10 @@ use crate::database::Database;
 use crate::executor::{ExecResult, Executor, PhysicalPlan};
 use crate::storage::btree::IndexManager;
 use crate::storage::page_format::{deserialize_row, overflow, ColumnType, SlottedPageRef};
-use crate::storage::{BufferPool, PageId, Result, RowId};
+use crate::storage::{
+    corrupted_data_page_slot_count_error, corrupted_data_page_slot_error, BufferPool, PageId,
+    Result, RowId,
+};
 use crate::transaction::VersionHeader;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -87,7 +90,9 @@ impl Executor for CreateIndexExecutor {
             }
             // MS35（`free-page-lifecycle` R3）：释放完成标记——该索引从未登记
             // 进目录（无锚点写），按保守方向等下一次成功刷盘。
-            self.database.buffer_pool.complete_free_release(&released);
+            self.database
+                .buffer_pool
+                .complete_free_release(&released, &[]);
             return Err(e);
         }
 
@@ -127,12 +132,23 @@ async fn backfill_tree(
         let (next_page, slots) = buffer_pool
             .with_page_data(pid, |data| -> Result<BackfillPage> {
                 let slotted = SlottedPageRef::new(data);
+                // MS37 T17: 页头槽数越界 ⇒ 明确错误（取槽**之前**判；否则
+                // 槽目录定位下溢 ⇒ 越界切片 panic ⇒ 进程 abort）。
+                if slotted.slot_count_exceeds_capacity() {
+                    return Err(corrupted_data_page_slot_count_error(
+                        pid.0,
+                        slotted.slot_count(),
+                    ));
+                }
                 let mut slots = Vec::new();
                 for index in 0..slotted.slot_count() {
                     let Some(slot) = slotted.get_slot(index) else {
                         continue;
                     };
-                    let slot_data = slotted.get_slot_data(&slot);
+                    // MS37 T3: 越界槽 ⇒ 明确错误（不得跳过——跳过 = 静默错读）。
+                    let slot_data = slotted
+                        .get_slot_data_checked(&slot)
+                        .ok_or_else(|| corrupted_data_page_slot_error(pid.0, index, &slot))?;
                     if slot_data.len() < VersionHeader::SIZE {
                         continue;
                     }
@@ -187,12 +203,12 @@ async fn backfill_tree(
             table_meta.narrowing.ensure_readable()?;
             let tuple_bytes = tuple_ref.resolve(buffer_pool).await?;
             let values = deserialize_row(&tuple_bytes, &schema, &table_meta.defaults)?;
-            if let Some(key) = values
-                .get(column_index)
-                .and_then(|v| v.to_key())
-                .map(|k| k.as_bytes().to_vec())
-            {
-                tree.insert(&key, rid).await?;
+            if let Some(key) = values.get(column_index).and_then(|v| {
+                schema
+                    .get(column_index)
+                    .and_then(|column_type| v.secondary_index_key(column_type))
+            }) {
+                tree.insert(key.as_bytes(), rid).await?;
             }
         }
     }

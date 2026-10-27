@@ -2,15 +2,15 @@
 
 ## Purpose
 
-约束用户级二级索引（`CREATE INDEX` / `DROP INDEX`）的端到端语义：单列、非唯一、声明 INT 列白名单与全形态修饰点名拒绝；建索引存量行全量回填与 catalog 持久化（干净重开与崩溃恢复 `redo_count > 0` 索引去信任重建通道扩展，两态一致）；索引名库级唯一；被索引列等值查询路由 `IndexScanAll` 可达且结果等价（不可键控字面量回落谓词下推）；INSERT/UPDATE（含 rekey）/DELETE/UPSERT 写路径与事务回滚还原的条目维护（PK 与唯一索引既有语义同型扩展）；DROP INDEX 页物理释放与查询回落扫描。来源：MS21（change `2026-09-29-ms21-ddl-evolution`，improvements I068；唯一索引基建复用 MS23）。
+约束用户级二级索引（`CREATE INDEX` / `DROP INDEX`）的端到端语义：单列、非唯一；声明 INT 或内部归一为字符串的列可建索引，支持域外类型与全形态修饰点名拒绝；完整编码可容纳的非 NULL 存量回填并持久化（干净重开、未决 WAL，以及崩溃恢复 `redo_count > 0` 索引去信任重建后与存活数据一致；超出键容量的字符串整值写入，等值查询扫描完整值，不截断、不限制字段长度）；索引名库级唯一；被索引列等值查询路由 `IndexScanAll` 可达且结果与全表扫描严格相等（不可路由谓词回落扫描）；INSERT/UPDATE（含 rekey）/DELETE/UPSERT 写路径与事务回滚、提交前取消还原条目；字符串索引不扩大非整数主键或唯一约束；DROP INDEX 页物理释放与查询回落扫描。来源：MS21（change `2026-09-29-ms21-ddl-evolution`，improvements I068；唯一索引基建复用 MS23）。
 
 ## Requirements
 
 ### Requirement: CREATE INDEX 建立单列 INT 二级索引
 
-`CREATE INDEX <name> ON <table>(<col>)` SHALL 在 `<col>` 为声明 INT（含隐式 PK 之外的普通 INT 列）的单列上建立非唯一二级索引：建索引时 SHALL 对存量行全量索引化；索引元数据（名称、所属表、索引列、根页）SHALL 经 catalog 持久化，干净重开与崩溃恢复（`redo_count > 0` 索引去信任重建通道扩展）后索引 SHALL 可用且内容与数据一致（两态一致）。索引名 SHALL 库级唯一；重复名、表不存在、列不存在、列声明非 INT SHALL 计划期点名拒绝且零副作用。
+`CREATE INDEX <name> ON <table>(<col>)` SHALL 在声明 INT 或内部归一为 ColumnType::String 的单列上建立非唯一二级索引，SHALL 对完整编码可由该布局容纳的非 NULL 存量值全量回填，并持久化名称、所属表、列和根页。INT 既有行为 SHALL 保持；字符串比较 SHALL 沿用 SQL 现有相等语义，允许重复值与空字符串，NULL 行 SHALL NOT 入索引。干净重开和未决 WAL 恢复后索引 SHALL 与存活数据一致。合法字符串超过该布局键容量时 SHALL 继续允许写入并由完整值扫描查询，SHALL NOT 截断、漏发或给行字段增加长度限制。
 
-`CREATE UNIQUE INDEX`、组合（多列）索引、表达式索引、部分索引（WHERE 子句）与 `IF NOT EXISTS` 子句 SHALL 计划期点名拒绝（能力可操作，MS19 错误面先例），SHALL NOT 静默忽略成分。对 PK 列建二级索引 SHALL 允许（冗余但行为等价，不做专门检测）。索引列值为 NULL 的行 SHALL NOT 入索引（`to_key` None，同 PK 与唯一索引既有语义；等值路由仅接受 Int 字面量，NULL 查询语义不受影响）。显式事务中的 CREATE INDEX 与 DROP INDEX SHALL 执行期点名拒绝（0A000；回填与登记一致性依赖无并发未提交写窗口——CTAS 事务内拒绝先例同型，拒绝先于执行器产生任何副作用）。
+索引名 SHALL 库级唯一；重名、缺表、缺列与支持域外类型 SHALL 点名拒绝且零副作用。`CREATE UNIQUE INDEX`、组合索引、表达式索引、部分索引与 `IF NOT EXISTS` SHALL 继续在计划期点名拒绝。显式事务中的 CREATE/DROP INDEX SHALL 继续在副作用之前以 0A000 拒绝。字符串索引 SHALL NOT 扩大非整数主键或唯一约束支持面。
 
 #### Scenario: 建索引与存量行索引化
 
@@ -32,9 +32,9 @@
 
 #### Scenario: 非 INT 列拒绝
 
-- **GIVEN** 表 `t(id INT PRIMARY KEY, name VARCHAR)`
-- **WHEN** `CREATE INDEX idx_name ON t(name)`
-- **THEN** 计划期点名拒绝（首版仅 INT 列），零副作用
+- **GIVEN** 表 `t(id INT PRIMARY KEY, flag BOOLEAN)`，该列既非 INT 也非本批支持的字符串类型
+- **WHEN** `CREATE INDEX idx_flag ON t(flag)`
+- **THEN** 计划期点名拒绝不支持的声明类型，零副作用
 
 #### Scenario: 重复索引名拒绝
 
@@ -52,9 +52,35 @@
 - **WHEN** `CREATE INDEX i1 ON nope(c)` / `CREATE INDEX i2 ON t(nope)`
 - **THEN** 均点名拒绝（表不存在 / 列不存在），零副作用
 
+#### Scenario: 整数索引建表回填行为保持
+
+- **GIVEN** 含重复整数值的表
+- **WHEN** 对该 INT 列创建非唯一二级索引
+- **THEN** 建索引成功，等值查询与创建前的行集一致
+
+#### Scenario: 字符串存量回填及空值边界
+
+- **GIVEN** 字符串列含重复值、空字符串、多字节 UTF-8 与 NULL
+- **WHEN** 对该列创建非唯一二级索引并执行等值查询
+- **THEN** 支持域内创建成功，非 NULL 值的全部匹配行可见，NULL 保持既有三值语义
+
+#### Scenario: 干净重开与崩溃恢复内容一致
+
+- **GIVEN** 已建字符串索引，随后完成合法增删改
+- **WHEN** 分别在干净关闭后、存在未决 WAL 的非正常关闭后重新打开
+- **THEN** 两条路径均恢复正确的已提交行与索引，完整性检查无 error
+
+#### Scenario: 不支持的声明与事务边界拒绝
+
+- **GIVEN** 重名、缺表、缺列、支持域外类型、修饰或显式事务中的建索引请求
+- **WHEN** 执行该请求
+- **THEN** 沿用既有分类点名拒绝，表和原有索引无副作用
+
 ### Requirement: 二级索引等值查询路由可达
 
-被索引列上的等值谓词 `WHERE <col> = <Int 字面量>` SHALL 可路由到该二级索引（计划形状经 `EXPLAIN` 可观察，与 PK 键位等值路由同型）；索引存在与否 SHALL NOT 改变查询结果行集（结果等价，仅计划形状不同）。不可键控字面量（非 Int / NULL）SHALL 回落既有谓词下推行内求值（MS16 键列类型感知路由同型语义）。无索引列与未建索引的表 SHALL 保持既有扫描语义零回归。
+被索引列与匹配类型字面量的等值谓词，在其完整编码可容纳且符合既有裸列字面量形态时 SHALL 可路由到二级索引，并由 EXPLAIN 显示索引节点且不执行内层查询。支持域内字符串匹配 SHALL 比较完整值，不得把共享前缀但不同的字符串当作相同值。索引路径与全表扫描的结果多重集合 SHALL 严格相等，不遗漏、不多发；单列、乱序多列和通配输出 SHALL 保持列元数据与投影契约。
+
+NULL、类型不匹配、无索引、超出布局键容量和本批不支持的谓词形态 SHALL 保持既有扫描与错误语义。范围路由不属于本次扩展。
 
 #### Scenario: 等值路由计划形状可观察
 
@@ -71,7 +97,7 @@
 #### Scenario: 不可键控字面量回落行内求值
 
 - **GIVEN** 已建 `idx_age`
-- **WHEN** `SELECT * FROM t WHERE age = NULL`（或非 Int 字面量形态）
+- **WHEN** `SELECT * FROM t WHERE age = NULL`（或与索引列类型不匹配的字面量形态）
 - **THEN** 回落既有扫描语义，无路由相关错误（与 PK 类型感知路由同型）
 
 #### Scenario: 无索引列零回归
@@ -105,9 +131,34 @@
 - **WHEN** 范围谓词 `WHERE n > k`、复合谓词 `WHERE n = k AND id <= x`、唯一键索引点查
 - **THEN** 全部行为与修复前一致
 
+#### Scenario: 字符串等值查询可观察且与扫描相等
+
+- **GIVEN** 含重复字符串值的表与该列的二级索引
+- **WHEN** 对同一等值条件执行 EXPLAIN 和不同投影的 SELECT
+- **THEN** EXPLAIN 显示对应索引且不执行查询，SELECT 表头与行逐位一致，结果与创建索引前的扫描严格相等
+
+#### Scenario: 共享前缀和边界长度不误匹配
+
+- **GIVEN** 支持域内两字符串共享长前缀，另有空串、多字节及尾部零字节样本
+- **WHEN** 分别按完整值执行等值查询
+- **THEN** 仅返回真实相等值的全部行，不截断合并不同值，不漏行
+
+#### Scenario: 非可路由谓词保留既有行为
+
+- **GIVEN** 字符串二级索引存在
+- **WHEN** 查询 NULL、不同类型字面量、范围或未被本批路由的组合谓词
+- **THEN** 沿用既有扫描求值与错误语义，结果不因索引存在而改变
+
+#### Scenario: 超容量完整字符串扫描且允许跨边界改值
+
+- **GIVEN** 表含两个共享长前缀但不同的字符串，其完整编码超出所选布局键容量，另有容量内字符串
+- **WHEN** 创建索引、分别按完整长值查询，再把行值在容量内和容量外双向更新
+- **THEN** 创建和合法写入成功，长值查询计划为扫描且仅返回真实匹配行；容量内值可走索引，跨界更新的新旧查询与全表扫描一致
+- **AND** NULL 和长值分别按其语义跳过条目，不截断键，不限制表字段长度
+
 ### Requirement: 二级索引写路径条目维护
 
-INSERT、UPDATE（含索引列改值的 rekey）、DELETE、UPSERT（DO UPDATE 删冲突行 / REPLACE）SHALL 维护受影响表的全部二级索引条目与存活版本一致：新行/新值入条目、删行/旧值出条目；事务回滚后条目 SHALL 还原为与存活版本一致（PK 与唯一索引既有还原语义同型扩展）；崩溃恢复后两态一致。非唯一索引 SHALL 允许重复键多行并存。
+INSERT、UPDATE/rekey、DELETE、UPSERT 与 REPLACE SHALL 维护全部受影响的 INT 和字符串二级索引，使条目与存活行一致。字符串与 NULL 相互转换 SHALL 分别增删条目；重复键中一行变化 SHALL NOT 误删其他行。回滚、失败和提交前取消经既有回收后 SHALL 还原行与条目，不留半写结构或占用键；提交后结果未送达 SHALL 继续视为已提交。
 
 #### Scenario: INSERT 后点查可达
 
@@ -158,6 +209,24 @@ INSERT、UPDATE（含索引列改值的 rekey）、DELETE、UPSERT（DO UPDATE �
 - **GIVEN** ≥3 层 PK 树的大表（乱序主键分布）
 - **WHEN** `UPDATE t SET …`（无 WHERE）/ `DELETE FROM t`（无 WHERE）
 - **THEN** `affected_rows` = 实际行数且全部行被触达（失败边界——修复前：affected≈0 或 `Abort failed: Key not found` 整语句失败）
+
+#### Scenario: 字符串改值和 NULL 转换维护新旧键
+
+- **GIVEN** 已有字符串索引，且多行共享相同字符串
+- **WHEN** 插入、改变其中一行字符串、在字符串与 NULL 间转换，或删除一行
+- **THEN** 新旧键查询与存活行一致，其他重复值行保持可见
+
+#### Scenario: 多步回滚和冲突更新保持条目一致
+
+- **GIVEN** 已建字符串索引并保留既有主键和唯一约束
+- **WHEN** 分别执行事务内多步写入后回滚、UPSERT/REPLACE，以及违反既有约束的失败写入
+- **THEN** 成功路径条目与新行一致，回滚与失败路径保留原已提交行及条目
+
+#### Scenario: 取消和超时沿用既有索引原子性
+
+- **GIVEN** 修改字符串索引的语句处于写入阶段
+- **WHEN** future 被丢弃或超时到期，随后触发既有回收
+- **THEN** 提交前取消的语句不提交，相关键全部释放且结构自洽；已提交但未送达的结果不被撤销
 
 ### Requirement: DROP INDEX 移除二级索引
 

@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 
 use crate::executor::Value;
 use crate::storage::btree::{CatalogRootSlot, IndexManager, LEAF_NODE};
@@ -10,8 +10,10 @@ use crate::storage::catalog::{
     Catalog, CatalogColumnRow, CatalogKind, CatalogRow, CatalogSecondaryIndex, COLUMNS_PAGE_ID,
     COLUMNS_SYSTEM_NAME, TABLES_PAGE_ID, TABLES_SYSTEM_NAME,
 };
-use crate::storage::data_page::update_version_header_in_data_page;
-use crate::storage::data_page::write_tuple_to_data_page;
+use crate::storage::data_page::{
+    corrupted_data_page_slot_count_error, corrupted_data_page_slot_error,
+    update_version_header_in_data_page, write_tuple_to_data_page,
+};
 use crate::storage::free_page_rebuild::take_free_page_rebuild_fault;
 use crate::storage::integrity::{check_data_page, check_tree_page, violation_summary};
 use crate::storage::page_format::{overflow, ColumnType, SlottedPage, SlottedPageRef};
@@ -96,15 +98,31 @@ impl DataChainStatus {
 /// 快照（旧 `TableMeta`），因此单元必须随活布局一起被读者观察到，否则窗口
 /// 内的拒绝对计划期快照失效。
 ///
+/// change 2026-10-25-ms37-defect-ledger-closure
+/// Iteration 006 / Cycle 000（T8 / ISS29）：在途状态不再由「单表一个布尔量」
+/// 承载，而是由**带所有者令牌**的每表状态承载：
+///
+/// - `owner` = 持有者令牌（0 = 无持有者）；`try_acquire` 用 CAS 把「无持有者」
+///   换成自己的令牌 ⇒ 同表的第二个窄化 DDL **取不到**令牌 ⇒ 被显式拒绝
+///   （不是排队，也不是互相清除对方的在途状态）。
+/// - `published` = **读者拒绝条件本身**（与既有语义一致：改写开始 ⇒ 拒绝；
+///   目录窄化生效 ⇒ 恢复）。令牌只决定「谁有权改变这个状态」，**不改拒绝
+///   条件本身**（拒绝窗口与既有行为逐点一致）。
+/// - 清除**只**由令牌持有者执行 ⇒ 非持有者的路径不会清掉别人窗口内的读拒绝。
+///
 /// 纯内存状态：不持久化、不进 WAL / 目录 ⇒ 磁盘格式不变（MS36 的 G1/G2/G3
 /// 兼容面不受影响）。单元不携带任何运行身份（无 hash / 指纹 / revision /
-/// run-id / 时间戳）。
+/// run-id / 时间戳）——令牌只是每表单调递增的**互斥所有权标记**。
 #[derive(Debug)]
 pub struct NarrowingState {
     /// 该单元所属的表名——拒绝信息据此点名表。
     table: String,
-    /// 是否正处于「改写已开始、目录窄化尚未生效」的窗口内。
-    in_flight: AtomicBool,
+    /// 在途窄化的所有者令牌（0 = 无持有者）。
+    owner: AtomicU64,
+    /// 每表单调递增的令牌分配器——只作互斥所有权标记，不承载身份语义。
+    next_token: AtomicU64,
+    /// 是否正处于「改写已开始、目录窄化尚未生效」的窗口内（读者拒绝条件）。
+    published: AtomicBool,
 }
 
 impl NarrowingState {
@@ -112,23 +130,57 @@ impl NarrowingState {
     pub fn new(table: impl Into<String>) -> Self {
         Self {
             table: table.into(),
-            in_flight: AtomicBool::new(false),
+            owner: AtomicU64::new(0),
+            next_token: AtomicU64::new(1),
+            published: AtomicBool::new(false),
         }
     }
 
     /// 在途窄化中——读者据此拒绝解码。
     fn is_in_flight(&self) -> bool {
-        self.in_flight.load(Ordering::SeqCst)
+        self.published.load(Ordering::SeqCst)
     }
 
-    /// 发布在途窄化（改写开始处）。
-    pub fn publish(&self) {
-        self.in_flight.store(true, Ordering::SeqCst);
+    /// 同表加列要等这一轮窄化结束。只读：`owner != 0` 或 `published` 为真。
+    /// 不改原子量，不返回令牌，不调用 `try_acquire`。
+    fn add_column_must_wait(&self) -> bool {
+        self.owner.load(Ordering::SeqCst) != 0 || self.published.load(Ordering::SeqCst)
     }
 
-    /// 清除在途窄化（目录窄化生效后 / 语句异常或放弃路径）。
-    pub fn clear(&self) {
-        self.in_flight.store(false, Ordering::SeqCst);
+    /// 取得在途窄化的**所有权**：成功返回本句的令牌；该表已有持有者 ⇒ 返回
+    /// `None`（调用方据此**拒绝**并发的窄化 DDL，而不是排队等待）。
+    pub fn try_acquire(&self) -> Option<u64> {
+        let token = self.next_token.fetch_add(1, Ordering::SeqCst);
+        self.owner
+            .compare_exchange(0, token, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| token)
+    }
+
+    /// 发布在途窄化（改写开始处）——**只有令牌持有者**能发布。
+    pub fn publish_narrowing(&self, token: u64) -> bool {
+        if self.owner.load(Ordering::SeqCst) != token {
+            return false;
+        }
+        self.published.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// 清除在途窄化（目录窄化生效后）——**只有令牌持有者**能清除 ⇒ 非持有者
+    /// 的路径不会清掉别人窗口内的读拒绝（ISS29 的「重叠清除」缺陷）。
+    pub fn clear_narrowing(&self, token: u64) -> bool {
+        if self.owner.load(Ordering::SeqCst) != token {
+            return false;
+        }
+        self.published.store(false, Ordering::SeqCst);
+        self.owner
+            .compare_exchange(token, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// 放弃在途窄化（语句异常 / 被放弃路径）——**只有令牌持有者**能放弃。
+    pub fn release(&self, token: u64) -> bool {
+        self.clear_narrowing(token)
     }
 
     /// 读者侧检查：窗口内拒绝解码，点名该表正在被修改。
@@ -153,22 +205,141 @@ impl NarrowingState {
 /// 正常路径由 `apply_column_drop` 在目录窄化生效后清除；异常 / 放弃路径由守卫
 /// 析构兜底清除 ⇒ 该表不会因失败的 DDL 而永久不可读（那比 ISS25 原缺陷更
 /// 严重）。守卫不携带任何运行身份。
+///
+/// change 2026-10-25-ms37-defect-ledger-closure
+/// Iteration 006 / Cycle 000（T8 / ISS29）：守卫持有**令牌**——只有令牌持有者
+/// 能改变该表的在途窄化状态（发布 / 清除 / 放弃）。
 pub struct NarrowingGuard {
     state: Arc<NarrowingState>,
+    /// 本句持有的令牌——只有它能清除该表的在途窄化状态。
+    token: u64,
+    /// 析构时的处置（`RELEASE` / `KEEP` / `CLEARED`）。
+    disposition: AtomicU8,
 }
 
+/// 析构时清除在途窄化状态（语句异常 / 被放弃路径）⇒ 读者恢复正常。
+const DISPOSITION_RELEASE: u8 = 0;
+/// 析构时**保留**在途窄化状态（发布失败路径）⇒ 读者继续被拒绝，不得退化为
+/// 「按旧布局错读」（D2 M2 的已知代价）。
+const DISPOSITION_KEEP: u8 = 1;
+/// 析构时不做任何事（目录窄化已生效，状态已清除）。
+const DISPOSITION_CLEARED: u8 = 2;
+
 impl NarrowingGuard {
-    fn new(state: Arc<NarrowingState>) -> Self {
-        Self { state }
+    fn new(state: Arc<NarrowingState>, token: u64) -> Self {
+        Self {
+            state,
+            token,
+            disposition: AtomicU8::new(DISPOSITION_RELEASE),
+        }
+    }
+
+    /// 目录窄化已生效 ⇒ 清除在途窄化状态（读者恢复正常）。
+    ///
+    /// 只有令牌持有者能清除——非持有者的清除无效，窗口内的读拒绝保持。
+    pub fn clear_narrowing(&self) -> bool {
+        let cleared = self.state.clear_narrowing(self.token);
+        if cleared {
+            self.disposition
+                .store(DISPOSITION_CLEARED, Ordering::SeqCst);
+        }
+        cleared
+    }
+
+    /// 发布失败 ⇒ 保留在途窄化状态（读者继续被拒绝）。
+    ///
+    /// 已提交的数据面不回滚、已提交的语句不改判为失败 ⇒ 目录窄化留待下次
+    /// 恢复期发布（意图记录留在 WAL 中）。
+    pub fn keep_narrowing(&self) {
+        self.disposition.store(DISPOSITION_KEEP, Ordering::SeqCst);
     }
 }
 
 impl Drop for NarrowingGuard {
     fn drop(&mut self) {
         // 语句异常 / 被放弃时的兜底清除——正常路径已由 `apply_column_drop`
-        // 清除（幂等）。
-        self.state.clear();
+        // 清除（幂等）。发布失败（`KEEP`）⇒ 保留在途窄化状态（读者继续被
+        // 拒绝）；已清除（`CLEARED`）⇒ 析构无事可做。
+        if self.disposition.load(Ordering::SeqCst) == DISPOSITION_RELEASE {
+            self.state.release(self.token);
+        }
     }
+}
+
+/// change 2026-10-25-ms37-defect-ledger-closure
+/// Iteration 006 / Cycle 000（T6）：从旧 `TableMeta` 推出**窄化后**的
+/// `TableMeta`——正常路径（`alter_drop_column` 的数据面改写）与恢复期发布
+/// （`publish_column_narrowing`）共用的**单一**实现。
+///
+/// 只做**布局推导**（列序 / NOT NULL / DEFAULT / 索引序位），不动数据页：
+/// 键树是按值组织的，内容不动，只有序位记账移动。
+///
+/// `data_page_tail` 取调用时刻的活尾部——改写路径在改写**之后**另行同步
+/// （改写期间活尾部会前进）；恢复期发布在改写已落盘之后调用，取到的即是
+/// 真实链尾。
+fn narrowed_meta(old: &Arc<TableMeta>, removed: usize) -> Arc<TableMeta> {
+    let new_columns: Vec<(String, ColumnType)> = old
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != removed)
+        .map(|(_, c)| c.clone())
+        .collect();
+    let new_not_null: Vec<bool> = old
+        .not_null
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != removed)
+        .map(|(_, v)| *v)
+        .collect();
+    let new_defaults: Vec<Option<Value>> = old
+        .defaults
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != removed)
+        .map(|(_, v)| v.clone())
+        .collect();
+    let new_pk_index = if old.pk_index > removed {
+        old.pk_index - 1
+    } else {
+        old.pk_index
+    };
+    let new_unique_indexes: Vec<(usize, Arc<IndexManager>)> = old
+        .unique_indexes
+        .iter()
+        .filter(|(idx, _)| *idx != removed)
+        .map(|(idx, im)| (if *idx > removed { idx - 1 } else { *idx }, im.clone()))
+        .collect();
+    let new_secondary_indexes: Vec<SecondaryIndexMeta> = old
+        .secondary_indexes
+        .iter()
+        .filter(|s| s.column_index != removed)
+        .map(|s| SecondaryIndexMeta {
+            name: s.name.clone(),
+            column_index: if s.column_index > removed {
+                s.column_index - 1
+            } else {
+                s.column_index
+            },
+            index: s.index.clone(),
+        })
+        .collect();
+    Arc::new(TableMeta {
+        name: old.name.clone(),
+        columns: new_columns,
+        not_null: new_not_null,
+        defaults: new_defaults,
+        pk_column: old.pk_column.clone(),
+        pk_index: new_pk_index,
+        explicit_primary_key: old.explicit_primary_key,
+        index_manager: old.index_manager.clone(),
+        unique_indexes: new_unique_indexes,
+        secondary_indexes: new_secondary_indexes,
+        data_page_head: old.data_page_head,
+        data_page_tail: Mutex::new(*old.data_page_tail.lock().unwrap()),
+        // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
+        narrowing: old.narrowing.clone(),
+    })
 }
 
 /// Table metadata: schema, primary key, per-table index, data page chain.
@@ -180,6 +351,9 @@ pub struct TableMeta {
     pub not_null: Vec<bool>,
     pub pk_column: String,
     pub pk_index: usize,
+    /// True only when CREATE TABLE wrote `PRIMARY KEY`. Implicit first-column
+    /// keys and legacy catalog rows stay false.
+    pub explicit_primary_key: bool,
     pub index_manager: Arc<IndexManager>,
     /// MS23 Iteration 001 (2.3/D5): per-column UNIQUE indexes, one per
     /// qualifying column (INT ∧ unique ∧ non-PK), bound to its column
@@ -228,12 +402,29 @@ pub struct PendingColumnDrop {
     pub removed_column: CatalogColumnRow,
     /// The column count the table must advertise once the drop is applied.
     pub new_column_count: u32,
-    /// The narrowed in-memory layout the data-plane rewrite wrote against.
-    pub new_meta: Arc<TableMeta>,
     /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
     /// Iteration 003（design D7 / ISS25）：语句作用域守卫——本 pending 值被
     /// 丢弃（语句异常 / 被放弃）时清除在途窄化状态。
+    ///
+    /// change 2026-10-25-ms37-defect-ledger-closure
+    /// Iteration 006 / Cycle 000（T8）：守卫持有**令牌**——只有令牌持有者能
+    /// 改变该表的在途窄化状态。
     _narrowing_guard: NarrowingGuard,
+    /// 取得令牌时算出、并在返回前同步过 `data_page_tail` 的那一份布局。
+    /// 正常路径发布安装这一份，不再按发布当时的活布局重算。
+    narrowed_layout: Arc<TableMeta>,
+}
+
+impl PendingColumnDrop {
+    /// 目录窄化已生效 ⇒ 清除该表在途窄化状态（**只有令牌持有者**能清除）。
+    fn clear_narrowing(&self) -> bool {
+        self._narrowing_guard.clear_narrowing()
+    }
+
+    /// 发布失败 ⇒ **保留**该表在途窄化状态（读者继续被拒绝）。
+    fn keep_narrowing(&self) {
+        self._narrowing_guard.keep_narrowing();
+    }
 }
 
 impl TableMeta {
@@ -288,6 +479,28 @@ pub struct TableManager {
     /// MS35 (`free-page-lifecycle` R2): the persisted directory as read at
     /// open time (before crash recovery). Empty until `open_or_init` runs.
     persisted_catalog_rows: RwLock<Vec<CatalogRow>>,
+    /// change 2026-10-25-ms37-defect-ledger-closure
+    /// Iteration 006 / Cycle 000（T6 / M5）：**已提交但尚未发布**的窄化意图
+    /// 登记面（按表登记一项）。
+    ///
+    /// 登记时机 = 该窄化 DDL 的事务**提交成功**之后、目录窄化发布之前。
+    /// 登记用途 = checkpoint 判定：存在登记时 checkpoint **不得**让该意图
+    /// 随 WAL 截断丢失（先发布在途窄化，再让 checkpoint 截断）。
+    ///
+    /// 纯内存登记面：不持久化、不进 WAL / 目录 ⇒ 磁盘格式不变。
+    committed_narrowings: Mutex<HashMap<String, CommittedNarrowing>>,
+}
+
+/// change 2026-10-25-ms37-defect-ledger-closure
+/// Iteration 006 / Cycle 000（T6 / M5）：一条**已提交但尚未发布**的窄化意图。
+#[derive(Debug, Clone)]
+pub struct CommittedNarrowing {
+    /// 被窄化的表。
+    pub table: String,
+    /// 被删列的序号（窄化**前**的布局序位）。
+    pub removed_column_index: u32,
+    /// 窄化**后**的列数。
+    pub new_column_count: u32,
 }
 
 impl TableManager {
@@ -311,6 +524,7 @@ impl TableManager {
             buffer_pool,
             catalog,
             persisted_catalog_rows: RwLock::new(Vec::new()),
+            committed_narrowings: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -483,6 +697,7 @@ impl TableManager {
                 columns,
                 pk_column: pk,
                 pk_index,
+                explicit_primary_key: row.explicit_primary_key,
                 index_manager,
                 unique_indexes,
                 secondary_indexes,
@@ -514,7 +729,7 @@ impl TableManager {
             .into_iter()
             .map(|(col_name, col_type)| (col_name, col_type, false, false, None))
             .collect();
-        self.create_table_with_constraints(name, columns, pk).await
+        self.create_table_with_constraints(name, columns, pk, false).await
     }
 
     /// Register a new table, persisting per-column NOT NULL / UNIQUE flags to
@@ -539,6 +754,7 @@ impl TableManager {
         name: &str,
         columns: Vec<(String, ColumnType, bool, bool, Option<Value>)>,
         pk: &str,
+        explicit_primary_key: bool,
     ) -> Result<()> {
         // --- reserved name guard (BEFORE duplicate check) ---
         if name == TABLES_SYSTEM_NAME || name == COLUMNS_SYSTEM_NAME {
@@ -645,6 +861,7 @@ impl TableManager {
             defaults,
             pk_column: pk.to_string(),
             pk_index,
+            explicit_primary_key,
             index_manager,
             unique_indexes,
             // MS21 Iteration 002 (D4): a brand-new table has no user-created
@@ -684,6 +901,7 @@ impl TableManager {
             // tables only (views go through `Catalog::insert_view_row`).
             kind: CatalogKind::Table,
             view_sql: None,
+            explicit_primary_key,
         };
         let catalog_cols: Vec<CatalogColumnRow> = columns
             .iter()
@@ -719,17 +937,19 @@ impl TableManager {
             let _ = self.catalog.delete_table(name).await;
             let mut released: Vec<PageId> = Vec::new();
             let root = table_meta.index_manager.root_page_id();
-            for page in [page_id, root]
-                .into_iter()
-                .chain(table_meta.unique_indexes.iter().map(|(_, u)| u.root_page_id()))
-            {
+            for page in [page_id, root].into_iter().chain(
+                table_meta
+                    .unique_indexes
+                    .iter()
+                    .map(|(_, u)| u.root_page_id()),
+            ) {
                 if self.buffer_pool.free_page(page).await.is_ok() {
                     released.push(page);
                 }
             }
             // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放没有
             // 锚点写（该表从未登记进目录），按保守方向等下一次成功刷盘。
-            self.buffer_pool.complete_free_release(&released);
+            self.buffer_pool.complete_free_release(&released, &[]);
             return Err(e);
         }
 
@@ -762,55 +982,168 @@ impl TableManager {
         column_type: ColumnType,
         not_null: bool,
         default_value: Option<Value>,
+        db_path: &Path,
+        outcome: oneshot::Sender<Result<()>>,
     ) -> Result<()> {
-        let mut tables = self.tables.write().await;
-        let old = tables
-            .get(table)
-            .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
+        // 写锁在等待之后才取得，并持有到提交或回退决定完成。语句 future 被丢弃时，
+        // 锁在这个任务里，不随那次丢弃放开。等待期间不持有 `tables` 的读锁或写锁，
+        // 也不看接收端是否已关闭。
+        loop {
+            if let Ok(existing) = self.get_table(table).await {
+                let narrowing = Arc::clone(&existing.narrowing);
+                drop(existing);
+                self.wait_out_same_table_narrowing(&narrowing, db_path)
+                    .await;
+            }
 
-        let col_row = CatalogColumnRow {
-            table_name: old.name.clone(),
-            column_index: old.columns.len() as u32,
-            column_name: column_name.to_string(),
-            column_type: column_type.clone(),
-            not_null,
-            unique: false,
-            default_value: default_value.clone(),
-        };
-        self.catalog.insert_column_row(&col_row).await?;
-        // change 2026-10-13 T3 (D4): the column-count rewrite is the ALTER
-        // ADD COLUMN commit point — flushed last so a reopened catalog never
-        // advertises a column whose row never reached disk (orphan rows left
-        // by an earlier crash stay invisible: open bounds columns by the
-        // table row's `column_count`, D5).
-        self.catalog
-            .update_table_column_count_ddl(table, (old.columns.len() + 1) as u32)
-            .await?;
+            let mut tables = self.tables.write().await;
+            if tables
+                .get(table)
+                .is_some_and(|meta| meta.narrowing.add_column_must_wait())
+            {
+                drop(tables);
+                continue;
+            }
+            let old = tables
+                .get(table)
+                .ok_or_else(|| StorageError::TableNotFound(table.to_string()))?;
 
-        let mut columns = old.columns.clone();
-        columns.push((column_name.to_string(), column_type));
-        let mut not_nulls = old.not_null.clone();
-        not_nulls.push(not_null);
-        let mut defaults = old.defaults.clone();
-        defaults.push(default_value);
+            let count_before = old.columns.len() as u32;
+            let col_row = CatalogColumnRow {
+                table_name: old.name.clone(),
+                column_index: count_before,
+                column_name: column_name.to_string(),
+                column_type: column_type.clone(),
+                not_null,
+                unique: false,
+                default_value: default_value.clone(),
+            };
+            // change 2026-10-25-ms37-defect-ledger-closure
+            // Iteration 006 / Cycle 000（T7 / ISS28）：列行写入失败 ⇒ 同样补偿
+            // （行可能已部分写入；补偿是幂等的——找不到该行即无操作）。
+            if let Err(e) = self.catalog.insert_column_row(&col_row).await {
+                self.compensate_column_add(table, col_row.column_index, count_before)
+                    .await;
+                if !outcome.is_closed() {
+                    let _ = outcome.send(Err(e));
+                }
+                return Ok(());
+            }
+            // change 2026-10-13 T3 (D4): the column-count rewrite is the ALTER
+            // ADD COLUMN commit point — flushed last so a reopened catalog never
+            // advertises a column whose row never reached disk (orphan rows left
+            // by an earlier crash stay invisible: open bounds columns by the
+            // table row's `column_count`, D5).
+            //
+            // change 2026-10-25-ms37-defect-ledger-closure
+            // Iteration 006 / Cycle 000（T7 / ISS28）：提交前失败 ⇒ **补偿**已发出的
+            // 目录面变更（列定义 + 列数同时回退）——否则失败语句留下的抬高端列数
+            // 与新增列行会在**下一次成功刷盘**时落盘 ⇒ 重开库可见该列（ISS28）。
+            if let Err(e) = self
+                .catalog
+                .update_table_column_count_ddl(table, count_before + 1)
+                .await
+            {
+                self.compensate_column_add(table, col_row.column_index, count_before)
+                    .await;
+                if !outcome.is_closed() {
+                    let _ = outcome.send(Err(e));
+                }
+                return Ok(());
+            }
 
-        let meta = Arc::new(TableMeta {
-            name: old.name.clone(),
-            columns,
-            not_null: not_nulls,
-            defaults,
-            pk_column: old.pk_column.clone(),
-            pk_index: old.pk_index,
-            index_manager: old.index_manager.clone(),
-            unique_indexes: old.unique_indexes.clone(),
-            secondary_indexes: old.secondary_indexes.clone(),
-            data_page_head: old.data_page_head,
-            data_page_tail: Mutex::new(*old.data_page_tail.lock().unwrap()),
-            // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
-            narrowing: old.narrowing.clone(),
-        });
-        tables.insert(table.to_string(), meta);
-        Ok(())
+            // 列数刷盘已经成功，活布局尚未换入。未布防时立即返回。
+            crate::storage::add_column_count_flush_window::pause_at_add_column_count_flush_window(
+                db_path,
+            )
+            .await;
+
+            if outcome.is_closed() {
+                // 接收端已关闭：不换入活布局，不交回成功。回退刷盘失败时也不再补偿。
+                let _ = self
+                    .catalog
+                    .rollback_abandoned_add_column(table, col_row.column_index, count_before)
+                    .await;
+                return Ok(());
+            }
+
+            let mut columns = old.columns.clone();
+            columns.push((column_name.to_string(), column_type));
+            let mut not_nulls = old.not_null.clone();
+            not_nulls.push(not_null);
+            let mut defaults = old.defaults.clone();
+            defaults.push(default_value);
+
+            let meta = Arc::new(TableMeta {
+                name: old.name.clone(),
+                columns,
+                not_null: not_nulls,
+                defaults,
+                pk_column: old.pk_column.clone(),
+                pk_index: old.pk_index,
+                explicit_primary_key: old.explicit_primary_key,
+                index_manager: old.index_manager.clone(),
+                unique_indexes: old.unique_indexes.clone(),
+                secondary_indexes: old.secondary_indexes.clone(),
+                data_page_head: old.data_page_head,
+                data_page_tail: Mutex::new(*old.data_page_tail.lock().unwrap()),
+                // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
+                narrowing: old.narrowing.clone(),
+            });
+            tables.insert(table.to_string(), meta);
+            // 发送失败说明接收端刚关闭。活布局已经换入，不再回退。
+            let _ = outcome.send(Ok(()));
+            return Ok(());
+        }
+    }
+
+    /// 同表窄化令牌还在，或在途窄化已发布时，加列停在写目录之前。
+    ///
+    /// 暂停点真正停住过后立刻再判断，中间不做这次让出。未布防或已经摘掉时，
+    /// 条件仍为真才 `yield_now` 一次再回到开头。条件变为假之后，这次让出结束，
+    /// 下一次判断离开循环。
+    async fn wait_out_same_table_narrowing(&self, narrowing: &NarrowingState, db_path: &Path) {
+        loop {
+            if !narrowing.add_column_must_wait() {
+                return;
+            }
+            let paused =
+                crate::storage::add_column_narrowing_wait::pause_at_add_column_narrowing_wait(
+                    db_path,
+                )
+                .await;
+            if !narrowing.add_column_must_wait() {
+                return;
+            }
+            if paused {
+                continue;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// change 2026-10-25-ms37-defect-ledger-closure
+    /// Iteration 006 / Cycle 000（T7 / ISS28）：回退一次「已发出但未提交」的
+    /// `ALTER TABLE ADD COLUMN` 目录面变更。
+    ///
+    /// **列定义**（移除本次新增的列行）与**列数**（恢复为语句前的值）**同时**
+    /// 回退；顺序 = **先**降列数、**再**移除列行——列数是目录广告的唯一权威，
+    /// 先降列数 ⇒ 中途崩溃留下的孤儿列行不可见（`open_or_init` 按列数截断列
+    /// 定义），与「ADD COLUMN 的提交点顺序」相反。
+    ///
+    /// 回退**不做存储 IO**（只改缓冲池页）⇒ 在存储正在失败时也能完成 ⇒ 补偿
+    /// 本身不成为新的失败源：补偿失败时**保留**语句的原始失败（不把补偿失败
+    /// 变成新的失败源）。
+    async fn compensate_column_add(&self, table: &str, column_index: u32, count_before: u32) {
+        if self
+            .catalog
+            .restore_table_column_count_no_flush(table, count_before)
+            .await
+            .is_ok()
+        {
+            // 列数已降回 ⇒ 移除本次新增的列行（找不到即无操作）。
+            let _ = self.catalog.remove_column_row_at(table, column_index).await;
+        }
     }
 
     /// change 2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog /
@@ -882,55 +1215,21 @@ impl TableManager {
             )));
         }
 
-        // New layout: shifted ordinals for every index-aligned vector. Key
-        // trees are value-based — their contents stay untouched, only the
-        // ordinal bookkeeping moves.
-        let new_columns: Vec<(String, ColumnType)> = old
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != removed)
-            .map(|(_, c)| c.clone())
-            .collect();
-        let new_not_null: Vec<bool> = old
-            .not_null
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != removed)
-            .map(|(_, v)| *v)
-            .collect();
-        let new_defaults: Vec<Option<Value>> = old
-            .defaults
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != removed)
-            .map(|(_, v)| v.clone())
-            .collect();
-        let new_pk_index = if old.pk_index > removed {
-            old.pk_index - 1
-        } else {
-            old.pk_index
+        // change 2026-10-25-ms37-defect-ledger-closure
+        // Iteration 006 / Cycle 000（T8 / ISS29）：**在途窄化的所有权令牌**——
+        // 在数据面改写开始**之前**取得。取不到 ⇒ 该表已有在途窄化 ⇒ 显式
+        // 拒绝并发的窄化 DDL（不排队、不改写数据面、不产生任何目录面变更）。
+        let Some(narrowing_token) = old.narrowing.try_acquire() else {
+            return Err(StorageError::ExecutionError(format!(
+                "table '{}' already has an in-flight ALTER TABLE DROP COLUMN; \
+                 concurrent narrowing DDL refused",
+                old.name
+            )));
         };
-        let new_unique_indexes: Vec<(usize, Arc<IndexManager>)> = old
-            .unique_indexes
-            .iter()
-            .filter(|(idx, _)| *idx != removed)
-            .map(|(idx, im)| (if *idx > removed { idx - 1 } else { *idx }, im.clone()))
-            .collect();
-        let new_secondary_indexes: Vec<SecondaryIndexMeta> = old
-            .secondary_indexes
-            .iter()
-            .filter(|s| s.column_index != removed)
-            .map(|s| SecondaryIndexMeta {
-                name: s.name.clone(),
-                column_index: if s.column_index > removed {
-                    s.column_index - 1
-                } else {
-                    s.column_index
-                },
-                index: s.index.clone(),
-            })
-            .collect();
+        // 守卫随本句活到语句结束——异常 / 放弃路径由它兜底释放令牌与在途状态，
+        // 避免该表永久不可读。守卫在取到令牌的**紧后**创建 ⇒ 此后任何提前
+        // 返回都会释放令牌。
+        let narrowing_guard = NarrowingGuard::new(old.narrowing.clone(), narrowing_token);
 
         // 1. The dropped column's catalog definition, with its original
         // ordinal. Read while the catalog still describes the old layout —
@@ -947,26 +1246,12 @@ impl TableManager {
                     removed, old.name
                 ))
             })?;
-        let new_column_count = new_columns.len() as u32;
+        let new_column_count = old.columns.len() as u32 - 1;
 
         // 2. The narrowed in-memory layout — the rewrite writes the narrowed
         // tuples and their index keys against it. The live table mapping is
         // switched only at the commit point (`apply_column_drop`).
-        let new_meta = Arc::new(TableMeta {
-            name: old.name.clone(),
-            columns: new_columns,
-            not_null: new_not_null,
-            defaults: new_defaults,
-            pk_column: old.pk_column.clone(),
-            pk_index: new_pk_index,
-            index_manager: old.index_manager.clone(),
-            unique_indexes: new_unique_indexes,
-            secondary_indexes: new_secondary_indexes,
-            data_page_head: old.data_page_head,
-            data_page_tail: Mutex::new(*old.data_page_tail.lock().unwrap()),
-            // Iteration 003（D7）：同一张表的活布局版本共享同一状态单元。
-            narrowing: old.narrowing.clone(),
-        });
+        let new_meta = narrowed_meta(&old, removed);
 
         // 3. Implicit-transaction row rewrite: every live (chain-tail,
         // non-tombstone) row is deleted (tombstone + index cleanup + WAL)
@@ -979,10 +1264,10 @@ impl TableManager {
         // ——发布后到目录窄化生效前，读路径对该表给出明确拒绝，绝不返回按位置
         // 错位的值。清除点：`apply_column_drop`（目录窄化生效后）与语句作用域
         // 守卫（异常 / 放弃路径）。
-        old.narrowing.publish();
-        // 守卫随 `PendingColumnDrop` 活到语句结束——异常 / 放弃路径由它兜底
-        // 清除，避免该表永久不可读。
-        let narrowing_guard = NarrowingGuard::new(old.narrowing.clone());
+        //
+        // change 2026-10-25-ms37-defect-ledger-closure
+        // Iteration 006 / Cycle 000（T8 / ISS29）：发布由**令牌持有者**执行。
+        old.narrowing.publish_narrowing(narrowing_token);
         let old_schema: Vec<ColumnType> = old.columns.iter().map(|(_, ct)| ct.clone()).collect();
         let new_schema: Vec<ColumnType> =
             new_meta.columns.iter().map(|(_, ct)| ct.clone()).collect();
@@ -995,12 +1280,23 @@ impl TableManager {
                 .buffer_pool
                 .with_page_data(pid, |data| -> Result<(u32, Vec<RowId>)> {
                     let slotted = SlottedPageRef::new(data);
+                    // MS37 T17: 页头槽数越界 ⇒ 明确错误（取槽**之前**判；否则
+                    // 槽目录定位下溢 ⇒ 越界切片 panic ⇒ 进程 abort）。
+                    if slotted.slot_count_exceeds_capacity() {
+                        return Err(corrupted_data_page_slot_count_error(
+                            pid.0,
+                            slotted.slot_count(),
+                        ));
+                    }
                     let mut rids = Vec::new();
                     for index in 0..slotted.slot_count() {
                         let Some(slot) = slotted.get_slot(index) else {
                             continue;
                         };
-                        let slot_data = slotted.get_slot_data(&slot);
+                        // MS37 T3: 越界槽 ⇒ 明确错误（不得跳过——跳过 = 静默错读）。
+                        let slot_data = slotted
+                            .get_slot_data_checked(&slot)
+                            .ok_or_else(|| corrupted_data_page_slot_error(pid.0, index, &slot))?;
                         if slot_data.len() < VersionHeader::SIZE {
                             continue;
                         }
@@ -1057,8 +1353,9 @@ impl TableManager {
                 .secondary_indexes
                 .iter()
                 .filter_map(|s| {
+                    let column_type = &old.columns[s.column_index].1;
                     old_values[s.column_index]
-                        .to_key()
+                        .secondary_index_key(column_type)
                         .map(|k| (s.index.clone(), k.as_bytes().to_vec()))
                 })
                 .collect();
@@ -1163,7 +1460,9 @@ impl TableManager {
                 }
             }
             for sindex in &new_meta.secondary_indexes {
-                if let Some(key) = new_values[sindex.column_index].to_key() {
+                let column_type = &new_meta.columns[sindex.column_index].1;
+                if let Some(key) = new_values[sindex.column_index].secondary_index_key(column_type)
+                {
                     sindex.index.insert(key.as_bytes(), new_rid).await?;
                 }
             }
@@ -1183,18 +1482,35 @@ impl TableManager {
         }
 
         // ISS22: the rewrite appended through the live table meta, so the
-        // narrowed meta's own tail pointer never advanced. `apply_column_drop`
-        // installs `new_meta` as the live mapping at the commit point — hand
-        // it the real chain terminal, otherwise the next append would start
-        // from a stale page and fork the chain again.
+        // narrowed meta's own tail pointer never advanced. The commit point
+        // installs the narrowed layout as the live mapping — it must carry the
+        // real chain terminal, otherwise the next append would start from a
+        // stale page and fork the chain again.
         *new_meta.data_page_tail.lock().unwrap() = *old.data_page_tail.lock().unwrap();
+
+        // change 2026-10-25-ms37-defect-ledger-closure
+        // Iteration 006 / Cycle 000（T6）：**窄化意图记录**——数据面改写成功
+        // **之后**、事务提交**之前**写入。与该事务的数据面记录、`CommitTxn`
+        // 在**同一次持久化**中落地（`WALBuffer::append` + 提交时的组提交）
+        // ⇒ 不出现「意图已持久但数据面未提交」或「数据面已提交但意图不存在」。
+        //
+        // 改写失败 / 语句中止 ⇒ 本行不可达 ⇒ **不产生**意图记录。
+        if let Some(wal) = &wal {
+            wal.append(crate::wal::WalRecord::ColumnNarrowing {
+                tx_id,
+                table_name: old.name.clone(),
+                removed_column_index: removed as u32,
+                new_column_count,
+            })
+            .await;
+        }
 
         Ok(PendingColumnDrop {
             table: old.name.clone(),
             removed_column,
             new_column_count,
-            new_meta,
             _narrowing_guard: narrowing_guard,
+            narrowed_layout: Arc::clone(&new_meta),
         })
     }
 
@@ -1212,24 +1528,152 @@ impl TableManager {
     /// `update_table_column_count_ddl` flushes every dirty page except the
     /// count page first and the count page last, so a crash can never leave a
     /// durable count that the column rows do not back.
+    ///
+    /// 正常路径安装 [`PendingColumnDrop`] 里捕获的布局。目录列数已经等于目标时
+    /// 不改页，也不替换活布局。列数还不等时先改写列行、再下调列数，成功后插入
+    /// 捕获的那一份 `Arc`。目录步骤失败时不插入，保留在途窄化，语句仍返回成功。
+    ///
+    /// 恢复期和 [`TableManager::publish_committed_narrowings`] 仍走
+    /// [`TableManager::publish_column_narrowing`] 的推导安装。
     pub async fn apply_column_drop(&self, pending: &PendingColumnDrop) -> Result<()> {
+        let install = match self.catalog_column_count(&pending.table).await {
+            Ok(Some(count)) if count == pending.new_column_count => false,
+            Ok(_) => true,
+            Err(_) => {
+                pending.keep_narrowing();
+                return Ok(());
+            }
+        };
+        if install {
+            if self
+                .catalog
+                .rewrite_column_rows_drop(&pending.table, pending.removed_column.column_index)
+                .await
+                .is_err()
+            {
+                pending.keep_narrowing();
+                return Ok(());
+            }
+            if self
+                .catalog
+                .update_table_column_count_ddl(&pending.table, pending.new_column_count)
+                .await
+                .is_err()
+            {
+                pending.keep_narrowing();
+                return Ok(());
+            }
+            self.tables
+                .write()
+                .await
+                .insert(pending.table.clone(), Arc::clone(&pending.narrowed_layout));
+        }
+        // 目录列数已经等于目标，或这次安装已经把捕获布局写入 `tables`。
+        // 之后才清除令牌。列数已相等时不替换活布局。
+        pending.clear_narrowing();
+        self.forget_committed_narrowing(&pending.table);
+        Ok(())
+    }
+
+    /// change 2026-10-25-ms37-defect-ledger-closure
+    /// Iteration 006 / Cycle 000（T6）：**幂等**的窄化发布入口。
+    ///
+    /// 判据 = `__tables` 行广告的 `column_count`（列数的**唯一权威**）：已等于
+    /// `new_column_count` ⇒ **直接返回成功且不改任何页**。判据必须在改写列行
+    /// **之前**——`rewrite_column_rows_drop` **非幂等**（第二次执行会删错行），
+    /// 幂等性由**本调用方**保证，不改它本身。
+    ///
+    /// 否则执行「改写列行 → 下调列数 → 切换内存活布局」。重复调用得到**相同
+    /// 结果**：正常路径发布一次 + 恢复期再发布一次 ⇒ 目录列数与列定义与只发布
+    /// 一次**相同**。
+    ///
+    /// 在途窄化状态的**清除**由令牌持有者完成（见 [`NarrowingGuard`]）——本入口
+    /// 不持有令牌，不代为清除。
+    pub async fn publish_column_narrowing(
+        &self,
+        table: &str,
+        removed_column_index: u32,
+        new_column_count: u32,
+    ) -> Result<()> {
+        // 幂等判据：目录行广告的列数。
+        let current_count = self.catalog_column_count(table).await?;
+        if current_count == Some(new_column_count) {
+            // 已发布 ⇒ 不改任何页。
+            return Ok(());
+        }
+        // 未发布 ⇒ 改写列行 → 下调列数（ADD COLUMN 的提交点顺序：列定义先、
+        // 广告列数后）。
         self.catalog
-            .rewrite_column_rows_drop(&pending.table, pending.removed_column.column_index)
+            .rewrite_column_rows_drop(table, removed_column_index)
             .await?;
         self.catalog
-            .update_table_column_count_ddl(&pending.table, pending.new_column_count)
+            .update_table_column_count_ddl(table, new_column_count)
             .await?;
-        // The live mapping switches only once the catalog advertises the
-        // narrowed layout.
+        // 活布局切换：目录已广告窄化布局 ⇒ 读者按窄化后的列定义解码。
+        let old = self.get_table(table).await?;
+        let new_meta = narrowed_meta(&old, removed_column_index as usize);
         self.tables
             .write()
             .await
-            .insert(pending.table.clone(), pending.new_meta.clone());
-        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
-        // Iteration 003（design D7 / ISS25）：目录窄化已生效 ⇒ 清除在途窄化
-        // 状态，读路径恢复正常。单元与旧活布局共享 ⇒ 持有计划期快照的读者
-        // 也一并恢复。
-        pending.new_meta.narrowing.clear();
+            .insert(table.to_string(), new_meta);
+        Ok(())
+    }
+
+    /// 目录行广告的列数（列数的唯一权威）——`None` = 该表没有目录行。
+    async fn catalog_column_count(&self, table: &str) -> Result<Option<u32>> {
+        let rows = self.catalog.scan_tables().await?;
+        Ok(rows
+            .into_iter()
+            .find(|row| row.table_name == table)
+            .map(|row| row.column_count))
+    }
+
+    /// change 2026-10-25-ms37-defect-ledger-closure
+    /// Iteration 006 / Cycle 000（T6 / M5）：登记一条**已提交但尚未发布**的
+    /// 窄化意图。
+    ///
+    /// 登记时机 = 该窄化 DDL 的事务**提交成功**之后、目录窄化发布之前。登记
+    /// 是**同步**的 ⇒ 与提交之间没有让出点 ⇒ 不出现「已提交但未登记」的窗口。
+    pub fn register_committed_narrowing(&self, pending: &PendingColumnDrop) {
+        self.committed_narrowings.lock().unwrap().insert(
+            pending.table.clone(),
+            CommittedNarrowing {
+                table: pending.table.clone(),
+                removed_column_index: pending.removed_column.column_index,
+                new_column_count: pending.new_column_count,
+            },
+        );
+    }
+
+    /// 撤回「已提交但未发布」的登记（发布成功后）。
+    fn forget_committed_narrowing(&self, table: &str) {
+        self.committed_narrowings.lock().unwrap().remove(table);
+    }
+
+    /// change 2026-10-25-ms37-defect-ledger-closure
+    /// Iteration 006 / Cycle 000（T6 / M5）：发布所有**已提交但尚未发布**的
+    /// 窄化意图。
+    ///
+    /// checkpoint 在**截断 WAL 之前**调用本入口：未发布的意图随 WAL 截断会
+    /// **永久丢失**（崩溃重开将无法发布该窄化 ⇒ 目录旧列数 + 数据面窄行 ⇒
+    /// 按位置错读）。发布成功 ⇒ 意图已落进目录面 ⇒ 截断不再丢失它。
+    pub async fn publish_committed_narrowings(&self) -> Result<()> {
+        let pending: Vec<CommittedNarrowing> = self
+            .committed_narrowings
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for intent in pending {
+            self.publish_column_narrowing(
+                &intent.table,
+                intent.removed_column_index,
+                intent.new_column_count,
+            )
+            .await?;
+            self.forget_committed_narrowing(&intent.table);
+        }
         Ok(())
     }
 
@@ -1249,12 +1693,23 @@ impl TableManager {
                 .buffer_pool
                 .with_page_data(pid, |data| -> Result<(u32, Vec<RowId>)> {
                     let slotted = SlottedPageRef::new(data);
+                    // MS37 T17: 页头槽数越界 ⇒ 明确错误（取槽**之前**判；否则
+                    // 槽目录定位下溢 ⇒ 越界切片 panic ⇒ 进程 abort）。
+                    if slotted.slot_count_exceeds_capacity() {
+                        return Err(corrupted_data_page_slot_count_error(
+                            pid.0,
+                            slotted.slot_count(),
+                        ));
+                    }
                     let mut slots = Vec::new();
                     for index in 0..slotted.slot_count() {
                         let Some(slot) = slotted.get_slot(index) else {
                             continue;
                         };
-                        let slot_data = slotted.get_slot_data(&slot);
+                        // MS37 T3: 越界槽 ⇒ 明确错误（不得跳过——跳过 = 静默错读）。
+                        let slot_data = slotted
+                            .get_slot_data_checked(&slot)
+                            .ok_or_else(|| corrupted_data_page_slot_error(pid.0, index, &slot))?;
                         if slot_data.len() < VersionHeader::SIZE {
                             continue;
                         }
@@ -1361,6 +1816,7 @@ impl TableManager {
             defaults: old.defaults.clone(),
             pk_column: old.pk_column.clone(),
             pk_index: old.pk_index,
+            explicit_primary_key: old.explicit_primary_key,
             index_manager: new_index,
             // MS23 Iteration 001 (2.3): UNIQUE trees are untouched by a PK
             // swap (recovery swaps them through `replace_recovery_indexes`).
@@ -1412,6 +1868,7 @@ impl TableManager {
             defaults: old.defaults.clone(),
             pk_column: old.pk_column.clone(),
             pk_index: old.pk_index,
+            explicit_primary_key: old.explicit_primary_key,
             index_manager: new_index,
             unique_indexes: new_uniques,
             secondary_indexes: new_secondaries,
@@ -1476,6 +1933,7 @@ impl TableManager {
             defaults: old.defaults.clone(),
             pk_column: old.pk_column.clone(),
             pk_index: old.pk_index,
+            explicit_primary_key: old.explicit_primary_key,
             index_manager: old.index_manager.clone(),
             unique_indexes: old.unique_indexes.clone(),
             secondary_indexes,
@@ -1497,7 +1955,7 @@ impl TableManager {
     pub async fn take_secondary_index(
         &self,
         index_name: &str,
-    ) -> Result<Option<(String, usize, Arc<IndexManager>)>> {
+    ) -> Result<Option<(String, usize, Arc<IndexManager>, Option<PageId>)>> {
         let holder = {
             let tables = self.tables.read().await;
             tables
@@ -1509,7 +1967,8 @@ impl TableManager {
             return Ok(None);
         };
 
-        self.catalog
+        let anchor = self
+            .catalog
             .remove_secondary_index(&table, index_name)
             .await?;
 
@@ -1537,6 +1996,7 @@ impl TableManager {
             defaults: old.defaults.clone(),
             pk_column: old.pk_column.clone(),
             pk_index: old.pk_index,
+            explicit_primary_key: old.explicit_primary_key,
             index_manager: old.index_manager.clone(),
             unique_indexes: old.unique_indexes.clone(),
             data_page_head: old.data_page_head,
@@ -1559,7 +2019,7 @@ impl TableManager {
             );
         }
 
-        Ok(Some((table, removed.column_index, removed.index)))
+        Ok(Some((table, removed.column_index, removed.index, anchor)))
     }
 
     /// MS21 Iteration 002 (D14 plan-time wiring): every registered secondary
@@ -1601,7 +2061,9 @@ impl TableManager {
         let table_meta = self.get_table(name).await?;
 
         // First delete from catalog (idempotent — silently succeeds if absent).
-        self.catalog.delete_table(name).await?;
+        // The pages this delete actually rewrites are the anchor of the
+        // release below.
+        let anchors = self.catalog.delete_table(name).await?;
 
         // Then remove from in-memory cache.
         {
@@ -1668,8 +2130,8 @@ impl TableManager {
         }
 
         // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
-        // （目录删除，`:1414`）已经发出。标记之前，这些页不得可分配。
-        self.buffer_pool.complete_free_release(&released);
+        // （目录删除）已经发出。标记之前，这些页不得可分配。
+        self.buffer_pool.complete_free_release(&released, &anchors);
 
         Ok(())
     }
@@ -1810,7 +2272,9 @@ impl TableManager {
         // snapshot must not be judged free.
         let page_bound = self.buffer_pool.storage().page_count();
         let live = self.collect_live_pages(db_path).await?;
-        let free: Vec<u64> = (0..page_bound).filter(|page| !live.contains(page)).collect();
+        let free: Vec<u64> = (0..page_bound)
+            .filter(|page| !live.contains(page))
+            .collect();
         self.buffer_pool.storage().inject_free_pages(free);
         Ok(())
     }
@@ -1857,7 +2321,10 @@ impl TableManager {
                 .collect_data_chain_strict(PageId(row.data_page_head as u64))
                 .await?;
             live.extend(data_pages.iter().map(|page| page.0));
-            for page in self.collect_overflow_chain_pages_strict(&chain_heads).await? {
+            for page in self
+                .collect_overflow_chain_pages_strict(&chain_heads)
+                .await?
+            {
                 live.insert(page.0);
             }
             // The trees the directory registers.
@@ -1884,7 +2351,10 @@ impl TableManager {
         {
             let tables = self.tables.read().await;
             for meta in tables.values() {
-                for page in self.collect_tree_pages(meta.index_manager.root_page_id()).await? {
+                for page in self
+                    .collect_tree_pages(meta.index_manager.root_page_id())
+                    .await?
+                {
                     live.insert(page);
                 }
                 for (_, uindex) in &meta.unique_indexes {
@@ -1914,10 +2384,7 @@ impl TableManager {
     /// on every open and must never crash the open. A damaged page is an
     /// error (R3) — the rebuild is abandoned rather than judged on a
     /// half-read ownership graph.
-    async fn collect_data_chain_strict(
-        &self,
-        head: PageId,
-    ) -> Result<(Vec<PageId>, Vec<u32>)> {
+    async fn collect_data_chain_strict(&self, head: PageId) -> Result<(Vec<PageId>, Vec<u32>)> {
         let mut pages = Vec::new();
         let mut chain_heads: Vec<u32> = Vec::new();
         let mut visited: HashSet<u64> = HashSet::new();
@@ -1948,7 +2415,10 @@ impl TableManager {
     /// Strict overflow-chain collection: the locators found in the data pages
     /// are followed to their chain pages; a read error or a malformed chain is
     /// an error (R3).
-    async fn collect_overflow_chain_pages_strict(&self, chain_heads: &[u32]) -> Result<Vec<PageId>> {
+    async fn collect_overflow_chain_pages_strict(
+        &self,
+        chain_heads: &[u32],
+    ) -> Result<Vec<PageId>> {
         let mut pages = Vec::new();
         for first in chain_heads {
             for raw in overflow::collect_overflow_pages(&self.buffer_pool, *first).await? {
@@ -2068,12 +2538,15 @@ impl TableManager {
         // 2. Tail returns to the head page — in-memory first (the swap below
         //    inherits it into the rebuilt TableMeta), then the catalog row.
         *table_meta.data_page_tail.lock().unwrap() = head;
-        self.catalog.update_table_tail(name, head.0 as u32).await?;
+        let mut anchors = vec![head];
+        if let Some(page) = self.catalog.update_table_tail(name, head.0 as u32).await? {
+            anchors.push(page);
+        }
 
         // MS35（`free-page-lifecycle` R3）：步骤 1 的释放（溢出链页 + 尾数据
         // 页）的锚点写 = 表头原地重置 + 目录尾指针更新，两者此刻都已发出 ⇒
         // 释放完成标记。标记之前这些页不得可分配。
-        self.buffer_pool.complete_free_release(&released);
+        self.buffer_pool.complete_free_release(&released, &anchors);
 
         // 3. Empty trees for all three index classes; catalog-first root
         //    write-back, then the whole-table swap (a failed catalog write
@@ -2087,7 +2560,7 @@ impl TableManager {
             .await?;
         let mut new_uniques: Vec<(usize, Arc<IndexManager>)> = Vec::new();
         let mut new_secondaries: Vec<SecondaryIndexMeta> = Vec::new();
-        let build_result: Result<()> = async {
+        let build_result: Result<Vec<PageId>> = async {
             for (ordinal, (col_idx, _)) in table_meta.unique_indexes.iter().enumerate() {
                 let tree = self
                     .new_empty_tree(CatalogRootSlot::Unique {
@@ -2111,39 +2584,55 @@ impl TableManager {
                 });
             }
             // Roots to the catalog row (PK + per-ordinal UNIQUE/secondary).
-            self.catalog
+            let mut anchors = Vec::new();
+            if let Some(page) = self
+                .catalog
                 .update_table_root(name, new_pk.root_page_id().0 as u32)
-                .await?;
-            for (ordinal, (_, tree)) in new_uniques.iter().enumerate() {
-                self.catalog
-                    .update_unique_index_root(name, ordinal, tree.root_page_id().0 as u32)
-                    .await?;
-            }
-            for (ordinal, s) in new_secondaries.iter().enumerate() {
-                self.catalog
-                    .update_secondary_index_root(name, ordinal, s.index.root_page_id().0 as u32)
-                    .await?;
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(e) = build_result {
-            let mut released: Vec<PageId> = Vec::new();
-            for tree in std::iter::once(&new_pk)
-                .chain(new_uniques.iter().map(|(_, t)| t))
-                .chain(new_secondaries.iter().map(|s| &s.index))
+                .await?
             {
-                for page in tree.collect_all_pages_tolerant().await {
-                    if self.buffer_pool.free_page(page).await.is_ok() {
-                        released.push(page);
-                    }
+                anchors.push(page);
+            }
+            for (ordinal, (_, tree)) in new_uniques.iter().enumerate() {
+                if let Some(page) = self
+                    .catalog
+                    .update_unique_index_root(name, ordinal, tree.root_page_id().0 as u32)
+                    .await?
+                {
+                    anchors.push(page);
                 }
             }
-            // MS35（`free-page-lifecycle` R3）：释放完成标记——新建的树从未
-            // 登记进目录（无锚点写），按保守方向等下一次成功刷盘。
-            self.buffer_pool.complete_free_release(&released);
-            return Err(e);
+            for (ordinal, s) in new_secondaries.iter().enumerate() {
+                if let Some(page) = self
+                    .catalog
+                    .update_secondary_index_root(name, ordinal, s.index.root_page_id().0 as u32)
+                    .await?
+                {
+                    anchors.push(page);
+                }
+            }
+            Ok(anchors)
         }
+        .await;
+        let root_anchors = match build_result {
+            Ok(anchors) => anchors,
+            Err(e) => {
+                let mut released: Vec<PageId> = Vec::new();
+                for tree in std::iter::once(&new_pk)
+                    .chain(new_uniques.iter().map(|(_, t)| t))
+                    .chain(new_secondaries.iter().map(|s| &s.index))
+                {
+                    for page in tree.collect_all_pages_tolerant().await {
+                        if self.buffer_pool.free_page(page).await.is_ok() {
+                            released.push(page);
+                        }
+                    }
+                }
+                // MS35（`free-page-lifecycle` R3）：释放完成标记——新建的树从未
+                // 登记进目录（无锚点写），按保守方向等下一次成功刷盘。
+                self.buffer_pool.complete_free_release(&released, &[]);
+                return Err(e);
+            }
+        };
         let (old_pk, old_uniques, old_secondaries) = self
             .replace_recovery_indexes(name, new_pk, new_uniques, new_secondaries)
             .await?;
@@ -2174,7 +2663,8 @@ impl TableManager {
 
         // MS35（`free-page-lifecycle` R3）：旧树的释放完成标记——本次释放的
         // 锚点写 = 步骤 3 的目录 root 更新（PK / 唯一 / 二级），已发出。
-        self.buffer_pool.complete_free_release(&released);
+        self.buffer_pool
+            .complete_free_release(&released, &root_anchors);
 
         // 5. Statement-return-is-durable: persist the head reset and every
         //    catalog rewrite (alter_drop_column precedent).
@@ -2298,6 +2788,7 @@ mod tests {
                 ),
             ],
             "id",
+            false,
         )
         .await
         .unwrap();
@@ -2347,6 +2838,7 @@ mod tests {
                 ),
             ],
             "id",
+            false,
         )
         .await
         .unwrap();
@@ -2396,6 +2888,7 @@ mod tests {
                 ),
             ],
             "id",
+            false,
         )
         .await
         .unwrap();
@@ -2422,6 +2915,7 @@ mod tests {
                 ("v".to_string(), ColumnType::Int, false, false, None),
             ],
             "id",
+            false,
         )
         .await
         .unwrap();
@@ -2450,6 +2944,7 @@ mod tests {
                 ("code".to_string(), ColumnType::Int, false, true, None),
             ],
             "id",
+            false,
         )
         .await
         .unwrap();
@@ -2496,6 +2991,7 @@ mod tests {
                 ),
             ],
             "id",
+            false,
         )
         .await
         .unwrap();
@@ -2541,6 +3037,7 @@ mod tests {
             secondary_indexes: Vec::new(),
             kind: CatalogKind::Table,
             view_sql: None,
+            explicit_primary_key: false,
         };
         let cols = vec![
             CatalogColumnRow {
@@ -2613,6 +3110,7 @@ mod tests {
                 ),
             ],
             "id",
+            false,
         )
         .await
         .unwrap();
@@ -2720,7 +3218,8 @@ mod tests {
         assert_eq!(meta2.secondary_indexes[1].index.root_page_id(), root2);
 
         // take 面：按名移除，返回被移除树；余者保留
-        let (table, col, old_tree) = tm.take_secondary_index("idx_age").await.unwrap().unwrap();
+        let (table, col, old_tree, _anchor) =
+            tm.take_secondary_index("idx_age").await.unwrap().unwrap();
         assert_eq!(table, "t");
         assert_eq!(col, 1);
         assert_eq!(old_tree.root_page_id(), root1);

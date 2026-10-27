@@ -22,7 +22,10 @@ use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor, PredicateRef, Value};
 use crate::storage::page_format::{deserialize_row, overflow, ColumnType, RowId, SlottedPageRef};
 use crate::storage::PageId;
-use crate::storage::{read_tuple_from_data_page, BufferPool, NarrowingState, Result, TableMeta};
+use crate::storage::{
+    corrupted_data_page_slot_count_error, corrupted_data_page_slot_error,
+    read_tuple_from_data_page, BufferPool, NarrowingState, Result, TableMeta,
+};
 use crate::transaction::{Snapshot, TransactionManager, VersionHeader};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -245,13 +248,24 @@ impl DataScanExecutor {
             let (next_page, links) = buffer_pool
                 .with_page_data(pid, |data| -> Result<(u32, Vec<VersionLink>)> {
                     let slotted = SlottedPageRef::new(data);
+                    // MS37 T17: 页头槽数越界 ⇒ 明确错误（取槽**之前**判；否则
+                    // 槽目录定位下溢 ⇒ 越界切片 panic ⇒ 进程 abort）。
+                    if slotted.slot_count_exceeds_capacity() {
+                        return Err(corrupted_data_page_slot_count_error(
+                            pid.0,
+                            slotted.slot_count(),
+                        ));
+                    }
                     let slot_count = slotted.slot_count();
                     let mut links = Vec::new();
                     for index in 0..slot_count {
                         let Some(slot) = slotted.get_slot(index) else {
                             continue;
                         };
-                        let slot_data = slotted.get_slot_data(&slot);
+                        // MS37 T3: 越界槽 ⇒ 明确错误（不得跳过——跳过 = 静默错读）。
+                        let slot_data = slotted
+                            .get_slot_data_checked(&slot)
+                            .ok_or_else(|| corrupted_data_page_slot_error(pid.0, index, &slot))?;
                         if slot_data.len() < VersionHeader::SIZE {
                             continue;
                         }
@@ -442,6 +456,14 @@ impl Executor for DataScanExecutor {
                 .buffer_pool
                 .with_page_data(page_id, |data| -> Result<PageAction> {
                     let slotted = SlottedPageRef::new(data);
+                    // MS37 T17: 页头槽数越界 ⇒ 明确错误（取槽**之前**判；否则
+                    // 槽目录定位下溢 ⇒ 越界切片 panic ⇒ 进程 abort）。
+                    if slotted.slot_count_exceeds_capacity() {
+                        return Err(corrupted_data_page_slot_count_error(
+                            page_id.0,
+                            slotted.slot_count(),
+                        ));
+                    }
                     let slot_count = slotted.slot_count();
                     // MS08-T02: capture the successor once per closure entry;
                     // reused by the all-invisible/exhausted branches below.
@@ -469,7 +491,10 @@ impl Executor for DataScanExecutor {
                     let slot = slotted
                         .get_slot(slot_index)
                         .expect("slot_index < slot_count validated above");
-                    let slot_data = slotted.get_slot_data(&slot);
+                    // MS37 T3: 越界槽 ⇒ 明确错误（不得跳过——跳过 = 静默错读）。
+                    let slot_data = slotted.get_slot_data_checked(&slot).ok_or_else(|| {
+                        corrupted_data_page_slot_error(page_id.0, slot_index, &slot)
+                    })?;
                     slot_index += 1; // consume this slot regardless of outcome
 
                     if slot_data.len() < VersionHeader::SIZE {

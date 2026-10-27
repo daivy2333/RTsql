@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::storage::Page;
 
 /// Slot: pointing to row data in the page
@@ -10,6 +12,95 @@ pub struct Slot {
 
 impl Slot {
     pub const SIZE: usize = 6; // u16 + u16 + u16
+}
+
+/// 页格式层的**结构化写入失败**——区分「页满（可换页继续）」与「页损坏
+/// （不可重试）」与「等长不符」。
+///
+/// 既有写入原语以 `String` 表达失败 ⇒ 调用点**无法**区分「页满」与「页
+/// 损坏」⇒ 损坏页上的落位失败被当作「页满」⇒ 换新页继续写入（损坏页被
+/// 跳过、数据继续落盘）。本类型让写侧能够分流。
+///
+/// 既有错误文案**逐字**保持（页满 / 等长不符 / 槽下标越界 / logical_id
+/// 不存在）⇒ 索引树侧（`StorageError::Io(std::io::Error::other(e))`）与
+/// 恢复面（`format!("add_slot failed: {}", e)`）的既有映射逐字继续编译。
+#[derive(Debug, Clone)]
+pub enum PageWriteError {
+    /// 页满——调用方可换新页继续。
+    PageFull,
+    /// 页头声称的槽数超出槽目录容量（页级损坏）。
+    SlotCountExceedsCapacity { slot_count: usize },
+    /// 槽负载区间越出页的数据区。
+    SlotPayloadOutOfBounds { slot_index: usize, slot: Slot },
+    /// 原地改写要求等长。
+    LengthMismatch {
+        slot_index: usize,
+        slot_length: usize,
+        write_length: usize,
+    },
+    /// 槽下标越界。
+    SlotIndexOutOfRange,
+    /// logical_id 不存在。
+    LogicalIdNotFound { logical_id: u16 },
+}
+
+impl fmt::Display for PageWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PageFull => write!(f, "No enough space in page"),
+            Self::SlotCountExceedsCapacity { slot_count } => write!(
+                f,
+                "corrupted page: slot count {slot_count} exceeds the page slot directory \
+                 capacity of {MAX_PAGE_SLOTS} slots"
+            ),
+            Self::SlotPayloadOutOfBounds { slot_index, slot } => {
+                let start = slot.offset as usize;
+                let end = start + slot.length as usize;
+                write!(
+                    f,
+                    "slot {slot_index} range [{start}, {end}) lies outside the page data area"
+                )
+            }
+            Self::LengthMismatch {
+                slot_length,
+                write_length,
+                ..
+            } => write!(
+                f,
+                "in-place update requires equal length: slot {slot_length} bytes, \
+                 got {write_length} bytes"
+            ),
+            Self::SlotIndexOutOfRange => write!(f, "Slot index out of range"),
+            Self::LogicalIdNotFound { logical_id } => {
+                write!(f, "logical_id {logical_id} not found")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PageWriteError {}
+
+/// 页内槽目录的最大条目数——槽目录自页尾向上生长（每项 `Slot::SIZE` 字节），
+/// 不得触及页头。页头声称的槽数超过该上限时，槽目录定位会下溢成越界切片，
+/// 故访问器在读槽**之前**先做此界限判断。
+///
+/// 全项目**唯一**定义（页格式层）：索引树访问器的读槽界限与数据页组的
+/// 页级判据共用它（取值不变 ⇒ 索引树路径零回归）。
+pub const MAX_PAGE_SLOTS: usize = (Page::PAGE_SIZE - SlottedPageHeader::SIZE) / Slot::SIZE;
+
+/// 槽负载是否完整落在页的数据区内——**读侧与写侧共用**的唯一判界实现
+/// （数据页路径）。
+///
+/// 语义与既有读侧私有判据**逐字**不变：`start >= SlottedPageHeader::SIZE
+/// && end <= slot_area_start`，其中 `slot_area_start =
+/// PAGE_SIZE.saturating_sub(slot_count * Slot::SIZE)`——槽目录自页尾向上
+/// 生长 ⇒ 负载既不得与页头重叠，也不得触及槽目录区。
+///
+/// 读侧（`SlottedPageRef::get_slot_data_checked`）与写侧（版本头原地写 /
+/// 槽原地改写）共用它 ⇒ 两侧的界限口径不会漂移。
+pub fn slot_payload_in_bounds(slot_count: usize, start: usize, end: usize) -> bool {
+    let slot_area_start = Page::PAGE_SIZE.saturating_sub(slot_count * Slot::SIZE);
+    start >= SlottedPageHeader::SIZE && end <= slot_area_start
 }
 
 /// Slotted Page Header (16 bytes)
@@ -65,6 +156,22 @@ impl SlottedPageHeader {
             _padding,
         }
     }
+
+    /// **页级判据**：页头声称的槽数是否超出该页的槽目录容量。
+    ///
+    /// 阈值与 `integrity::validate_slots` 的 `slot count exceeds the page
+    /// capacity` violation **同源**（`slot_count > MAX_PAGE_SLOTS`，即
+    /// `slot_count ≥ 681`）⇒ 同时覆盖「槽目录压到页头」与「槽目录定位下溢」
+    /// 两种页头损坏形态。
+    ///
+    /// **任何按页头 `slot_count` 迭代槽的读点都必须先问这个判据**：页头
+    /// 声称的槽数越界时，`get_slot` 的槽目录定位
+    /// `PAGE_SIZE - (index + 1) * Slot::SIZE` 会整数下溢 ⇒ 越界切片 panic
+    /// ⇒ 进程 abort（`get_slot` 本身**不改**其 `None` 语义——把越界折叠成
+    /// `None` 会让「页损坏」与「槽不存在」不可区分 ⇒ 静默跳过 = 静默错读）。
+    pub fn slot_count_exceeds_capacity(&self) -> bool {
+        self.slot_count as usize > MAX_PAGE_SLOTS
+    }
 }
 
 /// Slotted Page format reader/writer
@@ -92,7 +199,16 @@ impl<'a> SlottedPageRef<'a> {
         self.header.slot_count as usize
     }
 
+    /// **页级判据**（见 [`SlottedPageHeader::slot_count_exceeds_capacity`]）——
+    /// 页头声称的槽数是否超出该页的槽目录容量。取槽**之前**必须先问它。
+    pub fn slot_count_exceeds_capacity(&self) -> bool {
+        self.header.slot_count_exceeds_capacity()
+    }
+
     /// Get a specific slot (read-only)
+    ///
+    /// 页头声称的槽数越界时，槽目录定位会整数下溢 ⇒ 越界切片 panic ⇒ 进程
+    /// abort。调用方必须先问 [`Self::slot_count_exceeds_capacity`]。
     pub fn get_slot(&self, index: usize) -> Option<Slot> {
         if index >= self.slot_count() {
             return None;
@@ -128,6 +244,21 @@ impl<'a> SlottedPageRef<'a> {
         &self.data[start..end]
     }
 
+    /// 有界槽读——槽负载越界时返回 `None`（**不做任何越界切片**）。
+    ///
+    /// 判据与索引树既有有界读（`src/storage/btree/node.rs` 的
+    /// `slot_payload_in_bounds`）同形：负载不与页头重叠、不越过槽目录区
+    /// （槽目录自页尾向上生长）。未越界的槽与 [`Self::get_slot_data`]
+    /// 逐字节等价。判据实现 = [`slot_payload_in_bounds`]（读侧与写侧共用）。
+    pub fn get_slot_data_checked(&self, slot: &Slot) -> Option<&'a [u8]> {
+        let start = slot.offset as usize;
+        let end = start.checked_add(slot.length as usize)?;
+        if !slot_payload_in_bounds(self.slot_count(), start, end) {
+            return None;
+        }
+        self.data.get(start..end)
+    }
+
     /// Get header (read-only)
     pub fn header(&self) -> &SlottedPageHeader {
         &self.header
@@ -158,7 +289,16 @@ impl<'a> SlottedPage<'a> {
         self.header.slot_count as usize
     }
 
+    /// **页级判据**（见 [`SlottedPageHeader::slot_count_exceeds_capacity`]）——
+    /// 页头声称的槽数是否超出该页的槽目录容量。取槽**之前**必须先问它。
+    pub fn slot_count_exceeds_capacity(&self) -> bool {
+        self.header.slot_count_exceeds_capacity()
+    }
+
     /// Get a specific slot
+    ///
+    /// 页头声称的槽数越界时，槽目录定位会整数下溢 ⇒ 越界切片 panic ⇒ 进程
+    /// abort。调用方必须先问 [`Self::slot_count_exceeds_capacity`]。
     pub fn get_slot(&self, index: usize) -> Option<Slot> {
         if index >= self.slot_count() {
             return None;
@@ -199,7 +339,7 @@ impl<'a> SlottedPage<'a> {
     }
 
     /// Add a new slot, returns (logical_id, slot_index)
-    pub fn add_slot(&mut self, data: &[u8]) -> Result<(u16, usize), String> {
+    pub fn add_slot(&mut self, data: &[u8]) -> Result<(u16, usize), PageWriteError> {
         self.add_slot_inner(data, None)
     }
 
@@ -214,7 +354,7 @@ impl<'a> SlottedPage<'a> {
         &mut self,
         data: &[u8],
         logical_id: u16,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, PageWriteError> {
         self.add_slot_inner(data, Some(logical_id))
             .map(|(_, slot_index)| slot_index)
     }
@@ -222,7 +362,20 @@ impl<'a> SlottedPage<'a> {
     /// 共享落位主体：数据写入 + slot 写入 + header 更新。`forced = None` →
     /// 运行期自然分配（`next_logical_id` 递增）；`Some(id)` → 恢复面按 id
     /// 落位（`next_logical_id` 推进到 id+1，取 max 不回退）。
-    fn add_slot_inner(&mut self, data: &[u8], forced: Option<u16>) -> Result<(u16, usize), String> {
+    fn add_slot_inner(
+        &mut self,
+        data: &[u8],
+        forced: Option<u16>,
+    ) -> Result<(u16, usize), PageWriteError> {
+        // 0. **页级判据前置**：页头声称的槽数越界时，下面的
+        //    `PAGE_SIZE - slot_count * Slot::SIZE` 整数下溢 ⇒ 随后的负载写 /
+        //    槽目录写越界 ⇒ panic / 越界写。任何算术之前先问它。
+        if self.header.slot_count_exceeds_capacity() {
+            return Err(PageWriteError::SlotCountExceedsCapacity {
+                slot_count: self.slot_count(),
+            });
+        }
+
         // 1. Calculate required space
         let data_len = data.len();
         let needed_space = Slot::SIZE + data_len;
@@ -232,7 +385,7 @@ impl<'a> SlottedPage<'a> {
         let free_space_end = Page::PAGE_SIZE - self.slot_count() * Slot::SIZE;
 
         if free_space_start + needed_space > free_space_end {
-            return Err("No enough space in page".to_string());
+            return Err(PageWriteError::PageFull);
         }
 
         // 3. Write data (starting from free_space_start)
@@ -274,9 +427,18 @@ impl<'a> SlottedPage<'a> {
     }
 
     /// Delete a slot by physical index (compact slots by moving them backward)
-    pub fn delete_slot(&mut self, index: usize) -> Result<(), String> {
+    pub fn delete_slot(&mut self, index: usize) -> Result<(), PageWriteError> {
+        // **页级判据前置**：页头声称的槽数越界时，下面的
+        // `PAGE_SIZE - (i + k) * Slot::SIZE` 同形减法整数下溢 ⇒ 越界切片
+        // panic ⇒ 进程 abort。
+        if self.header.slot_count_exceeds_capacity() {
+            return Err(PageWriteError::SlotCountExceedsCapacity {
+                slot_count: self.slot_count(),
+            });
+        }
+
         if index >= self.slot_count() {
-            return Err("Slot index out of range".to_string());
+            return Err(PageWriteError::SlotIndexOutOfRange);
         }
 
         // Compact slots: move slots after index backward
@@ -304,10 +466,17 @@ impl<'a> SlottedPage<'a> {
     }
 
     /// Delete a slot by logical_id
-    pub fn delete_slot_by_logical_id(&mut self, logical_id: u16) -> Result<(), String> {
+    pub fn delete_slot_by_logical_id(&mut self, logical_id: u16) -> Result<(), PageWriteError> {
+        // **页级判据前置**：页头声称的槽数越界时，取槽遍历会走到槽目录定位
+        // 下溢 ⇒ 越界切片 panic ⇒ 进程 abort。
+        if self.header.slot_count_exceeds_capacity() {
+            return Err(PageWriteError::SlotCountExceedsCapacity {
+                slot_count: self.slot_count(),
+            });
+        }
         let (_, slot_index) = self
             .get_slot_by_logical_id(logical_id)
-            .ok_or_else(|| format!("logical_id {} not found", logical_id))?;
+            .ok_or(PageWriteError::LogicalIdNotFound { logical_id })?;
         self.delete_slot(slot_index)
     }
 
@@ -318,31 +487,59 @@ impl<'a> SlottedPage<'a> {
     /// so a fixed-size field update never leaks row bytes nor consumes a slot.
     /// On a page whose data area is exhausted this still succeeds, because the
     /// live row keeps its original slot.
-    pub fn update_slot_in_place(&mut self, logical_id: u16, data: &[u8]) -> Result<(), String> {
-        let (slot, _) = self
+    ///
+    /// 写入区间 = 该槽自身负载（等长已校验）⇒ 判界**精确**且零歧义：区间
+    /// 必须完整落在页的数据区内（不触及页头与槽目录），否则以结构化的页损坏
+    /// 失败结束，**不产生任何字节写入**。
+    pub fn update_slot_in_place(
+        &mut self,
+        logical_id: u16,
+        data: &[u8],
+    ) -> Result<(), PageWriteError> {
+        // **页级判据前置**：页头声称的槽数越界时，取槽遍历会走到槽目录定位
+        // 下溢 ⇒ 越界切片 panic ⇒ 进程 abort。
+        if self.header.slot_count_exceeds_capacity() {
+            return Err(PageWriteError::SlotCountExceedsCapacity {
+                slot_count: self.slot_count(),
+            });
+        }
+
+        let (slot, slot_index) = self
             .get_slot_by_logical_id(logical_id)
-            .ok_or_else(|| format!("logical_id {} not found", logical_id))?;
+            .ok_or(PageWriteError::LogicalIdNotFound { logical_id })?;
 
         if slot.length as usize != data.len() {
-            return Err(format!(
-                "in-place update requires equal length: slot {} bytes, got {} bytes",
-                slot.length,
-                data.len()
-            ));
+            return Err(PageWriteError::LengthMismatch {
+                slot_index,
+                slot_length: slot.length as usize,
+                write_length: data.len(),
+            });
         }
 
         let start = slot.offset as usize;
         let end = start + slot.length as usize;
+        // 槽级判界（与读侧共用同一实现）——判据前置于任何字节写入。
+        if !slot_payload_in_bounds(self.slot_count(), start, end) {
+            return Err(PageWriteError::SlotPayloadOutOfBounds { slot_index, slot });
+        }
         self.page.data[start..end].copy_from_slice(data);
 
         Ok(())
     }
 
     /// Calculate available space
+    ///
+    /// 无错误通道 ⇒ 页头损坏时**安全降级为 0**（调用方判定「无可用空间」
+    /// ⇒ 不会写入）。页头槽数越界时，同形减法会整数下溢 ⇒ 越界值回绕成
+    /// 巨大值 ⇒ 判定为「有空间」⇒ 写入越界。
     pub fn free_space(&self) -> usize {
+        if self.header.slot_count_exceeds_capacity() {
+            return 0;
+        }
         let free_space_start = self.header.free_space_offset as usize;
         let free_space_end = Page::PAGE_SIZE - self.slot_count() * Slot::SIZE;
-        free_space_end - free_space_start
+        // `free_space_start > free_space_end`（页头损坏）时不再下溢 ⇒ 0。
+        free_space_end.saturating_sub(free_space_start)
     }
 
     /// Sync header to page data

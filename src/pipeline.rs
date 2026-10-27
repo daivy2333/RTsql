@@ -9,8 +9,8 @@ use crate::executor::{
     InsertExecutor, InsertNode, InsertSelectNode, JoinConfig, JoinExecutor, JoinRelatedConfig,
     LimitExecutor, NestedLoopJoinExecutor, OutputColumn, PhysicalPlan, ProjectionExecutor,
     ScalarSubqueryFilterExecutor, ScanExecutor, SemiJoinExecutorV2, SetOperationExecutor,
-    SingleRowExecutor, SortExecutor, SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor,
-    UpsertExecutor, UpsertNode, UpsertValueExpr, Value, ValueParamSlot,
+    SingleRowExecutor, SortExecutor, SortMergeJoinExecutor, SubqueryEvalExecutor, TruncateExecutor,
+    UpdateExecutor, UpsertExecutor, UpsertNode, UpsertValueExpr, Value, ValueParamSlot,
 };
 use crate::parser::placeholder::{assign_placeholder_indices, count_placeholders, PARAM_PREFIX};
 use crate::parser::planner::ViewDef;
@@ -332,11 +332,24 @@ async fn plan_stage_impl(
             // （NOT NULL 无 DEFAULT × 非空的计划期判定输入）。
             if let Statement::AlterTable { name, .. } = stmt {
                 let table_name = crate::parser::ast::object_name_to_table_name(name);
-                let has_rows = database
+                // MS37 T3（A3）：**页损坏错误必须到达使用者**——吞成 `false`
+                // 会让「该表为空」的失真判断放行 ALTER TABLE 的计划期判定
+                // （`ADD COLUMN NOT NULL` 无 DEFAULT 时按「表非空」拒绝）。
+                // 其余错误（含「表不存在」）保留既有 `false` 兜底。
+                let has_rows = match database
                     .table_manager
                     .table_has_live_rows(&table_name)
                     .await
-                    .unwrap_or(false);
+                {
+                    Ok(has_rows) => has_rows,
+                    Err(crate::storage::StorageError::CorruptedDataPage { page_id, detail }) => {
+                        return Err(PlanFailure {
+                            message: format!("corrupted data page {page_id}: {detail}"),
+                            sqlstate: "58000",
+                        });
+                    }
+                    Err(_) => false,
+                };
                 plan_builder.set_table_has_live_rows(&table_name, has_rows);
             }
             register_table(database, &mut plan_builder, stmt, route, routed).await?;
@@ -983,7 +996,7 @@ async fn execute_ctas_routed(
         .collect();
     if let Err(e) = database
         .table_manager
-        .create_table_with_constraints(&node.table_name, columns, &pk)
+        .create_table_with_constraints(&node.table_name, columns, &pk, false)
         .await
     {
         return Err(SqlError {
@@ -1897,7 +1910,7 @@ fn plan_type_slots(plan: &PhysicalPlan) -> Vec<TypeSlot> {
                 vec![TypeSlot::Unknown; node.columns.len()]
             }
         }
-        PhysicalPlan::Join(node) => {
+        PhysicalPlan::Join(node) | PhysicalPlan::SortMergeJoin(node) => {
             join_type_slots(&node.left, &node.right, &node.output_columns, &[])
         }
         PhysicalPlan::NestedLoopJoin(node) => {
@@ -2020,7 +2033,7 @@ fn collect_scan_tables(plan: &PhysicalPlan, out: &mut Vec<String>) {
             collect_scan_tables(&node.left, out);
             collect_scan_tables(&node.right, out);
         }
-        PhysicalPlan::Join(node) => {
+        PhysicalPlan::Join(node) | PhysicalPlan::SortMergeJoin(node) => {
             collect_scan_tables(&node.left, out);
             collect_scan_tables(&node.right, out);
         }
@@ -2514,6 +2527,47 @@ pub(crate) fn create_executor_from_plan<'a>(
                 ) as Box<dyn Executor + Send>)
             }
 
+            PhysicalPlan::SortMergeJoin(join_node) => {
+                let (mut left_column_indices, _) = extract_column_indices(&join_node.left)?;
+                let (mut right_column_indices, right_table_name) =
+                    extract_column_indices(&join_node.right)?;
+                register_join_qualified_keys(&mut left_column_indices, &join_node.left);
+                register_join_qualified_keys(&mut right_column_indices, &join_node.right);
+
+                let left_executor = create_executor_from_plan(
+                    *join_node.left,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                    &budget,
+                )
+                .await?;
+                let right_executor = create_executor_from_plan(
+                    *join_node.right,
+                    database,
+                    tx_id,
+                    snapshot.clone(),
+                    routed,
+                    &budget,
+                )
+                .await?;
+
+                Ok(Box::new(
+                    SortMergeJoinExecutor::new(JoinConfig {
+                        left_executor,
+                        right_executor,
+                        conditions: join_node.conditions.clone(),
+                        output_columns: join_node.output_columns.clone(),
+                        output_sides: join_node.output_sides.clone(),
+                        left_column_indices,
+                        right_column_indices,
+                        right_table_name,
+                    })
+                    .with_budget(budget.clone()),
+                ) as Box<dyn Executor + Send>)
+            }
+
             PhysicalPlan::NestedLoopJoin(node) => {
                 // T9 replan：链首表名不再参与归属（output_sides 侧标志取代）。
                 // 保留对左输入的列索引解析调用——嵌套链形态既有错误传播面，
@@ -2951,7 +3005,9 @@ fn collect_join_key_pairs(plan: &PhysicalPlan, out: &mut Vec<(String, String, us
                 out.push((n.table_name.clone(), col.clone(), i));
             }
         }
-        PhysicalPlan::Join(n) => collect_output_column_pairs(&n.output_columns, out),
+        PhysicalPlan::Join(n) | PhysicalPlan::SortMergeJoin(n) => {
+            collect_output_column_pairs(&n.output_columns, out)
+        }
         PhysicalPlan::NestedLoopJoin(n) => collect_output_column_pairs(&n.output_columns, out),
         PhysicalPlan::SemiJoin(n) => collect_output_column_pairs(&n.output_columns, out),
         PhysicalPlan::AntiJoin(n) => collect_output_column_pairs(&n.output_columns, out),
@@ -2991,7 +3047,7 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
                 .collect();
             Ok((indices, scan_node.table_name.clone()))
         }
-        PhysicalPlan::Join(join_node) => {
+        PhysicalPlan::Join(join_node) | PhysicalPlan::SortMergeJoin(join_node) => {
             // For nested joins, use output_columns to build indices
             let indices: HashMap<String, usize> = join_node
                 .output_columns
@@ -3435,6 +3491,9 @@ fn register_table_schema(
             .map(|s| (s.name.clone(), table_meta.columns[s.column_index].0.clone()))
             .collect(),
     );
+    if table_meta.explicit_primary_key {
+        builder.set_explicit_primary_key(key);
+    }
 }
 
 /// MS20 T3：DDL 写目标（CREATE TABLE / DROP TABLE）的附加库引用标记。这两个

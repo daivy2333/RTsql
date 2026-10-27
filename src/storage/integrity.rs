@@ -30,7 +30,7 @@ use crate::storage::page_format::overflow::{
     decode_locator, parse_overflow_page, OVERFLOW_PAGE_TYPE,
 };
 use crate::storage::page_format::MAX_KEY_LEN;
-use crate::storage::page_format::{Slot, SlottedPageHeader, SlottedPageRef};
+use crate::storage::page_format::{RowId, Slot, SlottedPageHeader, SlottedPageRef};
 use crate::storage::{btree::INTERNAL_NODE, btree::LEAF_NODE, Page, PageId, Result};
 use crate::transaction::VersionHeader;
 
@@ -478,7 +478,11 @@ impl<'a> Checker<'a> {
 /// paths so both report the same shape.
 pub(crate) fn violation_summary(violations: &[String]) -> String {
     let count = violations.len();
-    let noun = if count == 1 { "violation" } else { "violations" };
+    let noun = if count == 1 {
+        "violation"
+    } else {
+        "violations"
+    };
     format!("{count} {noun}: {}", violations.join("; "))
 }
 
@@ -587,9 +591,10 @@ pub(crate) struct TreePageCheck {
 }
 
 /// Validate an index-tree page: leaf pages get the same slot bounds check as
-/// data pages (no locator probing — leaf entries are `[Key][RowId]` and can
-/// legitimately start with any byte); internal pages additionally yield their
-/// child pointers, each entry validated to carry `[Key][child u32]`.
+/// data pages plus an **entry length** check (no locator probing — leaf
+/// entries are `[Key][RowId]` and can legitimately start with any byte);
+/// internal pages additionally yield their child pointers, each entry
+/// validated to carry `[Key][child u32]`.
 pub(crate) fn check_tree_page(data: &[u8]) -> TreePageCheck {
     let mut out = TreePageCheck {
         children: Vec::new(),
@@ -605,8 +610,23 @@ pub(crate) fn check_tree_page(data: &[u8]) -> TreePageCheck {
     match header.page_type {
         LEAF_NODE => {
             let mut violations = Vec::new();
-            // Slot bounds only — the child is the sibling chain pointer.
-            let _ = validate_slots(data, &header, &mut violations);
+            // Slot bounds + entry length — the child is the sibling chain
+            // pointer. A leaf entry is `[Key][RowId]` (`MAX_KEY_LEN +
+            // RowId::SIZE` bytes): a slot whose payload is shorter than that
+            // cannot be decoded, and skipping it would silently answer "no
+            // such entry" for a row that does exist.
+            if let Some(slots) = validate_slots(data, &header, &mut violations) {
+                for (i, _slot, start, end) in slots {
+                    if end - start < MAX_KEY_LEN + RowId::SIZE {
+                        violations.push(format!(
+                            "slot {i} is too short for a leaf-node entry ({} bytes, need {})",
+                            end - start,
+                            MAX_KEY_LEN + RowId::SIZE
+                        ));
+                        continue;
+                    }
+                }
+            }
             out.violations = violations;
             if header.next_page_id > 0 {
                 out.children.push(header.next_page_id);

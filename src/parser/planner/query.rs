@@ -13,9 +13,9 @@ use super::ddl_dml::is_pure_equi_join_on;
 use super::expression::expr_to_column_name;
 use super::{CteDef, PlanBuilder};
 use crate::executor::{
-    ColumnExpression, DataScanNode, DistinctNode, ExpressionRef, FilterNode, IndexScanAllNode,
-    IndexScanNode, OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
-    ScanNode, SetOpKind, SetOperationNode, SortNode,
+    ColumnExpression, ColumnRef, DataScanNode, DistinctNode, ExpressionRef, FilterNode,
+    IndexScanAllNode, IndexScanNode, OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem,
+    ProjectionNode, ScanNode, SetOpKind, SetOperationNode, SortNode,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
@@ -185,7 +185,7 @@ impl PlanBuilder {
                 // 已按基表 schema × projection 收窄，此处直出不再二次裁剪）。
                 node.columns.clone()
             }
-            PhysicalPlan::Join(node) => {
+            PhysicalPlan::Join(node) | PhysicalPlan::SortMergeJoin(node) => {
                 // JOIN 行组装严格按 output_columns 顺序（见 executor/join.rs），
                 // 列名直接取自节点，不递归合并左右子计划。
                 node.output_columns
@@ -869,11 +869,10 @@ impl PlanBuilder {
 
             // MS09-T02 (I015): 计划期启发式路由（delta spec R4）。结构探测的
             // 真集恰为 `extract_join_conditions` 的接受面（resolve_column_ref
-            // 只接受 Identifier / 2 段 CompoundIdentifier），纯等值形态的 Hash
-            // 路径输入集与行为逐字节不变；其余形态（非等值/字面量/表达式腿）
-            // 路由 NLJ——原计划期 `Unsupported expression type` 拒绝面被该
-            // 能力取代。MS25 T1：外连接三态一律经 NLJ（Hash JoinExecutor
-            // 零触碰；等值外连接的性能路径归 MS22 域）。
+            // 只接受 Identifier / 2 段 CompoundIdentifier）。纯等值内连接里，
+            // 两侧基表扫描且每条键都是写出的整数 PRIMARY KEY 时发排序合并，其余仍发哈希
+            // 连接。非等值、字面量和表达式腿路由 NLJ。MS25 T1：外连接三态一律
+            // 经 NLJ。
             if matches!(outer, OuterJoinKind::None) && is_pure_equi_join_on(on_clause) {
                 let conditions = self.extract_join_conditions(
                     &current_tables,
@@ -882,14 +881,20 @@ impl PlanBuilder {
                     on_clause,
                 )?;
 
-                // 构建 Join 节点
-                current_plan = PhysicalPlan::Join(crate::executor::JoinNode {
+                let join = crate::executor::JoinNode {
                     left: Box::new(current_plan),
                     right: Box::new(right_plan),
                     conditions,
                     output_columns,
                     output_sides,
-                });
+                };
+                // 两侧都是基表扫描，且每条等值键都是该表写出的整数 PRIMARY KEY 时走排序合并。
+                // 任一条件不成立仍发哈希连接。
+                current_plan = if self.integer_pk_base_scan_join(&join) {
+                    PhysicalPlan::SortMergeJoin(join)
+                } else {
+                    PhysicalPlan::Join(join)
+                };
             } else {
                 // 非纯等值 ON → NLJ：组合行布局（左表偏移 0..n、右表
                 // n..n+m）上编译完整 ON 谓词。布局覆盖 save/restore 严格配对
@@ -1691,7 +1696,9 @@ impl PlanBuilder {
         let table_name = match &base_plan {
             PhysicalPlan::Scan(scan_node) => scan_node.table_name.clone(),
             PhysicalPlan::DerivedScan(derived_node) => derived_node.alias.clone(),
-            PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_) => {
+            PhysicalPlan::Join(_)
+            | PhysicalPlan::SortMergeJoin(_)
+            | PhysicalPlan::NestedLoopJoin(_) => {
                 "join_result".to_string() // 虚拟表名用于 JOIN 结果
             }
             _ => "unknown".to_string(),
@@ -1867,6 +1874,7 @@ impl PlanBuilder {
                 PhysicalPlan::Scan(_)
                     | PhysicalPlan::DerivedScan(_)
                     | PhysicalPlan::Join(_)
+                    | PhysicalPlan::SortMergeJoin(_)
                     | PhysicalPlan::NestedLoopJoin(_)
             )
             && !select
@@ -1930,7 +1938,9 @@ impl PlanBuilder {
             // MS25 T8: 纯列引用项走组合行承载 + 布局解析，不属本拒绝面）
             if matches!(
                 base_plan,
-                PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_)
+                PhysicalPlan::Join(_)
+                    | PhysicalPlan::SortMergeJoin(_)
+                    | PhysicalPlan::NestedLoopJoin(_)
             ) && !expression_items_plain
             {
                 return Err(PlanError::ParseError(
@@ -1962,7 +1972,9 @@ impl PlanBuilder {
             // MS25 T8: 纯列引用项走组合行承载 + 布局解析，不属本拒绝面）
             if matches!(
                 base_plan,
-                PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_)
+                PhysicalPlan::Join(_)
+                    | PhysicalPlan::SortMergeJoin(_)
+                    | PhysicalPlan::NestedLoopJoin(_)
             ) && !expression_items_plain
             {
                 return Err(PlanError::ParseError(
@@ -2284,10 +2296,10 @@ impl PlanBuilder {
             } else if let Some((index_name, key)) =
                 self.extract_secondary_index_equality(&table_name, where_expr)?
             {
-                // MS21 Iter002 (T2-g/D6)：二级索引等值路由——PK 判定链未命中
-                // 后、非 PK 臂前插入。单条件 `<登记列> = <Int 字面量>` 命中
-                // 登记索引即 `IndexScanAll`（执行器消费该登记树）；其余形态
-                // （AND/OR 嵌入、非 Int/NULL 字面量）一律既有路径。
+                // 二级索引等值路由——PK 判定链未命中后、非 PK 臂前插入。
+                // 单条件裸列等值且 `secondary_index_key` 返回键时走
+                // `IndexScanAll`（执行器消费该登记树）。键原样写入节点。
+                // 其余形态一律既有路径。
                 // T1（change 2026-10-04-external-review-gaps D1）：`columns`
                 // 恒为基表全列，输出形状由 `projection` 唯一决定——消费方
                 // （get_plan_output_columns / EXPLAIN 渲染 / 聚合输入 schema）
@@ -3381,6 +3393,48 @@ impl PlanBuilder {
         }
     }
 
+    /// 纯等值内连接在五个条件同时成立时改走排序合并：左右都是基表 `Scan`，
+    /// 条件非空，每一条左列是左表主键、右列是右表主键，两侧主键类型都是已登记的整数，
+    /// 且两侧扫描表都在 `explicit_primary_keys` 里。
+    fn integer_pk_base_scan_join(&self, join: &crate::executor::JoinNode) -> bool {
+        if join.conditions.is_empty() {
+            return false;
+        }
+        let (PhysicalPlan::Scan(left), PhysicalPlan::Scan(right)) =
+            (join.left.as_ref(), join.right.as_ref())
+        else {
+            return false;
+        };
+        self.registered_integer_primary_key(&left.table_name)
+            && self.registered_integer_primary_key(&right.table_name)
+            && self.explicit_primary_keys.contains(&left.table_name)
+            && self.explicit_primary_keys.contains(&right.table_name)
+            && join.conditions.iter().all(|condition| {
+                self.column_is_scan_primary_key(&condition.left_column, &left.table_name)
+                    && self.column_is_scan_primary_key(&condition.right_column, &right.table_name)
+            })
+    }
+
+    fn registered_integer_primary_key(&self, table_name: &str) -> bool {
+        matches!(
+            self.primary_key_types.get(table_name),
+            Some(crate::storage::page_format::ColumnType::Int)
+        )
+    }
+
+    fn column_is_scan_primary_key(&self, column: &ColumnRef, scan_table: &str) -> bool {
+        let Some(pk) = self.primary_keys.get(scan_table) else {
+            return false;
+        };
+        if pk.is_empty() || column.column != *pk {
+            return false;
+        }
+        match &column.table {
+            Some(table) => table == scan_table,
+            None => true,
+        }
+    }
+
     /// MS16 Iteration 000 (I046): 键列声明类型是否已知且非 Int
     /// （Float/String/Bool）。此时全部存储行必为无键行（`Value::to_key()`
     /// 仅 Int 有值），键位等值任何形态都不可路由索引遍历——统一分流到
@@ -3407,11 +3461,11 @@ impl PlanBuilder {
         self.extract_pk_from_where(table_name, expr)
     }
 
-    /// MS21 Iter002 (T2-g/D6)：二级索引等值路由键提取——WHERE 为单条件
-    /// `<列> = <Int 字面量>`（或字面量在前）且该列命中登记的二级索引时，
-    /// 返回 `(索引名, 键)`；其余形态一律 `None` 走既有路径（AND/OR 嵌入
-    /// 不路由；非 Int / NULL 字面量经 `to_key` None 自然回落；转换失败与
-    /// PK 提取同型传播）。
+    /// 二级索引等值路由键提取。WHERE 为单个裸列等值（字面量可在任一侧）且该列
+    /// 命中登记的二级索引时，按列清单同序的声明类型调用
+    /// `Value::secondary_index_key`，返回 `(索引名, 键)`。限定名、AND、OR、
+    /// 范围和参数占位返回 `None`。类型向量缺项或短于列清单时也返回 `None`，
+    /// 不回退到 `to_key`。字面量转换失败与主键提取同型传播。
     fn extract_secondary_index_equality(
         &self,
         table_name: &str,
@@ -3443,9 +3497,22 @@ impl PlanBuilder {
         if is_placeholder_value(literal) {
             return Ok(None);
         }
-        // 仅 Int 字面量可路由（非 Int / NULL → to_key None → 既有路径）
         let value = value_from_sqlparser(literal)?;
-        match value.to_key() {
+        let Some(column_index) = self.tables.get(table_name).and_then(|columns| {
+            columns
+                .iter()
+                .position(|column| column.to_lowercase() == column_name)
+        }) else {
+            return Ok(None);
+        };
+        let Some(column_type) = self
+            .table_column_types
+            .get(table_name)
+            .and_then(|types| types.get(column_index))
+        else {
+            return Ok(None);
+        };
+        match value.secondary_index_key(column_type) {
             Some(key) => Ok(Some((index_name.clone(), key))),
             None => Ok(None),
         }
@@ -3556,7 +3623,7 @@ fn set_operand_has_distinct(expr: &sqlparser::ast::SetExpr) -> bool {
 /// `get_plan_output_columns` 与 Sort 投影都以它为基准。
 fn join_combined_columns(plan: &PhysicalPlan) -> Option<&[OutputColumn]> {
     match plan {
-        PhysicalPlan::Join(node) => Some(&node.output_columns),
+        PhysicalPlan::Join(node) | PhysicalPlan::SortMergeJoin(node) => Some(&node.output_columns),
         PhysicalPlan::NestedLoopJoin(node) => Some(&node.output_columns),
         _ => None,
     }

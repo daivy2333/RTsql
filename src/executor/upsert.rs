@@ -317,9 +317,10 @@ impl UpsertExecutor {
             }
         }
 
-        // MS21 Iter002 (T2-d/D7)：二级索引条目——镜像唯一条目（NULL 跳过）。
+        // 二级索引条目与插入路径同源。NULL 与不可容纳的值不入树。
         for sindex in &self.table_meta.secondary_indexes {
-            if let Some(key) = row_values[sindex.column_index].to_key() {
+            let column = sindex.column_index;
+            if let Some(key) = row_values[column].secondary_index_key(&self.schema[column]) {
                 sindex.index.insert(key.as_bytes(), row_id).await?;
             }
         }
@@ -574,10 +575,11 @@ impl UpsertExecutor {
         // `delete_exact` + `insert`（D3 禁用歧义原语）。
         for (pos, sindex) in self.table_meta.secondary_indexes.iter().enumerate() {
             let col = sindex.column_index;
+            let column_type = &self.schema[col];
             let old_v = &secondary_old_values[pos];
             let new_v = &values[col];
-            let old_key = old_v.to_key();
-            let new_key = new_v.to_key();
+            let old_key = old_v.secondary_index_key(column_type);
+            let new_key = new_v.secondary_index_key(column_type);
             if old_v == new_v {
                 if let Some(k) = new_key {
                     sindex
@@ -634,7 +636,9 @@ impl UpsertExecutor {
                     // `delete_exact` 清理）。
                     let mut secondary = Vec::new();
                     for sindex in &self.table_meta.secondary_indexes {
-                        if let Some(key) = values[sindex.column_index].to_key() {
+                        let column = sindex.column_index;
+                        if let Some(key) = values[column].secondary_index_key(&self.schema[column])
+                        {
                             secondary.push((sindex.index.clone(), key.as_bytes().to_vec()));
                         }
                     }

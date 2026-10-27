@@ -109,7 +109,7 @@ impl JoinExecutor {
         if key.iter().any(|v| matches!(v, Value::Null)) {
             return None;
         }
-        Some(key)
+        Some(Self::normalize_signed_zero_key(key))
     }
 
     /// 计算左表行的哈希键（ON 条件左表列值组合）
@@ -130,7 +130,21 @@ impl JoinExecutor {
         if key.iter().any(|v| matches!(v, Value::Null)) {
             return None;
         }
-        Some(key)
+        Some(Self::normalize_signed_zero_key(key))
+    }
+
+    /// 交给哈希表的键把每个等于零的浮点收成正零。
+    /// `Hash` 使用 `to_bits()`，负零和正零会进不同的桶；`PartialEq` 却把它们看成相等。
+    /// 桶里的行和输出行不经过这里。
+    fn normalize_signed_zero_key(mut key: Vec<Value>) -> Vec<Value> {
+        for value in &mut key {
+            if let Value::Float(f) = value {
+                if *f == 0.0 {
+                    *value = Value::Float(0.0);
+                }
+            }
+        }
+        key
     }
 
     /// 构建输出行（根据 output_columns 从左/右表提取列）

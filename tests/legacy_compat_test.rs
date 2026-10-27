@@ -161,7 +161,8 @@ fn tables_row_name(row: &[u8]) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// `__tables` 行的 G1 固定段长度（不含当前布局追加的三段尾）。
+/// `__tables` 行的 G1 固定段长度。返回值不含数据页尾指针之后的唯一根段、
+/// 二级索引段、表类型字节和 `explicit_primary_key` 字节。
 ///
 /// G1 布局：`u16 名字长 | 名字 | u32 数据页头 | u32 索引根 | u32 主键索引 |
 ///           u16 主键列长 | 主键列 | u32 列数 | u32 数据页尾指针`。
@@ -396,8 +397,8 @@ async fn legacy_db_opens_queries_and_writes() {
 // ---------------------------------------------------------------------------
 
 /// 写入把**被写到**的表的目录行重写为当前布局（尾段：唯一根计数 0、
-/// 二级索引计数 0、表类型字节 0x01）；同库**未被写到**的表目录行仍止于
-/// 旧代际的数据页尾指针。
+/// 二级索引计数 0、表类型字节 0x01、末字节 `explicit_primary_key` 为 0）；
+/// 同库**未被写到**的表目录行仍止于旧代际的数据页尾指针。
 ///
 /// 这次写入跨过尾页容量 ⇒ **确实分配了新页**。因此本用例同时锁定
 /// 「会触发页分配的写入」路径上的数据存活：重开后既有已提交行与新增行
@@ -440,15 +441,17 @@ async fn legacy_db_write_upgrades_touched_table_row_to_current_layout() {
     let g1_len = g1_tables_row_len(&users);
     assert_eq!(
         users.len(),
-        g1_len + 9,
+        g1_len + 10,
         "the written table's catalog row must carry the current-layout tail \
-         (u32 unique roots | u32 secondary indexes | u8 kind), got {} bytes",
+         (u32 unique roots | u32 secondary indexes | u8 kind | \
+          u8 explicit_primary_key = 0), got {} bytes",
         users.len()
     );
     assert_eq!(
         &users[g1_len..],
-        &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
-        "current-layout tail = unique-root count 0 | secondary-index count 0 | kind = Table"
+        &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00],
+        "current-layout tail = unique-root count 0 | secondary-index count 0 | \
+         kind = Table | explicit_primary_key = 0"
     );
 
     for untouched in ["audit", "events"] {
@@ -1085,15 +1088,17 @@ async fn legacy_g2_db_opens_queries_and_writes() {
     let people_row = newest_table_row(&table_rows, "people");
     assert_eq!(
         people_row.len(),
-        g1_tables_row_len(&people_row) + 9,
+        g1_tables_row_len(&people_row) + 10,
         "the written table's catalog row must be rewritten in the current layout \
-         (unique roots | secondary indexes | kind), got {} bytes",
+         (unique roots | secondary indexes | kind | explicit_primary_key = 0), \
+         got {} bytes",
         people_row.len()
     );
     assert_eq!(
         &people_row[g1_tables_row_len(&people_row)..],
-        &[0, 0, 0, 0, 0, 0, 0, 0, 0x01],
-        "the current layout tail: unique roots 0 | secondary indexes 0 | table kind"
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00],
+        "the current layout tail: unique roots 0 | secondary indexes 0 | \
+         table kind | explicit_primary_key = 0"
     );
     let notes_row = newest_table_row(&table_rows, "notes");
     assert_eq!(

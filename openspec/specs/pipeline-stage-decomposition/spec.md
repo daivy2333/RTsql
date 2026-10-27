@@ -1,7 +1,7 @@
 # pipeline-stage-decomposition Specification
 
 ## Purpose
-TBD - created by archiving change 2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages. Update Purpose after archive.
+SQL 执行拆成 parse、plan、execute 三个阶段函数，完整流程由这三段按顺序组成。来源：`2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages`
 ## Requirements
 ### Requirement: 三阶段函数拆分
 

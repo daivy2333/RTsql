@@ -391,7 +391,7 @@ async fn test_free_page_reuse() {
         // 并提升之后，释放的页必须被复用。
         pool_for_promote
             .storage()
-            .complete_free_release(&[rtsql::storage::PageId(page_a.0)]);
+            .complete_free_release(&[rtsql::storage::PageId(page_a.0)], &[]);
         let limit = pool_for_promote.storage().release_completion_limit();
         pool_for_promote.storage().promote_free_releases(limit);
         let page_c = loader.allocate_page().unwrap();

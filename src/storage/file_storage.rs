@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -15,6 +16,14 @@ use super::crypto::{
 };
 use super::file_header::{FileHeader, HeaderError, FLAG_ENCRYPTED, HEADER_SIZE};
 use crate::storage::{AsyncStorage, Page, PageId, Result, StorageError};
+
+/// 一次已释放、尚未提升的页。锚点页号在释放完成时写入；空列表表示这次
+/// 释放没有锚点写，提升时不看失败集合。
+struct PendingRelease {
+    page: u64,
+    completion: Option<u64>,
+    anchors: Vec<u64>,
+}
 
 /// Map a module-private header classification to a `StorageError` with the
 /// path attached (MS10-T03 design D5).
@@ -49,24 +58,19 @@ pub struct FileStorage {
     file_len: AtomicU64,
     free_pages: Mutex<Vec<u64>>,
     /// MS35（`free-page-lifecycle` R3）：待释放集合——已释放但尚未在崩溃
-    /// 边界上成立的页。元素 = (页号, 释放完成编号 Option)；`None` = 该释放
-    /// 尚未完成（锚点写未发出）⇒ 任何时刻都不得被提升。
+    /// 边界上成立的页。完成编号为 `None` 时锚点写尚未发出，任何时刻都不得
+    /// 被提升。完成时记下这次调用的锚点页号。
     ///
     /// 释放完成编号单调递增（`release_id`）；checkpoint 在刷盘前取样该
     /// 编号，刷盘成功才把完成编号小于样本的项提升进 `free_pages`，刷盘失败
     /// 则丢弃（不提升）。
-    pending_frees: Mutex<Vec<(u64, Option<u64>)>>,
+    pending_frees: Mutex<Vec<PendingRelease>>,
     /// MS35（`free-page-lifecycle` R3）：已完成的释放计数（单调递增）。
-    ///
-    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
-    /// Iteration 004（RDP R2）：该计数器同时为**写盘失败**分配编号——一次
-    /// 数据页写失败也消耗一个编号，于是「某次写失败发生在该释放完成之后」
-    /// 可以用编号比较表达（失败编号 > 释放完成编号），而不需要额外的状态
-    /// 通道。失败编号只在该次写失败时分配，不影响释放完成编号的单调性。
+    /// checkpoint 在刷盘前取样它。写盘失败不再消耗这个编号。
     release_id: AtomicU64,
-    /// RDP R2：最近一次数据页写盘失败的编号（`release_id` 计数器分配）。
-    /// `0` = 尚未发生过写盘失败。
-    last_failed_write: AtomicU64,
+    /// 写盘失败的页号。失败的 `write_page` 放入该页，该页其后一次成功写入
+    /// 后移出。只在内存，不进页字节，也不进文件头。
+    failed_pages: Mutex<HashSet<u64>>,
     /// MS26 T1：只读实例（`open_readonly*`）——写方法显式点名拒绝，
     /// `sync` 为 no-op。只读打开的正常路径不可达这些守卫（写语句在
     /// pipeline 层先被拒，见 `pipeline::readonly_rejection`），此处为
@@ -216,8 +220,7 @@ impl FileStorage {
             free_pages: Mutex::new(Vec::new()),
             pending_frees: Mutex::new(Vec::new()),
             release_id: AtomicU64::new(0),
-            // RDP R2：尚无写盘失败。
-            last_failed_write: AtomicU64::new(0),
+            failed_pages: Mutex::new(HashSet::new()),
             readonly: false,
             io_failpoint,
         })
@@ -276,8 +279,7 @@ impl FileStorage {
             free_pages: Mutex::new(Vec::new()),
             pending_frees: Mutex::new(Vec::new()),
             release_id: AtomicU64::new(0),
-            // RDP R2：尚无写盘失败。
-            last_failed_write: AtomicU64::new(0),
+            failed_pages: Mutex::new(HashSet::new()),
             readonly: true,
             io_failpoint: Arc::new(Mutex::new(None)),
         })
@@ -425,12 +427,12 @@ impl FileStorage {
         Ok(())
     }
 
-    /// RDP R2：登记一次数据页写盘失败——从 `release_id` 计数器取一个编号
-    /// （与释放完成编号同一编号空间），使「失败发生在某次释放完成之后」
-    /// 可由编号比较回答。
-    fn record_write_failure(&self) {
-        let id = self.release_id.fetch_add(1, Ordering::SeqCst) + 1;
-        self.last_failed_write.store(id, Ordering::SeqCst);
+    fn mark_write_failed(&self, page_id: PageId) {
+        self.failed_pages.lock().unwrap().insert(page_id.0);
+    }
+
+    fn mark_write_succeeded(&self, page_id: PageId) {
+        self.failed_pages.lock().unwrap().remove(&page_id.0);
     }
 }
 
@@ -455,7 +457,7 @@ impl AsyncStorage for FileStorage {
         // spawn_blocking 内的 write_all_at）之前消费——注入失败不产生半页、
         // 不触碰文件。
         if consume_io_failpoint(&self.io_failpoint, IoFailPoint::DataWrite) {
-            self.record_write_failure();
+            self.mark_write_failed(page_id);
             return Err(StorageError::Io(std::io::Error::other(
                 "injected io failure (write_page)",
             )));
@@ -464,14 +466,20 @@ impl AsyncStorage for FileStorage {
         let cipher = self.cipher.clone();
         let record_size = self.record_size;
         let data = page.data.clone();
-        spawn_blocking(move || Self::write_page_blocking(file, cipher, page_id, record_size, data))
-            .await?
-            .map_err(|e| {
-                // RDP R2：真实写盘失败同样登记——它使「该次刷盘已把锚点写
-                // 落盘」这一前提无法确认。
-                self.record_write_failure();
-                e
-            })
+        match spawn_blocking(move || {
+            Self::write_page_blocking(file, cipher, page_id, record_size, data)
+        })
+        .await?
+        {
+            Ok(()) => {
+                self.mark_write_succeeded(page_id);
+                Ok(())
+            }
+            Err(e) => {
+                self.mark_write_failed(page_id);
+                Err(e)
+            }
+        }
     }
 
     async fn allocate_page(&self) -> Result<PageId> {
@@ -539,7 +547,11 @@ impl AsyncStorage for FileStorage {
         //
         // MS33 D1：释放时不写零页。checkpoint 前崩溃时磁盘页保留原内容，
         // 清零移到 `allocate_page` 弹出该页号时。
-        self.pending_frees.lock().unwrap().push((page_id.0, None));
+        self.pending_frees.lock().unwrap().push(PendingRelease {
+            page: page_id.0,
+            completion: None,
+            anchors: Vec::new(),
+        });
         Ok(())
     }
 
@@ -580,15 +592,17 @@ impl AsyncStorage for FileStorage {
     /// MS35（`free-page-lifecycle` R3）：释放操作完成——本次释放的锚点写
     /// 已经发出。只有 `pages` 里的页被标记为完成：未完成的释放任何时刻都
     /// 不得被提升（并发释放互不覆盖）。
-    fn complete_free_release(&self, pages: &[PageId]) {
+    fn complete_free_release(&self, pages: &[PageId], anchors: &[PageId]) {
         if pages.is_empty() {
             return;
         }
         let id = self.release_id.fetch_add(1, Ordering::SeqCst);
+        let anchor_ids: Vec<u64> = anchors.iter().map(|page| page.0).collect();
         let mut pending = self.pending_frees.lock().unwrap();
         for entry in pending.iter_mut() {
-            if entry.1.is_none() && pages.iter().any(|p| p.0 == entry.0) {
-                entry.1 = Some(id);
+            if entry.completion.is_none() && pages.iter().any(|page| page.0 == entry.page) {
+                entry.completion = Some(id);
+                entry.anchors = anchor_ids.clone();
             }
         }
     }
@@ -596,31 +610,25 @@ impl AsyncStorage for FileStorage {
     /// MS35（`free-page-lifecycle` R3）：覆盖样本的刷盘成功 ⇒ 该批释放在
     /// 崩溃边界上成立 ⇒ 其页进入可分配集合。
     ///
-    /// change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
-    /// Iteration 004（RDP R2）：**释放的可分配判定以锚点写已持久为准**。
-    /// 提升按每个待释放项进行：若该释放完成之后发生过数据页写盘失败，
-    /// 则覆盖它的那次刷盘未能把锚点写落盘 ⇒ 其持久化前提无法确认 ⇒
-    /// 该释放**不被提升**，并**继续留在待释放集合**等下一次 checkpoint
-    /// 重判（不是「丢弃」——丢弃会永久消除该释放，使「锚点写已落盘时释放
-    /// 被提升」永不成立）。未被提升的释放不得进入可分配集合 ⇒ 未持久化
-    /// 的释放不会变成可分配页。
+    /// 释放的可分配判定以锚点页是否仍在失败集合内为准。完成编号仍须
+    /// `id < limit`。锚点列表为空时，不因失败集合拒绝。任一锚点仍失败则
+    /// 该项留在待释放集合，等该页成功写入后再判。
     fn promote_free_releases(&self, limit: u64) {
-        // 最近一次写盘失败的编号（与释放完成编号同一编号空间）。
-        let last_failure = self.last_failed_write.load(Ordering::SeqCst);
+        let failed = self.failed_pages.lock().unwrap();
         let mut pending = self.pending_frees.lock().unwrap();
         let mut free = self.free_pages.lock().unwrap();
         let mut remaining = Vec::with_capacity(pending.len());
-        for (page, completion) in pending.drain(..) {
-            match completion {
+        for entry in pending.drain(..) {
+            match entry.completion {
                 Some(id) if id < limit => {
-                    if last_failure > id {
-                        // 失败发生在该释放完成之后 ⇒ 锚点写未持久 ⇒ 不提升。
-                        remaining.push((page, completion));
+                    let anchor_failed = entry.anchors.iter().any(|page| failed.contains(page));
+                    if anchor_failed {
+                        remaining.push(entry);
                     } else {
-                        free.push(page);
+                        free.push(entry.page);
                     }
                 }
-                _ => remaining.push((page, completion)),
+                _ => remaining.push(entry),
             }
         }
         *pending = remaining;
@@ -631,8 +639,8 @@ impl AsyncStorage for FileStorage {
     /// 重开时按持久目录重建会把它们判成空闲。
     fn discard_free_releases(&self, limit: u64) {
         let mut pending = self.pending_frees.lock().unwrap();
-        pending.retain(|(_, completion)| match completion {
-            Some(id) => *id >= limit,
+        pending.retain(|entry| match entry.completion {
+            Some(id) => id >= limit,
             None => true,
         });
     }

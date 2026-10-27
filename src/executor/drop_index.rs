@@ -41,7 +41,7 @@ impl Executor for DropIndexExecutor {
             _ => panic!("DropIndexExecutor requires DropIndexNode"),
         };
 
-        let Some((_table, _column, old_tree)) = self
+        let Some((_table, _column, old_tree, anchor)) = self
             .database
             .table_manager
             .take_secondary_index(&node.index_name)
@@ -78,7 +78,10 @@ impl Executor for DropIndexExecutor {
 
         // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
         // = 目录摘除（`take_secondary_index`），已发出。
-        self.database.buffer_pool.complete_free_release(&released);
+        let anchors: Vec<PageId> = anchor.into_iter().collect();
+        self.database
+            .buffer_pool
+            .complete_free_release(&released, &anchors);
 
         Ok(Some(ExecResult::AffectedRows(0)))
     }

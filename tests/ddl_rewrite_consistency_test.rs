@@ -56,9 +56,13 @@ async fn setup(dir: &TempDir, rows: i64) -> Database {
     let db = Database::open(&db_path(dir)).await.unwrap();
     db.execute_sql(CREATE_SQL).await.unwrap();
     for id in 1..=rows {
-        db.execute_sql(&format!("INSERT INTO t VALUES ({id}, {}, {})", id * 10, id * 100))
-            .await
-            .unwrap();
+        db.execute_sql(&format!(
+            "INSERT INTO t VALUES ({id}, {}, {})",
+            id * 10,
+            id * 100
+        ))
+        .await
+        .unwrap();
     }
     db
 }
@@ -187,42 +191,46 @@ async fn dump_chain(db: &Database, head: PageId) -> Vec<SlotView> {
     for page_id in chain_pages(db, head).await {
         let slots = db
             .buffer_pool
-            .with_page_data(PageId(page_id as u64), |data| -> StorageResult<Vec<SlotView>> {
-                let slotted = SlottedPageRef::new(data);
-                let mut slots = Vec::new();
-                for index in 0..slotted.slot_count() {
-                    let Some(slot) = slotted.get_slot(index) else {
-                        continue;
-                    };
-                    let slot_data = slotted.get_slot_data(&slot);
-                    if slot_data.len() < VersionHeader::SIZE {
-                        continue;
+            .with_page_data(
+                PageId(page_id as u64),
+                |data| -> StorageResult<Vec<SlotView>> {
+                    let slotted = SlottedPageRef::new(data);
+                    let mut slots = Vec::new();
+                    for index in 0..slotted.slot_count() {
+                        let Some(slot) = slotted.get_slot(index) else {
+                            continue;
+                        };
+                        let slot_data = slotted.get_slot_data(&slot);
+                        if slot_data.len() < VersionHeader::SIZE {
+                            continue;
+                        }
+                        let Some(vh) = VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE])
+                        else {
+                            continue;
+                        };
+                        let tuple_bytes = &slot_data[VersionHeader::SIZE..];
+                        let first_int = deserialize_row(
+                            tuple_bytes,
+                            &[ColumnType::Int, ColumnType::Int, ColumnType::Int],
+                            &[],
+                        )
+                        .ok()
+                        .and_then(|values| match values.first() {
+                            Some(Value::Int(id)) => Some(*id),
+                            _ => None,
+                        });
+                        slots.push(SlotView {
+                            page_id: page_id as u32,
+                            slot_id: slot.logical_id,
+                            create_tx: vh.create_tx_id(),
+                            deleted: vh.is_deleted(),
+                            next: vh.next_version(),
+                            first_int,
+                        });
                     }
-                    let Some(vh) = VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE]) else {
-                        continue;
-                    };
-                    let tuple_bytes = &slot_data[VersionHeader::SIZE..];
-                    let first_int = deserialize_row(
-                        tuple_bytes,
-                        &[ColumnType::Int, ColumnType::Int, ColumnType::Int],
-                        &[],
-                    )
-                    .ok()
-                    .and_then(|values| match values.first() {
-                        Some(Value::Int(id)) => Some(*id),
-                        _ => None,
-                    });
-                    slots.push(SlotView {
-                        page_id: page_id as u32,
-                        slot_id: slot.logical_id,
-                        create_tx: vh.create_tx_id(),
-                        deleted: vh.is_deleted(),
-                        next: vh.next_version(),
-                        first_int,
-                    });
-                }
-                Ok(slots)
-            })
+                    Ok(slots)
+                },
+            )
             .await
             .unwrap();
         views.extend(slots);
@@ -321,7 +329,10 @@ async fn drop_column_across_page_boundary_keeps_every_row_on_one_chain() {
 
     // AR1-c：改写后的行全部落在同一条数据页链上（无孤儿页）。
     let meta = db.get_table("t").await.unwrap();
-    let chain: BTreeSet<u32> = chain_pages(&db, meta.data_page_head).await.into_iter().collect();
+    let chain: BTreeSet<u32> = chain_pages(&db, meta.data_page_head)
+        .await
+        .into_iter()
+        .collect();
     let row_pages = live_row_pages(&db, &ids_after.iter().copied().collect::<Vec<_>>()).await;
     let off_chain_rows: Vec<u32> = row_pages.difference(&chain).copied().collect();
     assert!(
@@ -371,7 +382,10 @@ struct Readings {
 /// 两者都计入「该事务写下的指向者」。
 async fn readings(db: &Database, tx_id: u64) -> Readings {
     let meta = db.get_table("t").await.unwrap();
-    let chain: BTreeSet<u32> = chain_pages(db, meta.data_page_head).await.into_iter().collect();
+    let chain: BTreeSet<u32> = chain_pages(db, meta.data_page_head)
+        .await
+        .into_iter()
+        .collect();
     let slots = dump_chain(db, meta.data_page_head).await;
 
     // 该事务写下的墓碑（指向者）：未被中和的仍带它的 tx id，已中和的带 0。
@@ -413,7 +427,9 @@ async fn abandoned_drop_column_keeps_rewritten_row_visible() {
     let dir = TempDir::new().unwrap();
     let db = setup(&dir, ROWS_T6).await;
     // 回收触发用的写入目标表。
-    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await.unwrap();
+    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
 
     // 放弃改写（锚点 = 活跃事务已记录版本数 ≥ 2 ⇒ 语句已进入数据面改写）。
     let tx_id = abandon_statement(&db, DROP_SQL).await;
@@ -462,8 +478,7 @@ async fn abandoned_drop_column_keeps_rewritten_row_visible() {
         read.pointers_neutralized,
         "every tombstone the abandoned rewrite wrote must be neutralized (create_tx_id == 0); \
          pointer create_tx ids: {:?}; touched rows: {:?}",
-        read.pointer_create_tx,
-        read.touched
+        read.pointer_create_tx, read.touched
     );
 }
 
@@ -481,12 +496,7 @@ struct Shape {
 }
 
 async fn observe_shape(db: &Database) -> Shape {
-    let mut cols = db
-        .table_manager
-        .catalog()
-        .scan_columns("t")
-        .await
-        .unwrap();
+    let mut cols = db.table_manager.catalog().scan_columns("t").await.unwrap();
     cols.sort_by_key(|c| c.column_index);
     let columns: Vec<String> = cols.into_iter().map(|c| c.column_name).collect();
 
@@ -514,7 +524,9 @@ async fn observe_shape(db: &Database) -> Shape {
 async fn abandoned_drop_column_reopen_keeps_all_rows() {
     let dir = TempDir::new().unwrap();
     let db = setup(&dir, ROWS_T6).await;
-    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await.unwrap();
+    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
 
     // 放弃改写 + 回收。
     let _tx_id = abandon_statement(&db, DROP_SQL).await;
@@ -580,7 +592,9 @@ async fn abandoned_drop_column_reopen_keeps_all_rows() {
 async fn rolled_back_rewrite_does_not_suppress_predecessor_for_later_rewrite() {
     let dir = TempDir::new().unwrap();
     let db = setup(&dir, ROWS_T6).await;
-    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await.unwrap();
+    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
 
     // 放弃改写（删**末列** `w`）+ 回收。改写的墓碑指向被触及行的旧版本。
     let tx_id = abandon_statement(&db, "ALTER TABLE t DROP COLUMN w").await;
@@ -648,7 +662,9 @@ async fn anchor_slot_written(db: &Database) -> Option<u64> {
 async fn abandoned_drop_column_before_version_registration_keeps_row_visible() {
     let dir = TempDir::new().unwrap();
     let db = setup(&dir, ROWS_T6).await;
-    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await.unwrap();
+    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
 
     // 放弃改写，锚点 = 「链上已出现本事务写的版本槽」。
     let mut statement = Box::pin(db.execute_sql(DROP_SQL));
@@ -662,7 +678,9 @@ async fn abandoned_drop_column_before_version_registration_keeps_row_visible() {
             }
         })
         .await
-        .expect("the abandon anchor must be reachable: the fixture statement did not reach it in time")
+        .expect(
+            "the abandon anchor must be reachable: the fixture statement did not reach it in time",
+        )
     });
     let tx_id = tokio::select! {
         biased;
@@ -724,7 +742,9 @@ async fn anchor_narrow_copy_written(db: &Database) -> Option<u64> {
 async fn abandoned_drop_column_before_narrow_copy_registration_keeps_row_count() {
     let dir = TempDir::new().unwrap();
     let db = setup(&dir, ROWS_T6).await;
-    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").await.unwrap();
+    db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
 
     let mut statement = Box::pin(db.execute_sql(DROP_SQL));
     let mut anchor = Box::pin(async {
@@ -737,7 +757,9 @@ async fn abandoned_drop_column_before_narrow_copy_registration_keeps_row_count()
             }
         })
         .await
-        .expect("the abandon anchor must be reachable: the fixture statement did not reach it in time")
+        .expect(
+            "the abandon anchor must be reachable: the fixture statement did not reach it in time",
+        )
     });
     let tx_id = tokio::select! {
         biased;
@@ -906,7 +928,9 @@ async fn read_of_other_table_during_narrowing_is_unaffected() {
     db.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, x INT)")
         .await
         .unwrap();
-    db.execute_sql("INSERT INTO t2 VALUES (1, 11)").await.unwrap();
+    db.execute_sql("INSERT INTO t2 VALUES (1, 11)")
+        .await
+        .unwrap();
 
     let gate = arm_ddl_commit_window(&db_path(&dir));
     let mut statement = Box::pin(db.execute_sql(DROP_SQL));

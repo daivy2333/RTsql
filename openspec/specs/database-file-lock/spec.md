@@ -1,7 +1,7 @@
 # database-file-lock Specification
 
 ## Purpose
-TBD - created by archiving change 2026-09-06-ms10-t02-file-lock-graceful-shutdown. Update Purpose after archive.
+读写打开对主数据库文件取得非阻塞 advisory 独占锁，锁被占用时按等待预算重试，预算耗尽后返回 `DatabaseLocked`；只读打开对共享锁使用同一等待预算。来源：`2026-09-06-ms10-t02-file-lock-graceful-shutdown`
 ## Requirements
 ### Requirement: 打开即独占文件锁
 
