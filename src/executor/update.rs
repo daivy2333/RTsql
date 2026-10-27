@@ -230,13 +230,12 @@ impl UpdateExecutor {
             .map(|(col_idx, _)| values[*col_idx].clone())
             .collect();
 
-        // MS21 Iter002 (T2-d/D7)：二级列旧值快照——同区同型（无二级索引的
-        // 表零开销，不快照）。
-        let secondary_old_values: Vec<Value> = self
+        // 二级索引旧键在赋值前派生。没有二级索引时不读行。
+        let old_secondary_keys: Vec<Option<crate::storage::page_format::Key>> = self
             .table_meta
             .secondary_indexes
             .iter()
-            .map(|s| values[s.column_index].clone())
+            .map(|sindex| sindex.derive_key(&self.schema, &values))
             .collect();
 
         // Step 5 (T9): 赋值落位（语句序；同列重复赋值后写胜出）。
@@ -422,14 +421,14 @@ impl UpdateExecutor {
         // 1. 值不变：条目按同键换指新 rid；
         // 2. 置 NULL：删旧条目（NULL 不入索引）；
         // 3. 改值：删旧键旧条目、插新键新条目。NULL 与不可容纳的值不入树。
-        for (pos, sindex) in self.table_meta.secondary_indexes.iter().enumerate() {
-            let col = sindex.column_index;
-            let column_type = &self.schema[col];
-            let old_v = &secondary_old_values[pos];
-            let new_v = &values[col];
-            let old_key = old_v.secondary_index_key(column_type);
-            let new_key = new_v.secondary_index_key(column_type);
-            if old_v == new_v {
+        for (sindex, old_key) in self
+            .table_meta
+            .secondary_indexes
+            .iter()
+            .zip(old_secondary_keys)
+        {
+            let new_key = sindex.derive_key(&self.schema, &values);
+            if old_key == new_key {
                 if let Some(k) = new_key {
                     sindex.index.delete_exact(k.as_bytes(), old_row_id).await?;
                     sindex.index.insert(k.as_bytes(), new_row_id).await?;

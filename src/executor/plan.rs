@@ -2,8 +2,9 @@
 
 use crate::executor::aggregate::AggregateFunc;
 use crate::executor::predicate::{ExpressionRef, PredicateRef};
+use crate::executor::value::RangeSentinel;
 use crate::executor::{ColumnType, Value};
-use crate::storage::page_format::Key;
+use crate::storage::page_format::{ColumnType as StorageColumnType, Key};
 use std::collections::HashMap;
 
 /// 排序列定义
@@ -29,6 +30,8 @@ pub enum PhysicalPlan {
     IndexScan(IndexScanNode),
     /// 非唯一索引扫描（返回所有匹配行）
     IndexScanAll(IndexScanAllNode),
+    /// 二级索引范围扫描。端点只来自 `Value::secondary_range_bounds`。
+    IndexRangeScan(IndexRangeScanNode),
     /// 过滤节点（WHERE 子句）
     Filter(FilterNode),
     /// 插入
@@ -169,6 +172,27 @@ pub struct IndexScanAllNode {
     /// 全扫语义（构造路径逐字节不变）；`Some` 时执行器消费该登记树
     /// （pipeline 按 `TableMeta.secondary_indexes` 名称解析）。
     pub index_name: Option<String>,
+}
+
+/// 二级索引范围扫描。
+///
+/// `columns` 与 `IndexScanAll` 一样是基表全列，输出形状只由 `projection` 决定。
+/// `lower` / `upper` 是哨兵，缺席的一侧表示该方向没有约束。
+#[derive(Debug, Clone)]
+pub struct IndexRangeScanNode {
+    pub table_name: String,
+    pub index_name: String,
+    pub columns: Vec<String>,
+    pub projection: Vec<usize>,
+    pub lower: Option<RangeSentinel>,
+    pub upper: Option<RangeSentinel>,
+    /// 为真时，范围结果还要补上键派生为空且原谓词成立的可见行。
+    pub omitted_scan: bool,
+    pub predicate: Option<PredicateRef>,
+    /// 索引列在基表行中的位置，顺序与索引定义一致。
+    pub index_column_indexes: Vec<usize>,
+    pub generation: u8,
+    pub index_column_types: Vec<StorageColumnType>,
 }
 
 /// 过滤节点（WHERE 子句求值）
@@ -465,10 +489,14 @@ pub struct CreateIndexNode {
     pub index_name: String,
     /// 目标表名
     pub table_name: String,
-    /// 索引列（表列序内位置）
+    /// 索引第一列（表列序内位置）
     pub column_index: usize,
-    /// 索引列名（EXPLAIN 参数直出）
+    /// 索引第一列名（EXPLAIN 参数直出）
     pub column_name: String,
+    /// 键编码世代。单列字符串为 0，新建单列整数和多列为 1。
+    pub generation: u8,
+    /// 第一列之后的列号，顺序与索引定义一致。
+    pub extra_column_indexes: Vec<usize>,
 }
 
 /// ALTER TABLE 操作（MS21 Iter003 T3-b/c）——计划期白名单后的两种形态

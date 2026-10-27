@@ -5,12 +5,13 @@ use crate::executor::{
     AntiJoinExecutor, ConflictAction, CreateIndexExecutor, CreateTableAsSelectNode,
     CreateTableExecutor, CreateViewExecutor, DataScanExecutor, DeleteExecutor, DerivedScanExecutor,
     DistinctExecutor, DropIndexExecutor, DropTableExecutor, DropViewExecutor, ExecResult, Executor,
-    ExplainExecutor, FilterExecutor, HavingExecutor, IndexScanAllExecutor, IndexScanExecutor,
-    InsertExecutor, InsertNode, InsertSelectNode, JoinConfig, JoinExecutor, JoinRelatedConfig,
-    LimitExecutor, NestedLoopJoinExecutor, OutputColumn, PhysicalPlan, ProjectionExecutor,
-    ScalarSubqueryFilterExecutor, ScanExecutor, SemiJoinExecutorV2, SetOperationExecutor,
-    SingleRowExecutor, SortExecutor, SortMergeJoinExecutor, SubqueryEvalExecutor, TruncateExecutor,
-    UpdateExecutor, UpsertExecutor, UpsertNode, UpsertValueExpr, Value, ValueParamSlot,
+    ExplainExecutor, FilterExecutor, HavingExecutor, IndexRangeScanExecutor, IndexScanAllExecutor,
+    IndexScanExecutor, InsertExecutor, InsertNode, InsertSelectNode, JoinConfig, JoinExecutor,
+    JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, OutputColumn, PhysicalPlan,
+    ProjectionExecutor, ScalarSubqueryFilterExecutor, ScanExecutor, SemiJoinExecutorV2,
+    SetOperationExecutor, SingleRowExecutor, SortExecutor, SortMergeJoinExecutor,
+    SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor, UpsertExecutor, UpsertNode,
+    UpsertValueExpr, Value, ValueParamSlot,
 };
 use crate::parser::placeholder::{assign_placeholder_indices, count_placeholders, PARAM_PREFIX};
 use crate::parser::planner::ViewDef;
@@ -1872,6 +1873,10 @@ fn plan_type_slots(plan: &PhysicalPlan) -> Vec<TypeSlot> {
             &node.table_name,
             &projected_column_names(&node.columns, &node.projection),
         ),
+        PhysicalPlan::IndexRangeScan(node) => table_slots(
+            &node.table_name,
+            &projected_column_names(&node.columns, &node.projection),
+        ),
         PhysicalPlan::ScalarSubqueryFilter(node) => {
             // `columns` 即裁剪后实际输出形状（与 IndexScan 同型）。
             table_slots(&node.table_name, &node.columns)
@@ -2021,6 +2026,7 @@ fn collect_scan_tables(plan: &PhysicalPlan, out: &mut Vec<String>) {
         PhysicalPlan::DataScan(node) => push(&node.table_name),
         PhysicalPlan::IndexScan(node) => push(&node.table_name),
         PhysicalPlan::IndexScanAll(node) => push(&node.table_name),
+        PhysicalPlan::IndexRangeScan(node) => push(&node.table_name),
         PhysicalPlan::ScalarSubqueryFilter(node) => push(&node.table_name),
         PhysicalPlan::Filter(node) => collect_scan_tables(&node.input, out),
         PhysicalPlan::Sort(node) => collect_scan_tables(&node.input, out),
@@ -2302,6 +2308,44 @@ pub(crate) fn create_executor_from_plan<'a>(
                         })?;
                     executor = executor.with_index_manager(index);
                 }
+                Ok(Box::new(executor.with_projection(node.projection)) as Box<dyn Executor + Send>)
+            }
+
+            PhysicalPlan::IndexRangeScan(node) => {
+                let db = routed_db(routed, database, &node.table_name).0;
+                let table_meta = load_table_meta(routed, database, &node.table_name).await?;
+                let index = table_meta
+                    .secondary_indexes
+                    .iter()
+                    .find(|secondary| secondary.name == node.index_name)
+                    .map(|secondary| secondary.index.clone())
+                    .ok_or_else(|| {
+                        StorageError::Internal(format!(
+                            "plan routes to unregistered secondary index '{}'",
+                            node.index_name
+                        ))
+                    })?;
+                let lower = node
+                    .lower
+                    .as_ref()
+                    .map(|sentinel| (sentinel.key.clone(), sentinel.inclusive));
+                let upper = node
+                    .upper
+                    .as_ref()
+                    .map(|sentinel| (sentinel.key.clone(), sentinel.inclusive));
+                let executor = IndexRangeScanExecutor::new(
+                    table_meta,
+                    db.buffer_pool.clone(),
+                    index,
+                    lower,
+                    upper,
+                    node.omitted_scan,
+                    node.predicate.clone(),
+                    node.index_column_indexes.clone(),
+                    node.index_column_types.clone(),
+                    node.generation,
+                    snapshot,
+                );
                 Ok(Box::new(executor.with_projection(node.projection)) as Box<dyn Executor + Send>)
             }
 
@@ -2888,8 +2932,8 @@ pub(crate) fn create_executor_from_plan<'a>(
     })
 }
 
-/// MS31-T01：`value_to_json` 已迁入 `crate::result`（核心/协议解耦的载体
-/// 模块）——本文件不再持有值转换实现。
+// MS31-T01：`value_to_json` 已迁入 `crate::result`（核心/协议解耦的载体
+// 模块）——本文件不再持有值转换实现。
 
 /// T4（change 2026-10-04-external-review-gaps）：计划的输出列名序（仅覆盖
 /// SubqueryEval 消费面可达的形状——扫描类/聚合/排序/链式标量节点；其余形状
@@ -2914,6 +2958,11 @@ fn plan_output_names(plan: &PhysicalPlan) -> Option<Vec<String>> {
         }),
         PhysicalPlan::IndexScan(n) => Some(n.columns.clone()),
         PhysicalPlan::IndexScanAll(n) => Some(if n.projection.is_empty() {
+            n.columns.clone()
+        } else {
+            n.projection.iter().map(|&i| n.columns[i].clone()).collect()
+        }),
+        PhysicalPlan::IndexRangeScan(n) => Some(if n.projection.is_empty() {
             n.columns.clone()
         } else {
             n.projection.iter().map(|&i| n.columns[i].clone()).collect()
@@ -3205,9 +3254,23 @@ fn extract_column_indices(plan: &PhysicalPlan) -> Result<(HashMap<String, usize>
             Ok((indices, node.table_name.clone()))
         }
         PhysicalPlan::IndexScanAll(node) => {
-            // T1（change 2026-10-04-external-review-gaps D1）：`columns` 是
-            // 基表全列，输出形状由 `projection` 决定——先裁剪再建立输出位
-            // 映射（对齐 IndexScan 臂「已收窄」口径；执行器行即该形状）。
+            // `columns` 是基表全列，输出形状由 `projection` 决定。
+            let projected: Vec<String> = if node.projection.is_empty() {
+                node.columns.clone()
+            } else {
+                node.projection
+                    .iter()
+                    .map(|&i| node.columns[i].clone())
+                    .collect()
+            };
+            let indices: HashMap<String, usize> = projected
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| (col.to_lowercase(), idx))
+                .collect();
+            Ok((indices, node.table_name.clone()))
+        }
+        PhysicalPlan::IndexRangeScan(node) => {
             let projected: Vec<String> = if node.projection.is_empty() {
                 node.columns.clone()
             } else {
@@ -3481,14 +3544,23 @@ fn register_table_schema(
     // I080 一期（T02-C1）：传递逐列 NOT NULL 标志，绑定作用域段登记时
     // 经 `table_binding_meta` 消费。
     builder.set_table_not_null(key, table_meta.not_null.clone());
-    // MS21 Iter002 (T2-g/D6)：传递登记的二级索引（索引名, 列名），非 PK
-    // 等值路由在计划期消费。
     builder.set_table_secondary_indexes(
         key,
         table_meta
             .secondary_indexes
             .iter()
-            .map(|s| (s.name.clone(), table_meta.columns[s.column_index].0.clone()))
+            .map(|index| {
+                let mut columns = Vec::with_capacity(1 + index.extra_column_indexes.len());
+                columns.push(table_meta.columns[index.column_index].0.clone());
+                for extra in &index.extra_column_indexes {
+                    columns.push(table_meta.columns[*extra].0.clone());
+                }
+                crate::parser::planner::SecondaryIndexRegistration {
+                    name: index.name.clone(),
+                    generation: index.generation,
+                    columns,
+                }
+            })
             .collect(),
     );
     if table_meta.explicit_primary_key {

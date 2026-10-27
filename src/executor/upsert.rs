@@ -319,8 +319,7 @@ impl UpsertExecutor {
 
         // 二级索引条目与插入路径同源。NULL 与不可容纳的值不入树。
         for sindex in &self.table_meta.secondary_indexes {
-            let column = sindex.column_index;
-            if let Some(key) = row_values[column].secondary_index_key(&self.schema[column]) {
+            if let Some(key) = sindex.derive_key(&self.schema, row_values) {
                 sindex.index.insert(key.as_bytes(), row_id).await?;
             }
         }
@@ -364,12 +363,12 @@ impl UpsertExecutor {
             .iter()
             .map(|(col_idx, _)| values[*col_idx].clone())
             .collect();
-        // MS21 Iter002 (T2-d/D7)：二级列旧值快照（同区同型）。
-        let secondary_old_values: Vec<Value> = self
+        // 二级索引旧键在赋值前派生。没有二级索引时不读行。
+        let old_secondary_keys: Vec<Option<crate::storage::page_format::Key>> = self
             .table_meta
             .secondary_indexes
             .iter()
-            .map(|s| values[s.column_index].clone())
+            .map(|sindex| sindex.derive_key(&self.schema, &values))
             .collect();
 
         let mut touched_columns: Vec<usize> = Vec::with_capacity(assignments.len());
@@ -573,14 +572,14 @@ impl UpsertExecutor {
         // MS21 Iter002 (T2-d/D7)：二级索引条目维护——镜像 `update.rs` 三支
         // 形态（同值换指 / 置 NULL 仅删 / 改值删旧插新），写入一律
         // `delete_exact` + `insert`（D3 禁用歧义原语）。
-        for (pos, sindex) in self.table_meta.secondary_indexes.iter().enumerate() {
-            let col = sindex.column_index;
-            let column_type = &self.schema[col];
-            let old_v = &secondary_old_values[pos];
-            let new_v = &values[col];
-            let old_key = old_v.secondary_index_key(column_type);
-            let new_key = new_v.secondary_index_key(column_type);
-            if old_v == new_v {
+        for (sindex, old_key) in self
+            .table_meta
+            .secondary_indexes
+            .iter()
+            .zip(old_secondary_keys)
+        {
+            let new_key = sindex.derive_key(&self.schema, &values);
+            if old_key == new_key {
                 if let Some(k) = new_key {
                     sindex
                         .index
@@ -636,9 +635,7 @@ impl UpsertExecutor {
                     // `delete_exact` 清理）。
                     let mut secondary = Vec::new();
                     for sindex in &self.table_meta.secondary_indexes {
-                        let column = sindex.column_index;
-                        if let Some(key) = values[column].secondary_index_key(&self.schema[column])
-                        {
+                        if let Some(key) = sindex.derive_key(&self.schema, &values) {
                             secondary.push((sindex.index.clone(), key.as_bytes().to_vec()));
                         }
                     }

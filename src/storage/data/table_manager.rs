@@ -16,7 +16,7 @@ use crate::storage::data_page::{
 };
 use crate::storage::free_page_rebuild::take_free_page_rebuild_fault;
 use crate::storage::integrity::{check_data_page, check_tree_page, violation_summary};
-use crate::storage::page_format::{overflow, ColumnType, SlottedPage, SlottedPageRef};
+use crate::storage::page_format::{overflow, ColumnType, Key, SlottedPage, SlottedPageRef};
 use crate::storage::page_id::PageId;
 use crate::storage::{
     read_tuple_from_data_page, AsyncStorage, BufferPool, Result, RowId, StorageError,
@@ -64,7 +64,38 @@ impl ColumnSchema {
 pub struct SecondaryIndexMeta {
     pub name: String,
     pub column_index: usize,
+    pub generation: u8,
+    pub extra_column_indexes: Vec<usize>,
     pub index: Arc<IndexManager>,
+}
+
+impl SecondaryIndexMeta {
+    /// 用这个索引记录的世代和完整列序派生键。放不下、NULL 或列缺失时返回 `None`。
+    pub(crate) fn derive_key(&self, schema: &[ColumnType], values: &[Value]) -> Option<Key> {
+        Self::derive_row_key(
+            schema,
+            values,
+            self.column_index,
+            &self.extra_column_indexes,
+            self.generation,
+        )
+    }
+
+    pub(crate) fn derive_row_key(
+        schema: &[ColumnType],
+        values: &[Value],
+        column_index: usize,
+        extra_column_indexes: &[usize],
+        generation: u8,
+    ) -> Option<Key> {
+        let mut columns = Vec::with_capacity(1 + extra_column_indexes.len());
+        let mut picked = Vec::with_capacity(1 + extra_column_indexes.len());
+        for index in std::iter::once(column_index).chain(extra_column_indexes.iter().copied()) {
+            columns.push(schema.get(index)?.clone());
+            picked.push(values.get(index)?.clone());
+        }
+        Value::derive_secondary_index_key(&columns, &picked, generation)
+    }
 }
 
 /// Iter 002 T9 (change 2026-09-30-catalog-durability-and-cli-surface):
@@ -313,7 +344,7 @@ fn narrowed_meta(old: &Arc<TableMeta>, removed: usize) -> Arc<TableMeta> {
     let new_secondary_indexes: Vec<SecondaryIndexMeta> = old
         .secondary_indexes
         .iter()
-        .filter(|s| s.column_index != removed)
+        .filter(|s| s.column_index != removed && !s.extra_column_indexes.contains(&removed))
         .map(|s| SecondaryIndexMeta {
             name: s.name.clone(),
             column_index: if s.column_index > removed {
@@ -321,6 +352,12 @@ fn narrowed_meta(old: &Arc<TableMeta>, removed: usize) -> Arc<TableMeta> {
             } else {
                 s.column_index
             },
+            generation: s.generation,
+            extra_column_indexes: s
+                .extra_column_indexes
+                .iter()
+                .map(|index| if *index > removed { index - 1 } else { *index })
+                .collect(),
             index: s.index.clone(),
         })
         .collect();
@@ -684,6 +721,12 @@ impl TableManager {
                 secondary_indexes.push(SecondaryIndexMeta {
                     name: entry.name.clone(),
                     column_index: entry.column_index as usize,
+                    generation: entry.generation,
+                    extra_column_indexes: entry
+                        .extra_column_indexes
+                        .iter()
+                        .map(|index| *index as usize)
+                        .collect(),
                     index,
                 });
             }
@@ -729,7 +772,8 @@ impl TableManager {
             .into_iter()
             .map(|(col_name, col_type)| (col_name, col_type, false, false, None))
             .collect();
-        self.create_table_with_constraints(name, columns, pk, false).await
+        self.create_table_with_constraints(name, columns, pk, false)
+            .await
     }
 
     /// Register a new table, persisting per-column NOT NULL / UNIQUE flags to
@@ -975,6 +1019,7 @@ impl TableManager {
     /// Catalog-first ordering: a failed catalog write leaves the in-memory
     /// meta unchanged (zero side effects, retryable — CTAS/CREATE INDEX
     /// precedent); the in-memory swap itself cannot fail.
+    #[allow(clippy::too_many_arguments)]
     pub async fn alter_add_column(
         &self,
         table: &str,
@@ -1207,7 +1252,7 @@ impl TableManager {
         if old
             .secondary_indexes
             .iter()
-            .any(|s| s.column_index == removed)
+            .any(|s| s.column_index == removed || s.extra_column_indexes.contains(&removed))
         {
             return Err(StorageError::Internal(format!(
                 "column '{}' is referenced by a secondary index and cannot be dropped (drop the index first)",
@@ -1353,9 +1398,7 @@ impl TableManager {
                 .secondary_indexes
                 .iter()
                 .filter_map(|s| {
-                    let column_type = &old.columns[s.column_index].1;
-                    old_values[s.column_index]
-                        .secondary_index_key(column_type)
+                    s.derive_key(&old_schema, &old_values)
                         .map(|k| (s.index.clone(), k.as_bytes().to_vec()))
                 })
                 .collect();
@@ -1460,9 +1503,7 @@ impl TableManager {
                 }
             }
             for sindex in &new_meta.secondary_indexes {
-                let column_type = &new_meta.columns[sindex.column_index].1;
-                if let Some(key) = new_values[sindex.column_index].secondary_index_key(column_type)
-                {
+                if let Some(key) = sindex.derive_key(&new_schema, &new_values) {
                     sindex.index.insert(key.as_bytes(), new_rid).await?;
                 }
             }
@@ -1556,7 +1597,11 @@ impl TableManager {
             }
             if self
                 .catalog
-                .update_table_column_count_ddl(&pending.table, pending.new_column_count)
+                .publish_narrowed_table_row(
+                    &pending.table,
+                    pending.removed_column.column_index,
+                    pending.new_column_count,
+                )
                 .await
                 .is_err()
             {
@@ -1607,7 +1652,7 @@ impl TableManager {
             .rewrite_column_rows_drop(table, removed_column_index)
             .await?;
         self.catalog
-            .update_table_column_count_ddl(table, new_column_count)
+            .publish_narrowed_table_row(table, removed_column_index, new_column_count)
             .await?;
         // 活布局切换：目录已广告窄化布局 ⇒ 读者按窄化后的列定义解码。
         let old = self.get_table(table).await?;
@@ -1894,6 +1939,8 @@ impl TableManager {
         table: &str,
         index_name: &str,
         column_index: usize,
+        generation: u8,
+        extra_column_indexes: Vec<usize>,
         index: Arc<IndexManager>,
     ) -> Result<()> {
         let root = index.root_page_id().0 as u32;
@@ -1904,6 +1951,11 @@ impl TableManager {
                     name: index_name.to_string(),
                     column_index: column_index as u32,
                     root,
+                    generation,
+                    extra_column_indexes: extra_column_indexes
+                        .iter()
+                        .map(|index| *index as u32)
+                        .collect(),
                 },
             )
             .await?;
@@ -1924,6 +1976,8 @@ impl TableManager {
         secondary_indexes.push(SecondaryIndexMeta {
             name: index_name.to_string(),
             column_index,
+            generation,
+            extra_column_indexes,
             index,
         });
         let meta = Arc::new(TableMeta {
@@ -2580,6 +2634,8 @@ impl TableManager {
                 new_secondaries.push(SecondaryIndexMeta {
                     name: s.name.clone(),
                     column_index: s.column_index,
+                    generation: s.generation,
+                    extra_column_indexes: s.extra_column_indexes.clone(),
                     index: tree,
                 });
             }
@@ -3175,7 +3231,7 @@ mod tests {
                 .unwrap(),
         );
         let root1 = tree1.root_page_id();
-        tm.register_secondary_index("t", "idx_age", 1, tree1.clone())
+        tm.register_secondary_index("t", "idx_age", 1, 0, Vec::new(), tree1.clone())
             .await
             .unwrap();
 
@@ -3187,7 +3243,7 @@ mod tests {
                 .unwrap(),
         );
         let root2 = tree2.root_page_id();
-        tm.register_secondary_index("t", "idx_city", 1, tree2.clone())
+        tm.register_secondary_index("t", "idx_city", 1, 0, Vec::new(), tree2.clone())
             .await
             .unwrap();
 

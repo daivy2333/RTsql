@@ -93,8 +93,7 @@ impl DeleteExecutor {
         }
         let mut secondary_keys = Vec::new();
         for sindex in &self.table_meta.secondary_indexes {
-            let column = sindex.column_index;
-            if let Some(key) = values[column].secondary_index_key(&schema[column]) {
+            if let Some(key) = sindex.derive_key(&schema, &values) {
                 secondary_keys.push((sindex.index.clone(), key.as_bytes().to_vec()));
             }
         }
