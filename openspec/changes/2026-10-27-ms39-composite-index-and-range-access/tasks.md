@@ -6,8 +6,9 @@
 
 - 需求与 BDD：completed。
 - 000：执行依据是 `iterations/000-key-and-catalog/000-initial.md`。Review Result 为 accepted。
-- 001：执行依据是 `iterations/001-create-maintain-recover/000-initial.md`。Act Response 为 reported，Review Result 为 pending。
-- 002、003：只列在 Iteration Plan 中，目录未创建。
+- 001：执行依据是 `iterations/001-create-maintain-recover/000-initial.md`。Review Result 为 accepted。
+- 002：执行依据是 `iterations/002-equality-and-range-routing/000-initial.md`，Plan Context 为 ready。目录已创建，尚未实施。
+- 003：只列在 Iteration Plan 中，目录未创建。
 - Persisted Evidence：none。
 - 无跳过项。
 
@@ -17,7 +18,7 @@
 |---|---|---|---|---|
 | T1 | 000 | 无 | 世代 1 的键派生和范围哨兵。先行测试 RED 后实现 GREEN。世代 0 的整数大端字节保持 | completed |
 | T2 | 000 | T1 | 目录尾段、内存元数据的额外列号和世代。旧单列记录字节不变，组合记录可往返。SQL 仍拒绝多列索引 | completed |
-| T3 | 001 | 000 accepted | `CREATE INDEX` 建组合索引和新建 INT 索引，回填、DML、回滚、恢复使用同一派生。删列守卫认识全部列号 | pending |
+| T3 | 001 | 000 accepted | `CREATE INDEX` 建组合索引和新建 INT 索引，回填、DML、回滚、恢复使用同一派生。删列守卫认识全部列号 | completed |
 | T4 | 002 | 001 accepted | 等值与范围路由、EXPLAIN、补扫和索引选择。结果与全表扫描相同 | pending |
 | T5 | 003 | 002 accepted | 取消、只读、内存、加密、附加库和旧库组合；README；按 M19 分批的一次全量 | pending |
 
@@ -28,7 +29,7 @@
 
 ## 2. 生命周期
 
-- [ ] 2.1 T3：SQL 创建组合索引和新建单列 INT 索引，条目与存活行一致，含回滚和未决 WAL。验证：本轮新增的库或集成测试直接比较条目与查询行，failed 为 0。
+- [x] 2.1 T3：SQL 创建组合索引和新建单列 INT 索引，条目与存活行一致，含回滚和未决 WAL。验证：本轮新增的库或集成测试直接比较条目与查询行，failed 为 0。
 
 ## 3. 路由
 
@@ -84,11 +85,11 @@
 
 | Requirement | Task | First Test | Status |
 |---|---|---|---|
-| CREATE INDEX 建立单列 INT 二级索引 | T2, T3 | `ordered_int_key_matches_signed_order`；T3 的创建测试在 001 展开时命名 | Covered |
-| 二级索引等值查询路由可达 | T4 | 002 的组合等值 EXPLAIN 测试，展开时命名 | Covered |
+| CREATE INDEX 建立单列 INT 二级索引 | T2, T3 | `ordered_int_key_matches_signed_order`；`new_single_column_int_index_uses_ordered_key` | Covered |
+| 二级索引等值查询路由可达 | T4 | `composite_equality_names_index` | Covered |
 | 既有语义零回归 | T2, T5 | `secondary_index_key_preserves_int_bytes` | Covered |
-| 范围谓词路由到二级索引扫描 | T1, T4 | `range_sentinel_composite_prefix_excludes_next_leading_value` | Covered |
-| 组合二级索引的条目与存活行一致 | T3 | 001 的改键与回滚测试，展开时命名 | Covered |
+| 范围谓词路由到二级索引扫描 | T1, T4 | `range_sentinel_composite_prefix_excludes_next_leading_value`；T4 的 `new_int_range_includes_negatives` | Covered |
+| 组合二级索引的条目与存活行一致 | T3 | `composite_update_keeps_the_other_duplicate`；`composite_rollback_removes_uncommitted_entry` | Covered |
 | 唯一性边界保持在整数单列 | T3, T4 | 001 起保留的 `CREATE UNIQUE INDEX` 拒绝断言 | Covered |
 
 没有 Simplified 行。场景、设计和代码位置分别在 proposal、design 和首轮 Cycle 中。
