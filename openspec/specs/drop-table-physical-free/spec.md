@@ -1,7 +1,7 @@
 # drop-table-physical-free Specification
 
 ## Purpose
-TBD - created by archiving change 2026-08-26-ms07-t02-drop-table-physical-free. Update Purpose after archive.
+`TableManager::drop_table` 在抹除目录行并移出内存表项之后，把该表的数据页和 BTree 页归还到 `FileStorage::free_pages`。来源：`2026-08-26-ms07-t02-drop-table-physical-free`
 ## Requirements
 ### Requirement: IndexManager::collect_all_pages 公开 API
 

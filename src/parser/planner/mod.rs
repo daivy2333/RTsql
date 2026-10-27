@@ -154,6 +154,9 @@ pub struct PlanBuilder {
     /// (pk="") are not registered — unknown type = falls back to existing routing (only real
     /// tables can reach key-position equality, downgrade is unreachable).
     pub(crate) primary_key_types: HashMap<String, ColumnType>,
+    /// Table names whose CREATE TABLE wrote `PRIMARY KEY`. Keys are lowercase,
+    /// same as `primary_keys`. Stays empty unless `set_explicit_primary_key` runs.
+    pub(crate) explicit_primary_keys: std::collections::HashSet<String>,
     /// MS24 Iteration 000 (D1): Table name -> per-column declared DEFAULT
     /// literals (index-aligned with the registered column list; `None` = no
     /// default). Additive channel mirroring `set_pk_column_type`; consumed by
@@ -265,6 +268,7 @@ impl PlanBuilder {
             tables: HashMap::new(),
             primary_keys: HashMap::new(),
             primary_key_types: HashMap::new(),
+            explicit_primary_keys: std::collections::HashSet::new(),
             table_defaults: HashMap::new(),
             table_unique_columns: HashMap::new(),
             table_secondary_indexes: HashMap::new(),
@@ -297,6 +301,13 @@ impl PlanBuilder {
     /// `register_table` signature unchanged; the key is lowercase, consistent with `register_table`).
     pub fn set_pk_column_type(&mut self, name: &str, ct: ColumnType) {
         self.primary_key_types.insert(name.to_lowercase(), ct);
+    }
+
+    /// Record that `name`'s CREATE TABLE wrote `PRIMARY KEY`.
+    /// The key is lowercase, consistent with `register_table`.
+    /// `register_table` does not insert this set.
+    pub fn set_explicit_primary_key(&mut self, name: &str) {
+        self.explicit_primary_keys.insert(name.to_lowercase());
     }
 
     /// design D4：登记 FROM / JOIN 处声明的表别名 → `self.tables` 真实键。

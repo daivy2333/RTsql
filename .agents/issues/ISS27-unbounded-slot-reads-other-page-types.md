@@ -1,6 +1,6 @@
 # 存储层其余页型的无界读点（数据页 / 目录页 / 恢复面 / 缓冲池，同形态约 17 处）
 
-- Status: open
+- Status: closed（2026-10-26 fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`）
 - Filed: 2026-10-25
 - Source: Act Response 的 Issue 候选 **IC-2**，change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 006 Cycle `000-initial.md`（Review Result `accepted`）；Iteration 007 的 Issue 候选 2 沿用同一编号
 - Environment: Linux x86_64 / WSL2 6.18.40.1、rustc 1.99.1 / cargo 1.99.1、RTsql `tests/release_path_bounded_read_test.rs` / `tests/index_read_bounded_read_test.rs` 集成测试；登记时工作区 HEAD `0a08b14`（ahead of origin 9），产品改动未提交
@@ -30,9 +30,11 @@
 - 夹具可复用：每个页型的字节级损坏注入沿用承载 change 已验证的手法（`slot_offset_field_offset` / `page_file_offset` / `corrupt_slot_offset`）。
 - 与 IC-1 的边界：本条是**其余页型**的无界读点面（不含索引树叶页条目长度判据，另有 ISS26 登记），根因位置与承载面不同，**不合并**。
 - **编号说明（避免交叉引用误读）**：MS36 的 Plan Review 曾把它的两条 Minor finding / Acceptance Gap 以「**ISS26** / **ISS27**」之**候选名**报告（见 `.agents/docs/tasks.md` 的 MS36 段），但那两条**从未登记为 Issue 文件**，且已由缺陷修复 change 的 Iteration 007 闭合（G2 文件级样本 E7 与其四项断言已落地；矩阵 G2 行已升格为「文件级样本（E7）」）⇒ 本 Issue 与那两条候选**无主题关系**，编号自 ISS26 起顺接（既有登记最大为 ISS25）。
+- 2026-10-26 关闭。原因：数据页、目录页、恢复面三组无界读已分别由归档变更 Iteration 001（T3）、Iteration 004（T4）、Iteration 005（T5）处置。三个 Cycle 的 Plan Review 均为 `accepted`。处置指针：fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`。
 
 ## 证据
 
+- 2026-10-26 关闭依据：`openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure/iterations/001-data-page-bounded-read/000-initial.md`、`iterations/004-catalog-bounded-read/000-initial.md`、`iterations/005-recovery-bounded-read/000-initial.md` 的 Plan Review 均为 `accepted`（T3 / T4 / T5）。
 - 调查与结论正文（不在本 Issue 复制）：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/iterations/006-index-read-bounded-read/000-initial.md` —— Act Response 的 Issue 候选 IC-2。
 - 沿用：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/iterations/007-legacy-compat-evidence/000-initial.md` —— Issue 候选 IC-2（沿用 Iteration 006 的登记）。
 - 移交记录：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/tasks.md`（收尾交接清单第 4 条）。

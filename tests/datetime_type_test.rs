@@ -492,6 +492,7 @@ async fn date_pk_equality_routing_fallback() {
                     ),
                 ],
                 "d",
+                false,
             )
             .await
             .unwrap();

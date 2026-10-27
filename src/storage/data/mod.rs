@@ -1,6 +1,6 @@
 mod table_manager;
 
 pub use table_manager::{
-    ColumnSchema, DataChainStatus, NarrowingGuard, NarrowingState, SecondaryIndexMeta, TableManager,
-    TableMeta,
+    ColumnSchema, DataChainStatus, NarrowingGuard, NarrowingState, SecondaryIndexMeta,
+    TableManager, TableMeta,
 };

@@ -22,13 +22,13 @@ use std::sync::Arc;
 
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
-use rtsql::storage::btree::{InternalNodeRef, BTree, SyncPageLoader};
+use rtsql::storage::btree::{BTree, InternalNodeRef, SyncPageLoader};
 use rtsql::storage::page_format::RowId;
 use rtsql::storage::{
     AsyncStorage, BufferPool, FileStorage, InternalNode, PageId, StorageError, INTERNAL_NODE,
     LEAF_NODE,
 };
-use tempfile::{TempDir, tempdir};
+use tempfile::{tempdir, TempDir};
 
 /// 物理页空间的高水位（`FileStorage::page_count`）：已分配过的页号上界。
 /// 释放的页号恒 `< hwm`，新分配的页号恒 `>= hwm`。
@@ -83,8 +83,7 @@ async fn walk_index_tree(pool: &BufferPool, root: PageId) -> (usize, usize, Vec<
                 assert_eq!(
                     data[0], INTERNAL_NODE,
                     "index page {} has an unexpected page type {:#04x}",
-                    page_id.0,
-                    data[0]
+                    page_id.0, data[0]
                 );
                 let iref = InternalNodeRef::new(&data);
                 next.push(PageId(iref.leftmost_child() as u64));
@@ -106,13 +105,19 @@ async fn walk_index_tree(pool: &BufferPool, root: PageId) -> (usize, usize, Vec<
 
 /// 库级夹具：建一张带主键索引的表并写入 `n` 行（一个事务内的多行 INSERT）。
 async fn seed_table(db: &Database, table: &str, n: i64) {
-    ok(db, &format!("CREATE TABLE {table} (id INT PRIMARY KEY, n INT)")).await;
+    ok(
+        db,
+        &format!("CREATE TABLE {table} (id INT PRIMARY KEY, n INT)"),
+    )
+    .await;
     for start in (0..n).step_by(50) {
         let end = (start + 50).min(n);
-        let values: Vec<String> = (start..end)
-            .map(|i| format!("({i}, {i})"))
-            .collect();
-        ok(db, &format!("INSERT INTO {table} VALUES {}", values.join(","))).await;
+        let values: Vec<String> = (start..end).map(|i| format!("({i}, {i})")).collect();
+        ok(
+            db,
+            &format!("INSERT INTO {table} VALUES {}", values.join(",")),
+        )
+        .await;
     }
 }
 
@@ -214,7 +219,8 @@ fn assert_allocatable_set_has_no_duplicate_sync(
 
 /// 从根下降收集叶子页号、内部节点页号与树高（真实页读 + `InternalNodeRef`
 /// 的公开读面）。
-fn collect_tree(loader: &SyncPageLoader, root: PageId) -> (Vec<PageId>, Vec<PageId>, usize) {    let mut leaves = Vec::new();
+fn collect_tree(loader: &SyncPageLoader, root: PageId) -> (Vec<PageId>, Vec<PageId>, usize) {
+    let mut leaves = Vec::new();
     let mut internals = Vec::new();
     let mut level = 0;
     let mut current = vec![root];
@@ -431,7 +437,10 @@ async fn alter_table_drop_column_completes_without_exhausting_the_stack() {
     let meta = db.table_manager.get_table("t").await.unwrap();
     let root = meta.index_manager.root_page_id();
     let (leaves, depth, duplicates) = walk_index_tree(&db.buffer_pool, root).await;
-    assert!(leaves >= 2, "the primary key index must have several leaves");
+    assert!(
+        leaves >= 2,
+        "the primary key index must have several leaves"
+    );
     assert!(depth >= 1, "the primary key index must have several levels");
     assert!(
         duplicates.is_empty(),

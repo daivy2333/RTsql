@@ -1,7 +1,7 @@
 # ms07-rest-tx-checkpoint-pushdown Specification
 
 ## Purpose
-TBD - created by archiving change 2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown. Update Purpose after archive.
+`Database` 提供 begin、commit 和 rollback，使多条语句处于同一事务；恢复消费 checkpoint 位点并跳过已被覆盖的 WAL 前缀；扫描可在迭代内过滤谓词，无排序的 LIMIT 可下推进扫描并提前停止。来源：`2026-08-30-ms07-rest-explicit-tx-checkpoint-pushdown`
 
 ## Requirements
 

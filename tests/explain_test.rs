@@ -119,12 +119,7 @@ async fn explain_compound_nodes() {
         .await,
     )));
     assert_eq!(lines[0], "EXPLAIN", "{lines:?}");
-    for (node, needle) in [
-        ("Limit", "5"),
-        ("Sort", "id"),
-        ("Filter", "id"),
-        ("Join", "l"),
-    ] {
+    for (node, needle) in [("Limit", "5"), ("Filter", "id")] {
         assert!(
             lines
                 .iter()
@@ -132,6 +127,18 @@ async fn explain_compound_nodes() {
             "计划树缺 {node} 节点参数 {needle:?}: {lines:?}"
         );
     }
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.trim_start().starts_with("Sort (") && l.contains("id")),
+        "计划树缺以 Sort ( 开头的排序节点: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.trim_start().starts_with("SortMergeJoin") && l.contains("l")),
+        "计划树缺以 SortMergeJoin 开头且含 l 的连接节点: {lines:?}"
+    );
     // 树形缩进：EXPLAIN 根最浅，节点行逐层加深
     let root_indent = indent_of(&lines[0]);
     assert!(

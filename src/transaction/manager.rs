@@ -1,5 +1,6 @@
 use crate::storage::page_format::SlottedPageRef;
 use crate::storage::{
+    corrupted_data_page_slot_count_error, corrupted_data_page_slot_error,
     read_tuple_from_data_page, update_version_header_in_data_page, BufferPool, PageId, Result,
     RowId, StorageError, TableMeta,
 };
@@ -562,12 +563,23 @@ async fn versions_created_by(
         let (next_page, rids) = buffer_pool
             .with_page_data(pid, |data| -> Result<(u32, Vec<RowId>)> {
                 let slotted = SlottedPageRef::new(data);
+                // MS37 T17: 页头槽数越界 ⇒ 明确错误（取槽**之前**判；否则
+                // 槽目录定位下溢 ⇒ 越界切片 panic ⇒ 进程 abort）。
+                if slotted.slot_count_exceeds_capacity() {
+                    return Err(corrupted_data_page_slot_count_error(
+                        pid.0,
+                        slotted.slot_count(),
+                    ));
+                }
                 let mut rids = Vec::new();
                 for index in 0..slotted.slot_count() {
                     let Some(slot) = slotted.get_slot(index) else {
                         continue;
                     };
-                    let slot_data = slotted.get_slot_data(&slot);
+                    // MS37 T3: 越界槽 ⇒ 明确错误（不得跳过——跳过 = 静默错读）。
+                    let slot_data = slotted
+                        .get_slot_data_checked(&slot)
+                        .ok_or_else(|| corrupted_data_page_slot_error(pid.0, index, &slot))?;
                     if slot_data.len() < VersionHeader::SIZE {
                         continue;
                     }

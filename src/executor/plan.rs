@@ -69,6 +69,8 @@ pub enum PhysicalPlan {
     Limit(LimitNode),
     /// JOIN 节点（INNER JOIN）
     Join(JoinNode),
+    /// 排序合并连接（等值内连接）。字段与 `JoinNode` 相同。SQL 计划路径本阶段仍发出 `Join`。
+    SortMergeJoin(JoinNode),
     /// Nested Loop Join 节点（MS09-T02 — 非等值/混合 ON）
     NestedLoopJoin(NestedLoopJoinNode),
     /// 聚合节点（GROUP BY + 聚合函数）

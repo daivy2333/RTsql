@@ -1,6 +1,6 @@
 # 多表 dump 中靠后语句被范围外拒绝时，靠前语句已生效（既有 restore 合同的直接后果）
 
-- Status: open
+- Status: closed（2026-10-26 fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`）
 - Filed: 2026-10-25
 - Source: Act Response 的 Issue 候选（MS36 的 M 系列观察之一）+ Plan Review 的判为 Minor / 非阻塞，change `2026-10-24-ms36-legacy-format-and-dump-compat` Iteration 001 Cycle `000-initial.md`（Review Result `accepted`）；该形态由 MS36 的 `design.md` D4「已知边界」显式记录
 - Environment: Linux x86_64 / WSL2 6.18.40.1、rustc 1.99.1 / cargo 1.99.1、RTsql `rtsql` CLI 的 `dump` / `restore` 路径（`src/cli/`）；登记时工作区 HEAD `0a08b14`（ahead of origin 9），产品改动未提交
@@ -28,8 +28,10 @@
 - 处置指针：**待建 change 承载**（change 建好后由 Recorder 更新本指针）。
 - 承载落点：落在 **restore 的提交语义 / 范围外拒绝面** → 建议独立 change 承载「restore 原子化或全量预检」这一功能语义变更；在该 change 落地前，本条**不**应被当作缺陷修复（既有合同已覆盖其行为）。
 - 与 ISS33 的边界：本条是**多表 dump 的部分恢复**（提交语义），ISS33 是**dump 的 DDL 渲染规则**（产物生成侧），根因不同，**不合并**。
+- 2026-10-26 关闭。原因：多表 dump 靠后语句被拒绝时、靠前语句已经生效这一边界，由归档变更 Iteration 008 任务 T12 写成合同并用真实入口回归锁住。`restore` 行为没有改。该 Cycle `iterations/008-dump-restore-contract/000-initial.md` 的 Plan Review 为 `accepted`。处置指针：fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`。
 
 ## 证据
 
+- 2026-10-26 关闭依据：`openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure/iterations/008-dump-restore-contract/000-initial.md` 的 Plan Review 为 `accepted`（T12；`restore` 行为未改，边界由真实入口回归锁住）。
 - 调查与结论正文（不在本 Issue 复制）：`openspec/changes/archive/2026-10-24-ms36-legacy-format-and-dump-compat/design.md`（D4「范围外一律显式拒绝 + 迁移路径；不改动 restore 的既有提交语义」及其「已知边界」段）；`openspec/changes/archive/2026-10-24-ms36-legacy-format-and-dump-compat/iterations/001-contract-and-baseline/000-initial.md`（Plan Review 的 M 系列判定）。
 - 既有合同：`openspec/specs/cli-noninteractive-shell/spec.md`（逐条 auto-commit、失败即停、失败前语句已生效）、`openspec/specs/legacy-format-compat/spec.md`（范围外一律显式拒绝 + 迁移路径；SHALL NOT 静默地部分恢复后报告成功）。

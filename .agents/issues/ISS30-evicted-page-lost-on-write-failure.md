@@ -1,6 +1,6 @@
 # 并发驱逐 + 写盘失败 ⇒ 被驱逐页的内容既未落盘也不在缓冲池内
 
-- Status: open
+- Status: closed（2026-10-26 fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`）
 - Filed: 2026-10-25
 - Source: Act Response 的 Issue 候选（Iteration 004 的「驱逐与写盘失败的交错」），Plan Review 的 finding 4 与「范围外实质缺陷」段，change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 004 Cycle `000-initial.md`（Review Result `accepted`）
 - Environment: Linux x86_64 / WSL2 6.18.40.1、rustc 1.99.1 / cargo 1.99.1、RTsql `tests/release_durability_precondition_test.rs` 集成测试、真实文件库 + 一次性写盘失败注入点；登记时工作区 HEAD `0a08b14`（ahead of origin 9），产品改动未提交
@@ -28,8 +28,10 @@
 - 处置指针：**待建 change 承载**（change 建好后由 Recorder 更新本指针）。
 - 承载落点：落在**缓冲池驱逐与写盘失败的交错**（`src/storage/buffer_pool.rs`）→ 建议独立 change 承载；需要的决定是「写盘失败时对**已驱逐**页的处置语义」（回写内存 / 保留在池内标记为脏并重试 / 提升为用户可见错误）。
 - 与承载 change 的关系：承载 change 的 Iteration 004 明确把该交错划为 Excluded scope，**不由该 change 裁决**。
+- 2026-10-26 关闭。原因：驱逐与写盘失败交错时不再丢弃未落盘内容，由归档变更 Iteration 007 任务 T9 处置。该 Cycle `iterations/007-write-failure-state/000-initial.md` 的 Plan Review 为 `accepted`。处置指针：fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`。
 
 ## 证据
 
+- 2026-10-26 关闭依据：`openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure/iterations/007-write-failure-state/000-initial.md` 的 Plan Review 为 `accepted`（T9）。
 - 调查与结论正文（不在本 Issue 复制）：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/iterations/004-release-durability-precondition/000-initial.md` —— Plan Review 的 finding 4 与「范围外实质缺陷」段。
 - 相关行为规格：`openspec/specs/release-durability-precondition/spec.md`（释放的持久化前置条件——限定在**释放**路径，未涵盖驱逐交错）。

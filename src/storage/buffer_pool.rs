@@ -4,10 +4,11 @@ use tokio::sync::{RwLock, Semaphore};
 use dashmap::DashMap;
 
 use crate::storage::{
+    corrupted_data_page_slot_count_error, corrupted_data_page_slot_error,
     page_format::{overflow, SlottedPageRef},
     page_frame::{PageFrame, PageGuard},
-    AsyncStorage, Page, PageId, PageVisibilityInfo, Result, RowId, StorageError,
-    MIN_CREATE_UNKNOWN,
+    short_data_page_slot_error, AsyncStorage, Page, PageId, PageVisibilityInfo, Result, RowId,
+    StorageError, MIN_CREATE_UNKNOWN,
 };
 use crate::transaction::{Snapshot, VersionHeader};
 
@@ -44,6 +45,18 @@ pub struct BufferPool {
     clock_hand: RwLock<Vec<PageId>>,
     capacity: usize,
     storage: Arc<dyn AsyncStorage>,
+}
+
+/// 持帧锁复制脏页并标记写入在途。已经在途，或当前不脏，则本轮不发写。
+fn claim_dirty_for_write(frame: &std::sync::Mutex<PageFrame>) -> Option<Page> {
+    let mut guard = frame.lock().unwrap();
+    if guard.write_in_flight || !guard.dirty {
+        return None;
+    }
+    let page = guard.page.clone();
+    guard.write_in_flight = true;
+    guard.dirty = false;
+    Some(page)
 }
 
 impl BufferPool {
@@ -172,35 +185,65 @@ impl BufferPool {
                 None => continue,
             };
 
-            let (dirty, page_copy): (bool, Option<Page>) = {
+            enum EvictChoice {
+                Defer,
+                RemoveClean,
+                Write(Page),
+            }
+
+            let choice = {
                 let mut frame_guard = frame.lock().unwrap();
 
-                if frame_guard.ref_count > 0 {
+                // 引用中与写入在途都不能移出池：在途页的脏标记已被清掉，
+                // 但写盘还没返回，按干净页 remove 会丢掉尚未落盘的新内容。
+                if frame_guard.ref_count > 0 || frame_guard.write_in_flight {
                     clock_hand.push(candidate_id);
-                    (false, None)
+                    EvictChoice::Defer
                 } else if frame_guard.clock_bit {
                     frame_guard.clock_bit = false;
                     clock_hand.push(candidate_id);
-                    (false, None)
-                } else {
-                    let is_dirty = frame_guard.dirty;
+                    EvictChoice::Defer
+                } else if frame_guard.dirty {
                     let page = frame_guard.page.clone();
-                    (is_dirty, Some(page))
+                    frame_guard.write_in_flight = true;
+                    frame_guard.dirty = false;
+                    EvictChoice::Write(page)
+                } else {
+                    EvictChoice::RemoveClean
                 }
             };
 
-            let Some(page_copy) = page_copy else {
-                continue;
-            };
-
-            if dirty {
-                self.storage.write_page(candidate_id, &page_copy).await?;
+            match choice {
+                EvictChoice::Defer => continue,
+                EvictChoice::RemoveClean => {
+                    self.pages.remove(&candidate_id);
+                    return Ok(());
+                }
+                EvictChoice::Write(page_copy) => {
+                    let write_result = self.storage.write_page(candidate_id, &page_copy).await;
+                    let failed = write_result.is_err();
+                    let still_dirty = {
+                        let mut frame_guard = frame.lock().unwrap();
+                        frame_guard.write_in_flight = false;
+                        if failed {
+                            frame_guard.dirty = true;
+                        }
+                        frame_guard.dirty
+                    };
+                    if let Err(e) = write_result {
+                        // 页留在池内，也留在 clock 上，否则这一帧占着容量却再也不会被选中。
+                        clock_hand.push(candidate_id);
+                        return Err(e);
+                    }
+                    if still_dirty {
+                        // 等待写盘期间又被改脏：旧副本已经写出，新内容必须留在池内。
+                        clock_hand.push(candidate_id);
+                        continue;
+                    }
+                    self.pages.remove(&candidate_id);
+                    return Ok(());
+                }
             }
-
-            // Atomic remove from DashMap. If another thread already removed
-            // the entry, treat as success (someone else evicted it).
-            self.pages.remove(&candidate_id);
-            return Ok(());
         }
 
         Err(StorageError::BufferPoolFull)
@@ -217,10 +260,8 @@ impl BufferPool {
         // Phase 1: collect dirty pages while holding per-shard locks briefly.
         let mut to_write: Vec<(PageId, Page)> = Vec::new();
         for entry in self.pages.iter() {
-            let mut frame_guard = entry.value().lock().unwrap();
-            if frame_guard.dirty {
-                frame_guard.dirty = false;
-                to_write.push((*entry.key(), frame_guard.page.clone()));
+            if let Some(page) = claim_dirty_for_write(entry.value()) {
+                to_write.push((*entry.key(), page));
             }
         }
 
@@ -239,6 +280,7 @@ impl BufferPool {
                 self.restore_dirty_from(&to_write, written);
                 return Err(e);
             }
+            self.finish_write_in_flight(*page_id, true);
             written += 1;
         }
 
@@ -249,10 +291,19 @@ impl BufferPool {
     /// `from` on — the pages this flush cleared but did not successfully
     /// write. A page that a concurrent writer re-dirtied in the meantime
     /// stays dirty (the bit is set again, which is its correct state).
+    /// The in-flight flag is cleared for the same pages: the write attempt
+    /// has returned.
     fn restore_dirty_from(&self, collected: &[(PageId, Page)], from: usize) {
         for (page_id, _) in collected.iter().skip(from) {
-            if let Some(entry) = self.pages.get(page_id) {
-                let mut frame_guard = entry.value().lock().unwrap();
+            self.finish_write_in_flight(*page_id, false);
+        }
+    }
+
+    fn finish_write_in_flight(&self, page_id: PageId, success: bool) {
+        if let Some(entry) = self.pages.get(&page_id) {
+            let mut frame_guard = entry.value().lock().unwrap();
+            frame_guard.write_in_flight = false;
+            if !success {
                 frame_guard.dirty = true;
             }
         }
@@ -264,19 +315,10 @@ impl BufferPool {
     /// the dirty bit, never across the storage write await (M17).
     pub async fn flush_pages(&self, page_ids: &[PageId]) -> Result<()> {
         for &page_id in page_ids {
-            let page_copy = {
-                if let Some(entry) = self.pages.get(&page_id) {
-                    let mut frame_guard = entry.value().lock().unwrap();
-                    if frame_guard.dirty {
-                        frame_guard.dirty = false;
-                        Some(frame_guard.page.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            };
+            let page_copy = self
+                .pages
+                .get(&page_id)
+                .and_then(|entry| claim_dirty_for_write(entry.value()));
             if let Some(page) = page_copy {
                 // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
                 // Iteration 004 (RDP R1): a failed write must hand the dirty
@@ -286,6 +328,7 @@ impl BufferPool {
                     self.restore_dirty_from(&[(page_id, page)], 0);
                     return Err(e);
                 }
+                self.finish_write_in_flight(page_id, true);
             }
         }
         Ok(())
@@ -304,10 +347,8 @@ impl BufferPool {
             if exclude.contains(entry.key()) {
                 continue;
             }
-            let mut frame_guard = entry.value().lock().unwrap();
-            if frame_guard.dirty {
-                frame_guard.dirty = false;
-                to_write.push((*entry.key(), frame_guard.page.clone()));
+            if let Some(page) = claim_dirty_for_write(entry.value()) {
+                to_write.push((*entry.key(), page));
             }
         }
 
@@ -323,6 +364,7 @@ impl BufferPool {
                 self.restore_dirty_from(&to_write, written);
                 return Err(e);
             }
+            self.finish_write_in_flight(*page_id, true);
             written += 1;
         }
 
@@ -418,14 +460,28 @@ impl BufferPool {
                 }
                 let fast = self
                     .with_page_data(PageId(row_id.page_id as u64), |data| {
+                        let page_id = PageId(row_id.page_id as u64);
                         let slotted = SlottedPageRef::new(data);
-                        let (slot, _) = match slotted.get_slot_by_logical_id(row_id.slot_id) {
-                            Some(s) => s,
-                            None => return Ok(FastPath::Done(None)),
-                        };
-                        let slot_data = slotted.get_slot_data(&slot);
+                        // MS37 T17: 页头槽数越界 ⇒ 明确错误（取槽**之前**判；
+                        // 否则槽目录定位下溢 ⇒ 越界切片 panic ⇒ 进程 abort）。
+                        if slotted.slot_count_exceeds_capacity() {
+                            return Err(corrupted_data_page_slot_count_error(
+                                page_id.0,
+                                slotted.slot_count(),
+                            ));
+                        }
+                        let (slot, slot_index) =
+                            match slotted.get_slot_by_logical_id(row_id.slot_id) {
+                                Some(s) => s,
+                                None => return Ok(FastPath::Done(None)),
+                            };
+                        // MS37 T3: 越界槽 / 过短负载 ⇒ 明确错误。快慢两支语义
+                        // 一致——不得「查不到」而慢路径报错。
+                        let slot_data = slotted.get_slot_data_checked(&slot).ok_or_else(|| {
+                            corrupted_data_page_slot_error(page_id.0, slot_index, &slot)
+                        })?;
                         if slot_data.len() < VersionHeader::SIZE {
-                            return Ok(FastPath::Done(None));
+                            return Err(short_data_page_slot_error(page_id.0, slot_index, &slot));
                         }
                         let tuple_bytes = &slot_data[VersionHeader::SIZE..];
                         if overflow::is_overflow_ref(tuple_bytes) {
@@ -468,12 +524,31 @@ impl BufferPool {
         while let Some(current) = current_row_id {
             let visibility_result: VisibilityResult<R> = self
                 .with_page_data(PageId(current.page_id as u64), |data| {
+                    let current_page_id = PageId(current.page_id as u64);
                     let slotted = SlottedPageRef::new(data);
-                    let (slot, _) = match slotted.get_slot_by_logical_id(current.slot_id) {
+                    // MS37 T17: 页头槽数越界 ⇒ 明确错误（取槽**之前**判；否则
+                    // 槽目录定位下溢 ⇒ 越界切片 panic ⇒ 进程 abort）。
+                    if slotted.slot_count_exceeds_capacity() {
+                        return Err(corrupted_data_page_slot_count_error(
+                            current_page_id.0,
+                            slotted.slot_count(),
+                        ));
+                    }
+                    let (slot, slot_index) = match slotted.get_slot_by_logical_id(current.slot_id) {
                         Some(s) => s,
                         None => return Ok(VisibilityResult::<R>::NotFound),
                     };
-                    let slot_data = slotted.get_slot_data(&slot);
+                    // MS37 T3: 越界槽 / 过短负载 ⇒ 明确错误（今天短负载 panic）。
+                    let slot_data = slotted.get_slot_data_checked(&slot).ok_or_else(|| {
+                        corrupted_data_page_slot_error(current_page_id.0, slot_index, &slot)
+                    })?;
+                    if slot_data.len() < VersionHeader::SIZE {
+                        return Err(short_data_page_slot_error(
+                            current_page_id.0,
+                            slot_index,
+                            &slot,
+                        ));
+                    }
                     let version_header =
                         match VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE]) {
                             Some(vh) => vh,
@@ -544,8 +619,8 @@ impl BufferPool {
     /// MS35（`free-page-lifecycle` R3）：释放操作的完成标记——本次释放的
     /// 锚点写已经发出。释放点必须在锚点写发出**之后**调用它：释放的页在
     /// 此之前不得进入可分配集合。
-    pub fn complete_free_release(&self, pages: &[PageId]) {
-        self.storage.complete_free_release(pages);
+    pub fn complete_free_release(&self, pages: &[PageId], anchors: &[PageId]) {
+        self.storage.complete_free_release(pages, anchors);
     }
 
     /// Get the current visibility info for a page. Returns None if no entry exists
@@ -611,12 +686,22 @@ impl BufferPool {
     pub async fn check_page_all_visible(&self, page_id: PageId, snapshot: &Snapshot) -> bool {
         self.with_page_data(page_id, |data| -> Result<bool> {
             let slotted = SlottedPageRef::new(data);
+            // MS37 T17: 页头槽数越界 ⇒ 降级为安全值（非「全可见」）⇒ 走慢
+            // 路径，错误由随后的实际取行处抛出（布尔辅助自身不报页损坏）。
+            if slotted.slot_count_exceeds_capacity() {
+                return Ok(false);
+            }
             for i in 0..slotted.slot_count() {
                 let slot = match slotted.get_slot(i) {
                     Some(s) => s,
                     None => continue,
                 };
-                let slot_data = slotted.get_slot_data(&slot);
+                // MS37 T3: 越界槽 ⇒ 安全值（非「全可见」）⇒ 走慢路径，
+                // 错误由随后的实际取行处抛出（布尔辅助自身不报页损坏）。
+                let slot_data = match slotted.get_slot_data_checked(&slot) {
+                    Some(d) => d,
+                    None => return Ok(false),
+                };
                 if slot_data.len() < VersionHeader::SIZE {
                     return Ok(false);
                 }
@@ -652,7 +737,60 @@ impl BufferPool {
 mod tests {
     use super::*;
     use crate::storage::FileStorage;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    /// 写盘进入后停住，放行时返回 `Io` 且不改已持久化的字节。
+    /// 只存在于本模块的测试里，用来卡住「清脏之后、写盘返回之前」。
+    struct GatedWriteStorage {
+        persisted: Mutex<HashMap<PageId, Page>>,
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl AsyncStorage for GatedWriteStorage {
+        async fn read_page(&self, page_id: PageId) -> Result<Page> {
+            Ok(self
+                .persisted
+                .lock()
+                .unwrap()
+                .get(&page_id)
+                .cloned()
+                .unwrap_or_else(|| Page::new(page_id)))
+        }
+
+        async fn write_page(&self, _page_id: PageId, _page: &Page) -> Result<()> {
+            if let Some(tx) = self.entered.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let release = self.release.lock().unwrap().take();
+            if let Some(rx) = release {
+                let _ = rx.await;
+            }
+            Err(StorageError::Io(std::io::Error::other(
+                "injected write failure",
+            )))
+        }
+
+        async fn allocate_page(&self) -> Result<PageId> {
+            Ok(PageId(0))
+        }
+
+        async fn free_page(&self, _page_id: PageId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn page_count(&self) -> u64 {
+            self.persisted.lock().unwrap().len() as u64
+        }
+    }
 
     fn setup() -> (BufferPool, tempfile::TempDir) {
         let dir = tempdir().unwrap();
@@ -694,5 +832,60 @@ mod tests {
         // Merged real value keeps strict-greater semantics (S1 scenario THEN).
         assert!(info.all_invisible_for(6));
         assert!(!info.all_invisible_for(7));
+    }
+
+    /// 刷盘已取走页内容、写盘尚未返回时，再取另一页迫使驱逐。
+    /// 写盘失败后原页仍在池内，字节仍是这次要写的新内容，错误上抛。
+    #[tokio::test]
+    async fn failed_flush_then_evict_keeps_the_new_bytes() {
+        const OLD: u8 = 0x11;
+        const NEW: u8 = 0xAB;
+        let resident = PageId(1);
+        let intruder = PageId(2);
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut old = Page::new(resident);
+        old.data.fill(OLD);
+        let storage = Arc::new(GatedWriteStorage {
+            persisted: Mutex::new(HashMap::from([(resident, old)])),
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+        });
+        let pool = Arc::new(BufferPool::new(1, storage.clone() as Arc<dyn AsyncStorage>).unwrap());
+
+        {
+            let guard = pool.get_page(resident).await.unwrap();
+            guard.modify_page(|page| page.data.fill(NEW));
+        }
+
+        let flushing = {
+            let pool = Arc::clone(&pool);
+            tokio::spawn(async move { pool.flush_all().await })
+        };
+        entered_rx.await.expect("write_page entered");
+
+        // 迫使驱逐。变更前这一步会把已清脏的页移出池；变更后在途页留在池内，
+        // 这一步可能因池满失败。断言不看这一步的结果。
+        let _ = pool.get_page(intruder).await;
+
+        let _ = release_tx.send(());
+        let flush_result = flushing.await.unwrap();
+        assert!(
+            flush_result.is_err(),
+            "flush_all must surface the write error"
+        );
+
+        let guard = pool.get_page(resident).await.unwrap();
+        assert!(
+            guard.page_data().iter().all(|byte| *byte == NEW),
+            "after the failed write the pool must still hold the new bytes"
+        );
+        let persisted = storage.persisted.lock().unwrap();
+        let on_storage = persisted.get(&resident).expect("seeded page");
+        assert!(
+            on_storage.data.iter().all(|byte| *byte == OLD),
+            "the injected write must not update storage"
+        );
     }
 }

@@ -260,7 +260,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **常量查询：** 支持 `SELECT 1 + 1` 等无 `FROM` 表达式。
 - **事务：** 显式库 API 事务，以及 CLI `BEGIN` / `COMMIT` / `ROLLBACK` 会话。
 - **MVCC：** 默认 Repeatable Read，也可通过 `Database::open_with_isolation` 选择 Read Committed。
-- **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。`CREATE INDEX` 建的二级索引自动服务等值谓词，其结果集与全表扫描严格一致——同行集、不重复、不漏行——任意表规模成立，重启与崩溃恢复两态一致。
+- **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。单列非唯一 `CREATE INDEX` 接受 INTEGER 和字符串声明（TEXT、VARCHAR、CHAR、CLOB）。它自动服务等值谓词，其结果集与全表扫描严格一致——同行集、不重复、不漏行——任意表规模成立，重启与崩溃恢复两态一致。字符串在完整键编码放得进 32 字节时走索引。更长的字符串整值写入，等值查询扫描该完整字面量；即使该行因为其他列进入溢出页，这条回落也不变。不截断，不给列加长度上限。NULL 不入索引。重复字符串允许。PRIMARY KEY 与 UNIQUE 仍只接受整数。
 - **长值存储：** 超过单页内联容量（约 4KB）的行值自动经溢出页链存取，无人为长度上限。溢出对 SQL 层透明：`INSERT`/`UPDATE`/`SELECT`、`dump`/`restore`/`import`、崩溃恢复、GC 与 `DROP TABLE`/`TRUNCATE` 释放、加密库、`:memory:` 与只读会话同等可用（此前超过页容量的行以 `No enough space in page` 失败，该失败形态已终止）。
 - **运行形态：** 共享锁上的只读会话（多个并发读者、零写入），以及全程驻留内存的 `:memory:` 数据库。
 
@@ -274,7 +274,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **UNIQUE** 对 `INT` 列强制（主键列除外），经专属内部唯一索引实现；重复值以 `Duplicate key` 拒绝，`NULL` 豁免，且重启与崩溃恢复后强制保持。声明在主键列上的 `UNIQUE` 由主键既有唯一性消费，不建第二索引。
 - **PRIMARY KEY** 必须声明在 `INTEGER` 列上——这是引擎强制的唯一形态。显式非整数 `PRIMARY KEY` 计划期点名拒绝；未声明主键的表沿用首列隐式主键既有语义，零变化。
 - **计划期点名拒绝（表不创建）：** `CHECK`、`FOREIGN KEY`、方言特定列选项、显式非 `INTEGER` `PRIMARY KEY`、非 `INT` 列的 `UNIQUE`、组合（多列）`UNIQUE`。
-- **存量兼容：** 旧库与旧 dump 的支持范围按**系统表目录行的布局代际**划分（`G1` 最旧：`__tables` 行止于数据链尾指针；`G3` 当前：行上还带唯一根段、二级索引段与表类型字节），**不按文件格式版本划分**——版本号是产品格式契约，唯一版本 `v1`，只声明产品写出的布局。范围内：旧库可打开、可查询、可写入、可通过完整性扫描、打开时可重建、可导出 dump；带未决写入日志的旧库能恢复出已提交行；旧 dump 可恢复到新库且行数据等价，恢复出的库使用当前格式、可继续写入、可再次导出。写入有一处可见后果：**被写到的**表的目录行被重写为当前布局，未被写到的表保持各自原有代际。旧版本创建的、含非 `INT` `UNIQUE` 列的数据库可正常打开（这些列不被强制）；以非整数 `PRIMARY KEY` 声明的存量表同样可正常打开、读取与 dump，且 dump DDL 不渲染 `PRIMARY KEY`（`dump` → `restore` 往返可达）。范围外：输入被明确拒绝并定位到语句——非整数 `PRIMARY KEY`（`NON-INTEGER PRIMARY KEY`）、非 `INT` 列的 `UNIQUE`（`UNIQUE (INT columns only)`——表本身按上述计划期规则拒绝）、`NOT NULL` 列含 `NULL`（`NOT NULL constraint violation: column '<列名>'`）三类都以退出码 3 结束 restore，点名拒绝原因并给出失败语句序号；旧版本生成的、内嵌非整数 `... PRIMARY KEY` DDL 的 dump 因前者失败（该声明从未被强制），在 `NOT NULL` 强制落地前写入的、「NOT NULL 列含 NULL」的存量行因后者失败。迁移路径：去掉 dump 中的 `PRIMARY KEY` 声明后重新 restore；去掉 `UNIQUE` 声明后重新 restore，或把被约束列改为整数类型**并同步转换该列的行值**后重新 restore；回填该行的 `NULL` 后重新 restore，或删除该行后重新 restore。格式版本高于当前支持版本的文件被拒绝（`NewerFileVersion`，退出码 1），不含文件头的文件被拒绝（`NotADatabase`，退出码 1）——产品不做旧格式嗅探，也不做猜测性迁移。
+- **存量兼容：** 旧库与旧 dump 的支持范围按**系统表目录行的布局代际**划分（`G1` 最旧：`__tables` 行止于数据链尾指针；`G3` 当前：行上还带唯一根段、二级索引段与表类型字节），**不按文件格式版本划分**——版本号是产品格式契约，唯一版本 `v1`，只声明产品写出的布局。范围内：旧库可打开、可查询、可写入、可通过完整性扫描、打开时可重建、可导出 dump；带未决写入日志的旧库能恢复出已提交行；旧 dump 可恢复到新库且行数据等价，恢复出的库使用当前格式、可继续写入、可再次导出。写入有一处可见后果：**被写到的**表的目录行被重写为当前布局，未被写到的表保持各自原有代际。旧版本创建的、含非 `INT` `UNIQUE` 列的数据库可正常打开（这些列不被强制），且当前导出不渲染 `UNIQUE`，因此 `dump` → `restore` 可以往返；以非整数 `PRIMARY KEY` 声明的存量表同样可正常打开、读取与 dump，且 dump DDL 不渲染 `PRIMARY KEY`（`dump` → `restore` 往返可达）。范围外：输入被明确拒绝并定位到语句——非整数 `PRIMARY KEY`（`NON-INTEGER PRIMARY KEY`）、非 `INT` 列的 `UNIQUE`（`UNIQUE (INT columns only)`——表本身按上述计划期规则拒绝）、`NOT NULL` 列含 `NULL`（`NOT NULL constraint violation: column '<列名>'`）三类都以退出码 3 结束 restore，点名拒绝原因并给出失败语句序号；旧版本生成的、内嵌非整数 `... PRIMARY KEY` DDL 的 dump 因前者失败（该声明从未被强制），在 `NOT NULL` 强制落地前写入的、「NOT NULL 列含 NULL」的存量行因后者失败。迁移路径：去掉 dump 中的 `PRIMARY KEY` 声明后重新 restore；去掉 `UNIQUE` 声明后重新 restore，或把被约束列改为整数类型**并同步转换该列的行值**后重新 restore；回填该行的 `NULL` 后重新 restore，或删除该行后重新 restore。格式版本高于当前支持版本的文件被拒绝（`NewerFileVersion`，退出码 1），不含文件头的文件被拒绝（`NotADatabase`，退出码 1）——产品不做旧格式嗅探，也不做猜测性迁移。
 
 ### 写面
 
@@ -333,6 +333,8 @@ cargo bench
 ## 性能与资源对比
 
 2026-09-24 在 Intel i9-13900HX（32 线程）Linux 机器上实测：RTsql 0.1.0（release 构建）对比 SQLite 3.37.2（`rusqlite` 链接的系统 `libsqlite3`，以及 `sqlite3` CLI）。两个引擎均使用默认配置，作用于同一张合成表 `bench (id INTEGER PRIMARY KEY, name TEXT, value INTEGER)`；RTsql 每条语句经 WAL 自动提交，SQLite 使用默认回滚日志。以下为单机现场观察，不是基准保证。
+
+追加一帧、提交等待返回、以及 checkpoint，是三件不同的事。提交等待在该批次的 `sync_all` 返回之后才返回。并发提交可以共用一个批次，所以上表逐条 INSERT 的数字不是每条语句一次 fsync 的计数。两边都使用各自的默认日志和同步配置。只看到 `sync_all` 被调用，或者用 `SIGKILL` 杀掉进程再打开，都不能说明已经验证过断电安全。
 
 引擎级操作（Criterion 进程内基准、直接调用引擎 API，20 样本均值；复现命令 `cargo bench --bench sqlite_compare`）：
 

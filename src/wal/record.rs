@@ -10,6 +10,9 @@
 //! - Commit: tx_id + timestamp
 //! - Abort: tx_id
 //! - Checkpoint: lsn + timestamp
+//! - ColumnNarrowing: tx_id + table_name + removed_column_index + new_column_count
+//!   （change 2026-10-25-ms37-defect-ledger-closure Iteration 006 / Cycle 000：
+//!   窄化意图的事务作用域记录——随该事务的 `CommitTxn` 同一次持久化落地）
 
 use crate::storage::RowId;
 use std::fmt;
@@ -27,6 +30,10 @@ pub enum WalRecordType {
     BeginTxn = 0x07,
     CommitTxn = 0x08,
     AbortTxn = 0x09,
+    /// change 2026-10-25-ms37-defect-ledger-closure Iteration 006 / Cycle 000
+    /// （T6）：窄化意图记录——新类型**追加**，既有 `0x01`–`0x09` 的编码与语义
+    /// 零改动。
+    ColumnNarrowing = 0x0A,
 }
 
 impl TryFrom<u8> for WalRecordType {
@@ -43,6 +50,7 @@ impl TryFrom<u8> for WalRecordType {
             0x07 => Ok(WalRecordType::BeginTxn),
             0x08 => Ok(WalRecordType::CommitTxn),
             0x09 => Ok(WalRecordType::AbortTxn),
+            0x0A => Ok(WalRecordType::ColumnNarrowing),
             _ => Err(WalError::InvalidRecordType(value)),
         }
     }
@@ -84,6 +92,21 @@ pub enum WalRecord {
     CommitTxn { tx_id: u64, timestamp: u64 },
     /// 事务回滚（新格式）
     AbortTxn { tx_id: u64 },
+    /// change 2026-10-25-ms37-defect-ledger-closure Iteration 006 / Cycle 000
+    /// （T6）：**窄化意图**——`ALTER TABLE … DROP COLUMN` 的布局窄化意图。
+    ///
+    /// 事务作用域：与该语句的数据面改写记录、该事务的 `CommitTxn` 在**同一次
+    /// 持久化**中落地 ⇒ 不出现「意图已持久但数据面未提交」或「数据面已提交
+    /// 但意图不存在」。恢复期据此把**已提交**的窄化发布到目录面。
+    ColumnNarrowing {
+        tx_id: u64,
+        /// 被窄化的表。
+        table_name: String,
+        /// 被删列的序号（窄化**前**的布局序位）。
+        removed_column_index: u32,
+        /// 窄化**后**的列数。
+        new_column_count: u32,
+    },
 }
 
 impl WalRecord {
@@ -99,6 +122,7 @@ impl WalRecord {
             WalRecord::BeginTxn { .. } => WalRecordType::BeginTxn,
             WalRecord::CommitTxn { .. } => WalRecordType::CommitTxn,
             WalRecord::AbortTxn { .. } => WalRecordType::AbortTxn,
+            WalRecord::ColumnNarrowing { .. } => WalRecordType::ColumnNarrowing,
         }
     }
 
@@ -114,6 +138,7 @@ impl WalRecord {
             WalRecord::BeginTxn { tx_id } => *tx_id,
             WalRecord::CommitTxn { tx_id, .. } => *tx_id,
             WalRecord::AbortTxn { tx_id } => *tx_id,
+            WalRecord::ColumnNarrowing { tx_id, .. } => *tx_id,
         }
     }
 
@@ -293,6 +318,17 @@ impl WalRecord {
             WalRecord::AbortTxn { tx_id } => {
                 data.extend_from_slice(&tx_id.to_le_bytes());
             }
+            WalRecord::ColumnNarrowing {
+                tx_id,
+                table_name,
+                removed_column_index,
+                new_column_count,
+            } => {
+                data.extend_from_slice(&tx_id.to_le_bytes());
+                serialize_string(&mut data, table_name);
+                data.extend_from_slice(&removed_column_index.to_le_bytes());
+                data.extend_from_slice(&new_column_count.to_le_bytes());
+            }
         }
 
         data
@@ -418,6 +454,37 @@ impl WalRecord {
                 ]);
                 Ok(WalRecord::AbortTxn { tx_id })
             }
+            WalRecordType::ColumnNarrowing => {
+                if buf.len() < 8 {
+                    return Err(WalError::IncompleteRecord);
+                }
+                let tx_id = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                let (table_name, consumed1) = read_string(&buf[8..])?;
+                let offset = 8 + consumed1;
+                if buf.len() < offset + 8 {
+                    return Err(WalError::IncompleteRecord);
+                }
+                let removed_column_index = u32::from_le_bytes([
+                    buf[offset],
+                    buf[offset + 1],
+                    buf[offset + 2],
+                    buf[offset + 3],
+                ]);
+                let new_column_count = u32::from_le_bytes([
+                    buf[offset + 4],
+                    buf[offset + 5],
+                    buf[offset + 6],
+                    buf[offset + 7],
+                ]);
+                Ok(WalRecord::ColumnNarrowing {
+                    tx_id,
+                    table_name,
+                    removed_column_index,
+                    new_column_count,
+                })
+            }
         }
     }
 }
@@ -485,6 +552,18 @@ impl fmt::Display for WalRecord {
             }
             WalRecord::AbortTxn { tx_id } => {
                 write!(f, "AbortTxn(tx={})", tx_id)
+            }
+            WalRecord::ColumnNarrowing {
+                tx_id,
+                table_name,
+                removed_column_index,
+                new_column_count,
+            } => {
+                write!(
+                    f,
+                    "ColumnNarrowing(tx={}, table={}, removed_index={}, new_count={})",
+                    tx_id, table_name, removed_column_index, new_column_count
+                )
             }
         }
     }

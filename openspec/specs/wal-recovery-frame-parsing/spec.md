@@ -1,7 +1,7 @@
 # wal-recovery-frame-parsing Specification
 
 ## Purpose
-TBD - created by archiving change 2026-09-06-ms10-t02-file-lock-graceful-shutdown. Update Purpose after archive.
+WAL 逐帧解析无歧义且自验证：新格式以 CRC 为接受判据，歧义偏移上新旧格式都会尝试并恰好一种按其自身规则成功，两条路径都失败则显式报错。来源：`2026-09-06-ms10-t02-file-lock-graceful-shutdown`
 ## Requirements
 ### Requirement: 恢复解析逐帧无歧义
 

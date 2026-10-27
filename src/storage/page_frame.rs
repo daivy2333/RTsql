@@ -9,6 +9,8 @@ pub struct PageFrame {
     pub dirty: bool,
     pub ref_count: u32,
     pub clock_bit: bool,
+    /// 已复制出字节并已发出写盘，写盘尚未返回。只在内存，不进入页字节。
+    pub write_in_flight: bool,
 }
 
 impl PageFrame {
@@ -18,6 +20,7 @@ impl PageFrame {
             dirty: false,
             ref_count: 0,
             clock_bit: true,
+            write_in_flight: false,
         }
     }
 }

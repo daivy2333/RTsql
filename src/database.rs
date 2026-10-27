@@ -880,6 +880,14 @@ impl Database {
         // 应随 checkpoint 落盘（WAL 证据随截断消失后无从判断其归属）。本
         // 点覆盖 `close()`、显式 checkpoint 命令与自动 checkpoint。
         self.reclaim_abandoned_implicit_transactions().await?;
+        // change 2026-10-25-ms37-defect-ledger-closure
+        // Iteration 006 / Cycle 000（T6 / M5）：**先发布「已提交但未发布」的
+        // 窄化意图**，再让 checkpoint 截断 WAL——未发布的窄化意图随截断会
+        // **永久丢失**（崩溃重开将无法发布该窄化 ⇒ 目录旧列数 + 数据面窄行
+        // ⇒ 按位置错读，ISS25）。
+        //
+        // 发布失败 ⇒ 不截断（返回错误）⇒ 意图仍在 WAL 中。
+        self.table_manager.publish_committed_narrowings().await?;
         manager
             .checkpoint(|| self.transaction_manager.current_tx_id())
             .await

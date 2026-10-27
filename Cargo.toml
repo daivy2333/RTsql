@@ -49,6 +49,10 @@ name = "scale_bench"
 harness = false
 
 [[bench]]
+name = "index_key_encoding_bench"
+harness = false
+
+[[bench]]
 name = "sqlite_compare"
 harness = false
 

@@ -817,6 +817,7 @@ async fn legacy_non_integer_pk_table_still_usable() {
                     ),
                 ],
                 "name",
+                false,
             )
             .await
             .unwrap();

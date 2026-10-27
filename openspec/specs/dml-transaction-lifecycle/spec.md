@@ -1,7 +1,7 @@
 # dml-transaction-lifecycle Specification
 
 ## Purpose
-TBD - created by archiving change 2026-08-25-fix-dml-tx-id-injection. Update Purpose after archive.
+经 `Database::execute_sql` 发出的 INSERT、UPDATE 和 DELETE 都运行在 `TransactionManager` 的真实事务中，成功则提交，失败则中止，提交时保留删除墓碑。来源：`2026-08-25-fix-dml-tx-id-injection`
 ## Requirements
 ### Requirement: DML execution runs inside a real transaction
 

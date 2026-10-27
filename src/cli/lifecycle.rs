@@ -1003,7 +1003,10 @@ pub(crate) fn create_table_sql(table: &CatalogRow, columns: &[CatalogColumnRow])
             if col.not_null {
                 part.push_str(" NOT NULL");
             }
-            if col.unique {
+            // Non-integer UNIQUE is stored on the column but never indexed,
+            // so emitting it would produce DDL the plan-time check rejects.
+            // INTEGER UNIQUE stays rendered, same shape as PRIMARY KEY.
+            if col.unique && matches!(col.column_type, ColumnType::Int) {
                 part.push_str(" UNIQUE");
             }
             if let Some(default) = &col.default_value {
@@ -1545,6 +1548,7 @@ mod tests {
             secondary_indexes: Vec::new(),
             kind: crate::storage::CatalogKind::Table,
             view_sql: None,
+            explicit_primary_key: false,
         }
     }
 

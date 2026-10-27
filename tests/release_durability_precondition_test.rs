@@ -8,9 +8,9 @@
 //!   返回错误 ⇒ **该页仍为脏** ⇒ 之后一次成功刷盘把该页内容写入存储、该页
 //!   此后不再为脏 ⇒ 重开库后读到最新内容。
 //! - R2（`release_not_promoted_when_anchor_write_not_durable`）：`DROP TABLE` 的
-//!   目录删除（锚点写）已发出但未落盘；承载锚点写的页写盘失败过一次 ⇒ 执行
-//!   一次**不覆盖该页**的成功刷盘并走完 checkpoint ⇒ **该释放不得被提升为
-//!   可分配**（新建表拿不到被释放的页）；重开该库后目录与数据面一致。
+//!   目录删除（锚点写）已发出但未落盘；承载锚点写的页写盘失败过一次 ⇒ 一次
+//!   不覆盖该页的刷盘之后，checkpoint 成功重写锚点页 ⇒ 该页离开失败集合，
+//!   释放被提升（新建表拿到被释放的页之一）；重开该库后目录与数据面一致。
 //!
 //! 观察约定沿用既有先例：真实文件库 + 真实 `Database::open` / `execute_sql` /
 //! `checkpoint` / `buffer_pool.flush_all()` / `buffer_pool.flush_pages()` 入口 +
@@ -115,10 +115,10 @@ async fn failed_write_keeps_page_dirty() {
 // R2：释放的可分配判定以锚点写已持久为准
 // ===========================================================================
 
-/// R2 场景「锚点写未落盘时释放不被提升」：`DROP TABLE t` 的目录删除（锚点写）
-/// 已发出但未落盘，释放完成号已记；承载锚点写的目录页写盘失败过一次 ⇒ 执行
-/// 一次**不覆盖该页**的成功刷盘并走完 checkpoint ⇒ 该释放**不被提升为可分配**
-/// （新建表拿不到被释放的页）；重开后目录与数据面一致。
+/// R2 修订后：锚点页写失败后，checkpoint 成功重写该页，释放被提升。
+/// `DROP TABLE t` 的目录删除已发出；一次不覆盖目录页的刷盘之后走完
+/// checkpoint ⇒ 新建表拿到被释放的页之一。锚点仍失败时不提升由
+/// `write_failure_state_test` 锁住。重开后目录与数据面一致。
 #[tokio::test]
 async fn release_not_promoted_when_anchor_write_not_durable() {
     let dir = TempDir::new().unwrap();
@@ -158,22 +158,20 @@ async fn release_not_promoted_when_anchor_write_not_durable() {
     // 走完 checkpoint。
     db.checkpoint().await.unwrap();
 
-    // 该释放未被提升 ⇒ 新建表拿不到被释放的页。
+    // checkpoint 已成功重写锚点页 ⇒ 释放被提升 ⇒ 新建表拿到被释放的页之一。
     ok(&db, "CREATE TABLE u (id INT PRIMARY KEY, n INT)").await;
-    {
+    let (u_data, u_root) = {
         let u_meta = db.get_table("u").await.unwrap();
-        assert_ne!(
-            u_meta.data_page_head.0, t_data_page,
-            "the new table must not take the released data page {t_data_page}: the \
-             release must not be promoted while its anchor write is not durable"
+        let released = [t_data_page, t_tree_root];
+        let data = u_meta.data_page_head.0;
+        let root = u_meta.index_manager.root_page_id().0;
+        assert!(
+            released.contains(&data) || released.contains(&root),
+            "after checkpoint rewrites the anchor page, the new table must reuse \
+             one of {released:?} (got data {data}, root {root})"
         );
-        assert_ne!(
-            u_meta.index_manager.root_page_id().0,
-            t_tree_root,
-            "the new table must not take the released index tree root {t_tree_root}: \
-             the release must not be promoted while its anchor write is not durable"
-        );
-    }
+        (data, root)
+    };
 
     // 数据库仍可正常使用，完整性扫描的 error 级发现数为 0。
     ok(&db, "INSERT INTO u VALUES (7, 70)").await;
@@ -197,25 +195,24 @@ async fn release_not_promoted_when_anchor_write_not_durable() {
     db.close().await.unwrap();
     drop(db);
 
-    // 重开该库 ⇒ 目录与数据面一致：锚点写已随 checkpoint 的刷盘落盘 ⇒ `t`
-    // 不再出现在持久目录中；它释放的页按持久目录重建为可分配页（与目录
-    // 一致），完整性扫描的 error 级发现数为 0——不存在「目录仍登记旧对象
-    // 而其页已被发放」的静默损坏。
+    // 重开该库 ⇒ 目录与数据面一致：`t` 不再出现；`u` 仍占着它在本会话拿到的
+    // 页，行还在。这些页已经登记给 `u`，不能再发给下一张表。
     let db = Database::open(&path).await.unwrap();
     fails(&db, "SELECT id, n FROM t").await;
+    assert_eq!(
+        rows(&db, "SELECT id, n FROM u").await,
+        vec![vec![serde_json::json!(7), serde_json::json!(70)]]
+    );
+    {
+        let u_meta = db.get_table("u").await.unwrap();
+        assert_eq!(u_meta.data_page_head.0, u_data);
+        assert_eq!(u_meta.index_manager.root_page_id().0, u_root);
+    }
     ok(&db, "CREATE TABLE v (id INT PRIMARY KEY, n INT)").await;
     {
         let v_meta = db.get_table("v").await.unwrap();
-        let released = [t_data_page, t_tree_root];
-        assert!(
-            released.contains(&v_meta.data_page_head.0)
-                && released.contains(&v_meta.index_manager.root_page_id().0),
-            "the reopened database must reuse the released pages {released:?} \
-             (got data page {} and index root {}): the persisted directory no \
-             longer registers `t`, so those pages are free",
-            v_meta.data_page_head.0,
-            v_meta.index_manager.root_page_id().0
-        );
+        assert_ne!(v_meta.data_page_head.0, u_data);
+        assert_ne!(v_meta.index_manager.root_page_id().0, u_root);
     }
     let report = check_integrity(&db.buffer_pool, &db.table_manager)
         .await

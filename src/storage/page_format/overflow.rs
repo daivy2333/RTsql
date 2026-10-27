@@ -144,7 +144,7 @@ pub async fn write_overflow_chain(buffer_pool: &BufferPool, data: &[u8]) -> Resu
         }
         // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放没有
         // 锚点写（链页从未被登记），按保守方向等下一次成功刷盘。
-        buffer_pool.complete_free_release(&released);
+        buffer_pool.complete_free_release(&released, &[]);
     }
     result
 }
@@ -255,7 +255,11 @@ pub async fn collect_overflow_pages(buffer_pool: &BufferPool, first_page: u32) -
 }
 
 /// Free every page of the chain starting at `first_page` (no-op for 0).
-pub async fn free_overflow_chain(buffer_pool: &BufferPool, first_page: u32) -> Result<()> {
+pub async fn free_overflow_chain(
+    buffer_pool: &BufferPool,
+    first_page: u32,
+    anchors: &[PageId],
+) -> Result<()> {
     let pages = collect_overflow_pages(buffer_pool, first_page).await?;
     let mut released: Vec<PageId> = Vec::with_capacity(pages.len());
     for raw_id in pages {
@@ -265,7 +269,7 @@ pub async fn free_overflow_chain(buffer_pool: &BufferPool, first_page: u32) -> R
     }
     // MS35（`free-page-lifecycle` R3）：释放完成标记——调用方的锚点写
     // （GC 路径的数据页写 / 失败清理无锚点）此刻都已发出。
-    buffer_pool.complete_free_release(&released);
+    buffer_pool.complete_free_release(&released, anchors);
     Ok(())
 }
 
@@ -438,7 +442,7 @@ mod tests {
             read_overflow_chain(&pool, 0, 0).await.unwrap(),
             Vec::<u8>::new()
         );
-        free_overflow_chain(&pool, 0).await.unwrap();
+        free_overflow_chain(&pool, 0, &[]).await.unwrap();
     }
 
     #[tokio::test]
@@ -490,7 +494,7 @@ mod tests {
         let pages = collect_overflow_pages(&pool, first).await.unwrap();
         assert_eq!(pages.len(), 2);
 
-        free_overflow_chain(&pool, first).await.unwrap();
+        free_overflow_chain(&pool, first, &[]).await.unwrap();
 
         // 释放进入待释放集合：释放未持久化前，立即分配**不得**取回这些页。
         let mut fresh = Vec::new();
@@ -603,7 +607,7 @@ mod tests {
         // 零改动），生命周期落在它内部的 `FileStorage` 上，故直接驱动内层。
         storage
             .inner
-            .complete_free_release(&[PageId(issued[0] as u64)]);
+            .complete_free_release(&[PageId(issued[0] as u64)], &[]);
         let limit = storage.inner.release_completion_limit();
         storage.inner.promote_free_releases(limit);
         *storage.remaining.lock().unwrap() = 1;

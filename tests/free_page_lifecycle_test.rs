@@ -144,11 +144,7 @@ async fn rebuild_never_marks_live_pages_free() {
         create_small(&db, "gone").await;
         ok(&db, "INSERT INTO gone VALUES (1, 20)").await;
         ok(&db, "DROP TABLE gone").await;
-        ok(
-            &db,
-            "CREATE TABLE live (id INT PRIMARY KEY, s STRING)",
-        )
-        .await;
+        ok(&db, "CREATE TABLE live (id INT PRIMARY KEY, s STRING)").await;
         // A row beyond the inline capacity → overflow chain pages; a short
         // tuple → inline slot.
         let big = "x".repeat(5000);
@@ -260,7 +256,8 @@ async fn recovery_rebuilt_index_pages_are_not_reallocated() {
             "the new table must not take the {role} page"
         );
         assert_ne!(
-            u_meta.index_manager.root_page_id().0, page,
+            u_meta.index_manager.root_page_id().0,
+            page,
             "the new table must not take the {role} page"
         );
     }
@@ -381,7 +378,8 @@ async fn released_page_not_allocatable_before_release_durable() {
         "the new table must not take the released data page {t_data_page}"
     );
     assert_ne!(
-        u_meta.index_manager.root_page_id().0, t_tree_root,
+        u_meta.index_manager.root_page_id().0,
+        t_tree_root,
         "the new table must not take the released index tree root {t_tree_root}"
     );
     assert!(
@@ -493,7 +491,8 @@ async fn crash_with_pending_release_keeps_old_table_rows() {
         "the new table must not take the old table's data page {t_data_page}"
     );
     assert_ne!(
-        v_meta.index_manager.root_page_id().0, t_tree_root,
+        v_meta.index_manager.root_page_id().0,
+        t_tree_root,
         "the new table must not take the old table's index tree root {t_tree_root}"
     );
     let report = check_integrity(&db.buffer_pool, &db.table_manager)
@@ -544,7 +543,8 @@ async fn flush_failure_does_not_promote_pending_release() {
         "the new table must not take the released data page {t_data_page}"
     );
     assert_ne!(
-        u_meta.index_manager.root_page_id().0, t_tree_root,
+        u_meta.index_manager.root_page_id().0,
+        t_tree_root,
         "the new table must not take the released index tree root {t_tree_root}"
     );
 
@@ -600,7 +600,10 @@ async fn injected_free_pages_become_the_allocatable_set() {
     taken.sort_unstable();
     let mut expected = allocated;
     expected.sort_unstable();
-    assert_eq!(taken, expected, "the injected pages must be the allocatable ones");
+    assert_eq!(
+        taken, expected,
+        "the injected pages must be the allocatable ones"
+    );
 }
 
 // ===========================================================================

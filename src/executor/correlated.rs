@@ -68,7 +68,7 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
         PhysicalPlan::Aggregate(node) => {
             inject_correlated_values(&node.input, param_values);
         }
-        PhysicalPlan::Join(node) => {
+        PhysicalPlan::Join(node) | PhysicalPlan::SortMergeJoin(node) => {
             inject_correlated_values(&node.left, param_values);
             inject_correlated_values(&node.right, param_values);
         }

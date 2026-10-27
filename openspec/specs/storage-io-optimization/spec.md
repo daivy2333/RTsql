@@ -1,7 +1,7 @@
 # storage-io-optimization Specification
 
 ## Purpose
-TBD - created by archiving change 2026-09-05-ms08-t01-t02-pread-prefetch. Update Purpose after archive.
+页读写使用 `read_exact_at` / `write_all_at`，每次页 I/O 不再 seek；数据页链预取默认关闭，显式启用时不改变行序和查询结果。来源：`2026-09-05-ms08-t01-t02-pread-prefetch`
 ## Requirements
 ### Requirement: 页 I/O 使用位置参数调用
 

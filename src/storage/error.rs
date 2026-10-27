@@ -64,6 +64,27 @@ pub enum StorageError {
         detail: String,
     },
 
+    /// change 2026-10-25-ms37-defect-ledger-closure Iteration 001（T3）：
+    /// 读 / 写路径上的**损坏数据页**——专用变体点名损坏页号与该槽
+    /// （`detail` 由取行处组装）。
+    ///
+    /// 读 / 写路径**绝不**跳过损坏页上的槽：跳过会让确实存在的行得到
+    /// 「行不存在」的答案（静默错读）。释放 / 重建 / `rtsql check` 面的处置
+    /// 方向不同（页级判据 + 计数 / 告警 / 跳过），本变体不改变它们。
+    #[error("corrupted data page {page_id}: {detail}")]
+    CorruptedDataPage { page_id: u64, detail: String },
+
+    /// change 2026-10-25-ms37-defect-ledger-closure Iteration 004（T4）：
+    /// 读路径上的**损坏目录页**（`__tables` / `__columns` 链）——专用变体
+    /// 点名损坏页号与该槽（`detail` 由取行处组装）。
+    ///
+    /// 目录页损坏 ⇒ **该库 SHALL NOT 打开**：目录是「哪些页仍然存活」的根
+    /// 依据，跳过该目录行会让该表静默消失（比打不开更糟）。读路径**绝不**
+    /// 跳过损坏的目录行。释放 / 重建 / `rtsql check` 面的处置方向不同（本变体
+    /// 不改变它们）。
+    #[error("corrupted catalog page {page_id}: {detail}")]
+    CorruptedCatalogPage { page_id: u64, detail: String },
+
     #[error("Duplicate key")]
     DuplicateKey,
 

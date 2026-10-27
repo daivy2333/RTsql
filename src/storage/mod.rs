@@ -1,3 +1,5 @@
+pub mod add_column_count_flush_window;
+pub mod add_column_narrowing_wait;
 mod async_storage;
 pub mod btree;
 mod buffer_pool;
@@ -29,8 +31,9 @@ pub use catalog::{
 };
 pub use data::{NarrowingGuard, NarrowingState, TableManager, TableMeta};
 pub use data_page::{
-    delete_tuple_from_data_page, read_tuple_from_data_page, update_version_header_in_data_page,
-    write_tuple_to_data_page,
+    corrupted_data_page_slot_count_error, corrupted_data_page_slot_error,
+    delete_tuple_from_data_page, page_write_error_to_storage_error, read_tuple_from_data_page,
+    short_data_page_slot_error, update_version_header_in_data_page, write_tuple_to_data_page,
 };
 pub use error::{Result, StorageError};
 pub use file_header::{FileHeader, FLAG_ENCRYPTED, FORMAT_VERSION, HEADER_SIZE, KNOWN_FLAGS_MASK};

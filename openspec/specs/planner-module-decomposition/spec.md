@@ -1,7 +1,7 @@
 # planner-module-decomposition Specification
 
 ## Purpose
-TBD - created by archiving change 2026-08-30-ms07-t03-planner-decomposition. Update Purpose after archive.
+`src/parser/planner.rs` 拆成六个职责模块，`PlanBuilder` 的对外 API 和方法签名保持不变。来源：`2026-08-30-ms07-t03-planner-decomposition`
 ## Requirements
 ### Requirement: 六个职责模块
 

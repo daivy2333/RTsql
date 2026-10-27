@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use rtsql::database::Database;
 
 fn scale_insert(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -108,5 +109,64 @@ fn scale_join(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, scale_insert, scale_select, scale_scan, scale_join);
+async fn insert_build_side_rows(db: &Database) {
+    let mut customers = String::from("INSERT INTO customers VALUES ");
+    for i in 1..=1000 {
+        if i > 1 {
+            customers.push(',');
+        }
+        customers.push_str(&format!("({i}, 'c')"));
+    }
+    db.execute_sql(&customers).await.unwrap();
+
+    let mut start = 1i64;
+    while start <= 100_000 {
+        let end = (start + 999).min(100_000);
+        let mut orders = String::from("INSERT INTO orders VALUES ");
+        for i in start..=end {
+            if i > start {
+                orders.push(',');
+            }
+            let customer_id = ((i - 1) % 1000) + 1;
+            orders.push_str(&format!("({i}, {customer_id}, 0)"));
+        }
+        db.execute_sql(&orders).await.unwrap();
+        start = end + 1;
+    }
+}
+
+fn build_side_join(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut group = c.benchmark_group("build_side_join");
+
+    let (path, db) = rt.block_on(async {
+        let (p, d) = setup_db().await;
+        create_join_tables(&d).await;
+        insert_build_side_rows(&d).await;
+        (p, d)
+    });
+
+    group.bench_function("customers_1000_orders_100000", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                db.execute_sql(
+                    "SELECT * FROM customers INNER JOIN orders ON orders.customer_id = customers.id",
+                )
+                .await
+                .unwrap();
+            });
+        });
+    });
+    cleanup_db(&path);
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    scale_insert,
+    scale_select,
+    scale_scan,
+    scale_join,
+    build_side_join
+);
 criterion_main!(benches);

@@ -1,6 +1,6 @@
 # 失败的 DDL 语句其目录面变更在后续刷盘落地（与「失败的 DDL 不留目录面变更」字面冲突）
 
-- Status: open
+- Status: closed（2026-10-26 fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`）
 - Filed: 2026-10-25
 - Source: Act Response 的 Issue 候选 3（「失败的 DDL 语句其目录面变更在后续刷盘落地」，Plan Context Risks 的候选 3 被实测坐实）+ Plan Review 的 finding 5 / 非阻塞 2 与「范围外实质缺陷」段，change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 004 Cycle `000-initial.md`（Review Result `accepted`）
 - Environment: Linux x86_64 / WSL2 6.18.40.1、rustc 1.99.1 / cargo 1.99.1、RTsql `tests/release_durability_precondition_test.rs` 集成测试、真实文件库 + 一次性写盘失败注入点；登记时工作区 HEAD `0a08b14`（ahead of origin 9），产品改动未提交
@@ -32,9 +32,11 @@
 - 承载落点：落在 **DDL 语句边界落盘的顺序语义**（承载 change 的 `design.md` D9 / B-3）→ 建议独立 change 承载。
 - **需要的决定（产品决定，超出实现层）**：两条互斥方向——① **回滚目录变更**（失败的 DDL 在语句失败时把已发出的目录面变更撤回，使 R1 的字面重新成立）；② **修订既有域**（承认「失败的 DDL 的目录面变更可能在后续刷盘落地」并修订 `ddl-catalog-transactional` R1 的表述与迁移指引）。⇒ 须由用户 / Plan 裁定方向后再定承载。
 - 与承载 change 的关系：这是承载 change Iteration 004 修复「刷盘失败保持脏标记」后的**条件性副作用**——该修复使失败写不再被丢弃，代价是失败 DDL 的目录面变更可能落地；承载 change 的 Plan Review 明确把该语义划为 Excluded scope（D9 / B-3），**不由该 change 裁决**。
+- 2026-10-26 关闭。原因：失败路径上的目录面补偿已由归档变更 Iteration 006 任务 T7 处置（`alter_add_column` 失败时回退列定义与列数，回退不刷盘）。该 Cycle `iterations/006-ddl-commit-point-unified-model/000-initial.md` 的 Plan Review 为 `accepted`。语句 future 在列数刷盘期间被丢弃的形态不在本条内，另见 ISS40。处置指针：fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`。
 
 ## 证据
 
+- 2026-10-26 关闭依据：`openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure/iterations/006-ddl-commit-point-unified-model/000-initial.md` 的 Plan Review 为 `accepted`（T7）。放弃路径见 `.agents/issues/ISS40-add-column-abandoned-during-column-count-flush.md`。
 - 调查与结论正文（不在本 Issue 复制）：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/iterations/004-release-durability-precondition/000-initial.md` —— Plan Context 的 Risks 候选 3、Act Response 的「候选 3 的实际观察结果」段（修复前后的对照运行与两个观察结果）、Issue 候选 1；Plan Review 的 finding 5（目录面变更与语句边界落盘的先后可由代码独立推出）与「范围外实质缺陷」段（根因位置、影响面与触发条件、可承载建议）。
 - 既有合同：`openspec/specs/ddl-catalog-transactional/spec.md`（R1 被放弃或失败的 DDL 语句不留下目录面变更）。
 - 承载 change 的设计记录（该语义被显式划为范围外）：`openspec/changes/archive/2026-10-24-open-defect-batch-storage-ddl-legacy-evidence/design.md`（D9）。

@@ -884,9 +884,9 @@ impl PlanBuilder {
             // MS17-T02/ISS02: a JOIN-shaped IN-subquery plan used to fall into
             // the `_` arm below and misreport "multiple columns" even for a
             // single-column select list — reject with a truthful message.
-            PhysicalPlan::Join(_) | PhysicalPlan::NestedLoopJoin(_) => {
-                Err(PlanError::InSubqueryJoinUnsupported)
-            }
+            PhysicalPlan::Join(_)
+            | PhysicalPlan::SortMergeJoin(_)
+            | PhysicalPlan::NestedLoopJoin(_) => Err(PlanError::InSubqueryJoinUnsupported),
             // MS21 Iter005 (T5-c/D12)：视图/CTE 展开基座（DerivedScan）——
             // 返回首列名（此前兜底误报多列；CTE 基座同形随之收口，D12）。
             PhysicalPlan::DerivedScan(node) => {

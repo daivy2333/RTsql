@@ -151,6 +151,7 @@ async fn text_primary_key_equality_reaches_keyless_rows() {
                 ),
             ],
             "s",
+            false,
         )
         .await
         .unwrap();

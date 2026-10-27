@@ -1,7 +1,7 @@
 # database-file-format-header Specification
 
 ## Purpose
-TBD - created by archiving change 2026-09-08-ms10-t03-file-format-header. Update Purpose after archive.
+主数据库文件以固定 64 字节头开始；打开空文件时写入该头，打开非空文件时校验该头，格式不符则在页解析之前按原因拒绝。来源：`2026-09-08-ms10-t03-file-format-header`
 
 ## Requirements
 

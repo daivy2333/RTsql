@@ -5,7 +5,7 @@
 //!   R1-S1 建索引与存量行索引化        create_index_backfills_existing_rows_equivalently
 //!   R1-S2 干净重开后索引可用          create_index_usable_after_clean_reopen
 //!   R1-S3 崩溃恢复两态一致            create_index_consistent_across_crash_recovery
-//!   R1-S4 非 INT 列拒绝               create_index_on_non_int_column_rejected
+//!   R1-S4 非字符串非 INT 列拒绝       create_index_on_non_int_column_rejected
 //!   R1-S5 重复索引名拒绝              create_index_duplicate_name_rejected
 //!   R1-S6 UNIQUE 与组合索引拒绝       create_unique_and_composite_index_rejected
 //!   R1-S7 表或列不存在拒绝            create_index_missing_table_or_column_rejected
@@ -194,14 +194,20 @@ async fn create_index_consistent_across_crash_recovery() {
     );
 }
 
-/// R1-S4：非 INT 列点名拒绝，零副作用。
+/// R1-S4：INT 与字符串以外的列点名拒绝，零副作用。
 #[tokio::test]
 async fn create_index_on_non_int_column_rejected() {
     let (db, _dir) = open_db().await;
     seed_dup_table(&db).await;
+    exec_ok(
+        &db,
+        "CREATE TABLE flags (id INT PRIMARY KEY, flag BOOLEAN)",
+        "create flags",
+    )
+    .await;
     expect_plan_error(
-        to_response(db.execute_sql("CREATE INDEX idx_name ON t(name)").await),
-        "non-INT column",
+        to_response(db.execute_sql("CREATE INDEX idx_flag ON flags(flag)").await),
+        "unsupported column",
         "Unsupported statement type",
     );
     // 零副作用：合法建索引仍可用

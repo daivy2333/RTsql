@@ -1950,15 +1950,21 @@ impl PlanBuilder {
             return Err(PlanError::ColumnNotFound(column_name));
         };
 
-        // 声明类型门：首版仅 INT 列（写入类型门保证 INT 列无非 Int 值）
-        let declared_int = self
+        // 声明类型门：INT 与字符串列。缺类型与其余类型点名拒绝。
+        let supported = self
             .table_column_types
             .get(&table_name)
             .and_then(|types| types.get(column_index))
-            .is_some_and(|ct| matches!(ct, crate::storage::page_format::ColumnType::Int));
-        if !declared_int {
+            .is_some_and(|ct| {
+                matches!(
+                    ct,
+                    crate::storage::page_format::ColumnType::Int
+                        | crate::storage::page_format::ColumnType::String(_)
+                )
+            });
+        if !supported {
             return Err(PlanError::UnsupportedStatement(format!(
-                "INDEX ON NON-INT COLUMN '{}' (first version supports INT columns only)",
+                "INDEX ON UNSUPPORTED COLUMN '{}' (only INT and string columns)",
                 column_name
             )));
         }

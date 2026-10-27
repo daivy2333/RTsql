@@ -248,26 +248,26 @@ impl IndexManager {
     /// 001 (D5): dispatch by slot — PK root to `index_root_page_id`, UNIQUE
     /// root to `unique_roots[ordinal]`. MS21 Iteration 002 (D4): secondary
     /// root to `secondary_indexes[ordinal]`.
-    async fn sync_root_to_catalog(&self, new_root: PageId) -> Result<()> {
+    async fn sync_root_to_catalog(&self, new_root: PageId) -> Result<Option<PageId>> {
         let ctx = self.catalog_ctx.lock().unwrap().clone();
         if let Some((catalog, slot)) = ctx {
-            match slot {
+            return match slot {
                 CatalogRootSlot::PrimaryKey { table } => {
-                    catalog.update_table_root(&table, new_root.0 as u32).await?;
+                    catalog.update_table_root(&table, new_root.0 as u32).await
                 }
                 CatalogRootSlot::Unique { table, ordinal } => {
                     catalog
                         .update_unique_index_root(&table, ordinal, new_root.0 as u32)
-                        .await?;
+                        .await
                 }
                 CatalogRootSlot::Secondary { table, ordinal } => {
                     catalog
                         .update_secondary_index_root(&table, ordinal, new_root.0 as u32)
-                        .await?;
+                        .await
                 }
-            }
+            };
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Async search — direct async path without spawn_blocking
@@ -470,10 +470,12 @@ impl IndexManager {
         .await??;
 
         if let Some(new_root_id) = new_root {
-            self.sync_root_to_catalog(new_root_id).await?;
+            let anchor = self.sync_root_to_catalog(new_root_id).await?;
+            let anchors: Vec<PageId> = anchor.into_iter().collect();
             // MS35（`free-page-lifecycle` R3）：缩根释放的锚点写 = 目录 root
             // 更新，此刻已发出 ⇒ 释放完成标记（旧根页）。
-            self.sync_loader.complete_free_release(&[old_root]);
+            self.sync_loader
+                .complete_free_release(&[old_root], &anchors);
         }
 
         Ok(())
@@ -1107,5 +1109,75 @@ mod tests {
             height += 1;
             page_id = PageId(child as u64);
         }
+    }
+
+    /// 可容纳的 fixed32 字符串键走现有 38/36 字节条目，不改变页类型。
+    #[tokio::test]
+    async fn string_key_uses_existing_tree_entry_width() {
+        use crate::storage::page_format::{ColumnType as SchemaColumnType, SlottedPageRef};
+        use crate::Value;
+
+        let (_dir, im) = make_manager().await;
+        let column = SchemaColumnType::String(255);
+        let mut entries = Vec::with_capacity(200);
+        for i in 0..200u32 {
+            let key = Value::String(format!("s{i:04}"))
+                .secondary_index_key(&column)
+                .expect("sample string fits in 32 bytes");
+            let rid = RowId::new(i + 1, 1);
+            im.insert(key.as_bytes(), rid).await.unwrap();
+            entries.push((key, rid));
+        }
+
+        let child = {
+            let guard = im.async_loader.load_page(im.root_page_id()).await.unwrap();
+            let data = guard.page_data();
+            assert_eq!(data[0], 0x02);
+            let check = check_tree_page(&data);
+            assert!(
+                check.violations.is_empty(),
+                "root violations: {:?}",
+                check.violations
+            );
+            let separator = SlottedPageRef::new(&data)
+                .get_slot(0)
+                .expect("root has a separator slot");
+            assert_eq!(separator.length, 36);
+            InternalNodeRef::new(&data).leftmost_child()
+        };
+
+        {
+            let guard = im
+                .async_loader
+                .load_page(PageId(child as u64))
+                .await
+                .unwrap();
+            let data = guard.page_data();
+            assert_eq!(data[0], 0x01);
+            let check = check_tree_page(&data);
+            assert!(
+                check.violations.is_empty(),
+                "leaf violations: {:?}",
+                check.violations
+            );
+            let slot = SlottedPageRef::new(&data)
+                .get_slot(0)
+                .expect("leaf has an entry");
+            assert_eq!(slot.length, 38);
+        }
+
+        for (key, rid) in &entries {
+            assert_eq!(im.search_all(key.as_bytes()).await.unwrap(), vec![*rid]);
+        }
+
+        let shared = Value::String("dup".into())
+            .secondary_index_key(&column)
+            .expect("duplicate sample fits");
+        let rid_a = RowId::new(900, 1);
+        let rid_b = RowId::new(901, 2);
+        im.insert(shared.as_bytes(), rid_a).await.unwrap();
+        im.insert(shared.as_bytes(), rid_b).await.unwrap();
+        im.delete_exact(shared.as_bytes(), rid_a).await.unwrap();
+        assert_eq!(im.search_all(shared.as_bytes()).await.unwrap(), vec![rid_b]);
     }
 }

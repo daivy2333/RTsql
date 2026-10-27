@@ -170,9 +170,11 @@ CREATE TABLE 解析期 SHALL 对以下约束形态以点名不支持特性的错
 
 #### Scenario: 存量非 INT UNIQUE 库的边界已知
 
-- **GIVEN** 旧版本创建的库含非 INT 列 UNIQUE 标志
+- **GIVEN** 旧版本创建的库含非 INT 列 UNIQUE 标志（该约束从未被强制）
 - **WHEN** dump 出的 DDL 在本 change 之后 restore
-- **THEN** restore 被拒绝面挡住（接受并文档化的兼容性破坏；拒绝文本点名 UNIQUE 类型限制）
+- **THEN** dump 的 DDL SHALL NOT 渲染该 `UNIQUE`（与 `PRIMARY KEY` 同型条件：仅整数类型的唯一列输出 `UNIQUE`），restore 因此成功
+- **AND** 恢复后的表 SHALL **不含**该唯一约束——产物文本本身即声明了这一点（SHALL NOT 是被静默的部分恢复）
+- **AND** **旧版本已导出的、含该 `UNIQUE` 声明的 dump 文本**仍被拒绝面挡住（拒绝文本点名 UNIQUE 类型限制）——该输入面的拒绝保持不变
 
 ### Requirement: UNIQUE 干净重开与崩溃恢复两态一致
 

@@ -59,10 +59,14 @@ pub trait AsyncStorage: Send + Sync {
     /// pages become "completed": a release that has not completed yet is
     /// never promoted, no matter what else completes meanwhile.
     ///
+    /// `anchors` are the pages of the anchor write that stopped referencing
+    /// `pages`. An empty list means this release has no anchor write, and
+    /// promotion does not consult the per-page write-failure set.
+    ///
     /// Default implementation: no effect — storage shapes without a release
     /// lifecycle keep their existing "released pages are allocatable right
     /// away" behavior (`:memory:` has no crash boundary).
-    fn complete_free_release(&self, _pages: &[PageId]) {}
+    fn complete_free_release(&self, _pages: &[PageId], _anchors: &[PageId]) {}
 
     /// MS35 (`free-page-lifecycle` R3): the flush that covered the releases
     /// below `limit` succeeded — those releases are established on the crash

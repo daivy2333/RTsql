@@ -85,7 +85,12 @@ impl Executor for CreateTableExecutor {
         // 调用 TableManager::create_table_with_constraints
         self.database
             .table_manager
-            .create_table_with_constraints(&node.table_name, columns, &pk)
+            .create_table_with_constraints(
+                &node.table_name,
+                columns,
+                &pk,
+                node.primary_key.is_some(),
+            )
             .await?;
 
         Ok(Some(ExecResult::AffectedRows(0)))

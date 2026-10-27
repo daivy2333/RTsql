@@ -1,7 +1,7 @@
 # wal-writer-handle-reuse Specification
 
 ## Purpose
-TBD - created by archiving change 2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages. Update Purpose after archive.
+`WalWriter` 持有持久文件句柄，写入、fsync、截断和读取当前 LSN 都通过该句柄完成，不随每次调用打开关闭文件。来源：`2026-08-26-ms06-t03-t04-wal-handle-pipeline-stages`
 ## Requirements
 ### Requirement: WalWriter 持久句柄复用
 

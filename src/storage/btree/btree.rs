@@ -196,11 +196,7 @@ impl BTree {
                 let guard = loader.load_page(page_id).await?;
                 let data_guard = guard.page_data();
 
-                ensure_index_page_intact(
-                    &data_guard,
-                    page_id.0,
-                    self.root_page_id.0,
-                )?;
+                ensure_index_page_intact(&data_guard, page_id.0, self.root_page_id.0)?;
 
                 if data_guard[0] == LEAF_NODE {
                     let leaf = LeafNodeRef::new(&data_guard);
@@ -529,7 +525,8 @@ impl BTree {
         parent_id: PageId,
     ) -> Result<Option<MergeInfo>> {
         let parent_guard = self.loader.load_page(parent_id)?;
-        let (left_sib, right_sib) = sibling_ids(&parent_guard, parent_id, child_index, self.root_page_id.0)?;
+        let (left_sib, right_sib) =
+            sibling_ids(&parent_guard, parent_id, child_index, self.root_page_id.0)?;
         drop(parent_guard);
 
         if let Some(right_id) = right_sib {
@@ -670,7 +667,7 @@ impl BTree {
 
         // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
         // = 父节点的分隔键移除（同一写单元内的树页写），此刻已发出。
-        self.loader.complete_free_release(&[right_id]);
+        self.loader.complete_free_release(&[right_id], &[parent_id]);
 
         Ok(MergeInfo {
             separator_key: sep_key,
@@ -781,7 +778,8 @@ impl BTree {
         parent_id: PageId,
     ) -> Result<Option<MergeInfo>> {
         let parent_guard = self.loader.load_page(parent_id)?;
-        let (left_sib, right_sib) = sibling_ids(&parent_guard, parent_id, child_index, self.root_page_id.0)?;
+        let (left_sib, right_sib) =
+            sibling_ids(&parent_guard, parent_id, child_index, self.root_page_id.0)?;
         drop(parent_guard);
 
         if let Some(right_id) = right_sib {
@@ -939,7 +937,7 @@ impl BTree {
 
         // MS35（`free-page-lifecycle` R3）：释放完成标记——本次释放的锚点写
         // = 父节点的分隔键移除（同一写单元内的树页写），此刻已发出。
-        self.loader.complete_free_release(&[right_id]);
+        self.loader.complete_free_release(&[right_id], &[parent_id]);
 
         Ok(MergeInfo {
             separator_key: merged_sep,

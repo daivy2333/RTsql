@@ -1,8 +1,8 @@
 # DDL 提交点窗口内的位置性错读（窄 tuple 在未移位目录下按位置取值）
 
-- Status: open
+- Status: closed（2026-10-26 fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`）
 - Filed: 2026-10-24
-- Last updated: 2026-10-25（可达性坐实 + 并发读变体已修复；崩溃-重开变体仍开放）
+- Last updated: 2026-10-25（可达性坐实 + 并发读变体已修复；崩溃-重开变体仍开放）。2026-10-26 关闭：变体 (b) 已由该归档变更 Iteration 006 / T6 处置。
 - Source: Act Response 的 Remaining Issues（候选 D）+ Plan Review 的 F6（design D5「不会静默错读」主张不准确、就地更正；该窗口判为 Non-goal），change `2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog` Iteration 001 Cycle `000-initial.md`（Review Result `accepted`）；更新依据见「事件记录」与「证据」段（承载 change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 003）
 - Environment: Linux x86_64 / WSL2 6.18.40.1、rustc 1.99.1 (58cf8f9c3 2026-10-13) + cargo 1.99.1、sqlparser-rs 0.44；登记时工作区 HEAD `0a08b14`（ahead of origin 9）；复现现场为 MS34 Issue 修复批实施期工作树（产品改动未提交）
 
@@ -40,9 +40,11 @@
   - ⇒ 两条路径都超出当前 change 的范围与既有已验收契约 ⇒ 属**新的设计决定**，须由用户 / Plan 裁定后才能承载。
 - 建议修复方向（2026-10-25 更新）：原两条互补路径中，① **读侧列序校验**已由变体 (a) 的显式拒绝形态覆盖（进程内窗口）；② **把「提交完成 → 目录应用」的窗口收窄到读侧可判定的形态**在变体 (b) 上**仍未实现**——纯内存状态无法跨崩溃存活，需要持久标记或提交点层面的设计决定。
 - 验证前提（部分完成）：承载 change 需要**新的故障注入夹具**（提交完成、目录应用前崩溃）才能把本条从读码结论升级为已复现 ⇒ **2026-10-25 已满足**：夹具复用 `.agents/runbooks/in-process-crash-simulation.md` 的进程内崩溃形态（丢弃语句 future + 丢弃库句柄**不 close** ⇒ 脏页不落盘，重开走 WAL 恢复），实测读数已记录于「事件记录」段。
+- 2026-10-26 关闭。原因：变体 (b)（窗口内崩溃后重开仍按位置错读）已由归档变更 Iteration 006 任务 T6 处置。窄化意图随事务写入 WAL，崩溃重开后由恢复发布已提交的窄化。该 Cycle 的 Plan Review 为 `accepted`（2026-10-26）。上文 2026-10-25「不得关闭」保留为当时记录。处置指针：fixed → `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure`。
 
 ## 证据
 
+- 2026-10-26 关闭依据：`openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure/iterations/006-ddl-commit-point-unified-model/000-initial.md` 的 Plan Review 为 `accepted`（T6）。
 - 调查与结论正文（不在本 Issue 复制）：`openspec/changes/archive/2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog/iterations/001-ddl-catalog-transactional/000-initial.md` —— Act Response 的 Remaining Issues 候选 D（读码结论与「未实跑验证」的明确声明）、Plan Review 的 F6（独立读码核对、design D5 就地更正、镜像方向对照与 Non-goal 裁定）。
 - 登记时（2026-10-24）独立复核的代码位点：`src/storage/page_format/tuple.rs:189-222`（`deserialize_tuple_width`）、`src/storage/data/table_manager.rs:284-299`（重开库活布局 = 目录列行按宣告列数截断）
 - 相关产物：`openspec/changes/archive/2026-10-24-ms34-issue-fix-index-atomicity-and-ddl-catalog/design.md`（D5「崩溃窗口（明确记录）」段的就地更正）
