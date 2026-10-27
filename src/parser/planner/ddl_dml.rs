@@ -1478,10 +1478,8 @@ impl PlanBuilder {
                 for option in &column_def.options {
                     match &option.option {
                         sqlparser::ast::ColumnOption::NotNull => not_null = true,
-                        sqlparser::ast::ColumnOption::Default(expr) => {
-                            if default_value.is_none() {
-                                default_value = Some(self.extract_default_value(expr)?);
-                            }
+                        sqlparser::ast::ColumnOption::Default(expr) if default_value.is_none() => {
+                            default_value = Some(self.extract_default_value(expr)?);
                         }
                         _ => {}
                     }

@@ -1019,6 +1019,7 @@ impl TableManager {
     /// Catalog-first ordering: a failed catalog write leaves the in-memory
     /// meta unchanged (zero side effects, retryable — CTAS/CREATE INDEX
     /// precedent); the in-memory swap itself cannot fail.
+    #[allow(clippy::too_many_arguments)]
     pub async fn alter_add_column(
         &self,
         table: &str,

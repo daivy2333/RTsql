@@ -112,3 +112,77 @@ PASS。计划审查的 11 项均通过。运行形态的可观察结果由规格
 - 取消夹具沿用字符串测试的锚点：10 秒内目标表没有出现至少两行版本，就是夹具失败，返回计划。不要把等待加长后当成产品通过。
 - 写入本文件时测试文件是 156 个。加上本轮新文件后，`lib`、`bins` 和测试文件名要重新数。批表以运行时的名单为准。
 - 全局 fmt 和 deny clippy 预期会失败。这不是本任务的新缺陷，也不要顺手重排未编辑文件。
+
+## Act Response
+
+- Status: reported
+
+**Implemented**
+
+T5。新建 `tests/composite_index_runtime_test.rs`，六个测试都从 `Database::execute_sql` 或 CLI 进入。取消回收、只读会话、内存库、加密库、附加库和旧库副本在实现前就已经沿现有路径通过，没有为了制造失败去改产品代码。`README.md` 与 `README.zh-CN.md` 的存储段保留原有单列等值描述，并写明多列非唯一索引、32 字节键、新建单列 INT 的有符号范围、升级前单列 INT 的范围仍扫描，以及可能漏行的范围仍包含未入树且谓词成立的行。
+
+Clippy 点名了本变更已经改过的五个 Rust 文件。只清了这五处：`pipeline.rs` 里一段悬空文档注释改为普通注释；`IndexRangeScanExecutor::new` 和 `TableManager::alter_add_column` 按现有执行器的做法加上 `too_many_arguments` 允许；`ddl_dml.rs` 的 DEFAULT 分支收成等价的 match guard；`transaction/manager.rs` 两处 `zip` 去掉多余的 `into_iter`。键比较、`derive_secondary_index_key`、`secondary_range_bounds` 和 002 的谓词路由没有改。
+
+**Deviations from Plan**
+
+`cancelled_composite_index_write_is_reclaimed` 在下一次写入前断言被丢掉的事务仍活动，与字符串取消夹具相同。附加库测试除了新键、旧键和被删键，还断言 UPDATE 后的 `(11, 11)` 返回 id 1。
+
+`cargo fmt -- --check <paths>` 在当前 Cargo 里仍会检查包内其余文件。路径本身的格式结果来自 `rustfmt --edition 2021 --check` 加这 27 个 Rust 路径，退出码为 0。
+
+**Self-review**
+
+Gate 3 没有未解决的 Critical 或 Important 问题。六个运行形态的行集、计划、拒绝文本和文件副作用都由对应测试观察。允许属性和注释不改变签名或执行。match guard 与去掉 `into_iter` 之后，`add_column_with_default_backfills` 和 `cancelled_composite_index_write_is_reclaimed` 重新运行，failed 都是 0。全量是在这两处修改之前跑的，没有再跑第二次。
+
+**Verification Evidence**
+
+先行测试在改产品和改文档之前运行：
+
+- `cargo test --offline --test composite_index_runtime_test cancelled_composite_index_write_is_reclaimed -- --test-threads=1`：1 passed，0 failed，5 filtered out。
+
+定向测试：
+
+- `cargo test --offline --test composite_index_runtime_test -- --test-threads=1`：6 passed，0 failed。六个测试分别是 `cancelled_composite_index_write_is_reclaimed`、`readonly_session_reads_composite_and_new_int_range`、`memory_composite_range_creates_no_files`、`encrypted_composite_index_keeps_page_records`、`attached_dml_maintains_composite_index`、`legacy_open_does_not_rewrite_sample`。
+
+本变更 27 个 Rust 路径的 `rustfmt --edition 2021 --check` 退出码为 0。
+
+`openspec validate 2026-10-27-ms39-composite-index-and-range-access --strict --no-interactive` 退出码为 0，输出含 `is valid`。
+
+全量只跑了一次。新测试文件出现后目标数 N 为 159，包括 `lib`、`bins` 和 157 个测试文件名。`LC_ALL=C` 排序。B 为 14。前 9 批各 11 个目标，后 5 批各 12 个。批间串行。每批都是 `cargo test --offline` 加上该批的 `--lib`、`--bins` 或 `--test`，最后是 `-- --test-threads=1`。
+
+| 批 | 退出码 | passed | failed |
+|---|---|---|---|
+| 01 | 0 | 148 | 0 |
+| 02 | 0 | 186 | 0 |
+| 03 | 0 | 149 | 0 |
+| 04 | 0 | 110 | 0 |
+| 05 | 0 | 175 | 0 |
+| 06 | 0 | 65 | 0 |
+| 07 | 0 | 537 | 0 |
+| 08 | 0 | 84 | 0 |
+| 09 | 0 | 245 | 0 |
+| 10 | 0 | 104 | 0 |
+| 11 | 0 | 126 | 0 |
+| 12 | 0 | 185 | 0 |
+| 13 | 0 | 157 | 0 |
+| 14 | 0 | 97 | 0 |
+
+`cargo fmt --check` 退出码为 1。点名文件是 `tests/hash_join_build_side_test.rs` 和 `tests/sort_merge_join_test.rs`。二者不在本变更的 Rust 路径里，没有修改。
+
+`cargo clippy --offline --all-targets -- -D warnings` 在修复前退出码为 101，点名了 `src/pipeline.rs`、`src/executor/index_range_scan.rs`、`src/parser/planner/ddl_dml.rs`、`src/storage/data/table_manager.rs`、`src/transaction/manager.rs`，以及变更路径之外的文件。修复后同一命令退出码仍为 101。上述五个文件不再出现。仍被点名的项目文件是 `src/cli/lifecycle.rs`、`src/executor/alter_table.rs`、`src/executor/executor_trait.rs`、`src/executor/sort_merge_join.rs`、`src/network/protocol.rs`、`src/storage/async_storage.rs`、`src/storage/buffer_pool.rs`。这些文件不在本变更的 Rust 路径里，没有修改。ISS36 仍是 open。
+
+受 lint 修改影响的定向复核：
+
+- `cargo test --offline --test alter_table_test add_column_with_default_backfills -- --test-threads=1`：1 passed，0 failed，15 filtered out。
+- `cargo test --offline --test composite_index_runtime_test cancelled_composite_index_write_is_reclaimed -- --test-threads=1`：1 passed，0 failed，5 filtered out。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None。
+
+**Unresolved**
+
+None。

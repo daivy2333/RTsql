@@ -2932,8 +2932,8 @@ pub(crate) fn create_executor_from_plan<'a>(
     })
 }
 
-/// MS31-T01：`value_to_json` 已迁入 `crate::result`（核心/协议解耦的载体
-/// 模块）——本文件不再持有值转换实现。
+// MS31-T01：`value_to_json` 已迁入 `crate::result`（核心/协议解耦的载体
+// 模块）——本文件不再持有值转换实现。
 
 /// T4（change 2026-10-04-external-review-gaps）：计划的输出列名序（仅覆盖
 /// SubqueryEval 消费面可达的形状——扫描类/聚合/排序/链式标量节点；其余形状
