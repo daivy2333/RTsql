@@ -340,11 +340,3 @@ change 结构自检覆盖：tasks 状态与实际完成一致，specs、design �
 3. Gate 是否逐项通过或阻塞？
 4. 完成声明是否有当次运行的证据？
 5. 最终报告前是否检查任务状态？
-
-## Cursor Cloud specific instructions
-
-- 开发工具链是 rustc / cargo **1.99.1**（含 rustfmt、clippy）。镜像自带的 Rust 1.83 编不过这棵树。测试依赖 `rusqlite` 链接系统 SQLite，缺 `libsqlite3-dev` 与 `pkg-config` 时测试目标编不过。Cloud Agent 的 `install` 在版本不符时安装 1.99.1，并在缺包时安装这两个系统包。
-- 没有常驻服务。验证入口是 `cargo build --locked`，然后用隔离的 `RTSQL_HOME` 跑 `./target/debug/rtsql`，步骤见 README Quick start。
-- 整库行为检查：`cargo test --locked --test e2e_test -- --test-threads=1`。全量回归的分批约束在 `.agents/memory/project-model.md` 的 M19，不要跑无目标过滤的 `cargo test`。
-- `e3_crash_recovery_control` 假定 debug 构建下 1000 条 `INSERT` 在 600ms 内跑不完，从而能在 `SIGKILL` 前留下未完成写入。在本类机器上这批插入约 440ms 就以退出码 0 结束，断言会失败。这是测试里的时间假设，不是缺依赖。
-- `cargo fmt --check` 当前会报告仓库里已有的格式差异。这不是环境故障。

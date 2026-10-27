@@ -298,4 +298,19 @@
 - **状态**: active
 - **Legacy**: 无
 
+## M21: Cloud Agent 开发环境约束
+
+- **分类**: runtime
+- **范围**: Cloud Agent 与本机的构建、测试入口
+- **不变量**:
+  - 开发工具链 SHALL 为 rustc / cargo 1.99.1，并包含 rustfmt 与 clippy。镜像自带的 Rust 1.83 SHALL NOT 作为本仓库的构建工具链
+  - 测试依赖 `rusqlite` 链接系统 SQLite。缺少 `libsqlite3-dev` 或 `pkg-config` 时测试目标编不过。Cloud Agent 的 `install` 在 `rustc --version` 不是 1.99.1 时安装该工具链，并在缺包时安装这两个系统包
+  - 本仓库没有常驻服务。验证入口是 `cargo build --locked`，然后用隔离的 `RTSQL_HOME` 跑 `./target/debug/rtsql`，步骤见 README Quick start
+  - 整库行为检查是 `cargo test --locked --test e2e_test -- --test-threads=1`。全量回归仍受 M19 约束，SHALL NOT 跑无目标过滤的 `cargo test`
+  - `e3_crash_recovery_control` 假定 debug 构建下 1000 条 `INSERT` 在 600ms 内跑不完，从而能在 `SIGKILL` 前留下未完成写入。在 Cloud Agent 这类机器上这批插入约 440ms 就以退出码 0 结束，断言失败。判定时 SHALL 把它当作测试里的时间假设，而不是缺依赖
+  - `cargo fmt --check` 当前会报告仓库里已有的格式差异。该结果 SHALL NOT 被当成环境故障
+- **证据**: 2026-10-27 Cloud Agent 环境实测（rustc 1.99.1；`cargo build --locked` 成功；隔离 `RTSQL_HOME` 下 CLI 插入并选出 Lin / 41；1000 条 debug `INSERT` 用时约 440ms，`e3_crash_recovery_control` 因此以退出码 0 失败；`cargo fmt --check` 报告既有格式差异）。2026-10-27 用户指令：该说明不写入 `AGENTS.md`，迁入本文件
+- **状态**: active
+- **Legacy**: 无
+
 <!-- arc: ARC-202609241843b --> 2 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609241843b/proposal.md
