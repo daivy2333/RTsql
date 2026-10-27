@@ -1359,6 +1359,8 @@ impl RecoveryManager {
                 new_secondary_indexes.push(SecondaryIndexMeta {
                     name: entry.name.clone(),
                     column_index: entry.column_index as usize,
+                    generation: 0,
+                    extra_column_indexes: Vec::new(),
                     index: sindex,
                 });
             }

@@ -118,7 +118,53 @@ PASS。计划审查的 11 项均通过，RTM 无 Missing，没有未批准的裁
 
 ## Act Response
 
-实施尚未开始。本段由 Act 覆盖。
+- Status: reported
+
+**实际改动**
+
+- `src/executor/value.rs`：`Value::derive_secondary_index_key`、`Value::secondary_range_bounds`，以及 `BoundMark`、`IndexColumnBound`、`RangeSentinel`、`SecondaryRangeBounds`。字符串转义抽成 `encode_string_bytes`，`fixed32_string_key` 改为调用它。世代 1 的整数分量由 `encode_ordered_component` 对大端首字节异或 `0x80`。哨兵由 `range_sentinel` 计算。新增六个测试。
+- `src/storage/catalog.rs`：`CatalogSecondaryIndex` 增加 `generation: u8` 和 `extra_column_indexes: Vec<u32>`。`serialize_catalog_row` 仅在任一索引世代非 0 或有额外列时，于 `explicit_primary_key` 之后写 `u32 count` 和每个索引的 `u8 generation | u16 extra_count | extra_count 个 u32`。`deserialize_catalog_row` 通过 `read_secondary_generation_tail` 读取；尾段缺失、`count` 不符或截断时保持世代 0 和空额外列，不返回错误。既有构造点补世代 0 和空额外列。
+- `src/storage/data/table_manager.rs`：`SecondaryIndexMeta` 增加 `generation: u8` 和 `extra_column_indexes: Vec<usize>`。`register_secondary_index` 写出世代 0 和空额外列。`narrowed_meta` 复制这两个字段，删列仍只按第一列过滤。打开表和清空重建的字面量填世代 0 和空额外列。
+- `src/wal/recovery.rs`：恢复重建的 `SecondaryIndexMeta` 字面量补世代 0 和空额外列，否则无法编译。恢复仍不重建组合键。
+
+**偏差**
+
+- 世代不是 0 或 1，以及世代 1 传入空列列表时，`derive_secondary_index_key` 返回 `None`。任务只定义了世代 0 和世代 1。
+- 上下界都缺席的 `IndexColumnBound::Range` 返回 `None`。
+- 尾段里的整数使用小端，与 `__tables` 行已有整数相同。任务规定了字段宽度，没有规定字节序。
+- 打开表、清空重建和恢复的构造点按实施说明填世代 0，没有把目录里的世代读进内存。`narrowed_meta` 按任务复制字段。
+
+**自检**
+
+Gate 3 没有发现 Critical 或 Important 问题。`to_key`、`Key` 的比较、页长和页类型没有改。计划器、DML、`create_index.rs`、`index_scan_all.rs` 和 README 没有改。编译没有新增警告。测试直接断言键字节、键顺序、行字节和 SQL 错误文本。
+
+**验证**
+
+T1 先行：`cargo test --offline --lib executor::value::tests::ordered_int_key_matches_signed_order -- --test-threads=1` 失败，0 passed，1 failed。`i64::MIN` 当时得不到键。同时 `cargo test --offline --lib executor::value::tests::secondary_index_key_preserves_int_bytes -- --test-threads=1` 为 1 passed，0 failed。
+
+T1 完成后：`cargo test --offline --lib executor::value::tests -- --test-threads=1` 为 14 passed，0 failed。其中包括六个新测试、`secondary_index_key_preserves_int_bytes` 和 `string_secondary_key_preserves_full_value_within_32`。
+
+T2 先行：`cargo test --offline --lib legacy_secondary_index_row_has_no_generation_tail -- --test-threads=1` 编译失败，`CatalogSecondaryIndex` 没有 `generation` 字段。
+
+只补字段、尚未写尾段时，同一批三个库测试里 `catalog_row_with_secondary_indexes_roundtrip` 和 `legacy_secondary_index_row_has_no_generation_tail` 通过，`composite_secondary_index_row_roundtrips_generation_and_columns` 失败。失败断言是序列化长度 72，期望 90。合计 2 passed，1 failed。
+
+T2 完成后：`cargo test --offline --lib -- --test-threads=1 catalog_row_with_secondary_indexes_roundtrip legacy_secondary_index_row_has_no_generation_tail composite_secondary_index_row_roundtrips_generation_and_columns` 为 3 passed，0 failed。
+
+`cargo test --offline --test string_index_sql_test string_index_rejection_readonly_and_transaction -- --test-threads=1` 为 1 passed，0 failed。该测试断言错误文本包含 `MULTI-COLUMN INDEX`。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None。
+
+**未解决问题**
+
+无。
+
+Gate 3 和 Gate 4 通过。Gate 5 未触发。没有创建后继 Cycle 或 Iteration。
 
 ## Plan Review
 

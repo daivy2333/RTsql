@@ -5,7 +5,7 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed。
-- 000：当前可执行轮次。执行依据是 `iterations/000-key-and-catalog/000-initial.md`，Plan Context 为 ready。
+- 000：执行依据是 `iterations/000-key-and-catalog/000-initial.md`，Plan Context 为 ready。Act Response 为 reported，Review Result 为 pending。
 - 001、002、003：只列在 Iteration Plan 中，目录未创建。
 - Persisted Evidence：none。
 - 无跳过项。
@@ -14,16 +14,16 @@
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 世代 1 的键派生和范围哨兵。先行测试 RED 后实现 GREEN。世代 0 的整数大端字节保持 | pending |
-| T2 | 000 | T1 | 目录尾段、内存元数据的额外列号和世代。旧单列记录字节不变，组合记录可往返。SQL 仍拒绝多列索引 | pending |
+| T1 | 000 | 无 | 世代 1 的键派生和范围哨兵。先行测试 RED 后实现 GREEN。世代 0 的整数大端字节保持 | completed |
+| T2 | 000 | T1 | 目录尾段、内存元数据的额外列号和世代。旧单列记录字节不变，组合记录可往返。SQL 仍拒绝多列索引 | completed |
 | T3 | 001 | 000 accepted | `CREATE INDEX` 建组合索引和新建 INT 索引，回填、DML、回滚、恢复使用同一派生。删列守卫认识全部列号 | pending |
 | T4 | 002 | 001 accepted | 等值与范围路由、EXPLAIN、补扫和索引选择。结果与全表扫描相同 | pending |
 | T5 | 003 | 002 accepted | 取消、只读、内存、加密、附加库和旧库组合；README；按 M19 分批的一次全量 | pending |
 
 ## 1. 键与目录
 
-- [ ] 1.1 T1：为有序整数、组合拼接、超长与 NULL、哨兵端点建立先行测试并实现派生。验证：`cargo test --offline --lib executor::value::tests` 中新增测试与 `secondary_index_key_preserves_int_bytes` 均为 passed、failed 为 0。
-- [ ] 1.2 T2：目录尾段只在世代非 0 或多列时出现，旧单列行长度不变。验证：catalog 往返测试 passed、failed 为 0；`string_index_rejection_readonly_and_transaction` 仍因 `MULTI-COLUMN INDEX` 拒绝多列建索引。
+- [x] 1.1 T1：为有序整数、组合拼接、超长与 NULL、哨兵端点建立先行测试并实现派生。验证：`cargo test --offline --lib executor::value::tests` 中新增测试与 `secondary_index_key_preserves_int_bytes` 均为 passed、failed 为 0。
+- [x] 1.2 T2：目录尾段只在世代非 0 或多列时出现，旧单列行长度不变。验证：catalog 往返测试 passed、failed 为 0；`string_index_rejection_readonly_and_transaction` 仍因 `MULTI-COLUMN INDEX` 拒绝多列建索引。
 
 ## 2. 生命周期
 
