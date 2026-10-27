@@ -134,19 +134,49 @@ PASS。计划审查的 11 项均通过，RTM 无 Missing，没有未批准的裁
 
 ## Act Response
 
-- Status: 等待实施
+- Status: reported
 
 **Implemented**
 
-尚未实施。
+T4。计划器按 `secondary_indexes` 的登记顺序收到每个二级索引的名字、世代和完整列序。等值拆成 AND 后，裸列与字面量的比较以及裸列 `BETWEEN` 可以路由。字面量可以在列的任一侧。一元负号只用于范围端点；`n = -1` 仍走扫描。限定列、OR、`NOT BETWEEN`、参数、类型不匹配、NULL 和同一索引解释不了的额外谓词不路由。
+
+多个索引都能解释时，先取被约束前缀更长的，再取不需要补扫的，最后取创建更早的。整键等值且 `derive_secondary_index_key` 返回键时，计划是 `IndexScanAll`，执行器调用 `search_all`。编码放不下时不用该索引的 `IndexScanAll`。其余可路由谓词使用 `secondary_range_bounds` 的哨兵，计划是 `IndexRangeScan`。世代 0 的整数索引不参与范围路由。全整数且不超过 4 列的世代 1 索引不补扫。含字符串列，或可能超过 32 字节的索引，范围结果再加上键派生为 `None` 且原谓词成立的可见行。`EXPLAIN` 文本是 `IndexRangeScan <table> (index=<name>, columns=...)`，需要补扫时含 `omitted=scan`。
+
+`IndexManager::scan_range` 从内部节点下降，用显式栈按键序取落在哨兵内的条目，不沿叶子链前进。可见性与 `IndexScanAllExecutor` 相同：有 snapshot 时用 `find_visible_version`，否则用 `read_tuple_from_data_page`。在途窄化仍由 `ensure_readable` 拒绝。
+
+改动文件：`src/parser/planner/mod.rs` 的 `SecondaryIndexRegistration`，`src/pipeline.rs` 的登记、类型槽、输出列名、列映射和执行器构造，`src/parser/planner/query.rs` 的 `route_secondary_index`，`src/parser/planner/subquery.rs` 的标量子查询右支，`src/executor/correlated.rs` 的叶子臂，`src/executor/plan.rs` 的 `IndexRangeScanNode`，`src/executor/plan_format.rs` 的渲染，`src/executor/index_range_scan.rs` 的 `IndexRangeScanExecutor`，`src/storage/btree/index_manager.rs` 的 `scan_range`。测试：新建 `tests/index_range_routing_test.rs`，并改 `tests/composite_index_lifecycle_test.rs` 的 `composite_backfill_matches_live_rows` 与 `tests/string_index_sql_test.rs` 的 `string_index_unrouted_predicates_stay_scan`。
+
+**Deviations from Plan**
+
+`composite_prefix_bounds` 用 `UPDATE t SET b = 0 - 9223372036854775807 - 1 WHERE id = 2` 写入 `i64::MIN`。`INSERT ... VALUES` 不接受这个减法表达式。更新后 `SELECT b FROM t WHERE id = 2` 读回 `i64::MIN`。
+
+`string_index_unrouted_predicates_stay_scan` 不再调用 `assert_no_index_scan`。`name > 'a'` 单独断言 `IndexRangeScan`、`idx_name` 和 `omitted=scan`。同函数其余语句改为既不含 `IndexScanAll` 也不含 `IndexRangeScan`。这个只被该循环使用的辅助函数已删除。
+
+**Self-review**
+
+Gate 3 没有未解决的 Critical 或 Important 问题。标量子查询右支、`is_base_scan_chain`、相关参数叶子臂和 pipeline 的列映射都按 `IndexScanAll` 的投影契约补了 `IndexRangeScan` 臂。本轮三条命令没有执行带范围扫描的标量子查询或 `ORDER BY`。
 
 **Verification Evidence**
 
-无。
+先行测试 `new_int_range_includes_negatives` 在实现前失败。`EXPLAIN` 是 `DataScan`，不含 `IndexRangeScan`。
+
+实现后，以下命令按顺序执行，failed 都是 0。没有并行，没有跑全量。
+
+- `cargo test --offline --test index_range_routing_test -- --test-threads=1`：7 passed，0 failed。
+- `cargo test --offline --test composite_index_lifecycle_test composite_backfill_matches_live_rows -- --test-threads=1`：1 passed，0 failed，6 filtered out。
+- `cargo test --offline --test string_index_sql_test string_index_unrouted_predicates_stay_scan -- --test-threads=1`：1 passed，0 failed，7 filtered out。
 
 **Persisted Evidence**
 
 None required。
+
+**Experience Candidates**
+
+None。
+
+**Unresolved**
+
+None。
 
 ## Plan Review
 

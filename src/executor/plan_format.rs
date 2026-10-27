@@ -81,6 +81,7 @@ fn render_node(plan: &PhysicalPlan, depth: usize, out: &mut Vec<String>) {
         | PhysicalPlan::DataScan(_)
         | PhysicalPlan::IndexScan(_)
         | PhysicalPlan::IndexScanAll(_)
+        | PhysicalPlan::IndexRangeScan(_)
         | PhysicalPlan::Insert(_)
         | PhysicalPlan::Upsert(_)
         | PhysicalPlan::Update(_)
@@ -143,6 +144,17 @@ fn describe(plan: &PhysicalPlan) -> String {
                 columns(&node.columns, &node.projection)
             ));
             format!("IndexScanAll {} ({})", node.table_name, params.join(", "))
+        }
+        PhysicalPlan::IndexRangeScan(node) => {
+            let mut params = vec![format!("index={}", node.index_name)];
+            params.push(format!(
+                "columns={}",
+                columns(&node.columns, &node.projection)
+            ));
+            if node.omitted_scan {
+                params.push("omitted=scan".to_string());
+            }
+            format!("IndexRangeScan {} ({})", node.table_name, params.join(", "))
         }
         PhysicalPlan::Filter(node) => format!(
             "Filter {} (predicate={:?})",

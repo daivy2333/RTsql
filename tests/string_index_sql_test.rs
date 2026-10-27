@@ -84,13 +84,6 @@ fn assert_data_scan(plan: &str) {
     );
 }
 
-fn assert_no_index_scan(plan: &str) {
-    assert!(
-        !plan.contains("IndexScanAll"),
-        "plan must not use IndexScanAll, got: {plan}"
-    );
-}
-
 fn sql_quote(text: &str) -> String {
     format!("'{text}'")
 }
@@ -599,7 +592,16 @@ async fn string_index_unrouted_predicates_stay_scan() {
         assert_same_outcome(saved, &outcome(&db, sql).await, sql);
         let plan = explain_outcome(&db, sql).await;
         match (saved_plan, &plan) {
-            (Ok(_), Ok(text)) => assert_no_index_scan(text),
+            (Ok(_), Ok(text)) if sql.contains("name > 'a'") => assert!(
+                text.contains("IndexRangeScan")
+                    && text.contains("index=idx_name")
+                    && text.contains("omitted=scan"),
+                "name > 'a' must range-scan idx_name and rescan omitted keys, got: {text}"
+            ),
+            (Ok(_), Ok(text)) => assert!(
+                !text.contains("IndexScanAll") && !text.contains("IndexRangeScan"),
+                "plan must not route, got: {text}"
+            ),
             (Err(left), Err(right)) => assert_eq!(left, right, "{sql}"),
             _ => panic!("{sql}: explain outcome changed from {saved_plan:?} to {plan:?}"),
         }
