@@ -8,7 +8,7 @@
 - 000：执行依据是 `iterations/000-key-and-catalog/000-initial.md`。Review Result 为 accepted。
 - 001：执行依据是 `iterations/001-create-maintain-recover/000-initial.md`。Review Result 为 accepted。
 - 002：执行依据是 `iterations/002-equality-and-range-routing/000-initial.md`。Review Result 为 accepted。
-- 003：执行依据是 `iterations/003-fault-boundary-and-full-suite/000-initial.md`。Plan Context 为 ready。
+- 003：执行依据是 `iterations/003-fault-boundary-and-full-suite/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。
 - Persisted Evidence：none。
 - 无跳过项。
 
@@ -20,7 +20,7 @@
 | T2 | 000 | T1 | 目录尾段、内存元数据的额外列号和世代。旧单列记录字节不变，组合记录可往返。SQL 仍拒绝多列索引 | completed |
 | T3 | 001 | 000 accepted | `CREATE INDEX` 建组合索引和新建 INT 索引，回填、DML、回滚、恢复使用同一派生。删列守卫认识全部列号 | completed |
 | T4 | 002 | 001 accepted | 等值与范围路由、EXPLAIN、补扫和索引选择。结果与全表扫描相同 | completed |
-| T5 | 003 | 002 accepted | 取消、只读、内存、加密、附加库和旧库组合；README；按 M19 分批的一次全量 | pending |
+| T5 | 003 | 002 accepted | 取消、只读、内存、加密、附加库和旧库组合；README；按 M19 分批的一次全量 | completed |
 
 ## 1. 键与目录
 
@@ -37,7 +37,7 @@
 
 ## 4. 收尾
 
-- [ ] 4.1 T5：补齐故障与运行形态，更新两份 README 的二级索引段落，并按 Iteration 003 的分批规则跑完一次全量。缺一批不得记为通过。
+- [x] 4.1 T5：补齐故障与运行形态，更新两份 README 的二级索引段落，并按 Iteration 003 的分批规则跑完一次全量。缺一批不得记为通过。
 
 ## Iteration Plan
 

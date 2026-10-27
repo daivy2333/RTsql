@@ -33,6 +33,7 @@ pub struct IndexRangeScanExecutor {
 }
 
 impl IndexRangeScanExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         table_meta: Arc<TableMeta>,
         buffer_pool: Arc<BufferPool>,

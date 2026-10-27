@@ -426,10 +426,8 @@ impl TransactionManager {
                 // 回滚的 INSERT 残留唯一条目，后续同值插入假阳性
                 // DuplicateKey。MS21 Iter000 (D1): 与 PK 臂同型按派生键
                 // 区分 rekey 回退。
-                for ((_, uindex), derived_key) in table_meta
-                    .unique_indexes
-                    .iter()
-                    .zip(derived_uniques.into_iter())
+                for ((_, uindex), derived_key) in
+                    table_meta.unique_indexes.iter().zip(derived_uniques)
                 {
                     if let Some(key) = uindex.find_key_by_row_id(row_id).await {
                         match (derived_key, prev_row_id) {
@@ -475,10 +473,8 @@ impl TransactionManager {
                 //    的终态等价——反查键条目确定在位）。
                 // 反查 None 的对称还原分支（值→NULL 形态，镜像 D17）：prev
                 // 键可派生且非 NULL 时纯插入还原。
-                for (sindex, derived_key) in table_meta
-                    .secondary_indexes
-                    .iter()
-                    .zip(derived_secondaries.into_iter())
+                for (sindex, derived_key) in
+                    table_meta.secondary_indexes.iter().zip(derived_secondaries)
                 {
                     if let Some(key) = sindex.index.find_key_by_row_id(row_id).await {
                         match (derived_key, prev_row_id) {
