@@ -186,15 +186,28 @@ None。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未审查实施结果。
+独立阅读了 `58a1ff4..645e567` 的 diff 和当前源码。Act Response 与代码一致。没有阻塞本轮 Acceptance 的偏差。
+
+- 非阻塞，与计划一致。键派生集中在 `SecondaryIndexMeta::derive_key` 和 `derive_row_key`。`extract_index_keys` 不再接收只含第一列号的 `secondary_cols`，二级结果与 `table_meta.secondary_indexes` 逐项对齐，每项使用该索引自己的世代和全部列。主键和唯一列仍用 `to_key`。
+- 非阻塞，与计划一致。`age = -7` 仍走扫描，因为等值提取只接受字面量。`age = 3` 的 EXPLAIN 含 `IndexScanAll` 和 `idx_age`。负数 `-7` 的树内键等于世代 1 派生，不等于原来的大端 `to_key`。两条等值的行集都与建索引前相同。本轮验收要求的是等值行集和一次点名索引的 EXPLAIN，没有要求一元负号等值也走索引。
+
+**Evidence**
+
+沿用 Act Response 的验证，覆盖范围在 `645e567` 之后没有变化，本次不重跑：
+
+- `cargo test --offline --test composite_index_lifecycle_test -- --test-threads=1`：7 passed，0 failed。
+- `cargo test --offline --test secondary_index_test create_unique_and_composite_index_rejected -- --test-threads=1`：1 passed，0 failed，26 filtered out。
+- `cargo test --offline --test string_index_sql_test string_index_rejection_readonly_and_transaction -- --test-threads=1`：1 passed，0 failed，7 filtered out。
+
+代码核对：`build_create_index` 的拒绝顺序是修饰、索引名、附加库、表、空列清单、裸列与缺列、类型、重复列、全整数超过 4 列，最后才是重名。新建单列整数和多列的世代是 1，单列字符串是 0。回填、插入、更新、删除、UPSERT 的三条二级循环、REPLACE 的冲突删除、删列重写和 `extract_index_keys` 都调用 `derive_key` 或 `derive_row_key`。更新和替换在旧键与新键相等时换指行号，只有一侧有键时只做那一侧。`register_secondary_index` 把世代和额外列号写入目录和内存。打开表、`truncate_table` 和恢复重建复制来源里的这两项。`truncate_table` 只通过 `update_secondary_index_root` 更换根页。`alter_drop_column` 在第一列或任一额外列等于被删位置时拒绝。`narrowed_meta` 和 `publish_narrowed_table_row` 都把大于被删位置的第一列和额外列号减一。`publish_column_narrowing` 在列数已经是目标值时直接返回。`apply_column_drop` 也先看列数。`ADD COLUMN` 仍调用 `update_table_column_count_ddl`。等值路由只接收 `extra_column_indexes` 为空的索引，探测键带该索引的世代。`CREATE INDEX c ON t(age, id)` 和 `CREATE INDEX idx_multi ON t(name, age)` 改为成功，`CREATE UNIQUE INDEX` 的拒绝文本保持。
 
 **Follow-up Decision**
 
-等待 Act。
+本轮 Acceptance 已满足。不要求当前 Cycle 修复，不创建 rework 或 replan。Iteration Plan 不变。展开 002。
 
 **Next Cycle**
 
@@ -202,4 +215,4 @@ None
 
 **Next Iteration**
 
-None
+`openspec/changes/2026-10-27-ms39-composite-index-and-range-access/iterations/002-equality-and-range-routing/000-initial.md`
