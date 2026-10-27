@@ -3462,9 +3462,9 @@ impl PlanBuilder {
     }
 
     /// 二级索引等值路由键提取。WHERE 为单个裸列等值（字面量可在任一侧）且该列
-    /// 命中登记的二级索引时，按列清单同序的声明类型调用
-    /// `Value::secondary_index_key`，返回 `(索引名, 键)`。限定名、AND、OR、
-    /// 范围和参数占位返回 `None`。类型向量缺项或短于列清单时也返回 `None`，
+    /// 命中没有额外列的二级索引时，用该索引的世代调用
+    /// `Value::derive_secondary_index_key`，返回 `(索引名, 键)`。限定名、AND、OR、
+    /// 范围和参数占位返回 `None`。类型向量缺项时也返回 `None`，
     /// 不回退到 `to_key`。字面量转换失败与主键提取同型传播。
     fn extract_secondary_index_equality(
         &self,
@@ -3490,7 +3490,9 @@ impl PlanBuilder {
             _ => return Ok(None),
         };
         let column_name = column.value.to_lowercase();
-        let Some((index_name, _)) = indexes.iter().find(|(_, col)| *col == column_name) else {
+        let Some((index_name, _, generation)) =
+            indexes.iter().find(|(_, col, _)| *col == column_name)
+        else {
             return Ok(None);
         };
         // MS31 Iteration 001：参数占位位在计划期无值——不路由索引键。
@@ -3512,7 +3514,11 @@ impl PlanBuilder {
         else {
             return Ok(None);
         };
-        match value.secondary_index_key(column_type) {
+        match crate::executor::Value::derive_secondary_index_key(
+            std::slice::from_ref(column_type),
+            std::slice::from_ref(&value),
+            *generation,
+        ) {
             Some(key) => Ok(Some((index_name.clone(), key))),
             None => Ok(None),
         }

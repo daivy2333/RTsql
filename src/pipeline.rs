@@ -3481,14 +3481,20 @@ fn register_table_schema(
     // I080 一期（T02-C1）：传递逐列 NOT NULL 标志，绑定作用域段登记时
     // 经 `table_binding_meta` 消费。
     builder.set_table_not_null(key, table_meta.not_null.clone());
-    // MS21 Iter002 (T2-g/D6)：传递登记的二级索引（索引名, 列名），非 PK
-    // 等值路由在计划期消费。
+    // 只把没有额外列的二级索引交给等值路由，并带上该索引自己的世代。
     builder.set_table_secondary_indexes(
         key,
         table_meta
             .secondary_indexes
             .iter()
-            .map(|s| (s.name.clone(), table_meta.columns[s.column_index].0.clone()))
+            .filter(|index| index.extra_column_indexes.is_empty())
+            .map(|index| {
+                (
+                    index.name.clone(),
+                    table_meta.columns[index.column_index].0.clone(),
+                    index.generation,
+                )
+            })
             .collect(),
     );
     if table_meta.explicit_primary_key {

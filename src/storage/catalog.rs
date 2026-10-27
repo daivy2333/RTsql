@@ -455,6 +455,48 @@ impl Catalog {
         Ok(())
     }
 
+    /// 在同一次表行序列化里下调列数，并把大于被删位置的二级列号减一。
+    ///
+    /// 第一列和额外列使用同一规则。列数已经是目标值时调用方不得再进入这里，
+    /// 否则会把列号再减一次。`ADD COLUMN` 仍只改列数。
+    pub async fn publish_narrowed_table_row(
+        &self,
+        name: &str,
+        removed: u32,
+        new_count: u32,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let page = update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.column_count = new_count;
+                for entry in &mut row.secondary_indexes {
+                    if entry.column_index > removed {
+                        entry.column_index -= 1;
+                    }
+                    for column in &mut entry.extra_column_indexes {
+                        if *column > removed {
+                            *column -= 1;
+                        }
+                    }
+                }
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await?;
+        if let Some(page) = page {
+            self.flush_commit_point(&[page]).await?;
+        }
+        Ok(())
+    }
+
     /// change 2026-10-25-ms37-defect-ledger-closure
     /// Iteration 006 / Cycle 000（T7 / ISS28）：**非刷盘**的列数恢复入口——
     /// 把 `__tables` 行的 `column_count` 恢复为语句执行前的值。

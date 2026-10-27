@@ -6,7 +6,7 @@
 //! 2. 全量回填：遍历数据页链收集链尾（不被任何 `next_version` 指向）slot，
 //!    对**非墓碑**链尾无条件建条目（含活跃未提交版本——其回滚由 T2-d 扩展
 //!    后的 abort_cleanup 二级清理兜底，两向一致）；索引列经
-//!    `secondary_index_key` 派生，NULL 与不可容纳的值不入树；
+//!    `Value::derive_secondary_index_key` 派生，NULL 与不可容纳的值不入树；
 //! 3. 一次性 catalog 登记 + 内存换入（`TableManager::register_secondary_index`）。
 //!
 //! 回填失败：旧树页 best-effort 释放后传播错误——登记未发生，零副作用。
@@ -14,6 +14,7 @@
 use crate::database::Database;
 use crate::executor::{ExecResult, Executor, PhysicalPlan};
 use crate::storage::btree::IndexManager;
+use crate::storage::data::SecondaryIndexMeta;
 use crate::storage::page_format::{deserialize_row, overflow, ColumnType, SlottedPageRef};
 use crate::storage::{
     corrupted_data_page_slot_count_error, corrupted_data_page_slot_error, BufferPool, PageId,
@@ -76,6 +77,8 @@ impl Executor for CreateIndexExecutor {
             &self.database.buffer_pool,
             &table_meta,
             node.column_index,
+            &node.extra_column_indexes,
+            node.generation,
             &new_index,
         )
         .await;
@@ -103,6 +106,8 @@ impl Executor for CreateIndexExecutor {
                 &node.table_name,
                 &node.index_name,
                 node.column_index,
+                node.generation,
+                node.extra_column_indexes.clone(),
                 new_index,
             )
             .await?;
@@ -117,6 +122,8 @@ async fn backfill_tree(
     buffer_pool: &Arc<BufferPool>,
     table_meta: &Arc<crate::storage::TableMeta>,
     column_index: usize,
+    extra_column_indexes: &[usize],
+    generation: u8,
     tree: &Arc<IndexManager>,
 ) -> Result<()> {
     let schema: Vec<ColumnType> = table_meta
@@ -203,11 +210,13 @@ async fn backfill_tree(
             table_meta.narrowing.ensure_readable()?;
             let tuple_bytes = tuple_ref.resolve(buffer_pool).await?;
             let values = deserialize_row(&tuple_bytes, &schema, &table_meta.defaults)?;
-            if let Some(key) = values.get(column_index).and_then(|v| {
-                schema
-                    .get(column_index)
-                    .and_then(|column_type| v.secondary_index_key(column_type))
-            }) {
+            if let Some(key) = SecondaryIndexMeta::derive_row_key(
+                &schema,
+                &values,
+                column_index,
+                extra_column_indexes,
+                generation,
+            ) {
                 tree.insert(key.as_bytes(), rid).await?;
             }
         }

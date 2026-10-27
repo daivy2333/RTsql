@@ -6,7 +6,7 @@
 
 - 需求与 BDD：completed。
 - 000：执行依据是 `iterations/000-key-and-catalog/000-initial.md`。Review Result 为 accepted。
-- 001：执行依据是 `iterations/001-create-maintain-recover/000-initial.md`，Plan Context 为 ready。目录已创建，尚未实施。
+- 001：执行依据是 `iterations/001-create-maintain-recover/000-initial.md`。Act Response 为 reported，Review Result 为 pending。
 - 002、003：只列在 Iteration Plan 中，目录未创建。
 - Persisted Evidence：none。
 - 无跳过项。

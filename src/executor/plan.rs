@@ -465,10 +465,14 @@ pub struct CreateIndexNode {
     pub index_name: String,
     /// 目标表名
     pub table_name: String,
-    /// 索引列（表列序内位置）
+    /// 索引第一列（表列序内位置）
     pub column_index: usize,
-    /// 索引列名（EXPLAIN 参数直出）
+    /// 索引第一列名（EXPLAIN 参数直出）
     pub column_name: String,
+    /// 键编码世代。单列字符串为 0，新建单列整数和多列为 1。
+    pub generation: u8,
+    /// 第一列之后的列号，顺序与索引定义一致。
+    pub extra_column_indexes: Vec<usize>,
 }
 
 /// ALTER TABLE 操作（MS21 Iter003 T3-b/c）——计划期白名单后的两种形态

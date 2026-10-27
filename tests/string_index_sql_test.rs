@@ -635,8 +635,8 @@ async fn string_index_unrouted_predicates_stay_scan() {
     }
 }
 
-/// BOOLEAN、FLOAT、UNIQUE、多列和重名被拒绝。只读与显式事务拒绝后仍能建索引。
-/// 整数等值仍走索引。
+/// BOOLEAN、FLOAT、UNIQUE 和重名被拒绝。整数与字符串组成的索引可以建立。
+/// 只读与显式事务拒绝后仍能建索引。整数等值仍走索引。
 #[tokio::test]
 async fn string_index_rejection_readonly_and_transaction() {
     let (db, _dir) = open_db().await;
@@ -689,16 +689,7 @@ async fn string_index_rejection_readonly_and_transaction() {
         "{}",
         unique.message
     );
-    let multi = db
-        .execute_sql("CREATE INDEX idx_multi ON t(name, age)")
-        .await
-        .expect_err("multi");
-    assert!(
-        multi.message.contains("Unsupported statement type")
-            && multi.message.contains("MULTI-COLUMN INDEX"),
-        "{}",
-        multi.message
-    );
+    exec(&db, "CREATE INDEX idx_multi ON t(name, age)").await;
 
     exec(&db, "CREATE INDEX idx_name ON t(name)").await;
     let duplicate = db

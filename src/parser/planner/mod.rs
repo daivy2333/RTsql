@@ -168,10 +168,11 @@ pub struct PlanBuilder {
     /// conflict-target resolution — a target column is arbitrable only if it
     /// is an INT declared PK or listed here.
     pub(crate) table_unique_columns: HashMap<String, Vec<usize>>,
-    /// MS21 Iter002 (T2-g/D6): Table name -> registered secondary indexes
-    /// (`(index name, column name)`, creation order — the catalog section
-    /// order). Additive channel consumed by the non-PK equality routing arm.
-    pub(crate) table_secondary_indexes: HashMap<String, Vec<(String, String)>>,
+    /// Table name -> single-column secondary indexes
+    /// (`(index name, column name, generation)`, creation order).
+    /// Indexes with extra columns are omitted so a predicate on one column
+    /// does not probe a composite tree.
+    pub(crate) table_secondary_indexes: HashMap<String, Vec<(String, String, u8)>>,
     /// MS21 Iter002 (T2-c/D14): Table name -> per-column declared types
     /// (index-aligned with the registered column list). Additive channel
     /// consumed by the CREATE INDEX INT-only check.
@@ -369,10 +370,9 @@ impl PlanBuilder {
             .insert(name.to_lowercase(), columns);
     }
 
-    /// MS21 Iter002 (T2-g/D6): Register a table's secondary indexes
-    /// (`(index name, column name)` pairs, creation order — additive channel,
-    /// key lowercase like `register_table`).
-    pub fn set_table_secondary_indexes(&mut self, name: &str, indexes: Vec<(String, String)>) {
+    /// Register a table's single-column secondary indexes
+    /// (`(index name, column name, generation)`, creation order).
+    pub fn set_table_secondary_indexes(&mut self, name: &str, indexes: Vec<(String, String, u8)>) {
         self.table_secondary_indexes
             .insert(name.to_lowercase(), indexes);
     }
