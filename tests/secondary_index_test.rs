@@ -7,7 +7,7 @@
 //!   R1-S3 崩溃恢复两态一致            create_index_consistent_across_crash_recovery
 //!   R1-S4 非字符串非 INT 列拒绝       create_index_on_non_int_column_rejected
 //!   R1-S5 重复索引名拒绝              create_index_duplicate_name_rejected
-//!   R1-S6 UNIQUE 与组合索引拒绝       create_unique_and_composite_index_rejected
+//!   R1-S6 UNIQUE 拒绝、两列整数索引可建 create_unique_and_composite_index_rejected
 //!   R1-S7 表或列不存在拒绝            create_index_missing_table_or_column_rejected
 //!   R1 修饰面拒绝（部分/IF NOT EXISTS）create_index_modifier_forms_rejected
 //!   R1 显式事务内拒绝                 create_index_inside_explicit_transaction_rejected
@@ -245,7 +245,7 @@ async fn create_index_duplicate_name_rejected() {
     assert_eq!(rows.len(), 2);
 }
 
-/// R1-S6：UNIQUE 与组合（多列）索引点名拒绝。
+/// UNIQUE 索引仍被拒绝。两列整数索引可以建立。
 #[tokio::test]
 async fn create_unique_and_composite_index_rejected() {
     let (db, _dir) = open_db().await;
@@ -255,11 +255,7 @@ async fn create_unique_and_composite_index_rejected() {
         "unique index",
         "Unsupported statement type",
     );
-    expect_plan_error(
-        to_response(db.execute_sql("CREATE INDEX c ON t(age, id)").await),
-        "composite index",
-        "Unsupported statement type",
-    );
+    exec_ok(&db, "CREATE INDEX c ON t(age, id)", "composite index").await;
 }
 
 /// R1 修饰面：部分索引（WHERE）与 IF NOT EXISTS 点名拒绝，不静默忽略成分。

@@ -1,3 +1,4 @@
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -165,6 +166,61 @@ pub struct IndexManager {
     /// MS34 Iteration 000（ISS20 / D4）：写侧暂停点槽位——`None` 时写路径
     /// 零行为差异。
     write_pause: WritePauseSlot,
+}
+
+fn range_is_empty(lower: Option<&(Key, bool)>, upper: Option<&(Key, bool)>) -> bool {
+    match (lower, upper) {
+        (Some((lower_key, lower_in)), Some((upper_key, upper_in))) => {
+            match lower_key.cmp(upper_key) {
+                CmpOrdering::Greater => true,
+                CmpOrdering::Equal => !(*lower_in && *upper_in),
+                CmpOrdering::Less => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn key_in_range(key: &Key, lower: &Option<(Key, bool)>, upper: &Option<(Key, bool)>) -> bool {
+    if let Some((bound, inclusive)) = lower {
+        match key.cmp(bound) {
+            CmpOrdering::Less => return false,
+            CmpOrdering::Equal if !inclusive => return false,
+            _ => {}
+        }
+    }
+    if let Some((bound, inclusive)) = upper {
+        match key.cmp(bound) {
+            CmpOrdering::Greater => return false,
+            CmpOrdering::Equal if !inclusive => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// 子树键域是闭区间。只有整段都落在哨兵外时才跳过。
+fn subtree_overlaps(
+    low: Option<&Key>,
+    high: Option<&Key>,
+    lower: &Option<(Key, bool)>,
+    upper: &Option<(Key, bool)>,
+) -> bool {
+    if let (Some(high), Some((bound, inclusive))) = (high, lower.as_ref()) {
+        match high.cmp(bound) {
+            CmpOrdering::Less => return false,
+            CmpOrdering::Equal if !inclusive => return false,
+            _ => {}
+        }
+    }
+    if let (Some(low), Some((bound, inclusive))) = (low, upper.as_ref()) {
+        match low.cmp(bound) {
+            CmpOrdering::Greater => return false,
+            CmpOrdering::Equal if !inclusive => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 impl IndexManager {
@@ -572,6 +628,88 @@ impl IndexManager {
                     let child_id = PageId(child as u64);
                     if !visited.contains(&child_id.0) {
                         stack.push(child_id);
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// 按哨兵取条目。从内部节点下降，子页用显式栈按键序展开，不沿叶子链前进。
+    /// 成员判断只用 `Key` 的现有顺序。
+    ///
+    /// `inclusive` 为真时该端点包含等值键。缺席的一侧表示该方向没有约束。
+    pub async fn scan_range(
+        &self,
+        lower: Option<(Key, bool)>,
+        upper: Option<(Key, bool)>,
+    ) -> Result<Vec<RowId>> {
+        if range_is_empty(lower.as_ref(), upper.as_ref()) {
+            return Ok(Vec::new());
+        }
+        let root_page_id = PageId(self.root_page_id.load(Ordering::Acquire));
+        self.scan_range_from_root(root_page_id, &lower, &upper)
+            .await
+    }
+
+    async fn scan_range_from_root(
+        &self,
+        root_page_id: PageId,
+        lower: &Option<(Key, bool)>,
+        upper: &Option<(Key, bool)>,
+    ) -> Result<Vec<RowId>> {
+        let mut results = Vec::new();
+        let mut stack = vec![root_page_id];
+        let mut visited = HashSet::new();
+
+        while let Some(page_id) = stack.pop() {
+            if !visited.insert(page_id.0) {
+                continue;
+            }
+            let guard = self.async_loader.load_page(page_id).await?;
+            let data_guard = guard.page_data();
+            ensure_index_page_intact(
+                &data_guard,
+                page_id.0,
+                self.root_page_id.load(Ordering::Acquire),
+            )?;
+            let page_type = data_guard[0];
+
+            if page_type == LEAF_NODE {
+                let leaf = LeafNodeRef::new(&data_guard);
+                for i in 0..leaf.key_count() {
+                    if let (Some(key), Some(row_id)) = (leaf.get_key(i), leaf.get_row_id(i)) {
+                        if key_in_range(&key, lower, upper) {
+                            results.push(row_id);
+                        }
+                    }
+                }
+            } else if page_type == INTERNAL_NODE {
+                let internal = InternalNodeRef::new(&data_guard);
+                let mut children = Vec::new();
+                let count = internal.key_count();
+                let mut separators = Vec::with_capacity(count);
+                for i in 0..count {
+                    separators.push(internal.get_key(i));
+                }
+                let leftmost_high = separators.first().and_then(|key| key.as_ref());
+                if subtree_overlaps(None, leftmost_high, lower, upper) {
+                    children.push(PageId(internal.leftmost_child() as u64));
+                }
+                for i in 0..count {
+                    let Some(page) = internal.get_child_page_id(i) else {
+                        continue;
+                    };
+                    let low = separators.get(i).and_then(|key| key.as_ref());
+                    let high = separators.get(i + 1).and_then(|key| key.as_ref());
+                    if subtree_overlaps(low, high, lower, upper) {
+                        children.push(PageId(page as u64));
+                    }
+                }
+                for child in children.into_iter().rev() {
+                    if !visited.contains(&child.0) {
+                        stack.push(child);
                     }
                 }
             }

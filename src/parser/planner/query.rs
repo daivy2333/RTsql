@@ -13,14 +13,16 @@ use super::ddl_dml::is_pure_equi_join_on;
 use super::expression::expr_to_column_name;
 use super::{CteDef, PlanBuilder};
 use crate::executor::{
-    ColumnExpression, ColumnRef, DataScanNode, DistinctNode, ExpressionRef, FilterNode,
-    IndexScanAllNode, IndexScanNode, OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem,
-    ProjectionNode, ScanNode, SetOpKind, SetOperationNode, SortNode,
+    BoundMark, ColumnExpression, ColumnRef, DataScanNode, DistinctNode, ExpressionRef, FilterNode,
+    IndexColumnBound, IndexRangeScanNode, IndexScanAllNode, IndexScanNode, OrderByColumn,
+    OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode, RangeSentinel, ScanNode, SetOpKind,
+    SetOperationNode, SortNode, Value,
 };
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
 use crate::parser::placeholder::is_placeholder_value;
 use crate::parser::value::value_from_sqlparser;
+use crate::storage::page_format::{ColumnType, Key};
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Query, TableFactor};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -179,6 +181,9 @@ impl PlanBuilder {
                 node.columns.clone()
             }
             PhysicalPlan::IndexScanAll(node) => projected_columns(&node.columns, &node.projection),
+            PhysicalPlan::IndexRangeScan(node) => {
+                projected_columns(&node.columns, &node.projection)
+            }
             PhysicalPlan::ScalarSubqueryFilter(node) => {
                 // T4（change 2026-10-04-external-review-gaps）：`columns` 即
                 // 裁剪后实际输出形状（IndexScan「已收窄」契约同型——构造期
@@ -2293,25 +2298,48 @@ impl PlanBuilder {
                         projection: proj_or_empty.clone(),
                     })
                 }
-            } else if let Some((index_name, key)) =
-                self.extract_secondary_index_equality(&table_name, where_expr)?
-            {
-                // 二级索引等值路由——PK 判定链未命中后、非 PK 臂前插入。
-                // 单条件裸列等值且 `secondary_index_key` 返回键时走
-                // `IndexScanAll`（执行器消费该登记树）。键原样写入节点。
-                // 其余形态一律既有路径。
-                // T1（change 2026-10-04-external-review-gaps D1）：`columns`
-                // 恒为基表全列，输出形状由 `projection` 唯一决定——消费方
-                // （get_plan_output_columns / EXPLAIN 渲染 / 聚合输入 schema）
-                // 按「基表全列 × 投影号」契约裁剪。PK IndexScan 臂保持
-                // 「已收窄」契约不变，两契约并存是消费方现状。
-                PhysicalPlan::IndexScanAll(IndexScanAllNode {
-                    table_name: table_name.clone(),
-                    key,
-                    columns: base_schema.clone().unwrap_or_default(),
-                    projection: proj_or_empty.clone(),
-                    index_name: Some(index_name),
-                })
+            } else if let Some(route) = self.route_secondary_index(&table_name, where_expr)? {
+                // 二级索引等值仍是 `IndexScanAll`，前缀和范围是 `IndexRangeScan`。
+                // `columns` 恒为基表全列，输出形状由 `projection` 决定。
+                match route {
+                    SecondaryRoute::Equality { index_name, key } => {
+                        PhysicalPlan::IndexScanAll(IndexScanAllNode {
+                            table_name: table_name.clone(),
+                            key,
+                            columns: base_schema.clone().unwrap_or_default(),
+                            projection: proj_or_empty.clone(),
+                            index_name: Some(index_name),
+                        })
+                    }
+                    SecondaryRoute::Range {
+                        index_name,
+                        lower,
+                        upper,
+                        omitted_scan,
+                        index_column_indexes,
+                        index_column_types,
+                        generation,
+                    } => {
+                        let predicate = if omitted_scan {
+                            Some(self.build_where(&table_name, where_expr)?)
+                        } else {
+                            None
+                        };
+                        PhysicalPlan::IndexRangeScan(IndexRangeScanNode {
+                            table_name: table_name.clone(),
+                            index_name,
+                            columns: base_schema.clone().unwrap_or_default(),
+                            projection: proj_or_empty.clone(),
+                            lower,
+                            upper,
+                            omitted_scan,
+                            predicate,
+                            index_column_indexes,
+                            index_column_types,
+                            generation,
+                        })
+                    }
+                }
             } else {
                 // Non-PK WHERE — M19 routing + MS07-T06 pushdown:
                 // - PK equality in a non-simple form (e.g. AND-combined):
@@ -3461,61 +3489,43 @@ impl PlanBuilder {
         self.extract_pk_from_where(table_name, expr)
     }
 
-    /// 二级索引等值路由键提取。WHERE 为单个裸列等值（字面量可在任一侧）且该列
-    /// 命中登记的二级索引时，按列清单同序的声明类型调用
-    /// `Value::secondary_index_key`，返回 `(索引名, 键)`。限定名、AND、OR、
-    /// 范围和参数占位返回 `None`。类型向量缺项或短于列清单时也返回 `None`，
-    /// 不回退到 `to_key`。字面量转换失败与主键提取同型传播。
-    fn extract_secondary_index_equality(
+    /// 二级索引等值或范围路由。不能被同一个索引前缀完全解释时返回 `None`，
+    /// 调用方保持原来的扫描。字面量转换失败与主键提取同型传播。
+    fn route_secondary_index(
         &self,
         table_name: &str,
         expr: &Expr,
-    ) -> Result<Option<(String, crate::storage::page_format::Key)>, PlanError> {
+    ) -> Result<Option<SecondaryRoute>, PlanError> {
         let Some(indexes) = self.table_secondary_indexes.get(table_name) else {
             return Ok(None);
         };
-        let Expr::BinaryOp {
-            left,
-            op: sqlparser::ast::BinaryOperator::Eq,
-            right,
-        } = expr
-        else {
+        let Some(atoms) = predicate_atoms(expr)? else {
             return Ok(None);
         };
-        // column = literal / literal = column（裸列名；限定名不路由——与
-        // PK 简单等值同口径）
-        let (column, literal) = match (left.as_ref(), right.as_ref()) {
-            (Expr::Identifier(c), Expr::Value(v)) => (c, v),
-            (Expr::Value(v), Expr::Identifier(c)) => (c, v),
-            _ => return Ok(None),
-        };
-        let column_name = column.value.to_lowercase();
-        let Some((index_name, _)) = indexes.iter().find(|(_, col)| *col == column_name) else {
+        let Some(table_columns) = self.tables.get(table_name) else {
             return Ok(None);
         };
-        // MS31 Iteration 001：参数占位位在计划期无值——不路由索引键。
-        if is_placeholder_value(literal) {
+        let Some(table_types) = self.table_column_types.get(table_name) else {
+            return Ok(None);
+        };
+
+        let mut candidates = Vec::new();
+        for (ord, index) in indexes.iter().enumerate() {
+            if let Some(candidate) = explain_index(table_columns, table_types, ord, index, &atoms) {
+                candidates.push(candidate);
+            }
+        }
+        if candidates.is_empty() {
             return Ok(None);
         }
-        let value = value_from_sqlparser(literal)?;
-        let Some(column_index) = self.tables.get(table_name).and_then(|columns| {
-            columns
-                .iter()
-                .position(|column| column.to_lowercase() == column_name)
-        }) else {
-            return Ok(None);
-        };
-        let Some(column_type) = self
-            .table_column_types
-            .get(table_name)
-            .and_then(|types| types.get(column_index))
-        else {
-            return Ok(None);
-        };
-        match value.secondary_index_key(column_type) {
-            Some(key) => Ok(Some((index_name.clone(), key))),
-            None => Ok(None),
-        }
+        candidates.sort_by(|left, right| {
+            right
+                .prefix_len
+                .cmp(&left.prefix_len)
+                .then_with(|| left.omitted.cmp(&right.omitted))
+                .then_with(|| left.ord.cmp(&right.ord))
+        });
+        Ok(Some(candidates.remove(0).route))
     }
 
     /// Extract primary key from WHERE clause
@@ -3593,6 +3603,431 @@ impl PlanBuilder {
             })
             .collect()
     }
+}
+
+enum SecondaryRoute {
+    Equality {
+        index_name: String,
+        key: Key,
+    },
+    Range {
+        index_name: String,
+        lower: Option<RangeSentinel>,
+        upper: Option<RangeSentinel>,
+        omitted_scan: bool,
+        index_column_indexes: Vec<usize>,
+        index_column_types: Vec<ColumnType>,
+        generation: u8,
+    },
+}
+
+struct IndexCandidate {
+    prefix_len: usize,
+    omitted: bool,
+    ord: usize,
+    route: SecondaryRoute,
+}
+
+enum AtomKind {
+    Eq(Value),
+    Lower(BoundMark),
+    Upper(BoundMark),
+}
+
+struct Atom {
+    column: String,
+    kind: AtomKind,
+}
+
+#[derive(Clone, Default)]
+struct ColumnAtoms {
+    eqs: Vec<Value>,
+    lowers: Vec<BoundMark>,
+    uppers: Vec<BoundMark>,
+}
+
+enum MergedColumn {
+    Eq(Value),
+    Range {
+        lower: Option<BoundMark>,
+        upper: Option<BoundMark>,
+    },
+}
+
+fn explain_index(
+    table_columns: &[String],
+    table_types: &[ColumnType],
+    ord: usize,
+    index: &super::SecondaryIndexRegistration,
+    atoms: &[Atom],
+) -> Option<IndexCandidate> {
+    let mut positions = Vec::with_capacity(index.columns.len());
+    let mut types = Vec::with_capacity(index.columns.len());
+    for name in &index.columns {
+        let position = table_columns
+            .iter()
+            .position(|column| column.eq_ignore_ascii_case(name))?;
+        types.push(table_types.get(position)?.clone());
+        positions.push(position);
+    }
+
+    let mut by_pos = vec![None; index.columns.len()];
+    for atom in atoms {
+        let position = index
+            .columns
+            .iter()
+            .position(|column| column.eq_ignore_ascii_case(&atom.column))?;
+        let slot = by_pos[position].get_or_insert_with(ColumnAtoms::default);
+        match &atom.kind {
+            AtomKind::Eq(value) => slot.eqs.push(value.clone()),
+            AtomKind::Lower(mark) => slot.lowers.push(mark.clone()),
+            AtomKind::Upper(mark) => slot.uppers.push(mark.clone()),
+        }
+    }
+    let last = by_pos.iter().rposition(|slot| slot.is_some())?;
+    if by_pos[..=last].iter().any(|slot| slot.is_none()) {
+        return None;
+    }
+
+    let mut prefix_values = Vec::new();
+    let mut bounds = Vec::new();
+    for (position, slot) in by_pos[..=last].iter().enumerate() {
+        let merged = merge_column(&types, &prefix_values, slot.as_ref()?)?;
+        match merged {
+            MergedColumn::Eq(value) => {
+                bounds.push(IndexColumnBound::Eq(value.clone()));
+                prefix_values.push(value);
+            }
+            MergedColumn::Range { lower, upper } => {
+                if position != last {
+                    return None;
+                }
+                bounds.push(IndexColumnBound::Range { lower, upper });
+            }
+        }
+    }
+
+    let prefix_len = bounds.len();
+    let full_equality = prefix_len == types.len()
+        && bounds
+            .iter()
+            .all(|bound| matches!(bound, IndexColumnBound::Eq(_)));
+    if full_equality {
+        let key = Value::derive_secondary_index_key(&types, &prefix_values, index.generation)?;
+        return Some(IndexCandidate {
+            prefix_len,
+            omitted: false,
+            ord,
+            route: SecondaryRoute::Equality {
+                index_name: index.name.clone(),
+                key,
+            },
+        });
+    }
+    if !range_order_usable(index.generation, &types) {
+        return None;
+    }
+    let sentinels = Value::secondary_range_bounds(&types, &bounds)?;
+    let omitted = needs_omitted_scan(index.generation, &types);
+    Some(IndexCandidate {
+        prefix_len,
+        omitted,
+        ord,
+        route: SecondaryRoute::Range {
+            index_name: index.name.clone(),
+            lower: sentinels.lower,
+            upper: sentinels.upper,
+            omitted_scan: omitted,
+            index_column_indexes: positions,
+            index_column_types: types,
+            generation: index.generation,
+        },
+    })
+}
+
+fn merge_column(
+    types: &[ColumnType],
+    prefix_values: &[Value],
+    raw: &ColumnAtoms,
+) -> Option<MergedColumn> {
+    let mut lowers = raw.lowers.clone();
+    let mut uppers = raw.uppers.clone();
+    for value in &raw.eqs {
+        lowers.push(BoundMark {
+            value: value.clone(),
+            inclusive: true,
+        });
+        uppers.push(BoundMark {
+            value: value.clone(),
+            inclusive: true,
+        });
+    }
+    let lower = strictest_lower(types, prefix_values, &lowers)?;
+    let upper = strictest_upper(types, prefix_values, &uppers)?;
+    match (lower, upper) {
+        (Some(lower), Some(upper))
+            if lower.inclusive && upper.inclusive && lower.value == upper.value =>
+        {
+            Some(MergedColumn::Eq(lower.value))
+        }
+        (lower, upper) => Some(MergedColumn::Range { lower, upper }),
+    }
+}
+
+fn strictest_lower(
+    types: &[ColumnType],
+    prefix_values: &[Value],
+    marks: &[BoundMark],
+) -> Option<Option<BoundMark>> {
+    strictest(types, prefix_values, marks, true)
+}
+
+fn strictest_upper(
+    types: &[ColumnType],
+    prefix_values: &[Value],
+    marks: &[BoundMark],
+) -> Option<Option<BoundMark>> {
+    strictest(types, prefix_values, marks, false)
+}
+
+fn strictest(
+    types: &[ColumnType],
+    prefix_values: &[Value],
+    marks: &[BoundMark],
+    lower: bool,
+) -> Option<Option<BoundMark>> {
+    if marks.is_empty() {
+        return Some(None);
+    }
+    let mut best_index = 0;
+    let mut best = bound_sentinel(types, prefix_values, &marks[0], lower)?;
+    for (index, mark) in marks.iter().enumerate().skip(1) {
+        let sentinel = bound_sentinel(types, prefix_values, mark, lower)?;
+        let replace = match sentinel.key.cmp(&best.key) {
+            std::cmp::Ordering::Greater if lower => true,
+            std::cmp::Ordering::Less if !lower => true,
+            std::cmp::Ordering::Equal => !sentinel.inclusive && best.inclusive,
+            _ => false,
+        };
+        if replace {
+            best_index = index;
+            best = sentinel;
+        }
+    }
+    Some(Some(marks[best_index].clone()))
+}
+
+fn bound_sentinel(
+    types: &[ColumnType],
+    prefix_values: &[Value],
+    mark: &BoundMark,
+    lower: bool,
+) -> Option<RangeSentinel> {
+    let mut spec = Vec::with_capacity(prefix_values.len() + 1);
+    for value in prefix_values {
+        spec.push(IndexColumnBound::Eq(value.clone()));
+    }
+    spec.push(IndexColumnBound::Range {
+        lower: lower.then(|| mark.clone()),
+        upper: (!lower).then(|| mark.clone()),
+    });
+    let bounds = Value::secondary_range_bounds(types, &spec)?;
+    if lower {
+        bounds.lower
+    } else {
+        bounds.upper
+    }
+}
+
+fn needs_omitted_scan(generation: u8, types: &[ColumnType]) -> bool {
+    !(generation == 1
+        && types.len() <= 4
+        && types.iter().all(|column| matches!(column, ColumnType::Int)))
+}
+
+fn range_order_usable(generation: u8, types: &[ColumnType]) -> bool {
+    if generation == 0 {
+        types
+            .iter()
+            .all(|column| matches!(column, ColumnType::String(_)))
+    } else {
+        generation == 1
+    }
+}
+
+fn predicate_atoms(expr: &Expr) -> Result<Option<Vec<Atom>>, PlanError> {
+    let mut terms = Vec::new();
+    conjunction(expr, &mut terms);
+    let mut atoms = Vec::with_capacity(terms.len());
+    for term in terms {
+        match predicate_atom(term)? {
+            Some(term_atoms) => atoms.extend(term_atoms),
+            None => return Ok(None),
+        }
+    }
+    if atoms.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(atoms))
+    }
+}
+
+fn conjunction<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match peel(expr) {
+        Expr::BinaryOp {
+            left,
+            op: sqlparser::ast::BinaryOperator::And,
+            right,
+        } => {
+            conjunction(left, out);
+            conjunction(right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+fn predicate_atom(expr: &Expr) -> Result<Option<Vec<Atom>>, PlanError> {
+    match peel(expr) {
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            if *negated {
+                return Ok(None);
+            }
+            let Some(column) = bare_column(expr) else {
+                return Ok(None);
+            };
+            let Some(low) = endpoint_value(low, true)? else {
+                return Ok(None);
+            };
+            let Some(high) = endpoint_value(high, true)? else {
+                return Ok(None);
+            };
+            Ok(Some(vec![
+                Atom {
+                    column: column.clone(),
+                    kind: AtomKind::Lower(BoundMark {
+                        value: low,
+                        inclusive: true,
+                    }),
+                },
+                Atom {
+                    column,
+                    kind: AtomKind::Upper(BoundMark {
+                        value: high,
+                        inclusive: true,
+                    }),
+                },
+            ]))
+        }
+        other => Ok(comparison_atom(other)?.map(|atom| vec![atom])),
+    }
+}
+
+fn comparison_atom(expr: &Expr) -> Result<Option<Atom>, PlanError> {
+    let Expr::BinaryOp { left, op, right } = peel(expr) else {
+        return Ok(None);
+    };
+    let (column_expr, literal_expr, column_on_left) = match (bare_column(left), bare_column(right))
+    {
+        (Some(_), None) => (left.as_ref(), right.as_ref(), true),
+        (None, Some(_)) => (right.as_ref(), left.as_ref(), false),
+        _ => return Ok(None),
+    };
+    let Some(column) = bare_column(column_expr) else {
+        return Ok(None);
+    };
+    let kind = match (op, column_on_left) {
+        (sqlparser::ast::BinaryOperator::Eq, _) => {
+            let Some(value) = endpoint_value(literal_expr, false)? else {
+                return Ok(None);
+            };
+            AtomKind::Eq(value)
+        }
+        (sqlparser::ast::BinaryOperator::Gt, true)
+        | (sqlparser::ast::BinaryOperator::Lt, false) => {
+            let Some(value) = endpoint_value(literal_expr, true)? else {
+                return Ok(None);
+            };
+            AtomKind::Lower(BoundMark {
+                value,
+                inclusive: false,
+            })
+        }
+        (sqlparser::ast::BinaryOperator::GtEq, true)
+        | (sqlparser::ast::BinaryOperator::LtEq, false) => {
+            let Some(value) = endpoint_value(literal_expr, true)? else {
+                return Ok(None);
+            };
+            AtomKind::Lower(BoundMark {
+                value,
+                inclusive: true,
+            })
+        }
+        (sqlparser::ast::BinaryOperator::Lt, true)
+        | (sqlparser::ast::BinaryOperator::Gt, false) => {
+            let Some(value) = endpoint_value(literal_expr, true)? else {
+                return Ok(None);
+            };
+            AtomKind::Upper(BoundMark {
+                value,
+                inclusive: false,
+            })
+        }
+        (sqlparser::ast::BinaryOperator::LtEq, true)
+        | (sqlparser::ast::BinaryOperator::GtEq, false) => {
+            let Some(value) = endpoint_value(literal_expr, true)? else {
+                return Ok(None);
+            };
+            AtomKind::Upper(BoundMark {
+                value,
+                inclusive: true,
+            })
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(Atom {
+        column: column.clone(),
+        kind,
+    }))
+}
+
+fn endpoint_value(expr: &Expr, allow_unary: bool) -> Result<Option<Value>, PlanError> {
+    match peel(expr) {
+        Expr::Value(value) if is_placeholder_value(value) => Ok(None),
+        Expr::Value(value) => Ok(Some(value_from_sqlparser(value)?)),
+        Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Minus,
+            expr: inner,
+        } if allow_unary => match peel(inner) {
+            Expr::Value(value) if is_placeholder_value(value) => Ok(None),
+            Expr::Value(value) => match value_from_sqlparser(value)? {
+                Value::Int(number) => Ok(Some(Value::Int(-number))),
+                Value::Float(number) => Ok(Some(Value::Float(-number))),
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
+fn bare_column(expr: &Expr) -> Option<String> {
+    match peel(expr) {
+        Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
+        _ => None,
+    }
+}
+
+fn peel(expr: &Expr) -> &Expr {
+    let mut current = expr;
+    while let Expr::Nested(inner) = current {
+        current = inner;
+    }
+    current
 }
 
 /// MS25 T1（design D1）：JOIN 链单步的外连接形态。`None` = INNER（既有语义：
@@ -3807,6 +4242,7 @@ fn is_base_scan_chain(plan: &PhysicalPlan) -> bool {
         | PhysicalPlan::DataScan(_)
         | PhysicalPlan::IndexScan(_)
         | PhysicalPlan::IndexScanAll(_)
+        | PhysicalPlan::IndexRangeScan(_)
         // MS26 T8: the derived base emits full derived rows when its
         // projection is empty (the Sort node then owns the trim), and its
         // projection indices are resolved against the same derived column

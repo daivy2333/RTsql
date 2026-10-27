@@ -382,17 +382,16 @@ fn extract_pk_key(table_meta: &Arc<TableMeta>, tuple_data: &[u8]) -> Option<Vec<
 /// MS24 Iter001 replan (2.9/D9)：`pub(crate)` 供事务层回滚通道复用为墓碑
 /// 行的索引键派生单一来源（键派生规则零变化，仅可见性）。
 ///
-/// MS21 Iter002 (T2-d/T2-e, D8)：签名扩展兼提二级列键（`secondary_cols`，
-/// 一次反序列化多提键——rebuild 扫描与事务回滚还原共用单一派生源）。
+/// 二级键与 `table_meta.secondary_indexes` 逐位对齐。每个位置用该索引记录的
+/// 世代和完整列序。主键和唯一列仍用 `to_key`。
 ///
-/// 提取结果：`(PK 键, 唯一列键向量, 二级列键向量)`——后两者与传入列序号表
-/// 逐位对齐，不可键控位为 `None`。
+/// 提取结果：`(PK 键, 唯一列键向量, 二级列键向量)`。唯一列与传入列序号表
+/// 逐位对齐，二级列与表上的二级索引逐位对齐，不可键控位为 `None`。
 pub(crate) type ExtractedIndexKeys = (Option<Vec<u8>>, Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>);
 
 pub(crate) fn extract_index_keys(
     table_meta: &Arc<TableMeta>,
     unique_cols: &[usize],
-    secondary_cols: &[usize],
     tuple_data: &[u8],
 ) -> ExtractedIndexKeys {
     let schema: Vec<_> = table_meta
@@ -418,14 +417,13 @@ pub(crate) fn extract_index_keys(
                         .map(|k| k.as_bytes().to_vec())
                 })
                 .collect();
-            let secondaries = secondary_cols
+            let secondaries = table_meta
+                .secondary_indexes
                 .iter()
-                .map(|i| {
-                    let column_type = schema.get(*i)?;
-                    values
-                        .get(*i)
-                        .and_then(|v| v.secondary_index_key(column_type))
-                        .map(|k| k.as_bytes().to_vec())
+                .map(|index| {
+                    index
+                        .derive_key(&schema, &values)
+                        .map(|key| key.as_bytes().to_vec())
                 })
                 .collect();
             (pk, uniques, secondaries)
@@ -433,7 +431,7 @@ pub(crate) fn extract_index_keys(
         Err(_) => (
             None,
             vec![None; unique_cols.len()],
-            vec![None; secondary_cols.len()],
+            vec![None; table_meta.secondary_indexes.len()],
         ),
     }
 }
@@ -1335,11 +1333,6 @@ impl RecoveryManager {
             // MS21 Iter002 (T2-e/D8)：为 catalog 登记的每个二级索引新建空树
             // （creation order，与登记段序列化序一致）。重建树不带 catalog
             // 上下文（换入后由 attach_index_catalog_contexts 统一挂接）。
-            let secondary_cols: Vec<usize> = row
-                .secondary_indexes
-                .iter()
-                .map(|e| e.column_index as usize)
-                .collect();
             let mut new_secondary_indexes: Vec<SecondaryIndexMeta> = Vec::new();
             for entry in &row.secondary_indexes {
                 let bp = buffer_pool.clone();
@@ -1359,6 +1352,12 @@ impl RecoveryManager {
                 new_secondary_indexes.push(SecondaryIndexMeta {
                     name: entry.name.clone(),
                     column_index: entry.column_index as usize,
+                    generation: entry.generation,
+                    extra_column_indexes: entry
+                        .extra_column_indexes
+                        .iter()
+                        .map(|index| *index as usize)
+                        .collect(),
                     index: sindex,
                 });
             }
@@ -1452,8 +1451,7 @@ impl RecoveryManager {
                             table_name, rid, e
                         ))
                     })?;
-                    let (key, ukeys, skeys) =
-                        extract_index_keys(&meta, &unique_cols, &secondary_cols, &tuple_bytes);
+                    let (key, ukeys, skeys) = extract_index_keys(&meta, &unique_cols, &tuple_bytes);
                     slots.insert(rid, (vh, key, ukeys, skeys));
                 }
                 page_id = if next_page == 0 {

@@ -260,7 +260,7 @@ rtsql app "ATTACH 'orders' AS o; \
 - **常量查询：** 支持 `SELECT 1 + 1` 等无 `FROM` 表达式。
 - **事务：** 显式库 API 事务，以及 CLI `BEGIN` / `COMMIT` / `ROLLBACK` 会话。
 - **MVCC：** 默认 Repeatable Read，也可通过 `Database::open_with_isolation` 选择 Read Committed。
-- **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。单列非唯一 `CREATE INDEX` 接受 INTEGER 和字符串声明（TEXT、VARCHAR、CHAR、CLOB）。它自动服务等值谓词，其结果集与全表扫描严格一致——同行集、不重复、不漏行——任意表规模成立，重启与崩溃恢复两态一致。字符串在完整键编码放得进 32 字节时走索引。更长的字符串整值写入，等值查询扫描该完整字面量；即使该行因为其他列进入溢出页，这条回落也不变。不截断，不给列加长度上限。NULL 不入索引。重复字符串允许。PRIMARY KEY 与 UNIQUE 仍只接受整数。
+- **存储：** 持久化 schema、B-Tree 主键索引、带帧校验和的 WAL、checkpoint、崩溃恢复和页复用。单列非唯一 `CREATE INDEX` 接受 INTEGER 和字符串声明（TEXT、VARCHAR、CHAR、CLOB）。它自动服务等值谓词，其结果集与全表扫描严格一致——同行集、不重复、不漏行——任意表规模成立，重启与崩溃恢复两态一致。字符串在完整键编码放得进 32 字节时走索引。更长的字符串整值写入，等值查询扫描该完整字面量；即使该行因为其他列进入溢出页，这条回落也不变。不截断，不给列加长度上限。NULL 不入索引。重复字符串允许。PRIMARY KEY 与 UNIQUE 仍只接受整数。INT 与字符串列可以建多列非唯一索引，键仍是 32 字节。新建的单列 INT 索引按有符号数值序服务范围。升级前的单列 INT 索引保持原字节，范围仍扫描，等值不变。可能漏掉非 NULL 行的范围结果还包含未入树且谓词成立的行，结果与全表扫描相同。
 - **长值存储：** 超过单页内联容量（约 4KB）的行值自动经溢出页链存取，无人为长度上限。溢出对 SQL 层透明：`INSERT`/`UPDATE`/`SELECT`、`dump`/`restore`/`import`、崩溃恢复、GC 与 `DROP TABLE`/`TRUNCATE` 释放、加密库、`:memory:` 与只读会话同等可用（此前超过页容量的行以 `No enough space in page` 失败，该失败形态已终止）。
 - **运行形态：** 共享锁上的只读会话（多个并发读者、零写入），以及全程驻留内存的 `:memory:` 数据库。
 

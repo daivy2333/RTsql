@@ -59,10 +59,14 @@ const COL_TAG_TIMESTAMP: u8 = 0x06;
 pub struct CatalogSecondaryIndex {
     /// Index name (library-level unique).
     pub name: String,
-    /// Indexed column ordinal within the table's column list.
+    /// First indexed column ordinal within the table's column list.
     pub column_index: u32,
     /// B-Tree root page of this index tree.
     pub root: u32,
+    /// Key encoding generation. 0 keeps the single-column layout.
+    pub generation: u8,
+    /// Column ordinals after `column_index`, in index order.
+    pub extra_column_indexes: Vec<u32>,
 }
 
 /// Kind tag byte for a base-table row in the `__tables` trailing kind
@@ -441,6 +445,48 @@ impl Catalog {
                     return Ok(None);
                 }
                 row.column_count = new_count;
+                Ok(Some(serialize_catalog_row(&row)))
+            },
+        )
+        .await?;
+        if let Some(page) = page {
+            self.flush_commit_point(&[page]).await?;
+        }
+        Ok(())
+    }
+
+    /// 在同一次表行序列化里下调列数，并把大于被删位置的二级列号减一。
+    ///
+    /// 第一列和额外列使用同一规则。列数已经是目标值时调用方不得再进入这里，
+    /// 否则会把列号再减一次。`ADD COLUMN` 仍只改列数。
+    pub async fn publish_narrowed_table_row(
+        &self,
+        name: &str,
+        removed: u32,
+        new_count: u32,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let page = update_field_in_chain(
+            &self.buffer_pool,
+            &self.storage,
+            PageId(TABLES_PAGE_ID),
+            name,
+            |data| {
+                let mut row = deserialize_catalog_row(data)?;
+                if row.table_name != name {
+                    return Ok(None);
+                }
+                row.column_count = new_count;
+                for entry in &mut row.secondary_indexes {
+                    if entry.column_index > removed {
+                        entry.column_index -= 1;
+                    }
+                    for column in &mut entry.extra_column_indexes {
+                        if *column > removed {
+                            *column -= 1;
+                        }
+                    }
+                }
                 Ok(Some(serialize_catalog_row(&row)))
             },
         )
@@ -1226,6 +1272,10 @@ fn collapse_newest_same_name(rows: Vec<(u16, CatalogRow)>) -> Vec<CatalogRow> {
 ///         [ MS21 Iter005 appended: u8 kind; kind=View carries
 ///           u16 sql_len | sql_bytes ]
 ///         [ trailing u8 explicit_primary_key: 1 written, 0 not; absent reads 0 ]
+///         [ only when some secondary index has generation != 0 or extra
+///           columns: u32 count | count × (u8 generation | u16 extra_count |
+///           extra_count × u32 column). Otherwise the row ends at
+///           explicit_primary_key. ]
 pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
     let name_bytes = row.table_name.as_bytes();
     let pk_bytes = row.pk_column.as_bytes();
@@ -1253,7 +1303,8 @@ pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
         + sec_bytes
         + 1
         + view_bytes
-        + 1;
+        + 1
+        + secondary_generation_tail_len(&row.secondary_indexes);
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
     buf.extend_from_slice(name_bytes);
@@ -1286,8 +1337,78 @@ pub(crate) fn serialize_catalog_row(row: &CatalogRow) -> Vec<u8> {
         buf.extend_from_slice(sql_bytes);
     }
     buf.push(if row.explicit_primary_key { 1 } else { 0 });
+    write_secondary_generation_tail(&mut buf, &row.secondary_indexes);
     debug_assert_eq!(buf.len(), total);
     buf
+}
+
+fn secondary_generation_tail_len(indexes: &[CatalogSecondaryIndex]) -> usize {
+    if !generation_tail_needed(indexes) {
+        return 0;
+    }
+    4 + indexes
+        .iter()
+        .map(|entry| 1 + 2 + 4 * entry.extra_column_indexes.len())
+        .sum::<usize>()
+}
+
+fn generation_tail_needed(indexes: &[CatalogSecondaryIndex]) -> bool {
+    indexes
+        .iter()
+        .any(|entry| entry.generation != 0 || !entry.extra_column_indexes.is_empty())
+}
+
+fn write_secondary_generation_tail(buf: &mut Vec<u8>, indexes: &[CatalogSecondaryIndex]) {
+    if !generation_tail_needed(indexes) {
+        return;
+    }
+    buf.extend_from_slice(&(indexes.len() as u32).to_le_bytes());
+    for entry in indexes {
+        buf.push(entry.generation);
+        buf.extend_from_slice(&(entry.extra_column_indexes.len() as u16).to_le_bytes());
+        for column in &entry.extra_column_indexes {
+            buf.extend_from_slice(&column.to_le_bytes());
+        }
+    }
+}
+
+/// 尾段缺失、`count` 与索引个数不符或条目被截断时保持调用方已填的世代 0。
+fn read_secondary_generation_tail(indexes: &mut [CatalogSecondaryIndex], tail: &[u8]) {
+    if tail.len() < 4 {
+        return;
+    }
+    let count = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]) as usize;
+    if count != indexes.len() {
+        return;
+    }
+    let mut off = 4usize;
+    let mut parsed = Vec::with_capacity(count);
+    for _ in 0..count {
+        if tail.len() < off + 3 {
+            return;
+        }
+        let generation = tail[off];
+        let extra_count = u16::from_le_bytes([tail[off + 1], tail[off + 2]]) as usize;
+        off += 3;
+        if tail.len() < off + extra_count * 4 {
+            return;
+        }
+        let mut extras = Vec::with_capacity(extra_count);
+        for _ in 0..extra_count {
+            extras.push(u32::from_le_bytes([
+                tail[off],
+                tail[off + 1],
+                tail[off + 2],
+                tail[off + 3],
+            ]));
+            off += 4;
+        }
+        parsed.push((generation, extras));
+    }
+    for (entry, (generation, extras)) in indexes.iter_mut().zip(parsed) {
+        entry.generation = generation;
+        entry.extra_column_indexes = extras;
+    }
 }
 
 pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
@@ -1416,6 +1537,8 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
                 name: idx_name,
                 column_index: col_index,
                 root,
+                generation: 0,
+                extra_column_indexes: Vec::new(),
             });
         }
         if !ok {
@@ -1453,6 +1576,12 @@ pub(crate) fn deserialize_catalog_row(data: &[u8]) -> Result<CatalogRow> {
     } else {
         false
     };
+    if kind_consumed > 0 {
+        let tail_start = kind_consumed + 1;
+        if kind_rest.len() > tail_start {
+            read_secondary_generation_tail(&mut secondary_indexes, &kind_rest[tail_start..]);
+        }
+    }
     Ok(CatalogRow {
         table_name,
         data_page_head,
@@ -2237,6 +2366,8 @@ mod tests {
             name: "idx_payload".to_string(),
             column_index: 1,
             root: 42,
+            generation: 0,
+            extra_column_indexes: Vec::new(),
         };
         {
             let storage = Arc::new(FileStorage::open(&path).unwrap());
@@ -2317,6 +2448,8 @@ mod tests {
             name: "x".repeat(5000),
             column_index: 1,
             root: 7,
+            generation: 0,
+            extra_column_indexes: Vec::new(),
         };
         let err = cat
             .append_secondary_index("users", &entry)
@@ -2572,11 +2705,15 @@ mod tests {
                 name: "idx_age".to_string(),
                 column_index: 1,
                 root: 51,
+                generation: 0,
+                extra_column_indexes: Vec::new(),
             },
             CatalogSecondaryIndex {
                 name: "idx_city".to_string(),
                 column_index: 2,
                 root: 52,
+                generation: 0,
+                extra_column_indexes: Vec::new(),
             },
         ];
         let bytes = serialize_catalog_row(&row);
@@ -2585,6 +2722,130 @@ mod tests {
         assert_eq!(back.secondary_indexes.len(), 2);
         assert_eq!(back.secondary_indexes[0].name, "idx_age");
         assert_eq!(back.secondary_indexes[1].root, 52);
+    }
+
+    /// 世代 0 且没有额外列时，行在 `explicit_primary_key` 结束，不写世代尾段。
+    /// 尾段缺失、`count` 不符或被截断时仍读成世代 0，且不返回错误。
+    #[test]
+    fn legacy_secondary_index_row_has_no_generation_tail() {
+        let mut row = sample_row();
+        row.secondary_indexes = vec![CatalogSecondaryIndex {
+            name: "idx_age".to_string(),
+            column_index: 1,
+            root: 51,
+            generation: 0,
+            extra_column_indexes: Vec::new(),
+        }];
+        let bytes = serialize_catalog_row(&row);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&5u16.to_le_bytes());
+        expected.extend_from_slice(b"users");
+        expected.extend_from_slice(&7u32.to_le_bytes());
+        expected.extend_from_slice(&9u32.to_le_bytes());
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&2u16.to_le_bytes());
+        expected.extend_from_slice(b"id");
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.extend_from_slice(&7u32.to_le_bytes());
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&7u16.to_le_bytes());
+        expected.extend_from_slice(b"idx_age");
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&51u32.to_le_bytes());
+        expected.push(0x01);
+        expected.push(0);
+        assert_eq!(bytes, expected);
+
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(back, row);
+        assert_eq!(back.secondary_indexes[0].column_index, 1);
+        assert_eq!(back.secondary_indexes[0].generation, 0);
+        assert!(back.secondary_indexes[0].extra_column_indexes.is_empty());
+
+        let mut missing_explicit = bytes.clone();
+        missing_explicit.pop();
+        let missing = deserialize_catalog_row(&missing_explicit).unwrap();
+        assert!(!missing.explicit_primary_key);
+        assert_eq!(missing.secondary_indexes[0].generation, 0);
+        assert!(missing.secondary_indexes[0].extra_column_indexes.is_empty());
+
+        let mut truncated = bytes.clone();
+        truncated.extend_from_slice(&1u32.to_le_bytes());
+        truncated.push(1);
+        truncated.extend_from_slice(&1u16.to_le_bytes());
+        let truncated_row = deserialize_catalog_row(&truncated).unwrap();
+        assert_eq!(truncated_row.secondary_indexes[0].generation, 0);
+        assert!(truncated_row.secondary_indexes[0]
+            .extra_column_indexes
+            .is_empty());
+        assert_eq!(truncated_row.secondary_indexes[0].column_index, 1);
+
+        let mut mismatched = bytes.clone();
+        mismatched.extend_from_slice(&2u32.to_le_bytes());
+        mismatched.push(1);
+        mismatched.extend_from_slice(&0u16.to_le_bytes());
+        mismatched.push(0);
+        mismatched.extend_from_slice(&0u16.to_le_bytes());
+        let mismatched_row = deserialize_catalog_row(&mismatched).unwrap();
+        assert_eq!(mismatched_row.secondary_indexes[0].generation, 0);
+        assert!(mismatched_row.secondary_indexes[0]
+            .extra_column_indexes
+            .is_empty());
+    }
+
+    /// 任一索引世代非 0 或带额外列时，尾段随行往返；`column_index` 仍是第一列。
+    #[test]
+    fn composite_secondary_index_row_roundtrips_generation_and_columns() {
+        let mut row = sample_row();
+        row.explicit_primary_key = true;
+        row.secondary_indexes = vec![
+            CatalogSecondaryIndex {
+                name: "idx_ab".to_string(),
+                column_index: 1,
+                root: 51,
+                generation: 1,
+                extra_column_indexes: vec![2, 3],
+            },
+            CatalogSecondaryIndex {
+                name: "idx_c".to_string(),
+                column_index: 4,
+                root: 52,
+                generation: 0,
+                extra_column_indexes: Vec::new(),
+            },
+        ];
+        let bytes = serialize_catalog_row(&row);
+        let mut legacy_shape = row.clone();
+        for entry in &mut legacy_shape.secondary_indexes {
+            entry.generation = 0;
+            entry.extra_column_indexes.clear();
+        }
+        let legacy_bytes = serialize_catalog_row(&legacy_shape);
+        assert_eq!(bytes.len(), legacy_bytes.len() + 4 + 11 + 3);
+        let back = deserialize_catalog_row(&bytes).unwrap();
+        assert_eq!(back, row);
+        assert_eq!(back.secondary_indexes[0].column_index, 1);
+        assert_eq!(back.secondary_indexes[0].extra_column_indexes, vec![2, 3]);
+        assert_eq!(back.secondary_indexes[1].generation, 0);
+        assert!(back.secondary_indexes[1].extra_column_indexes.is_empty());
+
+        let mut extras_only = sample_row();
+        extras_only.secondary_indexes = vec![CatalogSecondaryIndex {
+            name: "idx_extra".to_string(),
+            column_index: 0,
+            root: 9,
+            generation: 0,
+            extra_column_indexes: vec![5],
+        }];
+        let extra_bytes = serialize_catalog_row(&extras_only);
+        let extra_back = deserialize_catalog_row(&extra_bytes).unwrap();
+        assert_eq!(extra_back, extras_only);
+        assert_eq!(extra_back.secondary_indexes[0].column_index, 0);
+        assert_eq!(
+            extra_back.secondary_indexes[0].extra_column_indexes,
+            vec![5]
+        );
     }
 
     /// 旧格式兼容：MS23 时代行（唯一根段之后无二级段）读为空二级登记。
@@ -2636,6 +2897,8 @@ mod tests {
                 name: "idx_age".to_string(),
                 column_index: 1,
                 root: 51,
+                generation: 0,
+                extra_column_indexes: Vec::new(),
             },
         )
         .await
@@ -2646,6 +2909,8 @@ mod tests {
                 name: "idx_city".to_string(),
                 column_index: 2,
                 root: 52,
+                generation: 0,
+                extra_column_indexes: Vec::new(),
             },
         )
         .await

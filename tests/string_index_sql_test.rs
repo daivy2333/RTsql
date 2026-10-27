@@ -84,13 +84,6 @@ fn assert_data_scan(plan: &str) {
     );
 }
 
-fn assert_no_index_scan(plan: &str) {
-    assert!(
-        !plan.contains("IndexScanAll"),
-        "plan must not use IndexScanAll, got: {plan}"
-    );
-}
-
 fn sql_quote(text: &str) -> String {
     format!("'{text}'")
 }
@@ -599,7 +592,16 @@ async fn string_index_unrouted_predicates_stay_scan() {
         assert_same_outcome(saved, &outcome(&db, sql).await, sql);
         let plan = explain_outcome(&db, sql).await;
         match (saved_plan, &plan) {
-            (Ok(_), Ok(text)) => assert_no_index_scan(text),
+            (Ok(_), Ok(text)) if sql.contains("name > 'a'") => assert!(
+                text.contains("IndexRangeScan")
+                    && text.contains("index=idx_name")
+                    && text.contains("omitted=scan"),
+                "name > 'a' must range-scan idx_name and rescan omitted keys, got: {text}"
+            ),
+            (Ok(_), Ok(text)) => assert!(
+                !text.contains("IndexScanAll") && !text.contains("IndexRangeScan"),
+                "plan must not route, got: {text}"
+            ),
             (Err(left), Err(right)) => assert_eq!(left, right, "{sql}"),
             _ => panic!("{sql}: explain outcome changed from {saved_plan:?} to {plan:?}"),
         }
@@ -635,8 +637,8 @@ async fn string_index_unrouted_predicates_stay_scan() {
     }
 }
 
-/// BOOLEAN、FLOAT、UNIQUE、多列和重名被拒绝。只读与显式事务拒绝后仍能建索引。
-/// 整数等值仍走索引。
+/// BOOLEAN、FLOAT、UNIQUE 和重名被拒绝。整数与字符串组成的索引可以建立。
+/// 只读与显式事务拒绝后仍能建索引。整数等值仍走索引。
 #[tokio::test]
 async fn string_index_rejection_readonly_and_transaction() {
     let (db, _dir) = open_db().await;
@@ -689,16 +691,7 @@ async fn string_index_rejection_readonly_and_transaction() {
         "{}",
         unique.message
     );
-    let multi = db
-        .execute_sql("CREATE INDEX idx_multi ON t(name, age)")
-        .await
-        .expect_err("multi");
-    assert!(
-        multi.message.contains("Unsupported statement type")
-            && multi.message.contains("MULTI-COLUMN INDEX"),
-        "{}",
-        multi.message
-    );
+    exec(&db, "CREATE INDEX idx_multi ON t(name, age)").await;
 
     exec(&db, "CREATE INDEX idx_name ON t(name)").await;
     let duplicate = db
