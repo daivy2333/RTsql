@@ -31,6 +31,7 @@
 - 操作任务：相关 Runbook。
 - 缺陷查询与复盘：issues → analysis → project-model → specs → improvements/change。
 - 查询：assistant。
+- goal 自动推进：autopilot 读产物状态并派发子代理，读取顺序同 assistant。
 - 路线规划：milestone-planner。
 - 日常文档写入：docs-maintainer。
 
@@ -45,6 +46,7 @@
 - `openspec-explorer`：宏观或微观探索；输出即时回答或 `.agents/analysis/`。
 - `openspec-compressor`：原地压缩，不改变状态。
 - `openspec-archivist`：清理无法满足正常收尾条件的 change，并处理其他生命周期清理和归档墓碑。
+- `openspec-autopilot`：goal 驱动调度；只读产物状态并派发白名单子代理推进工作流，自身不写入。
 
 ## 阶段边界
 
@@ -60,12 +62,14 @@
 - Maintainer 由用户直接调用时刷新 SNAPSHOT；Explorer、Recorder 的限定 R 登记不刷新 SNAPSHOT。
 - Maintainer 直接调用时除 SNAPSHOT 外只修改用户点名内容；限定 R 登记只修改 references。
 - Act 完成不构成 Recorder 授权；只有用户单独请求或预先明确授权串联时才执行 Recorder。
+- Autopilot 接收 goal 指令即构成目标范围内阶段推进的显式授权：授权随派发注入，白名单技能的用户批准检查点在注入范围内视为批准且不降低检查标准，超出 goal 范围视为未批准。
+- Autopilot 自身不写入；子代理间的自动调用（Explorer、Recorder 的限定 R 登记）由 Autopilot 中转派发。
 - 除上述例外，用户明确授权串联时才可继续下一阶段。
 - Explorer 的结论是 Plan 可复用的调查输入。Plan 负责检查适用性、补齐缺口并把必要事实写入当前 Cycle；Act 不沿引用链回读 Explorer Analysis。
 
 ## 轻量工作
 
-- 不改变系统可观察行为（功能语义）的修改不建 change：默认直接执行，用户请求即为授权；用户要求时仍可走完整流程。
+- 不改变系统可观察行为（功能语义）的修改不建 change、不开分支：默认直接在主分支执行，完成后提交，用户请求即为授权；用户要求时仍可走完整流程。
 - 改变系统可观察行为的修改必须建 change，经 plan、act 和 Review 完成；用户坚持跳过时保留原话和风险后执行。
 - 功能语义的判定沿用 › Plan 调查 的实质问题定义：影响行为、接口、错误语义、状态所有权、架构、范围、测试策略或 Acceptance 即改变功能语义。
 - specs 是功能语义的权威记录，直接修改 `openspec/specs/` 不属于轻量工作。
@@ -241,6 +245,12 @@ agent 可执行的测试和 Review 不形成边界。验证失败时保留当前
 ## Iteration 与 Cycle 线程
 
 - Iteration 是 change Map 中的逻辑工作单元；Cycle 是该 Iteration 内的一次 Plan、Act、Review 执行闭环。
+- change 目录创建时同步建立并切换到分支 `changes/<change-name>`，change 的全部产物和代码只在分支上演进；基点默认主分支，依赖另一活跃 change 时由用户显式决定。
+- 在 change 分支上写入产物的角色，交付时把本次写入提交到该分支；Act 在 Act Response 状态确定后提交本 Cycle 的全部改动。
+- Maintainer 在 change 分支上完成规格合并、归档和状态同步后，以 `--no-ff` merge 合回主分支并删除该分支；收尾授权覆盖 merge 动作。
+- 无法正常收尾的 change，Archivist 只把 change 文档取到主分支归档，再删除该分支；代码不进入主分支，提交由用户完成。
+- analysis、Runbook、Issue、M/R/I 以及 tasks 和 SNAPSHOT 均为项目级产物，其独立写入发生在主分支；change 分支上只写 change 自身产物与收尾同步。
+- 分支操作不使用 rebase、force-push 等历史改写。
 - Plan 在 change `tasks.md` 中把全部任务分配到工作量适中、可独立验证和诊断的 Iteration，只展开当前 Iteration 目录和当前 Cycle。
 - 每个 change 从 `iterations/000-initial/000-initial.md` 开始；每个后续 Iteration 也从本目录的 `000-initial.md` 开始。
 - 每个任务只归属一个 Iteration；首个与后续 Iteration 使用相同的聚合、拆分标准。
@@ -298,7 +308,7 @@ agent 可执行的测试和 Review 不形成边界。验证失败时保留当前
 
 验证通过一次即为通过；禁止自行重复运行已通过的验证以增强可靠性或信心，禁止重试直至通过。同一验证的重复仅适用于两种情形：计划在通过条件中写明判定方式的不稳定验证（时序、并发或已知不稳定类，如固定重复次数取结果），以及失败后判定是否偶发错误的一次复核；复核通过按通过处理，并在验证记录注明首跑失败。
 
-命令顺序由当前工作流状态和实际结果表达，时间戳只能辅助诊断。Hash、revision、run-id、peer、manifest 或时间顺序一致均不能使 Gate 通过；没有目标状态、输出、错误结果等实际行为证据时，验证结论为失败。
+命令顺序由当前工作流状态和实际结果表达，时间戳只能辅助诊断。Hash、revision、run-id、peer、manifest、时间顺序一致以及分支、merge、commit 状态均不能使 Gate 通过；没有目标状态、输出、错误结果等实际行为证据时，验证结论为失败。
 
 Persisted Evidence 默认 `none`。设为 `required` 前必须说明它支持哪个 Acceptance、为什么 Act Response 不够、为什么无法低成本重跑，以及缺少它会阻止哪个决定；任一项无法回答时保持 `none`。禁止保存完整日志目录、源码副本或完整测试套件输出。
 
