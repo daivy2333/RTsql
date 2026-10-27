@@ -7,8 +7,8 @@
 - 需求与 BDD：completed。
 - 000：执行依据是 `iterations/000-key-and-catalog/000-initial.md`。Review Result 为 accepted。
 - 001：执行依据是 `iterations/001-create-maintain-recover/000-initial.md`。Review Result 为 accepted。
-- 002：执行依据是 `iterations/002-equality-and-range-routing/000-initial.md`。Act Response 为 reported，Review Result 仍为 pending。
-- 003：只列在 Iteration Plan 中，目录未创建。
+- 002：执行依据是 `iterations/002-equality-and-range-routing/000-initial.md`。Review Result 为 accepted。
+- 003：执行依据是 `iterations/003-fault-boundary-and-full-suite/000-initial.md`。Plan Context 为 ready。
 - Persisted Evidence：none。
 - 无跳过项。
 

@@ -180,15 +180,32 @@ None。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未审查实施结果。
+独立阅读了 `39f804d..2fd6b80` 的 diff 和当前源码。Act Response 与代码一致。本轮 Acceptance 已满足。没有阻塞项。
+
+自检写过：标量子查询右支、`is_base_scan_chain`、相关参数叶子臂和 pipeline 的列映射都补了 `IndexRangeScan` 臂，但三条命令没有执行带范围扫描的标量子查询或 `ORDER BY`。这不是 Acceptance 缺口。任务要求这些位置按 `IndexScanAll` 的投影契约处理，避免通配臂把节点报成多列或丢掉表名。`get_plan_output_columns`、`is_base_scan_chain`、`subquery.rs` 的标量右支、`correlated.rs` 的叶子臂，以及 `pipeline.rs` 的类型槽、执行器构造、`plan_output_names` 和 `extract_column_indices` 都按这个契约处理：投影裁剪与 `IndexScanAll` 相同，表名保留。标量右支在通配臂之前取投影后的首列。Acceptance 的八条可观察条件不包含标量子查询，也不包含排序键落在输出列之外的 `ORDER BY`。Verification 就是已通过的三条命令。
+
+`composite_backfill_matches_live_rows` 执行了 `SELECT id, age, name FROM t WHERE age = 10 ORDER BY id`，并断言结果是原来的两行。该语句选出全部列。EXPLAIN 打在没有 `ORDER BY` 的同一 WHERE 上。自检把「没有执行 ORDER BY」说满了，但不构成另一条必须补跑的验收。
+
+- 非阻塞，与计划一致。`composite_prefix_bounds` 用 `UPDATE` 写入 `i64::MIN`，因为 `INSERT ... VALUES` 不接受那个减法表达式。`SELECT b FROM t WHERE id = 2` 读回 `i64::MIN`。`a > 1` 只含 id 2，`a = 1` 和 `a = 1 AND b > 2` 只含 id 1。
+- 非阻塞，与计划一致。`string_index_unrouted_predicates_stay_scan` 删掉了只被该循环使用的 `assert_no_index_scan`。`name > 'a'` 单独断言 `IndexRangeScan`、`idx_name` 和 `omitted=scan`。同函数其余语句既不含 `IndexScanAll` 也不含 `IndexRangeScan`。
+
+**Evidence**
+
+沿用 Act Response 的验证，覆盖范围在 `2fd6b80` 之后没有变化，本次不重跑：
+
+- `cargo test --offline --test index_range_routing_test -- --test-threads=1`：7 passed，0 failed。
+- `cargo test --offline --test composite_index_lifecycle_test composite_backfill_matches_live_rows -- --test-threads=1`：1 passed，0 failed，6 filtered out。
+- `cargo test --offline --test string_index_sql_test string_index_unrouted_predicates_stay_scan -- --test-threads=1`：1 passed，0 failed，7 filtered out。
+
+代码核对：计划器按 `secondary_indexes` 的登记顺序收到名字、世代和完整列序。谓词按 AND 拆开。裸列与字面量的比较，以及裸列 `BETWEEN`，可以路由；字面量可以在列的任一侧。等值不接受一元负号，`n = -1` 的测试断言既不是 `IndexScanAll` 也不是 `IndexRangeScan`。范围端点接受整数字面量上的一元负号。限定列、OR、`NOT BETWEEN`、参数、类型不匹配、NULL 和索引解释不了的额外谓词使该索引不能成为候选。选择顺序是更长前缀、不补扫、创建更早。整键等值且 `derive_secondary_index_key` 返回键时构造 `IndexScanAll`，执行器调用 `search_all`。编码放不下时该索引不产生候选。其余可路由谓词把 `secondary_range_bounds` 的哨兵放进 `IndexRangeScan`。世代 0 的整数索引不参与范围。全整数且不超过 4 列的世代 1 索引不补扫。`IndexManager::scan_range` 从内部节点下降，子页用显式栈按键序展开，成员判断用 `Key` 的现有顺序。子树按闭区间剪枝，这个闭区间盖住了 `equality_candidate_children` 写明的子树键域，剪枝不会丢掉落在哨兵内的键。可见性与 `IndexScanAllExecutor` 相同。补扫跳过派生不为空的行，再保留谓词成立的行。EXPLAIN 文本是 `IndexRangeScan <table> (index=<name>, columns=...)`，需要补扫时含 `omitted=scan`。矛盾区间 `a > 5 AND a < 1` 仍是 `IndexRangeScan`，结果为空。没有为单列 `1` 与 `(1, i64::MIN)` 改 `Key`。
 
 **Follow-up Decision**
 
-等待 Act。
+本轮 Acceptance 已满足。不要求当前 Cycle 修复，不创建 rework 或 replan。Iteration Plan 不变。展开 003。
 
 **Next Cycle**
 
@@ -196,4 +213,4 @@ None
 
 **Next Iteration**
 
-None
+`openspec/changes/2026-10-27-ms39-composite-index-and-range-access/iterations/003-fault-boundary-and-full-suite/000-initial.md`
