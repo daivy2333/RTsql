@@ -296,8 +296,7 @@ impl Executor for InsertExecutor {
 
             // 二级索引条目在数据落位后写入。NULL 与不可容纳的值不入树。
             for sindex in &self.table_meta.secondary_indexes {
-                let column = sindex.column_index;
-                if let Some(key) = row_values[column].secondary_index_key(&self.schema[column]) {
+                if let Some(key) = sindex.derive_key(&self.schema, row_values) {
                     sindex.index.insert(key.as_bytes(), row_id).await?;
                 }
             }

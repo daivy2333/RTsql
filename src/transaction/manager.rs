@@ -627,12 +627,6 @@ async fn restore_tombstone_index_entries(
         .iter()
         .map(|(col_idx, _)| *col_idx)
         .collect();
-    // MS21 Iter002 (T2-d/D7)：二级列键同一派生调用提取（单一派生源）。
-    let secondary_cols: Vec<usize> = table_meta
-        .secondary_indexes
-        .iter()
-        .map(|s| s.column_index)
-        .collect();
 
     let mut cursor = buffer_pool
         .read_version_header(tombstone_row_id)
@@ -664,12 +658,8 @@ async fn restore_tombstone_index_entries(
         }
 
         if let Some(tuple) = tuple {
-            let (pk_key, unique_keys, secondary_keys) = crate::wal::recovery::extract_index_keys(
-                table_meta,
-                &unique_cols,
-                &secondary_cols,
-                &tuple,
-            );
+            let (pk_key, unique_keys, secondary_keys) =
+                crate::wal::recovery::extract_index_keys(table_meta, &unique_cols, &tuple);
             if let Some(pk_key) = pk_key {
                 table_meta.index_manager.insert(&pk_key, row_id).await?;
             }
@@ -717,11 +707,6 @@ async fn read_prev_index_keys(
         .iter()
         .map(|(col_idx, _)| *col_idx)
         .collect();
-    let secondary_cols: Vec<usize> = table_meta
-        .secondary_indexes
-        .iter()
-        .map(|s| s.column_index)
-        .collect();
 
     let tuple =
         match read_tuple_from_data_page(buffer_pool, prev_row_id, |_, bytes| Ok(bytes.to_vec()))
@@ -746,7 +731,6 @@ async fn read_prev_index_keys(
     Ok(Some(crate::wal::recovery::extract_index_keys(
         table_meta,
         &unique_cols,
-        &secondary_cols,
         &tuple,
     )))
 }

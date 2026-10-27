@@ -134,19 +134,55 @@ PASS。计划审查的 11 项均通过，RTM 无 Missing，没有未批准的裁
 
 ## Act Response
 
-- Status: 等待实施
+- Status: reported
 
 **Implemented**
 
-尚未实施。
+T3。SQL 可以创建两列及以上的整数或字符串组合索引，以及新建的单列整数索引。计划器在修饰、索引名、附加库、表、列、类型之后检查重复列和全整数超过 4 列，最后才检查索引重名。新建单列整数索引的世代是 1，单列字符串是 0，多列是 1。`column_index` 是第一列，`extra_column_indexes` 是其后的列号。
+
+回填、插入、更新、删除、UPSERT、REPLACE、删列造成的行重写、回滚和恢复重建都经 `SecondaryIndexMeta::derive_key` 或 `derive_row_key` 调用 `Value::derive_secondary_index_key`。返回 `None` 的行不进入该索引。主键和唯一索引仍用 `to_key`。更新和替换在旧键和新键之间用 `delete_exact` 再 `insert`；只有一侧有键时只做那一侧。
+
+`register_secondary_index` 把计划器给出的世代和额外列号写入目录和内存。打开表、`truncate_table` 和恢复重建复制来源里的世代和额外列号。删列时，第一列或任一额外列等于被删位置就拒绝，文本仍含 `referenced by a secondary index`。未被引用的列删除后，大于该位置的第一列和额外列号都减一。`publish_narrowed_table_row` 在同一次表行序列化里改列数和这些列号。列数已经是目标值时，`publish_column_narrowing` 直接返回。`ADD COLUMN` 仍只调用 `update_table_column_count_ddl`。
+
+等值路由只接收没有额外列的二级索引，探测键用该索引的世代派生。组合索引不进入这条路由。
+
+改动文件：`src/parser/planner/ddl_dml.rs` 的 `build_create_index`，`src/parser/planner/mod.rs` 的二级索引登记，`src/parser/planner/query.rs` 的 `extract_secondary_index_equality`，`src/pipeline.rs` 的登记传递，`src/executor/plan.rs` 的 `CreateIndexNode`，`src/executor/create_index.rs` 的回填和登记，`src/executor/insert.rs`、`update.rs`、`delete.rs`、`upsert.rs` 的二级键循环，`src/storage/data/table_manager.rs` 的打开、登记、删列、窄化和 `truncate_table`，`src/storage/catalog.rs` 的 `publish_narrowed_table_row`，`src/wal/recovery.rs` 的 `extract_index_keys` 和重建，`src/transaction/manager.rs` 的两处调用。测试：新建 `tests/composite_index_lifecycle_test.rs`，并改 `tests/secondary_index_test.rs`、`tests/string_index_sql_test.rs`、`tests/string_secondary_index_test.rs`。
+
+**Deviations from Plan**
+
+`extract_index_keys` 去掉了只带第一列号的 `secondary_cols`。二级结果改为与 `table_meta.secondary_indexes` 逐项对应，每项使用该索引自己的世代和全部列。两个调用点同步去掉了这个参数。
+
+键派生集中在 `SecondaryIndexMeta::derive_key` 和 `derive_row_key`，各写入点调用它们，而不是各自拼列。
+
+`new_single_column_int_index_uses_ordered_key` 用 `WHERE age = 3` 断言 `IndexScanAll` 和 `idx_age`。`age = -7` 在语法上是一元负号，现有等值提取只接受字面量，所以这条语句保持扫描。负数 `-7` 的树内键等于世代 1 派生，不等于原来的大端 `to_key`。两条等值的行集都与建索引前相同。
+
+**Self-review**
+
+Gate 3 没有未解决的 Critical 或 Important 问题。REPLACE 和 UPSERT 的三条二级循环与插入、更新使用同一个派生函数。验证命令没有单独点名它们。
 
 **Verification Evidence**
 
-无。
+先行测试 `composite_backfill_matches_live_rows` 在实现前失败，错误是 `Unsupported statement type: MULTI-COLUMN INDEX`。
+
+实现后，以下命令的 failed 都是 0：
+
+- `cargo test --offline --test composite_index_lifecycle_test -- --test-threads=1`：7 passed，0 failed。
+- `cargo test --offline --test secondary_index_test create_unique_and_composite_index_rejected -- --test-threads=1`：1 passed，0 failed，26 filtered out。
+- `cargo test --offline --test string_index_sql_test string_index_rejection_readonly_and_transaction -- --test-threads=1`：1 passed，0 failed，7 filtered out。
+
+三条命令按顺序执行，没有并行。没有跑全量。
 
 **Persisted Evidence**
 
 None required。
+
+**Experience Candidates**
+
+None。
+
+**Unresolved**
+
+None。
 
 ## Plan Review
 

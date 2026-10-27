@@ -98,6 +98,8 @@ async fn create_string_index(
         table_name: table.to_string(),
         column_index,
         column_name: column_name.to_string(),
+        generation: 0,
+        extra_column_indexes: Vec::new(),
     });
     let mut executor = CreateIndexExecutor::new(plan, Arc::clone(db));
     let outcome = executor.next().await.expect("create string index");

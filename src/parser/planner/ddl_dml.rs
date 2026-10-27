@@ -1909,9 +1909,6 @@ impl PlanBuilder {
                 "PARTIAL INDEX (WHERE clause)".into(),
             ));
         }
-        if columns.len() != 1 {
-            return Err(PlanError::UnsupportedStatement("MULTI-COLUMN INDEX".into()));
-        }
 
         // 显式索引名（sqlparser 的 `CREATE INDEX ON t(c)` 自动命名形态不
         // 支持——MissingField 点名）；限定名（schema.idx）拒绝（无 schema 层级）
@@ -1936,37 +1933,69 @@ impl PlanBuilder {
             return Err(PlanError::TableNotFound(table_name));
         }
 
-        // 单列表达式形态：仅裸列名（表达式索引点名拒绝）
-        let column_expr = &columns[0].expr;
-        let Expr::Identifier(ident) = column_expr else {
-            return Err(PlanError::UnsupportedStatement("EXPRESSION INDEX".into()));
-        };
-        let column_name = ident.value.to_lowercase();
+        if columns.is_empty() {
+            return Err(PlanError::MissingField("index column".into()));
+        }
+
+        // 裸列名才能建索引。表达式和缺失列先于类型、重复列和宽度检查。
         let column_list = &self.tables[&table_name];
-        let Some(column_index) = column_list
-            .iter()
-            .position(|c| c.to_lowercase() == column_name)
-        else {
-            return Err(PlanError::ColumnNotFound(column_name));
-        };
+        let mut column_names = Vec::with_capacity(columns.len());
+        let mut column_indexes = Vec::with_capacity(columns.len());
+        for column in columns {
+            let Expr::Identifier(ident) = &column.expr else {
+                return Err(PlanError::UnsupportedStatement("EXPRESSION INDEX".into()));
+            };
+            let column_name = ident.value.to_lowercase();
+            let Some(column_index) = column_list
+                .iter()
+                .position(|c| c.to_lowercase() == column_name)
+            else {
+                return Err(PlanError::ColumnNotFound(column_name));
+            };
+            column_names.push(column_name);
+            column_indexes.push(column_index);
+        }
 
         // 声明类型门：INT 与字符串列。缺类型与其余类型点名拒绝。
-        let supported = self
-            .table_column_types
-            .get(&table_name)
-            .and_then(|types| types.get(column_index))
-            .is_some_and(|ct| {
-                matches!(
-                    ct,
-                    crate::storage::page_format::ColumnType::Int
-                        | crate::storage::page_format::ColumnType::String(_)
-                )
-            });
-        if !supported {
-            return Err(PlanError::UnsupportedStatement(format!(
-                "INDEX ON UNSUPPORTED COLUMN '{}' (only INT and string columns)",
-                column_name
-            )));
+        use crate::storage::page_format::ColumnType as SchemaColumnType;
+        let declared = self.table_column_types.get(&table_name);
+        for (column_name, column_index) in column_names.iter().zip(column_indexes.iter()) {
+            let supported = declared
+                .and_then(|types| types.get(*column_index))
+                .is_some_and(|column_type| {
+                    matches!(
+                        column_type,
+                        SchemaColumnType::Int | SchemaColumnType::String(_)
+                    )
+                });
+            if !supported {
+                return Err(PlanError::UnsupportedStatement(format!(
+                    "INDEX ON UNSUPPORTED COLUMN '{}' (only INT and string columns)",
+                    column_name
+                )));
+            }
+        }
+
+        let mut seen_names = Vec::with_capacity(column_names.len());
+        for column_name in &column_names {
+            if seen_names.iter().any(|seen: &String| seen == column_name) {
+                return Err(PlanError::InvalidQuery(format!(
+                    "duplicate column name '{}'",
+                    column_name
+                )));
+            }
+            seen_names.push(column_name.clone());
+        }
+
+        let all_int = column_indexes.iter().all(|column_index| {
+            declared
+                .and_then(|types| types.get(*column_index))
+                .is_some_and(|column_type| matches!(column_type, SchemaColumnType::Int))
+        });
+        if all_int && column_indexes.len() > 4 {
+            return Err(PlanError::UnsupportedStatement(
+                "MULTI-COLUMN INDEX EXCEEDS 32-BYTE KEY".into(),
+            ));
         }
 
         // 库级重名（plan_stage 注入的全库名单；点名拒绝零副作用）
@@ -1977,11 +2006,23 @@ impl PlanBuilder {
             )));
         }
 
+        let generation = if column_indexes.len() == 1
+            && declared
+                .and_then(|types| types.get(column_indexes[0]))
+                .is_some_and(|column_type| matches!(column_type, SchemaColumnType::String(_)))
+        {
+            0
+        } else {
+            1
+        };
+
         Ok(PhysicalPlan::CreateIndex(CreateIndexNode {
             index_name,
             table_name,
-            column_index,
-            column_name,
+            column_index: column_indexes[0],
+            column_name: column_names[0].clone(),
+            generation,
+            extra_column_indexes: column_indexes[1..].to_vec(),
         }))
     }
 
