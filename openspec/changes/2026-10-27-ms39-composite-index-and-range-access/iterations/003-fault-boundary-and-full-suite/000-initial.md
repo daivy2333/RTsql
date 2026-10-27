@@ -186,3 +186,52 @@ None。
 **Unresolved**
 
 None。
+
+## Plan Review
+
+- Review Result: accepted
+
+**Findings**
+
+独立阅读了 `76a06a9..c04bb35` 的 diff 和当前源码。Act Response 与代码一致。本轮 Acceptance 已满足。没有阻塞项。
+
+全量 14 批跑在两处 Clippy 修改之前。两处都是等价控制流，修改之后的可观察行为与跑全量时相同，全量结论沿用。
+
+`ddl_dml.rs` 里 `ColumnOption::Default` 从臂内的 `if default_value.is_none()` 收成 match guard。守卫不成立时落到原来的 `_ => {}`，不调用 `extract_default_value`。多项 DEFAULT 仍只取第一项。`add_column_with_default_backfills` 走第一项 DEFAULT，改前改后都执行同一条赋值。
+
+`transaction/manager.rs` 两处 `zip` 去掉 `into_iter`。`derived_uniques` 和 `derived_secondaries` 都是 `Vec<Option<Option<&[u8]>>>`。`Iterator::zip` 对 `Vec` 调用的就是 `IntoIterator::into_iter`，元素、顺序和提前结束都相同。循环体没有改。取消回收走二级索引那一处；唯一索引那一处是同一改法。
+
+同一次提交里，`IndexRangeScanExecutor::new` 和 `TableManager::alter_add_column` 只加了 `too_many_arguments` 允许。`pipeline.rs` 把一段没有挂到下一项的文档注释改成普通注释，下一项仍保留自己的文档注释。这三处不改变签名或执行。
+
+- 非阻塞，与计划一致。六个运行形态在改产品和改文档之前已经通过，没有为了制造失败去改运行路径。`Value::to_key`、`derive_secondary_index_key`、`secondary_range_bounds` 和 002 的谓词路由在 `76a06a9` 之后没有 diff。
+- 非阻塞，与自检一致。取消测试在下一次写入前断言被丢掉的事务仍活动。附加库测试额外断言 UPDATE 后的 `(11, 11)` 返回 id 1。
+- 非阻塞。`cargo fmt -- --check <paths>` 在当前 Cargo 里仍检查包内其余文件。27 个本变更 Rust 路径的格式结果来自 `rustfmt --edition 2021 --check`，Act 记录退出码为 0。本轮编辑过的文件已被格式检查接受。
+- 非阻塞，与 ISS36 一致。全局 `cargo fmt --check` 仍点名 `tests/hash_join_build_side_test.rs` 和 `tests/sort_merge_join_test.rs`。修复后的 deny clippy 仍点名 `src/cli/lifecycle.rs`、`src/executor/alter_table.rs`、`src/executor/executor_trait.rs`、`src/executor/sort_merge_join.rs`、`src/network/protocol.rs`、`src/storage/async_storage.rs`、`src/storage/buffer_pool.rs`。这些文件不在本变更的 27 个 Rust 路径里。ISS36 仍是 open。本轮不修改这些文件，也不因此失败。
+
+**Acceptance Gaps**
+
+None。
+
+**Evidence**
+
+沿用 Act Response 的验证。全量覆盖的是两处等价控制流修改之前的代码；修改不改变可观察行为。本次不重跑 14 批，也不重跑已经记录的定向测试。
+
+- `cargo test --offline --test composite_index_runtime_test -- --test-threads=1`：6 passed，0 failed。
+- 全量 N=159，B=14。前 9 批各 11 个目标，后 5 批各 12 个。14 批退出码都是 0，failed 都是 0。现场 `tests/*.rs` 为 157 个，加上 `lib` 和 `bins` 与 N 一致。`9 * 11 + 5 * 12 = 159`。
+- `openspec validate 2026-10-27-ms39-composite-index-and-range-access --strict --no-interactive`：退出码 0，输出含 `is valid`。
+- 本变更 27 个 Rust 路径的 `rustfmt --edition 2021 --check`：退出码 0。
+- 两处修改之后的定向复核：`add_column_with_default_backfills` 1 passed，0 failed；`cancelled_composite_index_write_is_reclaimed` 1 passed，0 failed。
+
+代码核对：六个测试从 `Database::execute_sql` 或 CLI 进入。取消后只剩 `(1, 1, 1)` 与 `(2, 2, 2)`，`a = 3` 无行，`COUNT(*)` 为 2，完整性 error 数为 0，没有活动事务。只读会话的组合等值是 `IndexScanAll`，新建整数 `n > 0` 是 `IndexRangeScan` 且不含 `omitted=scan`，再建索引的 SQLSTATE 是 `25006`。内存库路径是 `:memory:`，没有 WAL writer、WAL buffer 和 checkpoint manager，`a > 0` 不含 `omitted=scan`。加密文件长度减 64 后能被 4124 整除，明文字符串不在文件里，错钥是 `InvalidKey`。附加库的 INSERT、UPDATE、DELETE 经 CLI，`CREATE INDEX` 退出码是 3。旧库副本上的三行和新建组合等值成立，样本字节在打开后被再次读回比较。两份 README 的存储段保留原有单列描述，并写明多列非唯一索引、32 字节键、新建单列 INT 的有符号范围、升级前单列 INT 的范围仍扫描，以及可能漏行的范围仍包含未入树且谓词成立的行。
+
+**Follow-up Decision**
+
+本轮 Acceptance 已满足。不要求当前 Cycle 修复，不创建 rework 或 replan。Iteration Plan 不变。没有剩余 Iteration。没有新的 Issue 候选。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
