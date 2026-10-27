@@ -8,15 +8,70 @@
 
 ### Requirement: CREATE INDEX 建立单列 INT 二级索引
 
-`CREATE INDEX <name> ON <table>(<col>)` SHALL 在声明 INT 或内部归一为 ColumnType::String 的单列上建立非唯一二级索引，SHALL 对完整编码可由该布局容纳的非 NULL 存量值全量回填，并持久化名称、所属表、列和根页。INT 既有行为 SHALL 保持；字符串比较 SHALL 沿用 SQL 现有相等语义，允许重复值与空字符串，NULL 行 SHALL NOT 入索引。干净重开和未决 WAL 恢复后索引 SHALL 与存活数据一致。合法字符串超过该布局键容量时 SHALL 继续允许写入并由完整值扫描查询，SHALL NOT 截断、漏发或给行字段增加长度限制。
+`CREATE INDEX <name> ON <table>(<columns>)` SHALL 在一列或多列上建立非唯一二级索引。每一列的声明类型 SHALL 是 INT，或内部归一为 ColumnType::String 的字符串类型。NULL 不入索引。重复的整键允许并存。索引名 SHALL 库级唯一。干净重开和未决 WAL 恢复后，索引与已提交的存活行一致。
 
-索引名 SHALL 库级唯一；重名、缺表、缺列与支持域外类型 SHALL 点名拒绝且零副作用。`CREATE UNIQUE INDEX`、组合索引、表达式索引、部分索引与 `IF NOT EXISTS` SHALL 继续在计划期点名拒绝。显式事务中的 CREATE/DROP INDEX SHALL 继续在副作用之前以 0A000 拒绝。字符串索引 SHALL NOT 扩大非整数主键或唯一约束支持面。
+单列字符串索引的键编码 SHALL 保持现有转义：非零字节原样，输入 `00` 写成 `00 FF`，结尾 `00 00`，总长不超过 32 字节才入树。新建的单列 INT 索引 SHALL 使用 8 字节大端并翻转首字节符号位，使键的字节序与有符号数值序一致。升级前已经存在的单列 INT 索引 SHALL 继续使用原来的大端字节，等值查找字节不变。
+
+组合键 SHALL 按索引列序拼接各列编码。INT 分量使用上述翻转后的 8 字节。字符串分量使用上述转义。拼接结果超过 32 字节时，该行 SHALL NOT 入树。系统 SHALL NOT 截断键，也 SHALL NOT 因此拒绝该行的写入或给列增加长度上限。全部列都是 INT 且列数大于 4 时，计划期 SHALL 拒绝，因为 8×列数已经超过 32 字节，没有任何行能够入树。
+
+重名、缺表、缺列、重复的索引列、支持域外类型 SHALL 点名拒绝且零副作用。`CREATE UNIQUE INDEX`、表达式索引、部分索引、`IF NOT EXISTS` 以及其他既有修饰 SHALL 继续在计划期点名拒绝。显式事务中的 CREATE/DROP INDEX SHALL 继续在副作用之前以 0A000 拒绝。本能力 SHALL NOT 扩大非整数主键或非整数 UNIQUE 的支持面。
 
 #### Scenario: 建索引与存量行索引化
 
 - **GIVEN** 表 `t(id INT PRIMARY KEY, age INT, name VARCHAR)` 含若干行
 - **WHEN** `CREATE INDEX idx_age ON t(age)`
-- **THEN** 建索引成功；`SELECT * FROM t WHERE age = 25` 返回与建索引前完全一致的行集（含重复 age 值的多行全部命中）
+- **THEN** 建索引成功，`SELECT * FROM t WHERE age = 25` 返回与建索引前相同的行集，重复 age 的多行全部命中
+
+#### Scenario: 组合索引建在已有行上
+
+- **GIVEN** 表含 INT 列与字符串列，其中有重复组合、NULL 和编码后超过 32 字节的字符串
+- **WHEN** 按这些列创建非唯一组合索引，并按全部索引列做等值查询
+- **THEN** 建索引成功。编码能放入 32 字节的非 NULL 组合全部可查到，NULL 组合与超长组合不入树，查询结果仍与建索引前的全表扫描相同
+
+#### Scenario: 超过四列的全整数索引被拒绝
+
+- **GIVEN** 表有至少五个 INT 列
+- **WHEN** 对这五个 INT 列执行 `CREATE INDEX`
+- **THEN** 计划期拒绝，错误文本含 `MULTI-COLUMN INDEX EXCEEDS 32-BYTE KEY`，表和已有索引无变化
+
+#### Scenario: 非 INT 列拒绝
+
+- **GIVEN** 表有 BOOLEAN 列
+- **WHEN** 单独或与 INT 列一起为该列创建索引
+- **THEN** 计划期点名拒绝不支持的声明类型，零副作用
+
+#### Scenario: 重复索引名拒绝
+
+- **GIVEN** 已存在索引 `idx_age`
+- **WHEN** `CREATE INDEX idx_age ON other(c)`
+- **THEN** 点名拒绝，已有索引无变化
+
+#### Scenario: 重复列拒绝
+
+- **GIVEN** 表有列 `age`
+- **WHEN** `CREATE INDEX idx_dup ON t(age, age)`
+- **THEN** 计划期拒绝，错误文本含 `duplicate column`，表无变化
+
+#### Scenario: UNIQUE 与组合索引拒绝
+
+- **WHEN** `CREATE UNIQUE INDEX u ON t(age)`
+- **THEN** 计划期点名拒绝，零副作用。合法的多列非唯一索引不再使用这个拒绝；它的成功条件和超过四列全 INT 的拒绝见本需求的其他场景
+
+#### Scenario: UNIQUE、表达式和部分索引仍拒绝
+
+- **WHEN** 执行 `CREATE UNIQUE INDEX`、索引列上的表达式，或带 WHERE 的部分索引
+- **THEN** 均计划期点名拒绝，零副作用
+
+#### Scenario: 表或列不存在拒绝
+
+- **WHEN** `CREATE INDEX i1 ON nope(c)` 或 `CREATE INDEX i2 ON t(nope)`
+- **THEN** 点名拒绝，零副作用
+
+#### Scenario: 旧整数索引字节保持
+
+- **GIVEN** 升级前创建的单列 INT 二级索引及其已提交行
+- **WHEN** 用新代码打开并按原等值查询
+- **THEN** 命中行与升级前相同，不因为新的符号位编码而漏掉这些行
 
 #### Scenario: 干净重开后索引可用
 
@@ -29,28 +84,6 @@
 - **GIVEN** 建索引后含新写入行，进程未 close 退出（崩溃模拟：WAL 重放 + 索引重建）
 - **WHEN** 重新打开数据库
 - **THEN** 等值查询行集与崩溃前运行期行为一致
-
-#### Scenario: 非 INT 列拒绝
-
-- **GIVEN** 表 `t(id INT PRIMARY KEY, flag BOOLEAN)`，该列既非 INT 也非本批支持的字符串类型
-- **WHEN** `CREATE INDEX idx_flag ON t(flag)`
-- **THEN** 计划期点名拒绝不支持的声明类型，零副作用
-
-#### Scenario: 重复索引名拒绝
-
-- **GIVEN** 已存在索引 `idx_age`（任意表）
-- **WHEN** `CREATE INDEX idx_age ON other(c)`
-- **THEN** 点名拒绝（索引名库级唯一），既有索引零变化
-
-#### Scenario: UNIQUE 与组合索引拒绝
-
-- **WHEN** `CREATE UNIQUE INDEX u ON t(age)` / `CREATE INDEX c ON t(age, id)`
-- **THEN** 均计划期点名拒绝（唯一性约束走建表声明；首版单列）
-
-#### Scenario: 表或列不存在拒绝
-
-- **WHEN** `CREATE INDEX i1 ON nope(c)` / `CREATE INDEX i2 ON t(nope)`
-- **THEN** 均点名拒绝（表不存在 / 列不存在），零副作用
 
 #### Scenario: 整数索引建表回填行为保持
 
@@ -78,83 +111,92 @@
 
 ### Requirement: 二级索引等值查询路由可达
 
-被索引列与匹配类型字面量的等值谓词，在其完整编码可容纳且符合既有裸列字面量形态时 SHALL 可路由到二级索引，并由 EXPLAIN 显示索引节点且不执行内层查询。支持域内字符串匹配 SHALL 比较完整值，不得把共享前缀但不同的字符串当作相同值。索引路径与全表扫描的结果多重集合 SHALL 严格相等，不遗漏、不多发；单列、乱序多列和通配输出 SHALL 保持列元数据与投影契约。
+被索引列与匹配类型字面量的等值谓词，在完整编码可放入 32 字节且符合裸列字面量形态时 SHALL 路由到二级索引。组合索引的等值路由 SHALL 要求谓词用等值约束索引的全部列，列在谓词中的书写顺序可以不同。EXPLAIN SHALL 显示该索引且不执行查询。支持域内的字符串比较 SHALL 使用完整值。索引路径与全表扫描的结果多重集合 SHALL 严格相等。单列、乱序多列和通配输出 SHALL 保持列元数据与投影契约：`IndexScanAll` 的列清单是基表全列，真实输出由投影决定。
 
-NULL、类型不匹配、无索引、超出布局键容量和本批不支持的谓词形态 SHALL 保持既有扫描与错误语义。范围路由不属于本次扩展。
+NULL、类型不匹配、参数、限定列、OR、额外的非索引谓词、无索引，以及整键超过 32 字节的字面量 SHALL 保持扫描或既有错误，不因索引存在而少行。升级前的单列 INT 索引 SHALL 继续用原来的大端字节做等值路由。
 
 #### Scenario: 等值路由计划形状可观察
 
 - **GIVEN** 已建 `CREATE INDEX idx_age ON t(age)`
 - **WHEN** `EXPLAIN SELECT * FROM t WHERE age = 25`
-- **THEN** 计划树含该索引的索引扫描节点（点名索引），且不执行内层
+- **THEN** 计划文本含 `IndexScanAll` 和该索引名，且不返回查询行
 
-#### Scenario: 建索引前后结果等价
+#### Scenario: 组合等值与扫描相等
 
-- **GIVEN** 表 `t` 含重复 age 值多行
-- **WHEN** 同一 `SELECT * FROM t WHERE age = 25` 在建索引前与建索引后执行
-- **THEN** 两次行集一致（仅计划形状可能不同）
+- **GIVEN** 组合索引覆盖两列，两列上都有重复值
+- **WHEN** 对同一组等值分别在建索引前后查询，并交换谓词中的列顺序
+- **THEN** 行集相同。建索引后的 EXPLAIN 点名该组合索引
+
+#### Scenario: 超长组合等值改走扫描
+
+- **GIVEN** 组合索引含字符串列，查询字面量的完整编码超过 32 字节
+- **WHEN** 按该完整字面量做等值查询
+- **THEN** 计划不是该索引的 `IndexScanAll`，结果只含真实相等的行
 
 #### Scenario: 不可键控字面量回落行内求值
 
-- **GIVEN** 已建 `idx_age`
-- **WHEN** `SELECT * FROM t WHERE age = NULL`（或与索引列类型不匹配的字面量形态）
-- **THEN** 回落既有扫描语义，无路由相关错误（与 PK 类型感知路由同型）
-
-#### Scenario: 无索引列零回归
-
-- **WHEN** `SELECT * FROM t WHERE name = 'x'`（未建索引列）
-- **THEN** 行为与既有语义一致（全扫 + 谓词下推）
-
-**e2e 验证与缺陷清偿 change（T2/ISS05，2026-10-14 收尾）修改**：等值路由结果集 SHALL 与全表扫描（DataScan）严格相等——双向：不重复、不遗漏——任意重复键规模成立（多叶等值连串、≥2 层树）。同值键跨越「小于查找键的分隔键」边界散布的树形态下，全部命中条目 SHALL 可达（范围下探：首 ≥K 分隔键的前一子树至末 ≤K 分隔键的子树）。失败语句（含 UPDATE 旧键删除路径）SHALL 对索引零副作用（报错后索引条目集不变）。
+- **GIVEN** 已建二级索引
+- **WHEN** 查询 NULL、与列类型不匹配的字面量，或参数占位符
+- **THEN** 回落既有扫描语义，无路由相关的新错误
 
 #### Scenario: 多叶等值连串双向严格相等
 
-- **GIVEN** 表 t1（id INTEGER PRIMARY KEY, n INTEGER）30000 行 n∈1..100 重复键分布，`CREATE INDEX i1 ON t1(n)` 前 DataScan 基线逐 k 记录
-- **WHEN** 建索引后逐 k `SELECT COUNT(*), COUNT(DISTINCT id) FROM t1 WHERE n = k`
-- **THEN** COUNT(*) 与 COUNT(DISTINCT id) 均等于基线（失败边界——修复前：COUNT 虚高 [实测 +22944 总量] 且 DISTINCT 漏行 [实测 476 条漏发]）
-
-#### Scenario: 边界子树条目的 UPDATE 探针可达
-
-- **GIVEN** 同上建索引后，取基线中存在但索引扫描曾漏发的行 id
-- **WHEN** `UPDATE t1 SET n = 101 WHERE id = <该行>`
-- **THEN** 成功执行且旧键条目删除（失败边界——修复前：`Execution error: Key not found`，且失败后索引计数被 abort 路径改变——零副作用被违反）
-
-#### Scenario: 失败语句索引零副作用
-
-- **GIVEN** 同上建索引后的表，记录某键 k 的 COUNT/DISTINCT 基线
-- **WHEN** 构造一条执行失败的 UPDATE（如与唯一约束/键碰撞冲突）后重新计数
-- **THEN** `WHERE n = k` 的 COUNT 与 DISTINCT 与失败前一致（失败边界——修复前：abort 重插改变索引内容）
-
-#### Scenario: 既有回落与唯一索引零回归
-
-- **GIVEN** 同上
-- **WHEN** 范围谓词 `WHERE n > k`、复合谓词 `WHERE n = k AND id <= x`、唯一键索引点查
-- **THEN** 全部行为与修复前一致
-
-#### Scenario: 字符串等值查询可观察且与扫描相等
-
-- **GIVEN** 含重复字符串值的表与该列的二级索引
-- **WHEN** 对同一等值条件执行 EXPLAIN 和不同投影的 SELECT
-- **THEN** EXPLAIN 显示对应索引且不执行查询，SELECT 表头与行逐位一致，结果与创建索引前的扫描严格相等
+- **GIVEN** 重复键分布在多层树的多个叶子上
+- **WHEN** 按该键做等值聚合
+- **THEN** 行数与去重身份计数都等于全表扫描基线
 
 #### Scenario: 共享前缀和边界长度不误匹配
 
-- **GIVEN** 支持域内两字符串共享长前缀，另有空串、多字节及尾部零字节样本
-- **WHEN** 分别按完整值执行等值查询
-- **THEN** 仅返回真实相等值的全部行，不截断合并不同值，不漏行
+- **GIVEN** 两个字符串共享长前缀但不相等，另有空串和内部零字节
+- **WHEN** 按每个完整值等值查询
+- **THEN** 只返回真实相等的全部行
+
+#### Scenario: 建索引前后结果等价
+
+- **GIVEN** 表含重复的被索引值
+- **WHEN** 同一等值查询在建索引前后执行
+- **THEN** 两次行集一致
+
+#### Scenario: 无索引列零回归
+
+- **WHEN** 查询一个没有二级索引的列
+- **THEN** 行为与既有全表扫描一致
+
+#### Scenario: 边界子树条目的 UPDATE 探针可达
+
+- **GIVEN** 等值键分布在多层树的多个子树上
+- **WHEN** 按主键更新其中一行的被索引列
+- **THEN** 更新成功，旧键不再含该行，新键含该行
+
+#### Scenario: 失败语句索引零副作用
+
+- **GIVEN** 已建二级索引并记录某键的行数
+- **WHEN** 一条更新因既有约束失败
+- **THEN** 该键的行数与失败前相同
+
+#### Scenario: 字符串等值查询可观察且与扫描相等
+
+- **GIVEN** 含重复字符串的表和该列的二级索引
+- **WHEN** 对同一等值执行 EXPLAIN，以及单列、乱序多列和通配查询
+- **THEN** EXPLAIN 显示该索引且不执行查询。查询表头与行对齐，结果与建索引前的扫描相同
+
+#### Scenario: 既有回落与唯一索引零回归
+
+- **GIVEN** 已有主键或整数唯一索引，以及升级前的单列 INT 二级索引
+- **WHEN** 做唯一键点查，并对升级前的 INT 二级索引执行 `WHERE n > k`
+- **THEN** 点查与升级前一致。该旧索引上的范围查询仍走扫描。新建索引的范围行为由范围条款规定
 
 #### Scenario: 非可路由谓词保留既有行为
 
 - **GIVEN** 字符串二级索引存在
-- **WHEN** 查询 NULL、不同类型字面量、范围或未被本批路由的组合谓词
+- **WHEN** 查询 NULL、不同类型字面量，或未被范围条款接管的谓词
 - **THEN** 沿用既有扫描求值与错误语义，结果不因索引存在而改变
 
 #### Scenario: 超容量完整字符串扫描且允许跨边界改值
 
-- **GIVEN** 表含两个共享长前缀但不同的字符串，其完整编码超出所选布局键容量，另有容量内字符串
-- **WHEN** 创建索引、分别按完整长值查询，再把行值在容量内和容量外双向更新
-- **THEN** 创建和合法写入成功，长值查询计划为扫描且仅返回真实匹配行；容量内值可走索引，跨界更新的新旧查询与全表扫描一致
-- **AND** NULL 和长值分别按其语义跳过条目，不截断键，不限制表字段长度
+- **GIVEN** 两个共享长前缀但不同的字符串，其完整编码超过 32 字节，另有容量内字符串
+- **WHEN** 创建索引、按完整长值查询，再把行值在容量内外双向更新
+- **THEN** 创建和合法写入成功。长值查询不是该索引的等值扫描，且只返回真实匹配行。跨界更新后的查询与全表扫描一致
 
 ### Requirement: 二级索引写路径条目维护
 
@@ -251,12 +293,23 @@ INSERT、UPDATE/rekey、DELETE、UPSERT 与 REPLACE SHALL 维护全部受影响�
 
 ### Requirement: 既有语义零回归
 
-PK 索引与唯一索引（MS23）、键位等值路由（MS15/MS16）、约束执行面、T1 索引条目一致性收口语义 SHALL 全部保持；本 change 前全部既有测试 SHALL 零修改通过（语义校准白名单除外）。
+主键索引、唯一索引、键位等值路由和约束执行 SHALL 保持。页类型与 32 字节键槽不变。本变更只改那些直接断言「组合索引被拒绝」或「新行为出现前范围一定走扫描」的既有测试；其余既有测试 SHALL 不改预期而通过。本变更新编辑的文件 SHALL 能通过格式检查。全局 `cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 若只在未改文件上失败，且与已登记的 ISS36 一致，则记录该结果，不把 ISS36 的修复算进本变更。
 
 #### Scenario: 既有索引与路由面零回归
 
-- **WHEN** 运行完整测试套件
-- **THEN** 全部通过；除本 change 新增见证外既有测试零修改；`cargo clippy -- -D warnings`、`cargo fmt --check`、`openspec validate` 通过
+- **WHEN** 运行主键等值、整数 UNIQUE、升级前单列 INT 二级索引等值，以及本变更未改写其预期的既有测试
+- **THEN** 这些测试不改断言即通过。直接断言组合索引被拒绝的测试改为新的成功或容量拒绝
+
+#### Scenario: 主键与唯一索引零回归
+
+- **WHEN** 运行主键等值、整数 UNIQUE 和升级前单列 INT 二级索引等值的既有测试
+- **THEN** 这些测试不改断言即通过
+
+#### Scenario: 全局格式门的既有失败不被算成新范围
+
+- **GIVEN** ISS36 仍打开，且失败位于本变更未修改的文件
+- **WHEN** 收尾运行全局格式和 deny clippy
+- **THEN** 结果被记录。本变更不修改那些无关文件来换取通过
 
 ### Requirement: IndexScanAll 列元数据与输出形状契约
 
@@ -291,3 +344,89 @@ PK 索引与唯一索引（MS23）、键位等值路由（MS15/MS16）、约束�
 - **GIVEN** 同上
 - **WHEN** `SELECT COUNT(*), MAX(id) FROM q6 WHERE salary = 90`
 - **THEN** 聚合结果正确（聚合输入 schema 按基表列号映射，不再受错位元数据影响）
+
+### Requirement: 范围谓词路由到二级索引扫描
+
+范围谓词 SHALL 在它正好约束某个二级索引的前缀时路由到该索引。前缀是索引列序上从头开始的一段：前面的列只有等值，最后一列可以是等值、单侧比较或闭开区间。比较符是 `<`、`<=`、`>`、`>=`，字面量可以写在列的任一侧。`BETWEEN` SHALL 按两端都包含的区间处理。`NOT BETWEEN`、OR、参数、限定列、表达式、类型不匹配，以及不能由同一个索引前缀解释的额外谓词 SHALL NOT 路由。
+
+多个索引都能解释同一谓词时，SHALL 选择被约束前缀更长的索引；长度相同则选择不需要补扫超长行的索引；仍相同则选择创建更早的索引。
+
+键是否落入范围 SHALL 由 32 字节键的字典序决定，不把键解码回行值后再比较。端点按下列哨兵计算，编码使用本变更的有序分量。设约束前缀的编码为 P，长度为 n：
+
+- 包含的下界是 P 后补零到 32 字节，键大于等于它。
+- 不包含的下界：n 小于 32 时是 P 后补 `FF` 到 32 字节，键大于它；n 等于 32 时是这 32 字节本身，键大于它。
+- 包含的上界：n 小于 32 时是 P 后补 `FF` 到 32 字节，键小于等于它；n 等于 32 时是这 32 字节本身，键小于等于它。
+- 不包含的上界是 P 后补零到 32 字节，键小于它。
+
+升级前的单列 INT 索引使用旧的大端字节，其顺序不等于有符号数值序。这种索引上的范围谓词 SHALL 继续走全表扫描。新建的单列 INT 索引和全 INT 组合索引的每个非 NULL 值都能入树，范围扫描 SHALL 只读该树。字符串索引以及任何可能因超过 32 字节而漏掉非 NULL 行的索引，范围结果 SHALL 是树内命中的行，加上键派生为空且谓词成立的可见行。NULL 不满足范围比较，不得凭补扫被返回。两种路径的结果多重集合 SHALL 与全表扫描严格相等。
+
+EXPLAIN SHALL 显示 `IndexRangeScan` 和索引名，并且不执行查询。需要补扫时文本还含 `omitted=scan`；不需要时不含该标记。
+
+#### Scenario: 新建整数索引的范围含负数
+
+- **GIVEN** 本变更之后创建的单列 INT 二级索引，行值含负数、0 和正数
+- **WHEN** 分别查询 `列 > 0`、`列 < 0`、`列 >= -1` 和 `列 BETWEEN -2 AND 2`
+- **THEN** EXPLAIN 含 `IndexRangeScan` 和索引名，且不含 `omitted=scan`。结果与全表扫描相同，负数只出现在数值序确实落入区间的查询里
+
+#### Scenario: 旧整数索引的范围仍扫描
+
+- **GIVEN** 升级前创建的单列 INT 二级索引
+- **WHEN** 查询 `列 > 0`
+- **THEN** 计划不使用 `IndexRangeScan`。结果与全表扫描相同，等值查询仍命中原行
+
+#### Scenario: 组合前缀的端点
+
+- **GIVEN** 全 INT 组合索引 `(a, b)`，行含 `(1, 9223372036854775807)` 和 `(2, -9223372036854775808)`
+- **WHEN** 查询 `a > 1`、`a = 1` 和 `a = 1 AND b > 2`
+- **THEN** `a > 1` 含第二行、不含第一行。`a = 1` 含第一行、不含第二行。`a = 1 AND b > 2` 含第一行、不含第二行。三个结果都与全表扫描相同
+
+#### Scenario: 字符串范围不漏超长值
+
+- **GIVEN** 字符串二级索引，同时有可入树的短字符串和共享前缀但编码超过 32 字节的长字符串
+- **WHEN** 用一个小于两者的字面量做大于比较
+- **THEN** EXPLAIN 含 `IndexRangeScan`、索引名和 `omitted=scan`。短字符串与长字符串都在结果中，且与全表扫描相同
+
+#### Scenario: 非前缀和析取不路由
+
+- **GIVEN** 组合索引 `(a, b)`
+- **WHEN** 只约束 `b`，或使用 OR，或在范围之外再加一个索引不能解释的谓词
+- **THEN** 计划不使用 `IndexRangeScan`，结果与全表扫描相同
+
+### Requirement: 组合二级索引的条目与存活行一致
+
+INSERT、UPDATE、DELETE、UPSERT 和 REPLACE SHALL 用该索引登记的列序和编码世代维护组合键。任一索引列为 NULL，或拼接后超过 32 字节时，该行在这个索引中没有条目。一行的索引列发生变化时 SHALL 删除旧键并写入新键，不得误删其他行的重复键。回滚、失败和提交前取消经既有回收后 SHALL 恢复条目。提交后结果未送达 SHALL 继续视为已提交。未决 WAL 恢复重建 SHALL 使用同一派生。
+
+删除被组合索引任一列引用的列 SHALL 拒绝，错误沿用「被二级索引引用、须先删除索引」。未被引用的列删除后，其余索引的列号 SHALL 按删除位置重新编号。`DROP INDEX` 后对应查询 SHALL 回到扫描，行集不变。
+
+#### Scenario: 改组合中的一列
+
+- **GIVEN** 组合索引 `(a, b)` 上有两行共享同一个 `a`、`b` 不同
+- **WHEN** 只更新其中一行的 `b`，再按新旧组合查询
+- **THEN** 新组合只含被更新的行，旧组合仍含另一行
+
+#### Scenario: 回滚后条目回到原状
+
+- **GIVEN** 显式事务修改组合索引的多行
+- **WHEN** 回滚后按原组合查询，并重新打开数据库
+- **THEN** 行和可路由查询的结果都与事务开始前相同
+
+#### Scenario: 删除被引用列被拒绝
+
+- **GIVEN** 组合索引使用表中的非主键列
+- **WHEN** `ALTER TABLE DROP COLUMN` 删除其中一列
+- **THEN** 语句失败，列和索引都还在
+
+### Requirement: 唯一性边界保持在整数单列
+
+组合二级索引 SHALL 允许重复的整键。`CREATE UNIQUE INDEX`、表级组合 UNIQUE、非 INT 列上的 UNIQUE，以及非整数主键 SHALL 继续按现有文本拒绝。本变更 SHALL NOT 把唯一约束扩展到字符串或组合键。
+
+#### Scenario: 重复组合键可以并存
+
+- **GIVEN** 两行在组合索引的全部列上值相同，且该键能放入 32 字节
+- **WHEN** 创建该组合索引并按这个组合查询
+- **THEN** 创建成功，两行都返回
+
+#### Scenario: 组合唯一约束仍被拒绝
+
+- **WHEN** 在建表时声明多列 UNIQUE，或执行 `CREATE UNIQUE INDEX`
+- **THEN** 计划期点名拒绝，零副作用
