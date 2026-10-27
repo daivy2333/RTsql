@@ -925,6 +925,16 @@ impl PlanBuilder {
                     None => Err(PlanError::SubqueryReturnsMultipleColumns),
                 }
             }
+            PhysicalPlan::IndexRangeScan(node) => {
+                let output_columns = projected_columns(&node.columns, &node.projection);
+                match output_columns.first() {
+                    Some(column) => Ok(ColumnRef {
+                        table: Some(node.table_name.clone()),
+                        column: column.clone(),
+                    }),
+                    None => Err(PlanError::SubqueryReturnsMultipleColumns),
+                }
+            }
             _ => Err(PlanError::SubqueryReturnsMultipleColumns),
         }
     }

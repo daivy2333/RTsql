@@ -236,8 +236,11 @@ async fn composite_backfill_matches_live_rows() {
 
     let age_plan = explain(&db, "SELECT id, age, name FROM t WHERE age = 10").await;
     assert!(
-        age_plan.contains("DataScan") && !age_plan.contains("IndexScanAll"),
-        "a predicate on one column of a composite index keeps the scan: {age_plan}"
+        age_plan.contains("IndexRangeScan")
+            && age_plan.contains("index=idx_age_name")
+            && age_plan.contains("omitted=scan")
+            && !age_plan.contains("IndexScanAll"),
+        "a prefix equality on (age, name) is an IndexRangeScan with omitted=scan: {age_plan}"
     );
     assert_eq!(
         select_rows(

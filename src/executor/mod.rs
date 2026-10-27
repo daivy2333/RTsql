@@ -28,6 +28,7 @@ mod explain;
 mod filter;
 mod function;
 mod having;
+mod index_range_scan;
 mod index_scan;
 mod index_scan_all;
 mod insert;
@@ -76,6 +77,7 @@ pub use explain::ExplainExecutor;
 pub use filter::FilterExecutor;
 pub use function::{check_scalar_function, is_scalar_function, FunctionExpression};
 pub use having::HavingExecutor;
+pub use index_range_scan::IndexRangeScanExecutor;
 pub use index_scan::IndexScanExecutor;
 pub use index_scan_all::IndexScanAllExecutor;
 pub use insert::InsertExecutor;
@@ -87,9 +89,9 @@ pub use plan::{
     ColumnRef, ConflictAction, ConflictArbiter, CorrelatedParam, CreateIndexNode,
     CreateTableAsSelectNode, CreateTableNode, CreateViewNode, DataScanNode, DeleteNode,
     DerivedScanNode, DistinctNode, DropIndexNode, DropTableNode, DropViewNode, ExplainNode,
-    FilterNode, HavingNode, IndexScanAllNode, IndexScanNode, InsertNode, InsertSelectNode,
-    JoinCondition, JoinNode, JoinSide, LimitNode, NestedLoopJoinNode, NestedLoopJoinType,
-    OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
+    FilterNode, HavingNode, IndexRangeScanNode, IndexScanAllNode, IndexScanNode, InsertNode,
+    InsertSelectNode, JoinCondition, JoinNode, JoinSide, LimitNode, NestedLoopJoinNode,
+    NestedLoopJoinType, OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
     ScalarSubqueryBinding, ScalarSubqueryFilterNode, ScanNode, SemiJoinNode, SetOpKind,
     SetOperationNode, SortNode, SubqueryEvalNode, TruncateNode, UpdateAssignment, UpdateNode,
     UpdateValue, UpsertAssignment, UpsertNode, UpsertValueExpr, ValueParamSlot,
@@ -114,7 +116,9 @@ pub use subquery_eval::SubqueryEvalExecutor;
 pub use truncate::TruncateExecutor;
 pub use update::UpdateExecutor;
 pub use upsert::UpsertExecutor;
-pub use value::{ColumnType, Value, ValueError};
+pub use value::{
+    BoundMark, ColumnType, IndexColumnBound, RangeSentinel, SecondaryRangeBounds, Value, ValueError,
+};
 pub use value_ref::ValueRef;
 
 /// MS10-T01 Iter001: narrow a full-schema row to the selected column indices
