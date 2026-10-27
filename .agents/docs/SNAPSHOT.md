@@ -104,7 +104,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: BASELINE_PENDING
+- **提交基线**: 28a94fd4ff6d941bc118cdb0941337ed0b79eb9a
 - **ahead of origin**: 12
 - **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-10-27-ms39-composite-index-and-range-access/`。
 - **最新 tag**: 无
