@@ -168,15 +168,29 @@ Gate 3 和 Gate 4 通过。Gate 5 未触发。没有创建后继 Cycle 或 Itera
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未审查实施结果。
+独立阅读了 `2b9a3d1..1b1ca06` 的 diff 和当前源码。Act Response 与代码一致。没有阻塞本轮 Acceptance 的偏差。
+
+- 非阻塞，Plan 错误。任务写了「两个能放下的不同组合不得得到同一个 Key」。`i64::MIN` 的世代 1 分量是 8 个 0，空字符串分量是 `00 00`，而 `Key` 的相等只比较填零后的 32 字节。因此单列 `1` 与 `(1, i64::MIN)`、字符串 `"a"` 与 `("a", "")` 比较相等。同一列清单内不会相撞：整数分量定长 8 字节，字符串转义无前缀。不同列数的键落在不同索引树里。规格没有要求跨列数互异。要消掉这个相等就必须改编码或 `Key::cmp`，两者都与本轮停止条件冲突。后续轮次不要为它改键编码。
+- 非阻塞，Act 偏离。世代不是 0 或 1、世代 1 的空列列表、上下界都缺的 `IndexColumnBound::Range`，`derive_secondary_index_key` 或 `secondary_range_bounds` 返回 `None`。任务没有定义这些输入。
+- 非阻塞，与计划一致。打开表、清空重建和恢复把内存元数据填成世代 0、空额外列，不读取目录尾段。这是本轮实施说明。001 必须改为沿用目录里的世代和列号，否则世代 1 的索引在打开或恢复后会按世代 0 写键。
+
+**Evidence**
+
+沿用 Act Response 的验证，覆盖范围在 `1b1ca06` 之后没有变化，本次不重跑：
+
+- `cargo test --offline --lib executor::value::tests -- --test-threads=1`：14 passed，0 failed。六个新测试和 `secondary_index_key_preserves_int_bytes` 都在其中。
+- `cargo test --offline --lib -- --test-threads=1 catalog_row_with_secondary_indexes_roundtrip legacy_secondary_index_row_has_no_generation_tail composite_secondary_index_row_roundtrips_generation_and_columns`：3 passed，0 failed。
+- `cargo test --offline --test string_index_sql_test string_index_rejection_readonly_and_transaction -- --test-threads=1`：1 passed，0 failed。错误文本仍含 `MULTI-COLUMN INDEX`。
+
+代码核对：`derive_secondary_index_key` 在世代 0 直接调用 `secondary_index_key`；世代 1 的整数是大端后首字节异或 `0x80`，字符串走 `encode_string_bytes` 且不在分量上填零；总长超过 32 返回 `None`。`range_sentinel` 对包含下界和不包含上界补零，对不包含下界和包含上界补 `FF`，前缀已是 32 字节时哨兵就是这 32 字节。`secondary_range_bounds` 只允许最后一列是范围。目录仅在任一索引世代非 0 或有额外列时写尾段，整数用小端，与 `__tables` 行已有整数相同；`read_secondary_generation_tail` 在尾段短于 4 字节、`count` 不符或条目被截断时保持世代 0，不返回错误。`git diff --stat 2b9a3d1..1b1ca06` 的产品文件只有 `src/executor/value.rs`、`src/storage/catalog.rs`、`src/storage/data/table_manager.rs`、`src/wal/recovery.rs`。`recovery.rs` 只补了世代 0 和空额外列，没有改主键或唯一键派生。
 
 **Follow-up Decision**
 
-等待 Act。
+本轮 Acceptance 已满足。不要求当前 Cycle 修复，不创建 rework 或 replan。Iteration Plan 不变。展开 001。
 
 **Next Cycle**
 
@@ -184,4 +198,4 @@ None
 
 **Next Iteration**
 
-None
+`openspec/changes/2026-10-27-ms39-composite-index-and-range-access/iterations/001-create-maintain-recover/000-initial.md`
