@@ -64,6 +64,8 @@ impl ColumnSchema {
 pub struct SecondaryIndexMeta {
     pub name: String,
     pub column_index: usize,
+    pub generation: u8,
+    pub extra_column_indexes: Vec<usize>,
     pub index: Arc<IndexManager>,
 }
 
@@ -321,6 +323,8 @@ fn narrowed_meta(old: &Arc<TableMeta>, removed: usize) -> Arc<TableMeta> {
             } else {
                 s.column_index
             },
+            generation: s.generation,
+            extra_column_indexes: s.extra_column_indexes.clone(),
             index: s.index.clone(),
         })
         .collect();
@@ -684,6 +688,8 @@ impl TableManager {
                 secondary_indexes.push(SecondaryIndexMeta {
                     name: entry.name.clone(),
                     column_index: entry.column_index as usize,
+                    generation: 0,
+                    extra_column_indexes: Vec::new(),
                     index,
                 });
             }
@@ -729,7 +735,8 @@ impl TableManager {
             .into_iter()
             .map(|(col_name, col_type)| (col_name, col_type, false, false, None))
             .collect();
-        self.create_table_with_constraints(name, columns, pk, false).await
+        self.create_table_with_constraints(name, columns, pk, false)
+            .await
     }
 
     /// Register a new table, persisting per-column NOT NULL / UNIQUE flags to
@@ -1904,6 +1911,8 @@ impl TableManager {
                     name: index_name.to_string(),
                     column_index: column_index as u32,
                     root,
+                    generation: 0,
+                    extra_column_indexes: Vec::new(),
                 },
             )
             .await?;
@@ -1924,6 +1933,8 @@ impl TableManager {
         secondary_indexes.push(SecondaryIndexMeta {
             name: index_name.to_string(),
             column_index,
+            generation: 0,
+            extra_column_indexes: Vec::new(),
             index,
         });
         let meta = Arc::new(TableMeta {
@@ -2580,6 +2591,8 @@ impl TableManager {
                 new_secondaries.push(SecondaryIndexMeta {
                     name: s.name.clone(),
                     column_index: s.column_index,
+                    generation: 0,
+                    extra_column_indexes: Vec::new(),
                     index: tree,
                 });
             }
