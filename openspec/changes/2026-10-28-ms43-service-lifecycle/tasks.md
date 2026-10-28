@@ -7,7 +7,7 @@
 - 需求与 BDD：completed。S8 已按 proposal「验收修订」重写，场景草图见该文件。
 - 000：accepted。执行依据是 `iterations/000-wal-flush-owner/000-initial.md`。Review Result 为 accepted。
 - 001：accepted。`iterations/001-session-checkpoint-close/000-initial.md` 的 Review Result 仍为 `replan-required`，其 Plan Context 不改写。`iterations/001-session-checkpoint-close/001-replan.md` 的 Plan Context 仍为 `draft`，Gate 2 仍为 BLOCKED，不改为 ready。当前执行依据 `iterations/001-session-checkpoint-close/002-replan.md` 的 Review Result 为 `accepted`。原验收「未提交行在 close 后不可见」已按用户裁定撤回，父 Cycle 没有满足它，本轮通过也不补上它。
-- 002：T3 已实施。执行依据是 `iterations/002-batched-full/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。
+- 002：accepted。执行依据是 `iterations/002-batched-full/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。Next Iteration 为 None。原「未提交行在 close 后不可见」仍是撤回，这次全量通过不补上它。
 - Persisted Evidence：none。
 - 无跳过项。
 
@@ -19,7 +19,7 @@
 |---|---|---|---|---|
 | T1 | 000 | 无 | `WALBuffer` 单飞刷盘、暂停/恢复、`shutdown` 后等待返回 `Ok` | 已验收 |
 | T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持；未提交插入在 `close` 后重开仍被查到 | 已验收。原「未提交行在 close 后不可见」已撤回，不是已经满足。 |
-| T3 | 002 | 001 accepted | M19 分批全量一次，每批 failed 为 0 | 已实施 |
+| T3 | 002 | 001 accepted | M19 分批全量一次，每批 failed 为 0 | 已验收。原「未提交行在 close 后不可见」仍是撤回，不是已经满足。 |
 
 ## 1. WAL 刷盘所有者（Iteration 000）
 

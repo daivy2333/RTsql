@@ -486,15 +486,40 @@ None。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未审查。
+没有阻塞 Acceptance 的发现。本 Cycle 相对 `85e2bcf` 的 diff 只有本文件的 Act Response，以及 `tasks.md` 里 T3 的实施状态。`src/`、`tests/`、`Cargo.toml`、`Cargo.lock` 没有改动。
+
+15 批都记下了 cargo 退出码 0。每一行 `test result:` 的 failed 都是 0。第 3 批有一行 `2 ignored`。计划写明 ignored 可以不是 0，这一行仍是 failed 为 0。
+
+对账与当前 `ls tests/*.rs | sort` 一致：159 个 `--test` 主名顺序相同，无缺失、无多余、无重复。第 1 批只有 `--lib --bins`，没有 `--test`，有 2 行 `test result:`。第 2 批到第 14 批各有 12 个 `--test` 和 12 行结果。第 15 批有 3 个 `--test` 和 3 行结果。每条命令都是 `cargo test --offline`，并且带 `-- --test-threads=1`。没有不带 `--lib`、`--bins` 或 `--test` 的全量调用。也没有省略 `--test-threads=1` 的批次。
+
+`session_lifecycle_test` 在第 12 批，和另外 11 个目标同一条命令。001 那次只跑这一个目标、得到 `7 passed` 的结果，没有被写成这次全量通过。
+
+原验收「未提交行在 `close` 后不可见」仍是撤回。`uncommitted_row_absent_after_reopen` 仍断言重开后查到 `Int(7)`。这次全量通过不把它记成已经满足。
+
+**Acceptance Gaps**
+
+无。本 Cycle 的 Acceptance 都有对应结果。
+
+「未提交行在 `close` 后不可见」保持撤回，不进入本 Cycle 的未关闭缺口。父 Cycle 没有满足它。这次通过不补上它。
+
+**Evidence**
+
+- 审查前工作区干净，HEAD 为 `be2a6504bb9f8a0b9fc6e0159aa711af3f433bff`。`git diff --name-only 85e2bcf..HEAD` 只有本 Cycle 文件和 `tasks.md`。
+- 验证沿用本文件 Act Response 的「验证」一节，不重跑全量。15 批的命令、退出码和 `test result:` 原行都在该节。独立对账：159 个 `--test` 与审查时的 `ls tests/*.rs | sort` 逐名相同且顺序相同。15 批退出码都是记录中的 0。每一行 failed 都是 0。第 1 批、第 4 批和第 8 批里各有一行 `0 passed; 0 failed`，failed 仍是 0。没有公共规则里的重跑情形。
+- `tests/session_lifecycle_test.rs` 的 `uncommitted_row_absent_after_reopen` 仍是 `assert_eq!(rows, vec![vec![rtsql::Value::Int(7)]])`。
+- Persisted Evidence 为 none。未因缺少 evidence 目录提出问题。Experience Candidates 为 None。没有 Issue 候选。
 
 **Follow-up Decision**
 
-尚未审查。
+本 Cycle 的 Acceptance 已经满足。没有要留在当前 Cycle 的修复，也没有需要新执行依据的缺口。Iteration Plan 保持不变。这是最后一个 Iteration，不展开后继目录。
+
+**Iteration Plan Update**
+
+无。Map 仍是 000、001、002。002 完成后没有剩余 Iteration。
 
 **Next Cycle**
 
