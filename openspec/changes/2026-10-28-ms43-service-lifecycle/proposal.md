@@ -2,7 +2,7 @@
 
 对应路线：MS43。来源：I012 里实际存在的生产消费关系（WAL 缓冲、提交通知、checkpoint、缓冲池）。约束：M19、M20（本 goal 的当次变体见下）、M21、M22。
 
-Gate 1 为 PASS。批准来自本次 goal 指令对 tasks.md 里 MS43 的 Outcome、Scope、Non-goals、Stable result、Split signals 的授权，不是跳过。本文件不更新全局里程碑状态。
+Gate 1 为 PASS。批准来自本次 goal 指令对 tasks.md 里 MS43 的 Outcome、Scope、Non-goals、Stable result、Split signals 的授权，不是跳过。其后的验收修订见「验收修订」，同样来自用户原话，不是跳过检查。本文件不更新全局里程碑状态。
 
 ## Why
 
@@ -37,7 +37,7 @@ MS43 要求：把 WAL、提交通知、checkpoint 和缓冲池协调里实际的
 
 - 代码：`src/wal/buffer.rs`（刷盘闸门、循环暂停/恢复、`shutdown` 之后的同步完成）、`src/transaction/manager.rs`（`commit` 在 `CommitTxn` 与等待之间持有会话闸门）、`src/database.rs`（`checkpoint` / `close` 的暂停、预刷、恢复或 `shutdown`）。
 - 不改：`src/wal/checkpoint.rs` 九步顺序、`src/wal/writer.rs`、`src/storage/buffer_pool.rs`、执行器与 `table_manager` 的 `append` 调用点、错误类型、SQL 结果、磁盘格式。
-- 测试：扩展 `tests/wal_buffer_test.rs`；在库级测试中覆盖 `close` 停循环、`checkpoint` 后循环仍在、取消后循环仍在。既有 `tests/checkpoint_*.rs`、`tests/statement_cancellation_test.rs`、`tests/readonly_session_test.rs`、`tests/memory_db_test.rs` 保持通过。
+- 测试：扩展 `tests/wal_buffer_test.rs`；在库级测试中覆盖 `close` 停循环、`checkpoint` 后循环仍在、取消后循环仍在。`tests/session_lifecycle_test.rs` 的 `uncommitted_row_absent_after_reopen` 断言显式事务未提交就 `close` 之后，默认重开仍查到该行。既有 `tests/checkpoint_*.rs`、`tests/statement_cancellation_test.rs`、`tests/readonly_session_test.rs`、`tests/memory_db_test.rs` 保持通过。`tests/mvcc_tombstone_visibility_test.rs` 的 `flushed_uncommitted_insert_does_not_resurrect` 不改。
 - 关联：MS43；I012；M19（全量只在最后一轮、分批串行）；M21（`wal_buffer` 仍归 `Database`，后台对象生命周期随会话）；M22（本变更不实现诊断门面）。
 
 ## 需求
@@ -45,7 +45,7 @@ MS43 要求：把 WAL、提交通知、checkpoint 和缓冲池协调里实际的
 1. 同一次刷盘取走的缓冲记录和提交等待由这一次 `do_flush` 完成：写盘尝试结束之后唤醒这些等待者。成功路径上，`append_commit_and_wait` 在对应批次 `write_batch` 返回之后返回 `Ok(())`，`TransactionManager::commit` 再标记版本。
 2. `shutdown` 把剩余缓冲写入 WAL、停止后台循环并 join。循环停止之后的 `append_commit_and_wait` 在有限时间内返回 `Ok(())`，且对应记录可读。`write_batch` 失败时仍返回 `Ok(())` 并唤醒已取走的等待者。
 3. `checkpoint` 与后台 `do_flush` 不并发。进入九步前先刷出当时已在缓冲中的记录。九步之后循环继续运行，后续提交仍可由该循环完成。
-4. `close` 在九步之后停止并 join 循环。返回之后，低于容量的普通 `append` 不再被定时器写盘。已提交的行在 `close` 后重开仍在。只读和内存会话的 `close` / `checkpoint` 仍是无 WAL 任务的既有路径。
+4. `close` 在九步之后停止并 join 循环。返回之后，低于容量的普通 `append` 不再被定时器写盘。已提交的行在 `close` 后重开仍在。显式事务 `begin` 后插入一行、调用方没有 `commit` 就 `close`，再按默认打开查询时，该行仍被查到。这与改前 `close` 只调用公开 `checkpoint()` 的结果相同，本条只记录这个现行结果。它不覆盖「刷盘后丢弃句柄、不调用 `close`」的既有测试。只读和内存会话的 `close` / `checkpoint` 仍是无 WAL 任务的既有路径。
 5. 语句取消不停止 WAL 循环，也不改变缓冲池的刷盘失败处置（失败写盘把脏位交还调用方）。
 6. 整个 change 收尾时按 M19 分批串行跑一次全量。缺一批不得声明全量通过。
 
@@ -55,6 +55,8 @@ MS43 要求：把 WAL、提交通知、checkpoint 和缓冲池协调里实际的
 - 所有锁改通道、全库 actor 化、组提交性能优化、节点级锁、批量 I/O、io_uring。
 - 新增取消 API、跨进程读写。
 - 把 `append_commit_and_wait` 在写盘失败时改成 `Err`，或改变已提交数据的可见性、checkpoint 九步、位点格式、恢复规则。
+- 在 `close` 里代替调用方回滚仍活跃的显式事务。
+- 把「显式事务 `begin` 后插入、不 `commit` 就 `close`，默认打开后该行不可见」留在本变更的验收里，或把现行可见结果写成覆盖「刷盘后丢弃句柄、不调用 `close`」那条测试的新持久化承诺。
 - 实现 M22 的诊断门面或迁移现有 `eprintln!`。
 - 改索引写侧闸门、行锁、计划缓存。
 - 预建「修复尚未发现的缺陷」的 Iteration。
@@ -70,12 +72,27 @@ MS43 要求：把 WAL、提交通知、checkpoint 和缓冲池协调里实际的
 | S5 | Sad | `shutdown` 已返回，又 `append` 了一条未达容量的记录 | `append_commit_and_wait` | 2 秒内返回 `Ok(())`，该记录可读 | 超时即挂起 |
 | S6 | Sad | `write_batch` 返回错误 | 已登记的等待者 | 仍被唤醒，等待返回 `Ok(())` | 改成 `Err` 即改变事务合同，本范围禁止 |
 | S7 | Edge | 两次 `do_flush` 重叠 | 并发进入 | 记录可解析，等待者最终返回 | 帧损坏即刷盘执行者重叠 |
-| S8 | Edge | 显式事务已 `begin` 但未提交，缓冲中有记录 | `close` 后重开 | 未提交行不可见；安静路径的最终 WAL 不含这条未提交记录 | 未提交行变成已提交即合同变化 |
+| S8 | Edge | 显式事务已 `begin` 并插入一行，没有 `commit` | `close` 后按默认打开重开并查询 | 该行仍被查到。结果与改前 `close` 只调用公开 `checkpoint()` 相同。本场景只记录现行结果，不覆盖刷盘后丢弃句柄且不调用 `close` 的既有测试 | 在 `close` 里回滚该事务、改九步或恢复规则、改无快照点查，或把该结果写成新的持久化承诺 |
 | S9 | Edge | 只读或内存会话 | `close` / `checkpoint` | 成功返回，不创建 WAL 任务 | panic 或写出 WAL 即回归 |
 | S10 | 组合 | 语句 future 在提交前被放弃 | 放弃后 `begin` 一条记录并等待超过间隔 | 循环仍把记录刷出；随后提交成功 | 取消把循环停掉即违反既有取消规格 |
 | S11 | 组合 | 提交与 `close` 先后发生 | 先完成的一方结束后再跑另一方 | 先提交的行在 `close` 后仍在；`close` 之后的提交等待返回成功且记录可读 | 死锁或已提交行丢失 |
 | S12 | 错误 | checkpoint 步骤失败 | 触发边界的提交 | 仍按既有规格点名失败，已提交行不回滚 | 本变更不改这条错误 |
 | S13 | 兼容 | 默认构建 | M19 分批全量 | 每批退出码 0 且 failed 为 0，目标对账无缺无重 | 缺一批不得算通过 |
+
+## 验收修订
+
+用户原话：「我注意到了问题，我觉得可以接受replan更改计划，继续吧」。
+
+批准的范围：
+
+- 接受修订计划。不接受新的事务错误语义，也不接受改变既有事务与持久化合同。
+- 「显式事务 `begin` 后插入、不 `commit` 就 `close`，默认打开后该行不可见」从本变更的验收里拿掉。父 Cycle 没有满足这条验收。撤回不等于把它记成已经通过。
+- 现行结果写入本文件需求 4、场景 S8 和规格：这样 `close` 再打开，该行仍然可见，与改前只调用公开 `checkpoint()` 的 `close` 相同。这是已有合同下的现行结果。规格不把它写成新的持久化承诺，并写明它不覆盖「刷盘后丢弃句柄、不调用 `close`」那条已有测试。
+- checkpoint 九步、恢复规则、无快照点查保持不变。`close` 不代替调用方回滚显式事务。
+- 父 Cycle 已经落地、且不改变事务结果的接线保留：`commit` 在写入 `CommitTxn` 到等待返回之间持有会话闸门；公开 `checkpoint` 在九步期间暂停循环，返回或 future 被丢掉时恢复；`close` 走同一段前序后 `shutdown`。
+- 这条可见性不登记成要在本变更里修掉的缺陷。
+
+会把上述现行结果扩大成新的持久化承诺的写法未获批准，本计划不采用。
 
 ## 回滚
 
@@ -104,4 +121,4 @@ MS43 要求：把 WAL、提交通知、checkpoint 和缓冲池协调里实际的
 
 ## 未自行批准的缺口
 
-无。写盘失败改成 `Err`、新增取消 API、改持久化格式，都落在 Non-goals 里，本计划不采用。
+无。写盘失败改成 `Err`、新增取消 API、改持久化格式，以及把 S8 的现行结果扩大成新的持久化承诺，都落在「不做」或「验收修订」里，本计划不采用。

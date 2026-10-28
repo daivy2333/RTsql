@@ -4,9 +4,9 @@
 
 ## 当前批次状态
 
-- 需求与 BDD：completed（场景草图与默认假设见 proposal.md）。
+- 需求与 BDD：completed。S8 已按 proposal「验收修订」重写，场景草图见该文件。
 - 000：accepted。执行依据是 `iterations/000-wal-flush-owner/000-initial.md`。Review Result 为 accepted。
-- 001：审查结论 `replan-required`。原执行依据 `iterations/001-session-checkpoint-close/000-initial.md` 的 Plan Context 仍为 ready，不改写。后继 `iterations/001-session-checkpoint-close/001-replan.md` 的 Plan Context 为 draft，Gate 2 为 BLOCKED，不交给实施。
+- 001：审查结论 `replan-required`。原执行依据 `iterations/001-session-checkpoint-close/000-initial.md` 的 Plan Context 仍为 ready，不改写。`iterations/001-session-checkpoint-close/001-replan.md` 的 Plan Context 保持 draft，Gate 2 保持 BLOCKED，不改为 ready，不交给实施。当前执行依据是 `iterations/001-session-checkpoint-close/002-replan.md`，Plan Context 为 ready，Gate 2 为 PASS。原验收「未提交行在 close 后不可见」已按用户裁定撤回，父 Cycle 没有满足它。
 - 002：未展开。
 - Persisted Evidence：none。
 - 无跳过项。
@@ -18,7 +18,7 @@
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
 | T1 | 000 | 无 | `WALBuffer` 单飞刷盘、暂停/恢复、`shutdown` 后等待返回 `Ok` | 已验收 |
-| T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持 | 接线已落地；「未提交行在 close 后不可见」未通过，审查为 replan-required |
+| T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持；未提交插入在 `close` 后重开仍被查到 | 接线已落地。原「未提交行在 close 后不可见」已撤回，不是已经满足。剩余工作见 `002-replan.md` |
 | T3 | 002 | 001 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
 
 ## 1. WAL 刷盘所有者（Iteration 000）
@@ -27,14 +27,16 @@
 
 ## 2. 会话 checkpoint 与关闭（Iteration 001）
 
-- [ ] 2.1 T2：按 `iterations/001-session-checkpoint-close/000-initial.md` 执行。在 000 的方法之上，让 `TransactionManager::commit` 在 `CommitTxn` 与 `append_commit_and_wait` 之间持有会话闸门；`Database::checkpoint` 在九步前 `quiesce_for_checkpoint`、九步后 `resume_after_checkpoint`；`Database::close` 走同一段九步前序列，然后 `shutdown`，不恢复循环。只读和内存会话保持早退。
+- [ ] 2.1 T2：接线已在父 Cycle 落地，本项不重做产品代码。剩余工作按 `iterations/001-session-checkpoint-close/002-replan.md` 执行：只改 `tests/session_lifecycle_test.rs` 的 `uncommitted_row_absent_after_reopen`。该用例不再要求该行不存在，改为断言默认重开后仍查到 `id = 7` 的那一行。
 
-先行测试与通过条件（本轮展开时写入该轮 Cycle，此处为任务合同）：
+已经落地、且本项必须保持的接线：`TransactionManager::commit` 在 `CommitTxn` 与 `append_commit_and_wait` 之间持有会话闸门；`Database::checkpoint` 在九步前 `quiesce_for_checkpoint`、九步后 `resume_after_checkpoint`，future 被丢掉时 `ResumeOnDrop` 恢复；`Database::close` 走同一段九步前序列，然后 `shutdown`，不恢复循环。只读和内存会话保持早退。
 
-- RED：`close` 返回后，经 `wal_buffer` `append` 一条未达容量的记录，等待 1 秒，记录出现在 WAL 中。期望改成「不出现」。今天循环仍在，所以这条断言现在失败。
-- 改前 GREEN，改后仍 GREEN：`checkpoint` 返回且未 `close` 时，同样的 `append` 加 1 秒等待，记录出现。`cargo test --offline --test checkpoint_test --test checkpoint_skip_test --test checkpoint_redo_reduction_test --test statement_cancellation_test --test readonly_session_test --test memory_db_test` 通过。
-- GREEN：已提交一行，`close` 后重开仍在。未提交的 `begin` 写入，`close` 后重开不可见。取消语句之后 `begin` 的 `BeginTxn` 在 1 秒内被原循环刷出，随后另一条提交成功。`shutdown` 两次都返回。`commit` 与 `close` 在 2 秒内返回，不因闸门嵌套挂起。
-- 禁止：改 `append_commit_and_wait` 的失败 Result；改九步；给 `BufferPool` 加任务或 `watch`；新增诊断输出；`close` 调用会恢复循环的公开 `checkpoint()`。
+通过条件：
+
+- 变更前观察沿用父 Cycle Act Response：`cargo test --offline --test session_lifecycle_test` 退出码 101，`6 passed; 1 failed`，失败用例查询结果 `[[Int(7)]]`。产品代码和该测试文件自 `454c87d` 之后未改，本项不重跑这次失败。
+- GREEN：只改上述断言后，`cargo test --offline --test session_lifecycle_test` 退出码 0，failed 为 0。已提交一行在 `close` 后重开仍在。取消语句之后 `begin` 的 `BeginTxn` 在 1 秒内被原循环刷出，随后另一条提交成功。`shutdown` 两次都返回。`commit` 与 `close` 在 2 秒内返回，不因闸门嵌套挂起。
+- 原「未提交的 `begin` 写入，`close` 后重开不可见」已按用户裁定撤回。父 Cycle 没有满足它。通过上述 GREEN 不算补上这条已撤回的验收。
+- 禁止：改产品代码来藏行；改 `append_commit_and_wait` 的失败 Result；改九步、恢复规则或无快照点查；在 `close` 里回滚显式事务；给 `BufferPool` 加任务或 `watch`；新增诊断输出；`close` 调用会恢复循环的公开 `checkpoint()`；修改 `flushed_uncommitted_insert_does_not_resurrect`；本轮跑全量。
 
 ## 3. 收尾全量（Iteration 002）
 
@@ -65,10 +67,10 @@
 
 - Tasks：T2
 - Depends on：000 accepted
-- Stable result：读写会话的 `checkpoint` 在九步期间暂停循环并在返回后恢复；`close` 在返回后循环已 join。已提交行、取消、只读和内存路径保持。
-- Verification boundary：T2 的新测试加上 checkpoint、取消、只读、内存这组定向测试，默认并行度。不跑全量。
-- Diagnostic boundary：`database.rs` 的暂停/恢复/`shutdown` 顺序，以及 `manager.rs` 的会话闸门范围。WAL 帧格式和缓冲池脏位不属于本轮改动。
-- Non-goals：改九步、改写盘失败的 Result、全量回归、预建缺陷修复轮。
+- Stable result：读写会话的 `checkpoint` 在九步期间暂停循环并在返回后恢复；`close` 在返回后循环已 join。已提交行、取消、只读和内存路径保持。显式事务 `begin` 后插入且不 `commit` 就 `close`，默认重开后该行仍被查到。原「不可见」验收已撤回，父 Cycle 没有满足它。
+- Verification boundary：剩余验证是 `cargo test --offline --test session_lifecycle_test`，默认并行度。父 Cycle 已通过的保持面沿用，不在本 Cycle 重跑。不跑全量。全量预算仍在 Iteration 002，整个 change 一次，按 M19 分批且 `--test-threads=1`。
+- Diagnostic boundary：`tests/session_lifecycle_test.rs` 的 `uncommitted_row_absent_after_reopen` 断言。产品接线不在剩余工作的修改范围。测试改完后该命令仍失败时返回计划，不改产品代码来藏行。
+- Non-goals：改九步、改恢复规则、改无快照点查、在 `close` 里回滚显式事务、改写盘失败的 Result、全量回归、把这条可见性登记成待修缺陷、把现行结果写成新的持久化承诺。
 
 ### Iteration 002：收尾全量
 
@@ -82,7 +84,7 @@
 ## 平衡审计
 
 - 000 只交付可独立测试的 `WALBuffer` 合同。并进 001 会让「循环没停」和「关闭顺序错了」落在同一轮。
-- 001 是同一会话上的调用顺序，checkpoint 与 close 共用预刷和暂停。拆成两个 change 会让关闭测试依赖尚未存在的暂停方法，或者在 000 里提前改 `Database`。缓冲池没有后台任务，不单列一轮。
+- 001 是同一会话上的调用顺序，checkpoint 与 close 共用预刷和暂停。拆成两个 change 会让关闭测试依赖尚未存在的暂停方法，或者在 000 里提前改 `Database`。缓冲池没有后台任务，不单列一轮。撤回「关闭后不可见」之后，剩余工作只对齐同一条关闭测试的断言，仍留在 001。它没有单独的产品结果，不为此新开一轮。
 - 002 只有全量，没有新行为。它不并进 001：全量成本高，且 001 的定向测试已经能判断关闭顺序。
 - 三轮都有稳定结果和单独的失败范围。没有再拆 change。后续边界写在 proposal 的「后续 change」。
 
@@ -92,8 +94,10 @@
 |---|---|---|---|
 | 刷盘执行者与提交等待 | T1 | `quiesce_flushes_then_pauses_timer` | Covered |
 | shutdown 与写盘失败的完成方式 | T1 | `commit_wait_after_shutdown_returns_ok` | Covered |
-| checkpoint 与关闭对刷盘循环的责任 | T2 | `close_stops_timer_flush` | Covered |
+| checkpoint 与关闭对刷盘循环的责任 | T2 | `close_stops_timer_flush`；未提交重开见 `uncommitted_row_absent_after_reopen` | Covered |
 | 取消与缓冲池边界保持 | T2 | `cancel_leaves_flush_loop_running` | Covered |
 | 全量回归只跑一次且分批串行 | T3 | M19 分批命令（见 T3） | Covered |
 
 写盘失败仍返回 `Ok(())` 写在第二条需求里，由 T1 的 Preserve 约束保住，不用新的失败注入当先行测试。重叠刷盘的可解析性是 T1 的保持用例，不作为那条需求的唯一 RED。
+
+场景「未提交缓冲不在关闭后可见」已从规格删除，不计入本表。替代场景「关闭后未提交插入仍被查到」由 T2 的 `uncommitted_row_absent_after_reopen` 覆盖。该场景记录现行结果，不覆盖 `flushed_uncommitted_insert_does_not_resurrect`。

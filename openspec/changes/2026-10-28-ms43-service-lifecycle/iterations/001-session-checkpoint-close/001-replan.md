@@ -106,19 +106,32 @@ BLOCKED。设计没有闭合：要满足父 Cycle 那条验收，就会改变持
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: replan-required
 
 **Findings**
 
-尚未审查。
+本 Cycle 没有 Act。Plan Context 里的 Gate 2 停在当时的停止条件：不能改 proposal 和规格，也不能把失败用例改成期望该行可见。用户原话「我注意到了问题，我觉得可以接受replan更改计划，继续吧」随后批准了修订计划。批准范围写在 `002-replan.md` 的 Background。本文件的 Plan Context 保持原文，状态保持 `draft`，不改为 `ready`。
+
+**Acceptance Gaps**
+
+本 Cycle 的 Plan Context 写明没有可以通过的验收。父 Cycle 的「未提交行在 `close` 后不可见」不由本文件宣布已经满足。该验收在 `002-replan.md` 按用户裁定撤回。
+
+**Evidence**
+
+- 用户原话见 `002-replan.md` 的 Background，以及 proposal 的「验收修订」。
+- `454c87d723df76ac66bb1c6c637b7c70087693c9` 到 `29c6b0aa0d7e359f00a25ef969ac82f3158116bd` 的 diff 只有 Cycle 文件和 `tasks.md`。产品代码和 `tests/session_lifecycle_test.rs` 未改。
 
 **Follow-up Decision**
 
-尚未审查。
+后继执行依据是 `iterations/001-session-checkpoint-close/002-replan.md`。本文件不交给 Act。
+
+**Iteration Plan Update**
+
+验收边界按用户批准修订，见 proposal「验收修订」、规格场景「关闭后未提交插入仍被查到」、`tasks.md` 的 T2 与 Iteration 001。Map 仍是 000、001、002。001 未完成。全量仍在 Iteration 002。
 
 **Next Cycle**
 
-None
+`iterations/001-session-checkpoint-close/002-replan.md`
 
 **Next Iteration**
 

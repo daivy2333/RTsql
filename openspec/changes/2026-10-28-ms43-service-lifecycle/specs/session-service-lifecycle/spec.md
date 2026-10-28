@@ -50,6 +50,8 @@
 
 `Database::close` SHALL 在九步返回后 `shutdown` 刷盘循环并 join，SHALL NOT 在 join 之后恢复循环。已提交的行 SHALL 在 `close` 之后重新打开时仍然可见。只读会话和内存会话没有 WAL 缓冲时，`close` 与 `checkpoint` SHALL 保持既有无 WAL 写入路径。
 
+显式事务已经 `begin` 并插入一行、调用方没有 `commit` 就调用 `close` 时，库 SHALL NOT 代替调用方回滚该事务。按默认 `Database::open` 重新打开并查询时，该行仍被查到。本句记录的是改前 `close` 只调用公开 `checkpoint()` 时已经存在的结果，不新增持久化承诺，也不覆盖「刷盘后丢弃句柄、不调用 `close`」的既有测试 `tests/mvcc_tombstone_visibility_test.rs` 的 `flushed_uncommitted_insert_does_not_resurrect`（规格 `mvcc-tombstone-visibility` 的场景「落盘未提交行重启后不复活」）。
+
 #### Scenario: 关闭后定时器不再写盘
 
 - **GIVEN** 读写会话已经成功提交过数据并 `close`
@@ -68,11 +70,11 @@
 - **WHEN** `append` 一条未达容量的记录并等待超过刷盘间隔
 - **THEN** 该记录出现在 WAL 中
 
-#### Scenario: 未提交缓冲不在关闭后可见
+#### Scenario: 关闭后未提交插入仍被查到
 
-- **GIVEN** 读写会话 `begin` 之后写入了一行但没有提交
-- **WHEN** `close` 后重新打开
-- **THEN** 该行不存在
+- **GIVEN** 读写会话 `begin` 之后插入了一行但没有提交
+- **WHEN** `close` 后按默认打开重新打开并查询该行
+- **THEN** 该行仍被查到。这与改前 `close` 只调用公开 `checkpoint()` 的结果相同。本场景记录现行结果，不覆盖刷盘后丢弃句柄且不调用 `close` 的既有测试
 
 #### Scenario: 只读与内存会话不拥有刷盘循环
 

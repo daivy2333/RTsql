@@ -119,10 +119,18 @@ sequenceDiagram
 
 公开 `checkpoint` 的图与 `close` 相同，直到九步返回；之后是 `resume_after_checkpoint`，不 `shutdown`。
 
+### 7. 关闭后未提交插入的可见性保持现行结果
+
+父 Cycle 曾把「显式事务 `begin` 后插入、不 `commit` 就 `close`，默认打开后该行不可见」写成验收。接线之后该行仍被查到，与改前 `close` 只调用公开 `checkpoint()` 相同。要让该行不可见，得在 `close` 里回滚调用方仍持有的显式事务，或改 checkpoint 九步、恢复规则、无快照点查。前一条会让尚未写 `CommitTxn` 的并发 `commit` 返回错误。这些都不在本变更里做。
+
+用户已批准把这条验收拿掉。规格只记录现行结果：这样 `close` 再打开，该行仍然可见。该句子属于已有合同，不新增持久化承诺，也不覆盖 `flushed_uncommitted_insert_does_not_resurrect`。不把这条可见性登记成要在本变更里修的缺陷。
+
+父 Cycle 已经落地、且不改变事务结果的接线保留。
+
 ## 实现顺序
 
 1. Iteration 000 只改 `WALBuffer` 和它的测试。先有失败测试，再加刷盘闸门、暂停/恢复、停止后的同步完成。
-2. Iteration 001 把 `commit`、`checkpoint`、`close` 接到这些方法上，并补取消与既有关闭测试。
+2. Iteration 001 把 `commit`、`checkpoint`、`close` 接到这些方法上，并补取消与既有关闭测试。原「关闭后未提交行不可见」的验收已撤回。剩余工作只把 `uncommitted_row_absent_after_reopen` 改成断言重开后仍查到该行，不改产品代码来藏行。
 3. Iteration 002 按 M19 把全量分批跑一次。
 
 顺序的原因：001 的暂停和停止依赖 000 的方法。全量放在行为稳定之后，整个 change 只跑一次。
