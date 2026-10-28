@@ -6,6 +6,7 @@
 //! Uses real `Server` — validates exclusively through TCP-level observation
 //! (response timing), with no test-only hooks or counters in production code.
 
+#![cfg(feature = "network")]
 use std::sync::Arc;
 use std::time::Duration;
 

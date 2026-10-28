@@ -19,6 +19,7 @@
 //! Iteration 001 将扩展：崩溃恢复两态、GC/drop/TRUNCATE 释放、加密/
 //! `:memory:`/只读、全写通道、~1MB 基线。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::storage::data::TableManager;
 use rtsql::storage::page_format::{overflow, ColumnType, SlottedPageRef};
 use rtsql::storage::{BufferPool, FileStorage, PageId, RowId};

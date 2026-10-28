@@ -1,5 +1,6 @@
 //! Pipeline integration tests for DDL + WHERE execution
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::to_response;
 use tempfile::tempdir;

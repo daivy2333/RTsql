@@ -1,3 +1,4 @@
+#![cfg(feature = "network")]
 use rtsql::executor::Value;
 use rtsql::network::pg_messages;
 

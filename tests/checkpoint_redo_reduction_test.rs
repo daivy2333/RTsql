@@ -5,6 +5,7 @@
 //! - S2.2: 无位点文件 → 全量重放（行为与现状一致）
 //! - S2.4: 位点损坏（<16B / L > file_len）→ 安全退化全量重放
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::{AsyncStorage, BufferPool, FileStorage, RowId, TableManager};

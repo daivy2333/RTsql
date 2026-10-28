@@ -7,6 +7,7 @@
 //! RED pre-fix: 15000 行 n∈1..=100 确定性分布（每值 150 行）下探重复发射 +
 //! 边界子树漏发；失败语句 abort 路径残留幻影条目（COUNT 漂移）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::{tempdir, TempDir};

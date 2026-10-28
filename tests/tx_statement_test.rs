@@ -7,6 +7,7 @@
 //! SHALL NOT terminate it. The CLI-session scenarios (R1/R2/R3) extend this
 //! file in Iteration 001.
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::handler::SqlHandler;
 use rtsql::network::protocol::{to_response, Request, Response};

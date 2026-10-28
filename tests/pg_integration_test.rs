@@ -2,6 +2,7 @@
 //!
 //! Task 13: Integration tests for PostgreSQL 3.0 Simple Query Protocol
 
+#![cfg(feature = "network")]
 use std::sync::Arc;
 
 use rtsql::database::Database;

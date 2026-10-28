@@ -21,6 +21,7 @@
 //! RIGHT 经交换重写为「原右为左」的 LEFT（未匹配的原左行按标准 SQL 语义丢弃），
 //! 故行序以原右表行序在前。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::executor::{NestedLoopJoinType, PhysicalPlan};
 use rtsql::network::protocol::{to_response, Response};

@@ -1,3 +1,4 @@
+#![cfg(feature = "network")]
 use rtsql::network::{Request, Response};
 
 #[test]

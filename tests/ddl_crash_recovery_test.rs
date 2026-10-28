@@ -10,6 +10,7 @@
 //! 矩阵：CREATE TABLE / CREATE INDEX / CREATE VIEW / ALTER ADD COLUMN /
 //! CTAS 各形态建后即崩恢复 + 既有表普通写入崩溃恢复对照。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::integrity::check_integrity;

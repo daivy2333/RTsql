@@ -14,6 +14,7 @@
 //! 非 Int 键列不新增拒绝（Float 键列收 Int 值等宽松行为保持）；NULL 保持
 //! 既有无键行语义，`UPDATE SET id = NULL` 继续 I037 删旧键分支。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

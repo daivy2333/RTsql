@@ -27,6 +27,7 @@
 //! 等价变换（别名改写、派生表/CTE 包裹、谓词交换与重排）先在 RTsql 内部
 //! 互比（变体 vs 原查询归一化一致），再对每个变体做跨引擎差分。
 
+#![cfg(feature = "network")]
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rtsql::database::Database;

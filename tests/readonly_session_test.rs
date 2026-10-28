@@ -12,6 +12,7 @@
 //! T2 的只读拒绝面（25006 / `--readonly` / ATTACH 只读传递）由本文件后续分组
 //! 见证。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::StorageError;

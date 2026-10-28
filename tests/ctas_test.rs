@@ -26,6 +26,7 @@
 //!   S10 混合形态 / LIKE / CLONE 拒绝         ctas_mixed_definition_and_query_rejected
 //!                                          ctas_like_and_clone_rejected
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;

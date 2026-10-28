@@ -4,6 +4,7 @@
 //! Task 10: PgProtocol parse_request implementation
 //! Task 11: PgProtocol write_response implementation
 
+#![cfg(feature = "network")]
 use rtsql::network::{PgProtocol, Protocol, Request, Response};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

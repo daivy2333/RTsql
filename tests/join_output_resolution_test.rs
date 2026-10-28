@@ -21,6 +21,7 @@
 //! - R4 ORDER BY 别名键与 Sort 输入行同基座（无 WHERE 按过滤后布局、WHERE 按全
 //!   组合布局）→ JOIN 上别名排序真实生效。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

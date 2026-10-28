@@ -29,6 +29,7 @@
 //!   R7/S7 主库显式事务读写       insert_select_main_explicit_tx_commit_and_rollback
 //!   R5    目标 checkpoint 失败保提交  insert_select_target_auto_checkpoint_failure_preserves_commit
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::pipeline::{AttachRoute, RoutedTables};

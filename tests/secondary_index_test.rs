@@ -25,6 +25,7 @@
 //!   R4-S2 索引不存在拒绝              drop_index_missing_or_if_exists_rejected
 //!   R4-S3 删索引跨重启持久            drop_index_persists_across_restart
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

@@ -1,6 +1,7 @@
 //! 写盘失败按页记录。锚点页仍在失败集合内时，它挡住的释放不提升；
 //! 该页被成功重写后离开集合，释放可以提升，新建表能拿到被释放的页。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::IoFailPoint;

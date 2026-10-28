@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod database;
 pub mod executor;
+#[cfg(feature = "network")]
 pub mod network;
 pub mod parser;
 pub mod pipeline;

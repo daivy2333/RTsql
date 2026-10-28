@@ -19,6 +19,7 @@
 //!   R3-S3 显式事务内拒绝                        alter_table_inside_explicit_transaction_rejected
 //!   R3-S4 既有面零回归                          （全量分批承载，不单列）
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

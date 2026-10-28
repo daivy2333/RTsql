@@ -20,6 +20,7 @@
 //! 与其它用例同处一个测试二进制时，abort 会带走同批其它用例的观测结果
 //! （`index_page_ownership_test.rs` 的 RED 观测需要与本用例分开）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;

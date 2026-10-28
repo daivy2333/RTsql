@@ -1,5 +1,6 @@
 //! Integration tests for MS06-T02 PlanCache DashMap + SQL normalization.
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::plan_cache::normalize_sql_key;

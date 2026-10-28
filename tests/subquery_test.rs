@@ -1,6 +1,7 @@
 //! End-to-end tests for subquery support (WHERE IN/EXISTS, NOT IN/NOT EXISTS,
 //! scalar subqueries in SELECT, FROM derived tables).
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;

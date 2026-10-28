@@ -6,6 +6,7 @@
 //! panic；链上同名列条件键裸名查表静默串列。两表单步全形态为逐字节零回归
 //! 对照（S46，先确认 GREEN）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;

@@ -22,6 +22,7 @@
 //! S3/S5 panic（exit 101）、S4 无错误（affected 1）、S7（重复列）无错误；
 //! S6 一致锚点恒 GREEN。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

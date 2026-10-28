@@ -12,6 +12,7 @@
 //! - R2 CTE 基座同款形态（同一 DerivedScan 装配路径）。
 //! - R3 别名排序可达（DESC）；无别名、限定名引用与既有拒绝面零回归。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::to_response;
 use serde_json::json;

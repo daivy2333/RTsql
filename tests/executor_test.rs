@@ -492,6 +492,7 @@ fn test_exec_result_row_variant() {
     }
 }
 
+#[cfg(feature = "network")]
 #[test]
 fn test_response_rows_serialization() {
     use rtsql::network::Response;

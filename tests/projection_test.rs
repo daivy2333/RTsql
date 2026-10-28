@@ -9,6 +9,7 @@
 //! 2. PK-point aggregates return real values instead of NULL,
 //! 3. ORDER BY keys outside the projection still sort.
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;
