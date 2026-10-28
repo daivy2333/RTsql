@@ -4,7 +4,7 @@
 
 RTsql 是一个用 Rust 编写的嵌入式关系型数据库。它使用 Tokio 任务执行异步 I/O，以单个主文件保存数据库，并通过一次性执行的 CLI 提供 SQL 执行和管理能力。
 
-当前仓库支持 Linux 和 macOS，并可交叉构建静态 RISC-V 64 Linux（musl）二进制；不依赖独立数据库服务。
+2026-10-28，在 Linux x86_64 上，`cargo build --locked --offline --release --bin rtsql` 得到 release 二进制。该二进制在路径含 `/` 的临时库上执行了 `CREATE TABLE t (id INT)`、`INSERT INTO t (id) VALUES (1)` 和 `SELECT id FROM t`，查询输出包含 `{"columns":["id"],"rows":[[1]]}`。同一组语句在静态 `x86_64-unknown-linux-musl` 二进制上完成。该二进制由 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static` 构建，`ldd` 输出为 `statically linked`。macOS 本次未运行。仓库仍可交叉构建静态 RISC-V 64 Linux（musl）二进制，不依赖独立数据库服务。
 
 ## 快速开始
 
@@ -330,6 +330,8 @@ cargo bench
 
 仓库的 `benches/` 目录还包含 Criterion 基准和 SQLite 对比基准。RISC-V 64 Linux（musl）产物由 `build-riscv64-musl.sh` 生成，见上文「交叉构建 RISC-V 64 Linux（musl）」章节。
 
+2026-10-28，在 Linux x86_64 上，`cargo build --locked --offline --release --bin rtsql` 得到 release 二进制。该二进制在路径含 `/` 的临时库上执行了 `CREATE TABLE t (id INT)`、`INSERT INTO t (id) VALUES (1)` 和 `SELECT id FROM t`，查询输出包含 `{"columns":["id"],"rows":[[1]]}`。同一组语句在静态 `x86_64-unknown-linux-musl` 二进制上完成。该二进制由 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static` 构建，`ldd` 输出为 `statically linked`。macOS 本次未运行。
+
 ## 性能与资源对比
 
 2026-09-24 在 Intel i9-13900HX（32 线程）Linux 机器上实测：RTsql 0.1.0（release 构建）对比 SQLite 3.37.2（`rusqlite` 链接的系统 `libsqlite3`，以及 `sqlite3` CLI）。两个引擎均使用默认配置，作用于同一张合成表 `bench (id INTEGER PRIMARY KEY, name TEXT, value INTEGER)`；RTsql 每条语句经 WAL 自动提交，SQLite 使用默认回滚日志。以下为单机现场观察，不是基准保证。
@@ -360,7 +362,7 @@ CLI 级资源占用（一次性进程，加载 2,000 行后执行 `SELECT COUNT(
 
 ## 已知限制
 
-- 支持 Linux 和 macOS 构建宿主；尚未实现 Windows 文件 I/O。RISC-V 64 Linux 以静态 musl 交叉构建产物交付，尚未在真实 RISC-V 硬件上验证。
+- 2026-10-28，在 Linux x86_64 上，`cargo build --locked --offline --release --bin rtsql` 得到 release 二进制。该二进制在路径含 `/` 的临时库上执行了 `CREATE TABLE t (id INT)`、`INSERT INTO t (id) VALUES (1)` 和 `SELECT id FROM t`，查询输出包含 `{"columns":["id"],"rows":[[1]]}`。同一组语句在静态 `x86_64-unknown-linux-musl` 二进制上完成。该二进制由 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static` 构建，`ldd` 输出为 `statically linked`。macOS 本次未运行。尚未实现 Windows 文件 I/O。RISC-V 64 Linux 以静态 musl 交叉构建产物交付，尚未在真实 RISC-V 硬件上验证。
 - 只加密主数据库文件；WAL、checkpoint 和 dump 输出仍为明文。
 - 不支持原地切换明文/加密状态；请使用 `dump` 和 `restore`。
 - 不包含密钥轮换、密钥管理子命令、密钥缓存和 `--password-file`。

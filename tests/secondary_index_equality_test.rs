@@ -23,9 +23,8 @@ async fn open_db() -> (Database, TempDir) {
 }
 
 async fn exec_ok(db: &Database, sql: &str) {
-    match to_response(db.execute_sql(sql).await) {
-        Response::Error { message, .. } => panic!("{sql:?} failed: {message}"),
-        _ => {}
+    if let Response::Error { message, .. } = to_response(db.execute_sql(sql).await) {
+        panic!("{sql:?} failed: {message}");
     }
 }
 

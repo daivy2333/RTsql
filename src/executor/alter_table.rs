@@ -74,7 +74,7 @@ impl Executor for AlterTableExecutor {
                 let default_value = default_value.clone();
                 let path = self.database.path().to_path_buf();
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = tokio::spawn(async move {
+                std::mem::drop(tokio::spawn(async move {
                     let _ = table_manager
                         .alter_add_column(
                             &table_name,
@@ -86,7 +86,7 @@ impl Executor for AlterTableExecutor {
                             tx,
                         )
                         .await;
-                });
+                }));
                 match rx.await {
                     Ok(Ok(())) => Ok(Some(ExecResult::AffectedRows(0))),
                     Ok(Err(error)) => Err(error),

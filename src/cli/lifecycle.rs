@@ -634,20 +634,17 @@ pub(super) async fn restore(
                             )
                         }
                     };
-                    match execute_stage(db, plan, false).await {
-                        Err(error) => {
-                            return super::sql_failure_status(
-                                index + 1,
-                                total,
-                                &error.message,
-                                &statement_text,
-                                false,
-                                None,
-                            )
-                        }
-                        // restore 不渲染：dump 文本面只有 CREATE/INSERT，
-                        // 其余结果静默忽略
-                        Ok(_) => {}
+                    // restore 不渲染：dump 文本面只有 CREATE/INSERT，
+                    // 其余结果静默忽略
+                    if let Err(error) = execute_stage(db, plan, false).await {
+                        return super::sql_failure_status(
+                            index + 1,
+                            total,
+                            &error.message,
+                            &statement_text,
+                            false,
+                            None,
+                        );
                     }
                 }
                 ExitStatus::Success

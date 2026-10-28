@@ -6,6 +6,7 @@ use crate::executor::ExecResult;
 use crate::storage::Result;
 
 /// Executor trait - 异步迭代器接口
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Executor {
     /// 执行一次迭代，返回结果

@@ -274,14 +274,12 @@ impl BufferPool {
         // after it that were never attempted. Restoring only the failing page
         // would leave the same hole: those pages would never be rewritten and
         // their content would be lost silently.
-        let mut written = 0usize;
-        for (page_id, page) in to_write.iter() {
+        for (index, (page_id, page)) in to_write.iter().enumerate() {
             if let Err(e) = self.storage.write_page(*page_id, page).await {
-                self.restore_dirty_from(&to_write, written);
+                self.restore_dirty_from(&to_write, index);
                 return Err(e);
             }
             self.finish_write_in_flight(*page_id, true);
-            written += 1;
         }
 
         Ok(())
@@ -358,14 +356,12 @@ impl BufferPool {
         // Iteration 004 (RDP R1): same discipline as `flush_all` — a failure
         // hands the dirty bit back to every page this flush cleared but did
         // not write.
-        let mut written = 0usize;
-        for (page_id, page) in to_write.iter() {
+        for (index, (page_id, page)) in to_write.iter().enumerate() {
             if let Err(e) = self.storage.write_page(*page_id, page).await {
-                self.restore_dirty_from(&to_write, written);
+                self.restore_dirty_from(&to_write, index);
                 return Err(e);
             }
             self.finish_write_in_flight(*page_id, true);
-            written += 1;
         }
 
         Ok(())

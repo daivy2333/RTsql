@@ -241,21 +241,15 @@ fn note_literal(id: u32) -> String {
 /// （DDL/INSERT 语法双方通用；BOOL 列 SQLite 经 NUMERIC affinity 存 1/0）。
 fn seed_statements() -> Vec<String> {
     let mut rng = StdRng::seed_from_u64(SEED);
-    let mut stmts = Vec::new();
-
-    stmts.push(
+    let mut stmts = vec![
         "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INT, score FLOAT, active BOOL, joined TEXT)"
             .to_string(),
-    );
-    stmts.push(
         "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INT, amount INT, tag TEXT, note TEXT)"
             .to_string(),
-    );
-    stmts.push("CREATE TABLE items (k TEXT, a INT, b INT, label TEXT)".to_string());
-    stmts.push(
+        "CREATE TABLE items (k TEXT, a INT, b INT, label TEXT)".to_string(),
         "CREATE TABLE shipments (id INTEGER PRIMARY KEY, ord_id INT, carrier TEXT, days INT)"
             .to_string(),
-    );
+    ];
 
     // users：240 行，唯一 name、可空 age/score/active、DA5 日期字符串。
     for id in 1..=240u32 {
