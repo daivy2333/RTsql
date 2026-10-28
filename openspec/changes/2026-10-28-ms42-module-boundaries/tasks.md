@@ -8,7 +8,7 @@
 - 000：执行依据是 `iterations/000-feature-base-and-network/000-initial.md`。T1、T2 已完成，Act Response 为 reported，Review Result 为 accepted（2026-10-28，两条非阻塞 Minor 见该 Cycle Plan Review F1/F2）。
 - 001：执行依据是 `iterations/001-crypto-optional/000-initial.md`。T3 已完成，Act Response 为 reported，Review Result 为 accepted（2026-10-28，两条非阻塞 Minor 见该 Cycle Plan Review F1/F2）。
 - 002：执行依据是 `iterations/002-cli-optional/000-initial.md`。T4 已完成，Act Response 为 reported，Review Result 为 accepted（2026-10-28，三条非阻塞 Minor 见该 Cycle Plan Review F1/F2/F3）。
-- 003：执行依据是 `iterations/003-combination-matrix-and-full-regression/000-initial.md`。Plan Context 为 ready。T5 待执行，T6 依赖 T5。
+- 003：执行依据是 `iterations/003-combination-matrix-and-full-regression/000-initial.md`。T5、T6 已完成，Act Response 为 reported（2026-10-28），Review Result 待 Plan Review。
 - Persisted Evidence：none（全 change）。
 - 无跳过项。
 
@@ -20,8 +20,8 @@
 | T2 | 000 | T1 | network 可选化 + 测试面门；C1 组合构建门与验证集通过；默认组合协议测试通过 | done |
 | T3 | 001 | 000 accepted | crypto 可选化 + 关闭态行为测试；C2 组合构建门与验证集通过；加密单元测试按组合门控 | done |
 | T4 | 002 | 001 accepted | cli 可选化（bin required-features + 44 文件门）；C3/C4 组合构建门与验证集通过；默认组合 cli_test 通过 | done |
-| T5 | 003 | 002 accepted（2026-10-28 已满足） | 五组合矩阵全绿（构建门 + 各验证集 + 双组合 clippy + fmt）；执行依据 `iterations/003-combination-matrix-and-full-regression/000-initial.md` | pending |
-| T6 | 003 | T5 | M19 分批全量（默认组合）每批 0 failed + 对账 0/0/0；design §5/§6 契约与实施后代码事实一致性核对；change 结构自检；执行依据 `iterations/003-combination-matrix-and-full-regression/000-initial.md` | pending |
+| T5 | 003 | 002 accepted（2026-10-28 已满足） | 五组合矩阵全绿（构建门 + 各验证集 + 双组合 clippy + fmt）；执行依据 `iterations/003-combination-matrix-and-full-regression/000-initial.md` | done |
+| T6 | 003 | T5 | M19 分批全量（默认组合）每批 0 failed + 对账 0/0/0；design §5/§6 契约与实施后代码事实一致性核对；change 结构自检；执行依据 `iterations/003-combination-matrix-and-full-regression/000-initial.md` | done |
 
 ## 1. Feature 基座与 network 可选化（Iteration 000）
 
@@ -38,8 +38,8 @@
 
 ## 4. 组合矩阵与收尾全量（Iteration 003）
 
-- [ ] 4.1 T5：逐一执行 design §2.5 五组合的构建门与行为验证集（默认组合的行为验证即 4.2 的全量，此处只跑构建门）；补 `cargo fmt --check`、默认组合 deny clippy 与 core-only 组合 `cargo clippy --offline --no-default-features --lib --tests -- -D warnings`。任一组合失败即本任务失败。结果逐组合记录。
-- [ ] 4.2 T6：按 M19 + 等分批次规则在默认组合跑整个 change 的一次全量（`ls tests/*.rs | sort`，N 个文件，B = ceil(N/12)，前 B×12−N 批各 11、其余各 12，`--lib --bins` 单独成第一批；批间串行、批内 `--test-threads=1`；逐批记录计数与三项对账）。随后核对 design §5 层接口/状态归属与 §6 诊断约定同实施后的代码事实一致（发现偏差记入 Act Response 并修正 design 或按差异回报），完成 change 结构自检（tasks 状态、specs/design 与实现一致、Iteration/Cycle 齐全）。
+- [x] 4.1 T5：逐一执行 design §2.5 五组合的构建门与行为验证集（默认组合的行为验证即 4.2 的全量，此处只跑构建门）；补 `cargo fmt --check`、默认组合 deny clippy 与 core-only 组合 `cargo clippy --offline --no-default-features --lib --tests -- -D warnings`。任一组合失败即本任务失败。结果逐组合记录。
+- [x] 4.2 T6：按 M19 + 等分批次规则在默认组合跑整个 change 的一次全量（`ls tests/*.rs | sort`，N 个文件，B = ceil(N/12)，前 B×12−N 批各 11、其余各 12，`--lib --bins` 单独成第一批；批间串行、批内 `--test-threads=1`；逐批记录计数与三项对账）。随后核对 design §5 层接口/状态归属与 §6 诊断约定同实施后的代码事实一致（发现偏差记入 Act Response 并修正 design 或按差异回报），完成 change 结构自检（tasks 状态、specs/design 与实现一致、Iteration/Cycle 齐全）。
 
 ## Iteration Plan
 
@@ -78,7 +78,7 @@
 - Verification boundary：整个 change 的一次全量，只在本轮、只在默认组合（M19 + 等分批次规则 + 三项对账）；非默认组合只跑 §2.5 验证集。失败批只整批复核一次。
 - Diagnostic boundary：按组合分列（构建失败归对应 feature 门；测试失败归目标域；全量失败按批定位）；契约核对偏差按「design 陈述 vs 代码事实」分列。
 - Non-goals：第二次全量、非默认组合全量、新平台验证、诊断接口实现、依赖环消除。
-- 执行依据（落地信息，2026-10-28）：`iterations/003-combination-matrix-and-full-regression/000-initial.md`，Plan Context 为 ready，Gate 2 PASS（无 BLOCKED、无 SKIPPED），Persisted Evidence 为 `none`。T5 待执行，T6 依赖 T5。
+- 执行依据（落地信息，2026-10-28）：`iterations/003-combination-matrix-and-full-regression/000-initial.md`，Plan Context 为 ready，Gate 2 PASS（无 BLOCKED、无 SKIPPED），Persisted Evidence 为 `none`。T5、T6 已完成（Act Response 见该 Cycle，状态 reported，2026-10-28）；Review Result 待 Plan Review。
 - M19 全量预算（design §7 定形，写入本轮执行依据）：只在默认组合、整个 change 一次（本 Iteration 内执行，非默认组合不承诺全量绿）；`ls tests/*.rs | sort` 取 N 个文件，`B = ceil(N/12)`，前 `B×12−N` 批各 11 个、其余各 12 个，`--lib --bins` 单独成一批；批间串行（同一时刻只有一批在跑）、批内 `--test-threads=1`；SHALL NOT 用一次无目标过滤的全量调用跑完，SHALL NOT 用默认并行度跑任何全量批次；逐批记录 passed/failed/ignored 并做 missing/extra/duplicate 三项对账（均须为 0）；缺一批不得声明全量通过，失败批只整批复核一次。规划时基线（`163d1a9`）为 N = 158 → B = 14 → 10 批 × 11 + 4 批 × 12，`--lib --bins` 单独第 15 批 ⇒ 15 批 / 159 个测试目标 / 预期 160 条 `test result:` 行（执行时按实际文件集合重算）。
 - 契约核对项（design §5/§6 逐项对照实施后代码事实）：§5.1 六层公共接口、§5.2 状态归属、§5.3 依赖方向与环清单、§6.1 现状出口清单与错误通道、§6.2 约定正文六条、§6.3 不落接口代码的理由。规划时已定位两处**计数类**偏差待 T6 裁定：§6.1「35 个直写出口 / wal/recovery 7」与实算 34 / 6 不符（`grep -c 'eprintln!' src/wal/recovery.rs` = 7 含文档注释处 1 处）；§5.2「12 字段」与 `pub struct Database` 实有 15 字段、R79 §4.1 表 13 行三者互不相等。计数类以代码事实为准修正 `design.md`，语义类按差异回报。R7/R8 为文档性验证（无自动测试），RTM 如实标注。
 

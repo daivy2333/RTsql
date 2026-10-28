@@ -124,7 +124,7 @@ install.sh 与 build-riscv64-musl.sh 不传 feature flag，走默认组合，行
 
 ### 5.2 状态归属（R79 §4 + 裁定）
 
-所有权裁定：**会话级可变状态统一归 `Database` 协调器所有**（`Arc` 共享、克隆共享全部可变态），具体字段清单与读写层见 R79 §4.1（12 字段）。要点裁定：
+所有权裁定：**会话级可变状态统一归 `Database` 协调器所有**（`Arc` 共享、克隆共享全部可变态），具体字段清单与读写层见 R79 §4.1（字段数以 `pub struct Database` 的结构体字段为准：15 字段——buffer_pool、table_manager、transaction_manager、wal_writer、wal_buffer、plan_cache、schema_version、checkpoint_manager、isolation、views、mode、query_memory_limit、io_failpoint、implicit_transactions、path）。要点裁定：
 
 - `plan_cache` 读写独占 pipeline；`schema_version` 单点递增在 pipeline `bump_schema_version`，database 5 处消费（预编译重计划）；克隆共享、open 归零、不持久化。
 - `wal_buffer` 是唯一「三层持有入口」的字段（执行器写路径直接追加 + TransactionManager 内部槽 + CLI shutdown）——归属仍为 Database；MS43 改造此对象的协作时以本清单为起点。
@@ -152,7 +152,7 @@ install.sh 与 build-riscv64-musl.sh 不传 feature flag，走默认组合，行
 
 ### 6.1 现状出口清单（迁移基底）
 
-- 35 个 `eprintln!`/`println!` 直写出口（排除 cfg(test)）：table_manager 12（DROP/TRUNCATE 释放 best-effort 告警）、wal/recovery 7、profiling 5（计时表）、btree/index_manager 4、network/server 3、executor/drop_index 2、data_page 1、database 1。
+- 34 个 `eprintln!`/`println!` 直写出口（排除 cfg(test)；文档注释中的形态引用不计调用点）：table_manager 12（DROP/TRUNCATE 释放 best-effort 告警）、wal/recovery 6、profiling 5（计时表）、btree/index_manager 4、network/server 3、executor/drop_index 2、data_page 1、database 1。
 - 既有计时设施：`profiling.rs`（task_local + `RTSQL_PROFILING` + `with_profiling_scope`），产品接线 4 处（pipeline 三段、database 1、两个索引算子）。
 - 错误通道：库公共面单漏斗 `SqlError { message, sqlstate }`；SQLSTATE 分类三源（parser/error.rs:145、pipeline.rs:1673-1686、network/pg_messages.rs:266）；各层 thiserror 三个 error.rs。
 
@@ -162,7 +162,7 @@ install.sh 与 build-riscv64-musl.sh 不传 feature flag，走默认组合，行
 2. **数据模型**：`DiagnosticRecord { severity（分级枚举，名称 MS44 定）、category（模块/阶段标识）、message、data（可选键值：耗时、资源计数） }`；事件记录与性能统计两类；阶段计时沿用 `with_profiling_scope` 的 scope 语义（阶段 + 算子两级）。
 3. **交付 API（草案签名）**：`diagnostics::report(record)`（同步投递、门面决定丢弃/缓冲/输出，模块不得自持输出）与 `diagnostics::scope(name) -> ScopeGuard`。MS44 实现时可收敛参数与返回形态，但不得把输出决策移回模块。
 4. **职责边界**：模块产生自身事件与统计（模块自己持有阶段语义）；门面独占配置（详细程度/观察模块/采集内容三分离，对齐 I096）、跨异步上下文关联与输出限量。诊断只观察，不改变事务结果、不替代行为断言。
-5. **迁移原则**：35 个既有出口由 MS43/MS44 按域增量迁移；「用户可见 stderr 告警」的有无变化属行为变化，须由承载 change 的 spec 增量明示，不得借诊断名义静默吸收。profiling.rs 并入门面作计时提供方，4 个接线点语义保持。
+5. **迁移原则**：34 个既有出口由 MS43/MS44 按域增量迁移；「用户可见 stderr 告警」的有无变化属行为变化，须由承载 change 的 spec 增量明示，不得借诊断名义静默吸收。profiling.rs 并入门面作计时提供方，4 个接线点语义保持。
 6. **与错误通道的关系**：错误继续走 `Result` 返回值（错误不是诊断事件）；SQLSTATE 三源分类本 change 零变化。
 
 ### 6.3 本 change 不落该接口代码的理由
