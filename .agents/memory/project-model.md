@@ -44,7 +44,7 @@
 - **范围**: B-Tree Key 编码
 - **不变量**: B-Tree Key 固定 32 字节存储
 - **代价**: 短 Key 浪费 ~28 bytes，无法支持 >32 bytes Key
-- **后续优化**: M23 Varint Key（计划中，见 I024）
+- **后续优化**: 无——Varint Key 评估（I024）经 MS38 实测后保留 32 字节定长键（2026-10-27），不再计划
 - **证据**: `src/storage/btree/`
 - **状态**: active
 - **Legacy**: A002
@@ -294,6 +294,7 @@
   - 等级分类只决定承载顺序与排期，不构成处置结论；缺陷不因等级低而免于承载
   - 承载落点按缺陷所在层确定：落在存储/索引层的由存储域后续 change 承载，落在 DDL 目录面的由 DDL 目录事务化主题承载；与哪一里程碑相邻排期由 milestone-planner 统一裁定
   - 发现方只报告与移交，不在当前 change 内扩范围修复；当前 change 的验收面只覆盖本 change 范围内的行为
+  - 适用边界：本条为人工/常规流程的基线；autopilot goal 驱动自动调度下同一批实施产出的实质缺陷改由当前 change 追加 Iteration 就地承载，见 M23
 - **证据**: 2026-10-24 用户指令「对于实施当中发现的所有issue候选，都直接寻找好的承载方式流程进行修复而不是等级」；MS34 实施期间产生的三个 Issue 候选（索引写侧原子性与取消后一致性、DDL 目录事务化）按本条进入承载闭环而非等级分类
 - **状态**: active
 - **Legacy**: 无
@@ -331,6 +332,19 @@
   - 迁移原则：现存 34 个 `eprintln!`/`println!` 直写出口（排除 `cfg(test)`）由 MS43/MS44 按域增量迁移——分布为 table_manager 12、wal/recovery 6、profiling 5、btree/index_manager 4、network/server 3、executor/drop_index 2、data_page 1、database 1；「用户可见 stderr 告警」的有无变化属行为变化，须由承载 change 的 spec 增量明示，不得借诊断名义静默吸收；`profiling.rs` 并入门面作计时提供方，4 个产品接线点语义保持
   - 与错误通道的关系：错误继续走 `Result` 返回值（错误不是诊断事件）；SQLSTATE 三源分类不变
 - **证据**: `openspec/changes/archive/2026-10-28-ms42-module-boundaries/design.md` §6（诊断报告接口约定与现状出口清单；长期理由以该 design 为准）；实施后代码事实的逐项核对见该 change 的 `iterations/003-combination-matrix-and-full-regression/000-initial.md` Plan Review
+- **状态**: active
+- **Legacy**: 无
+
+## M23: 自动调度实施期缺陷的就地承载约束
+
+- **分类**: domain
+- **范围**: autopilot goal 驱动派发实施 change 期间新发现实质缺陷的登记与承载
+- **不变量**:
+  - 适用边界与 M20 互补：人工/常规流程的缺陷承载按 M20 闭环；本条只覆盖 openspec-autopilot 接收 goal 指令实施某个 change 时、该 change 实施中新发现的实质缺陷（Act/Plan 记录的 Issue 候选；实质缺陷界定沿用公共规则 › Plan 调查，与 M20 同一口径）
+  - goal 注入的授权（公共规则 › 阶段边界）覆盖「登记 Issue」的用户指令环节：此类缺陷由 openspec-experience-recorder 直接登记，不等用户单独指令
+  - 登记后不为该缺陷另建 change、不推回路线重排；由 openspec-plan 在当前 change 的 Iteration Map 追加一轮新 Iteration 承载修复——发现后追加，不预建；autopilot 按正常状态路由推进该 Iteration 至 Review accepted，随后进入正常收尾
+  - 缺陷超出该承载方式（需新需求裁定、修改已批准 Acceptance 或扩大 goal 范围）时，子代理停止并回报用户决定，不自动扩权
+- **证据**: 2026-10-28 用户 goal 原话「开始实施，把这个change做完，要求遵守各种规范，尤其是多批次串行测试规范，对于实施当中发现的issue，直接登记后在这个change规划新iter进行解决，另外把这个issue在自动调度时候的规范写到M文档」
 - **状态**: active
 - **Legacy**: 无
 
