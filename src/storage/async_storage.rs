@@ -1,6 +1,7 @@
 use crate::storage::{Page, PageId, Result};
 use async_trait::async_trait;
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AsyncStorage: Send + Sync {
     async fn read_page(&self, page_id: PageId) -> Result<Page>;
