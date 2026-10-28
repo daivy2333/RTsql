@@ -118,7 +118,7 @@ install.sh 与 build-riscv64-musl.sh 不传 feature flag，走默认组合，行
 | 入口 | `cli/`、`network/`、`main.rs` | CLI：进程退出码与四格式输出合同（经二进制锚定）；lib 面 `rtsql::cli::run()` 仅供 bin 装配。network：`Server::new/shutdown_token`、`network::protocol::to_response`（CLI/Server 边界转换词表，97 个测试文件用作断言词表）、PgProtocol/JsonProtocol。入口层消费核心与各层 pub 面，不被任何层引用（network、cli 均为叶子） |
 | 核心 | `database.rs`、`pipeline.rs`、`plan_cache.rs`、`result.rs`、`profiling.rs` | `Database` open 家族与显式事务 API、`checkpoint()`、`prepare`/`PreparedStatement`、`set_query_memory_limit`；pipeline 的 `parse_stage`/`plan_stage[_routed]`/`execute_stage[_in_tx[_with_params]]` 族与 `AttachRoute`/`RoutedTables`、`infer_ctas_column_types`（pub(crate)，CLI 复用）；`SqlOutcome`/`SqlError`/`ColumnMeta`（result，lib 根重导出）；profiling 的 `with_profiling_scope`/`is_profiling_enabled`；`PhysicalPlan`（定义在执行层、lib 根重导出，核心-规划-执行共同词表） |
 | 规划 | `parser/`（含 planner 七模块） | `parse_sql`、`PlanBuilder`、`PlanError`（含 SQLSTATE 分类）、`classify_attach_statement`/`classify_transaction_statement`/`AttachInfo`/`TxStatementKind`（CLI 消费）、二级索引名名单注入面 |
-| 执行 | `executor/` | `Value` 值词表（存储 27 处、result/network/cli 消费）、`ColumnType` 与 `datetime` 编码（存储/pg 协议消费）、`Executor` trait 与 `next_batch`、`query_budget` 预算面、32+ 执行器与 `plan_format`（EXPLAIN） |
+| 执行 | `executor/` | `Value` 值词表（存储侧消费面按引用文件计：3 个产品文件——catalog.rs、data/table_manager.rs、page_format/tuple.rs，另有 1 个测试文件 btree/index_manager.rs；result/network/cli 消费）、`ColumnType` 与 `datetime` 编码（存储/pg 协议消费）、`Executor` trait 与 `next_batch`、`query_budget` 预算面、32+ 执行器与 `ExplainExecutor`（EXPLAIN 计划树渲染，由 core 层 pipeline 消费；渲染模块 `plan_format` 为执行层私有，不属对外公共面） |
 | 存储（含持久化） | `storage/`、`wal/` | `AsyncStorage` trait（`Arc<dyn AsyncStorage>` 持有点 database.rs:332——存储后端替换接缝）、`BufferPool`、`TableManager`/`TableMeta`、`IndexManager`、catalog 词表（`CatalogRow`/`CatalogColumnRow`/`CatalogKind`）、页格式词表（`ColumnType`、`RowId`、tuple 编码）、`check_integrity`、`StorageError`；wal 的 `WalWriter`/`WALBuffer`/`CheckpointManager`/Recovery |
 | 事务 | `transaction/` | `TransactionManager`（begin/commit/abort 唯一 WAL 事务记录源）、`TransactionId`、`Snapshot`/`IsolationLevel`、`VersionHeader`（数据页格式逐字节消费）、`TransactionSession`、`abort_by_id`/`discard_tx_version_tables`（取消回收面） |
 
@@ -146,7 +146,7 @@ install.sh 与 build-riscv64-musl.sh 不传 feature flag，走默认组合，行
 | 环 1c | database↔transaction（transaction/session.rs:9 产品代码引 `Database`） | `TransactionSession` 执行臂注入方式 |
 | 环 2 | storage↔transaction（`VersionHeader` 嵌入页格式 5 文件 6 处；反向 `page_format`/`RowId`/`ColumnType`） | `Value`/`ColumnType` 词表归属下沉（R25 第一刀） |
 
-词表归属遗留决策（R25 遗留、本 change 只更新消费面数字不改归属）：`Value` 在 executor/value.rs（存储逐字节依赖）、`ColumnType` 在 storage/page_format/tuple.rs、`PhysicalPlan` 在 executor/plan.rs、`datetime` 在 executor/datetime.rs。归属调整属 crate 拆分 change 的专项设计。
+词表归属遗留决策（R25 遗留、本 change 只更新消费面数字不改归属）：`Value` 在 executor/value.rs（存储逐字节依赖）、`ColumnType` 在 storage/page_format/tuple.rs 与 executor/value.rs（两个同名类型分属存储与执行两层；lib 根重导出执行层版 `rtsql::ColumnType`，存储层版为 `rtsql::storage::ColumnType`）、`PhysicalPlan` 在 executor/plan.rs、`datetime` 在 executor/datetime.rs。归属调整属 crate 拆分 change 的专项设计。
 
 ## 6. 诊断报告接口约定（面向 MS43 衔接、MS44 实现）
 
