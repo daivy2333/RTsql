@@ -104,8 +104,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: BASELINE_PENDING
-- **ahead of origin**: AHEAD_PENDING
+- **提交基线**: 86ce428fa98835a8fe93efe835e13c04a6c8a726
+- **ahead of origin**: 25
 - **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 87 个域。
