@@ -157,7 +157,70 @@ PASS。计划审查的 11 项均通过。无 BLOCKED。无 SKIPPED。
 
 ## Act Response
 
-- Status: 未开始
+- Status: reported
+
+**Implemented**
+
+没有修改 Rust 源码、`Cargo.toml` 或 `Cargo.lock`。
+
+T3：`cargo build --locked --offline --release --bin rtsql` 在 `CARGO_TARGET_DIR` 未设置时退出码 0，产物是 `target/release/rtsql`。对 `/tmp/tmp.8k2qojAEig/smoke.db`，`new` 与三条 SQL 退出码都为 0。`SELECT` stdout 为 `{"columns":["id"],"rows":[[1]]}`。临时目录已删除。
+
+T4：`rustup target add x86_64-unknown-linux-musl` 退出码 0。随后的 `cargo rustc` 命令退出码 0，产物是 `target/x86_64-unknown-linux-musl/release/rtsql`。`ldd` 原句是 `statically linked`。对 `/tmp/tmp.A4zdYxRdk1/smoke.db`，`new` 与三条 SQL 退出码都为 0，`SELECT` stdout 同样包含 `{"columns":["id"],"rows":[[1]]}`。临时目录已删除。
+
+T5：macOS 未完成。`README.md` 与 `README.zh-CN.md` 的开头第 2 段、构建节和已知限制第一条写明了 T3、T4 的命令和结果，并写明 macOS 本次未运行。Windows 文件 I/O 未实现，以及 RISC-V 交叉构建不等于在硬件上运行，都保留。
+
+**Deviations from Plan**
+
+执行 T3 时，shell 里的 `CARGO_TARGET_DIR` 指向沙箱缓存目录。第一次 `cargo build --locked --offline --release --bin rtsql` 退出码 0，但二进制不在 `target/release/rtsql`。取消该变量后用同一命令再构建一次，退出码 0，产物落到计划路径。记录的 T3 结果是这一次。冒烟使用的是 `target/release/rtsql`。
+
+`file` 的原句是 `ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, not stripped`，其中没有 `statically linked`。`ldd` 的原句是 `statically linked`，其中没有 `not a dynamic executable`。静态判定采用 `ldd` 的这句。链接器、`+crt-static` 和依赖都没有改。判定成立后，musl 冒烟通过。
+
+**Self-Review**
+
+T3、T4 没有产品代码 diff。T5 只改了两份 README 里点名的六处。六处对 gnu、musl、macOS 的完成状态一致：gnu 与 musl 已运行，macOS 未运行。没有遗留的 Minor 问题。
+
+**Verification Evidence**
+
+T3 构建：`cargo build --locked --offline --release --bin rtsql`，退出码 0。`Finished release profile [optimized] target(s) in 1m 27s`。`target/release/rtsql` 存在。
+
+T3 冒烟，库路径 `/tmp/tmp.8k2qojAEig/smoke.db`：
+
+- `target/release/rtsql new <路径>`：退出码 0。
+- `target/release/rtsql --format json <路径> "CREATE TABLE t (id INT)"`：退出码 0。
+- `target/release/rtsql --format json <路径> "INSERT INTO t (id) VALUES (1)"`：退出码 0。
+- `target/release/rtsql --format json <路径> "SELECT id FROM t"`：退出码 0。stdout 为 `{"columns":["id"],"rows":[[1]]}`，包含要求的子串。
+
+T4：`rustup target add x86_64-unknown-linux-musl` 退出码 0。之后 `rustup target list --installed` 含 `x86_64-unknown-linux-musl`。
+
+`CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static`：退出码 0。`Finished release profile [optimized] target(s) in 1m 25s`。
+
+`file target/x86_64-unknown-linux-musl/release/rtsql` 的原句见 Deviations。`ldd` 退出码 0，原句是 `statically linked`。
+
+T4 冒烟，库路径 `/tmp/tmp.A4zdYxRdk1/smoke.db`，二进制是 `target/x86_64-unknown-linux-musl/release/rtsql`：`new`、`CREATE`、`INSERT`、`SELECT` 退出码都为 0。`SELECT` stdout 为 `{"columns":["id"],"rows":[[1]]}`。
+
+T5 复查：`uname -srm` 退出码 0，输出 `Linux 6.18.40.1-microsoft-standard-WSL2 x86_64`。`rustup target list --installed` 退出码 0，已安装目标为 `aarch64-unknown-none`、`riscv64gc-unknown-linux-gnu`、`riscv64gc-unknown-linux-musl`、`riscv64gc-unknown-none-elf`、`x86_64-unknown-linux-gnu`、`x86_64-unknown-linux-musl`、`x86_64-unknown-none`，没有名称含 `apple` 或 `darwin` 的目标。`command -v x86_64-apple-darwin-gcc`、`command -v o64-clang`、`command -v x86_64-apple-darwin20.4-clang` 退出码都是 1。macOS 未完成。
+
+修改前阅读六处：开头第 2 段和已知限制第一条把 Linux 与 macOS 写成当前目标或支持的构建宿主，构建节没有这次 gnu 或 musl 冒烟。修改后再次阅读：六处都写了 T3 的构建命令、含 `/` 的临时库、三条 SQL，以及查询输出包含 `{"columns":["id"],"rows":[[1]]}`；都写了 musl 命令、链接器路径、`+crt-static` 和 `ldd` 原句 `statically linked`，并写明 musl 二进制完成了同一组 SQL；都写明 macOS 本次未运行。中英文完成状态一致。构建节原有的 `cargo build --release` 示例仍在，没有写成这次跑过 `cargo test --no-fail-fast`。
+
+`~/.cargo/config` 的弃用提示在两次构建中出现，未当作失败。没有设置 `RTSQL_HOME`。没有跑 `cargo test`、`cargo fmt`、`cargo clippy` 或 M19。000 的 fmt 与 clippy 结论继续沿用：覆盖范围没有因本 Cycle 失效，本 Cycle 没有改 Rust 源码。
+
+Gate 3：T3 通过。T4 在采用 `ldd` 原句作为静态判定后通过。T5 通过。
+
+Gate 4：T3、T4、T5 的 Verification 由上面的退出码、stdout、`ldd` 原句、环境复查和六处阅读满足。
+
+Gate 5：未命中。
+
+**Persisted Evidence**
+
+None required
+
+**Experience Candidates**
+
+None
+
+**未解决问题**
+
+无。macOS 按环境复查记为未完成，没有编造运行结果。
 
 ## Plan Review
 
