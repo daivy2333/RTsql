@@ -6,8 +6,8 @@
 
 - 需求与 BDD：completed（场景草图与默认假设见 proposal.md）。
 - 000：执行依据是 `iterations/000-feature-base-and-network/000-initial.md`。T1、T2 已完成，Act Response 为 reported，Review Result 为 accepted（2026-10-28，两条非阻塞 Minor 见该 Cycle Plan Review F1/F2）。
-- 001：执行依据是 `iterations/001-crypto-optional/000-initial.md`。T3 已执行且验证通过（Act Response: reported），待 Plan Review。
-- 002：尚未展开（Map 内待执行；目录与 Cycle 由 001 accepted 后创建）。
+- 001：执行依据是 `iterations/001-crypto-optional/000-initial.md`。T3 已完成，Act Response 为 reported，Review Result 为 accepted（2026-10-28，两条非阻塞 Minor 见该 Cycle Plan Review F1/F2）。
+- 002：执行依据是 `iterations/002-cli-optional/000-initial.md`。Plan Context 为 ready。T4 待执行。
 - 003：尚未展开。
 - Persisted Evidence：none（全 change）。
 - 无跳过项。
