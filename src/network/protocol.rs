@@ -7,6 +7,7 @@ use crate::network::error::NetworkError;
 use crate::result::{value_to_json, SqlError, SqlOutcome};
 
 /// Protocol abstraction trait
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Protocol: Send + Sync {
     async fn parse_request(

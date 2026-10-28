@@ -139,7 +139,72 @@ PASS。计划审查的 11 项均通过。无 BLOCKED。无 SKIPPED。
 
 ## Act Response
 
-- Status: 未开始
+- Status: reported
+
+**Implemented**
+
+T1 只接受 rustfmt 写回。`tests/hash_join_build_side_test.rs` 的 `pair`，以及 `tests/sort_merge_join_test.rs` 的 `assert_line_starts_with`、`self_join_integer_pk_selects_sort_merge`、`order_by_keeps_sort_merge_and_sort`、`explain_integer_pk_join_names_sort_merge`、`in_subquery_integer_pk_join_rejected`，变化都是换行和缩进。
+
+T2 按执行依据改写：
+
+- `src/cli/lifecycle.rs` restore 循环：`execute_stage` 的 `match` 改为 `if let Err(error)`。失败仍调用原来的 `sql_failure_status`，参数不变。成功继续循环，不渲染。
+- `src/executor/alter_table.rs` ADD COLUMN：`let _ = tokio::spawn(...)` 改为 `std::mem::drop(tokio::spawn(...))`。不 await `JoinHandle`。`rx.await` 仍是三条结果臂的来源。
+- `src/executor/executor_trait.rs` 的 `Executor`、`src/network/protocol.rs` 的 `Protocol`、`src/storage/async_storage.rs` 的 `AsyncStorage`：在各自 `#[async_trait]` 正上方加 `#[allow(clippy::double_must_use)]`。方法签名不变。
+- `src/executor/sort_merge_join.rs` 的 `merge_product`：用 `&left_rows[left_index..left_end]` 与 `&right_rows[right_index..right_end]` 取 `.1` 调用 `build_output_row`。
+- `src/storage/buffer_pool.rs` 的 `flush_all` 与 `flush_all_except`：`for (index, (page_id, page)) in to_write.iter().enumerate()`。`write_page` 失败时 `restore_dirty_from(&to_write, index)`。成功页仍 `finish_write_in_flight(*page_id, true)`。未改 `restore_dirty_from`。
+- `tests/dml_tombstone_abandon_window_test.rs` 的 `pk_entry_count` 去掉 `id as i64`。`dump_chain` 里已经是 `u32` 的 `page_id` 改为同名字段。
+- `tests/ddl_rewrite_consistency_test.rs` 的 `live_row_pages` 去掉 `*id as i64`，`readings` 里的 `id as i64` 同样去掉。`dump_chain` 里已经是 `u32` 的 `page_id` 改为同名字段。`as u64` 未动。
+- `tests/sql_differential_test.rs` 的 `seed_statements`：原来四条 `CREATE TABLE` 作为 `vec![]` 初值。后面的 `push` 文本和顺序未改。
+- `tests/secondary_index_equality_test.rs` 的 `exec_ok`：见 Deviations。
+
+**Deviations from Plan**
+
+deny clippy 在计划内改写之后仍退出码 101。唯一剩下的诊断是 `tests/secondary_index_equality_test.rs:26` 的 `clippy::single_match`，位于 `exec_ok`。改写前的测量用全局允许 `single_match` 做全目标检查，所以这个测试点没有出现在列出的 6 条警告里。它可以用 restore 同一条规则消除：`if let Response::Error { message, .. }` 时 panic，消息不变；其他响应继续。改写前该测试 3 passed、0 failed、退出码 0；改写后相同。这不改变 SQL、存储字节、错误文本或是否 await。
+
+**Self-Review**
+
+上述 `single_match` 已在本 Cycle 修掉，并重跑了该测试、`cargo fmt --check` 和 deny clippy。没有遗留的 Minor 问题。
+
+**Verification Evidence**
+
+T1 先行，`cargo fmt --check`：退出码 1。差异只有 `tests/hash_join_build_side_test.rs` 1 处和 `tests/sort_merge_join_test.rs` 5 处，内容是空白和换行。支持 R1 的 RED。
+
+`cargo fmt`：退出码 0。`git diff -w` 仍显示换行拆开的行，逐行对照后没有非空白语义差异。
+
+T1 GREEN，`cargo fmt --check`：退出码 0。支持 R1。
+
+T2 改写前，默认并行度，全部退出码 0、failed 为 0：
+
+- `cargo test --offline --test sort_merge_join_test`：15 passed，0 failed。
+- `cargo test --offline --test alter_table_test`：16 passed，0 failed。
+- `cargo test --offline --test write_failure_state_test`：3 passed，0 failed。
+- `cargo test --offline --test release_durability_precondition_test`：2 passed，0 failed。
+- `cargo test --offline --test dml_tombstone_abandon_window_test`：3 passed，0 failed。
+- `cargo test --offline --test ddl_rewrite_consistency_test`：9 passed，0 failed。
+- `cargo test --offline --test sql_differential_test`：10 passed，0 failed。
+- `cargo test --offline --test cli_test restore`：11 passed，0 failed，117 filtered out。
+
+随后 `cargo clippy --offline --all-targets -- -D warnings`：退出码 101。`could not compile rtsql (lib) due to 15 previous errors`。这是 RED。
+
+T2 计划内改写后，同一组测试再次全部退出码 0，passed 与 failed 计数与上表相同。`cargo fmt --check` 退出码 0。deny clippy 退出码 101，只剩 Deviations 中的那一条。
+
+`exec_ok` 改写后：`cargo test --offline --test secondary_index_equality_test` 退出码 0，3 passed，0 failed。`cargo fmt --check` 退出码 0。`cargo clippy --offline --all-targets -- -D warnings` 退出码 0。支持 R2，以及 T2 列出的行为测试在改写后仍为 0 failed。
+
+`~/.cargo/config` 的弃用提示在这些命令里出现，未当作项目 lint。本 Cycle 没有跑全量。
+
+Gate 3：T1 通过。T2 在补上同一条 `if let` 规则后通过。计划列出的行为都已落地，diff 没有计划外的功能改动，失败页下标仍是失败页的位置，ADD COLUMN 仍不 await `JoinHandle`。
+
+Gate 4：T1、T2 的 Verification 均由上面的当次退出码和 failed 计数满足。
+
+Gate 5：未命中。
+
+**Persisted Evidence**
+
+None required
+
+**Experience Candidates**
+
+None
 
 ## Plan Review
 

@@ -393,7 +393,9 @@ fn indent_of(line: &str) -> usize {
 
 fn assert_line_starts_with(lines: &[String], prefix: &str) {
     assert!(
-        lines.iter().any(|line| line.trim_start().starts_with(prefix)),
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with(prefix)),
         "计划行应以 {prefix} 开头: {lines:?}"
     );
 }
@@ -412,7 +414,9 @@ async fn self_join_integer_pk_selects_sort_merge() {
     .await;
     assert_line_starts_with(&lines, "SortMergeJoin");
     assert!(
-        lines.iter().any(|line| line.contains("customers.id = customers.id")),
+        lines
+            .iter()
+            .any(|line| line.contains("customers.id = customers.id")),
         "条件文本应是 customers.id = customers.id: {lines:?}"
     );
 
@@ -447,7 +451,10 @@ async fn order_by_keeps_sort_merge_and_sort() {
         .iter()
         .position(|line| line.trim_start().starts_with("SortMergeJoin"))
         .unwrap_or_else(|| panic!("缺少 SortMergeJoin: {lines:?}"));
-    assert!(sort_at < join_at, "Sort 应出现在 SortMergeJoin 之前: {lines:?}");
+    assert!(
+        sort_at < join_at,
+        "Sort 应出现在 SortMergeJoin 之前: {lines:?}"
+    );
     assert!(
         indent_of(&lines[sort_at]) < indent_of(&lines[join_at]),
         "Sort 的缩进应浅于 SortMergeJoin: {lines:?}"
@@ -471,7 +478,9 @@ async fn explain_integer_pk_join_names_sort_merge() {
     .await;
     assert_line_starts_with(&lines, "SortMergeJoin");
     assert!(
-        lines.iter().any(|line| line.contains("customers.id = orders.id")),
+        lines
+            .iter()
+            .any(|line| line.contains("customers.id = orders.id")),
         "计划文本应含等值条件: {lines:?}"
     );
 }
@@ -610,7 +619,8 @@ async fn in_subquery_integer_pk_join_rejected() {
         .await
         .expect_err("IN 子查询中的连接必须被拒绝");
     assert!(
-        err.message.contains("IN subquery with JOIN is not supported"),
+        err.message
+            .contains("IN subquery with JOIN is not supported"),
         "错误应点名连接形状: {}",
         err.message
     );
