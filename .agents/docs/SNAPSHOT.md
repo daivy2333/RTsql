@@ -105,8 +105,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 合回后写入
-- **ahead of origin**: 合回后写入
+- **提交基线**: e18fd7b825f48a1debe0b7a3f26dcc9b8164bda2
+- **ahead of origin**: 14
 - **工作区**: 有一处未提交修改，`.gitignore` 增加 `/third_party/`。无活跃 change。最新归档 `openspec/changes/archive/2026-10-28-ms43-service-lifecycle/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 89 个域。
