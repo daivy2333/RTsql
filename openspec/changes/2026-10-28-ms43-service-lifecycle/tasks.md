@@ -5,8 +5,8 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed（场景草图与默认假设见 proposal.md）。
-- 000：当前轮。执行依据是 `iterations/000-wal-flush-owner/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。
-- 001：未展开。
+- 000：accepted。执行依据是 `iterations/000-wal-flush-owner/000-initial.md`。Review Result 为 accepted。
+- 001：当前轮。执行依据是 `iterations/001-session-checkpoint-close/000-initial.md`。Plan Context 为 ready。
 - 002：未展开。
 - Persisted Evidence：none。
 - 无跳过项。
@@ -17,7 +17,7 @@
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | `WALBuffer` 单飞刷盘、暂停/恢复、`shutdown` 后等待返回 `Ok` | 已实施 |
+| T1 | 000 | 无 | `WALBuffer` 单飞刷盘、暂停/恢复、`shutdown` 后等待返回 `Ok` | 已验收 |
 | T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持 | 未开始 |
 | T3 | 002 | 001 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
 
@@ -27,7 +27,7 @@
 
 ## 2. 会话 checkpoint 与关闭（Iteration 001）
 
-- [ ] 2.1 T2：在 000 的方法之上，让 `TransactionManager::commit` 在 `CommitTxn` 与 `append_commit_and_wait` 之间持有会话闸门；`Database::checkpoint` 在九步前 `quiesce_for_checkpoint`、九步后 `resume_after_checkpoint`；`Database::close` 走同一段九步前序列，然后 `shutdown`，不恢复循环。只读和内存会话保持早退。
+- [ ] 2.1 T2：按 `iterations/001-session-checkpoint-close/000-initial.md` 执行。在 000 的方法之上，让 `TransactionManager::commit` 在 `CommitTxn` 与 `append_commit_and_wait` 之间持有会话闸门；`Database::checkpoint` 在九步前 `quiesce_for_checkpoint`、九步后 `resume_after_checkpoint`；`Database::close` 走同一段九步前序列，然后 `shutdown`，不恢复循环。只读和内存会话保持早退。
 
 先行测试与通过条件（本轮展开时写入该轮 Cycle，此处为任务合同）：
 

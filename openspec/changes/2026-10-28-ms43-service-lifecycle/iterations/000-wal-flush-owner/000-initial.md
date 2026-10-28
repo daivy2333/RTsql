@@ -193,15 +193,27 @@ None。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未审查。
+- 非阻塞。`shutdown`、`quiesce_for_checkpoint` 和已停止的 `append_commit_and_wait` 在已经持有 `flush_gate` 时调用 `flush_locked`，没有再次进入 `do_flush`。`tokio::sync::Mutex` 不可重入。同一次持锁内仍然完成取走缓冲、`write_batch` 和唤醒。调用形状和执行依据里的字面 `do_flush` 不同，闸门范围与 Acceptance 一致。分类：Act 偏离，不阻塞。
+- 非阻塞。`session_gate`、`quiesce_for_checkpoint`、`resume_after_checkpoint` 带有 `#[allow(dead_code)]`。本轮没有提交或 checkpoint 调用这些符号，集成测试编译库时需要这条允许。下一轮接入之后可以去掉。不阻塞本轮验收。
+
+**Evidence**
+
+- diff 范围：`git diff 60e107965a4f728b0dcbe157bf39c59f8c9dbb0f..d065a023ad31e412055ef37109a9a0c7e399dbe4` 的产品代码只有 `src/wal/buffer.rs` 和 `tests/wal_buffer_test.rs`。`src/database.rs`、`src/transaction/manager.rs`、`src/wal/checkpoint.rs`、`src/wal/writer.rs`、`src/storage/buffer_pool.rs`、`src/lib.rs` 不在其中。
+- `flush_locked`（`src/wal/buffer.rs`）在 `write_batch` 返回 `Err` 时分支为空（287–295 行），唤醒在该分支之外（298–305 行）。缓冲为空但 `committed_tx_ids` 非空时同样唤醒。`append_commit_and_wait` 末尾是 `Ok(())`（128 行）。`get_current_lsn()` 的 `unwrap_or(0)` 仍在（277 行）。
+- `notified().await`（127 行）发生在 `flush_gate` 释放之后。`wait_until_flush_allowed` 不取 `flush_gate`。`session_gate()` 只返回共享引用。`quiesce_for_checkpoint`、`resume_after_checkpoint`、`shutdown`、`do_flush`、`append`、`append_commit_and_wait` 不锁这把闸门。
+- `quiesce_for_checkpoint` 与 `resume_after_checkpoint` 在停止标志已为真时直接返回，不调用 `start_flush_loop`。`start_flush_loop` 看到停止标志也不 `spawn`。
+- `wait_until_flush_allowed` 先构造 `state_notify.notified()`，再读暂停和停止标志。tokio 1.52.3 的 `Notify::notified` 在创建时记下 `notify_waiters` 的调用次数；创建之后的 `notify_waiters` 会在 poll 时被看到（`tokio-1.52.3/src/sync/notify.rs` 中 `notified` 的说明，以及 `poll_notified` 对调用次数的比较）。暂停中的等待因此能在恢复或停止时返回。
+- 验证沿用本文件 Act Response 的「验证」一节。`cargo test --offline --lib wal::buffer` 退出码 0，`7 passed; 0 failed`。`cargo test --offline --test wal_buffer_test` 在 `#[allow(dead_code)]` 之后退出码 0，`5 passed; 0 failed`，其中 `commit_wait_after_shutdown_returns_ok` 为 ok。这两条就是本 Cycle 的 GREEN 命令。属性与其后的格式调整不改变刷盘路径，不重跑。改前 RED，以及四个既有用例在改前的通过，也沿用该节。`resume_lets_timer_flush` 第一次通过，没有复跑。
+- `tests/wal_buffer_test.rs` 的 `create_wal_buffer` 会 `start_flush_loop`。`commit_wait_after_shutdown_returns_ok` 因此是在循环已经启动并完成 `shutdown` 之后再等待。
+- 本轮用例还包括 `quiesce_flushes_then_pauses_timer`、`resume_lets_timer_flush`、`shutdown_after_quiesce_flushes_paused_records`、`resume_after_shutdown_does_not_flush_by_timer`、`second_shutdown_returns`、`quiesce_does_not_take_session_gate`、`overlapping_do_flush_preserves_record_count`，以及既有的追加、容量刷盘、组提交和 `shutdown` 刷盘四个用例。组提交用例让两个 `append_commit_and_wait` 并发返回，并用 `WalReader::read_all` 读出记录。
 
 **Follow-up Decision**
 
-尚未审查。
+本轮 Acceptance 已经满足，没有要留在当前 Cycle 的修复，也没有需要新执行依据的缺口。Iteration Plan 保持不变。展开下一轮的目录和 `000-initial.md`。
 
 **Next Cycle**
 
@@ -209,4 +221,4 @@ None
 
 **Next Iteration**
 
-None
+`openspec/changes/2026-10-28-ms43-service-lifecycle/iterations/001-session-checkpoint-close/000-initial.md`
