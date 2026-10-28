@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-2026-10-27 用户批准“架构边界与验证基础”批，新增 MS41–MS44，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）：MS41 构建与兼容验证基线为 completed（macOS 按 2026-10-28 用户决定不再等待）；MS42 可组合模块边界为 planned（本机质量检查基线已可通过）；MS43 异步服务状态协作为 planned、依赖 MS42；MS44 统一诊断为 planned、依赖 MS43。本批覆盖 ISS36、I073、I093、I074、I095、I012、I096；I093 按平台与 feature 组合分别承接，I095 保留按需触发边界，不把未触发定制变成必做工作。
+2026-10-27 用户批准“架构边界与验证基础”批，新增 MS41–MS44，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）：MS41 构建与兼容验证基线为 completed（macOS 按 2026-10-28 用户决定不再等待）；MS42 可组合模块边界为 completed（2026-10-28 收尾归档，change `openspec/changes/archive/2026-10-28-ms42-module-boundaries/`）；MS43 异步服务状态协作为 planned、依赖 MS42；MS44 统一诊断为 planned、依赖 MS43。本批覆盖 ISS36、I073、I093、I074、I095、I012、I096；I093 按平台与 feature 组合分别承接，I095 保留按需触发边界，不把未触发定制变成必做工作。
 
 2026-10-25 批次共四个里程碑（2026-10-25 用户批准「查询能力与缺陷收口批」，4 个里程碑上限、全部 10 条 open 缺陷纳入本批；2026-10-26 用户指令把新登记的 ISS39、ISS40 纳入 MS40，不新编号）：**MS37 缺陷台账收口**（completed，2026-10-26，change `2026-10-25-ms37-defect-ledger-closure`）。**MS40 Join 算法补全与 ADD COLUMN 目录面收口**（completed，2026-10-27。ADD COLUMN 目录面 change `2026-10-26-ms40-add-column-catalog` 与 Join 变更 `2026-10-26-ms40-join-smj-and-build-side` 已归档。ISS39、ISS40、ISS41 已关闭（2026-10-27 fixed：ISS39、ISS40 → `openspec/changes/archive/2026-10-26-ms40-add-column-catalog`，ISS41 → `openspec/changes/archive/2026-10-26-ms40-join-smj-and-build-side`）。无硬前置）；**MS38 索引键保序编码评估与字符串二级索引**（completed，2026-10-27，change `2026-10-27-ms38-index-key-encoding-and-string-index` 已归档。ISS36 保持 open）。**MS39 组合索引与范围访问**（completed，2026-10-27，change `2026-10-27-ms39-composite-index-and-range-access` 已归档。ISS36 保持 open）。前路线 MS35–MS36 于 2026-10-25 实施完成（2026-10-23 用户批准，承接 I092、I087；2026-10-24 依赖 MS33 已满足后转 ready）。MS22 于 2026-10-23 superseded 退回 improvements；MS30–MS36 为 completed（2026-10-25 归档，段原文见文件末墓碑）。历史总数曾写作 33（22 completed + 6 superseded + 5 planned，6 个历史段在 carrier `ARC-202609242151`），该算术未按本次状态重算已归档段。初版后统一路线，2026-09-24 规划：MS18-MS27；2026-10-01 用户批准重排，milestone-planner 增补 MS28-MS29 承接 I077/I078/I079 与残留任务；2026-10-19 用户批准底层设计批（依据 improvements 同日优先级排序），milestone-planner 增补 MS30-MS32 承接 I091/I080/I088/I089/I081/I082、执行序前置于 MS22；MS23 于 2026-09-25 完成，MS24 于 2026-09-26 完成〔T04 声明期 DEFAULT 类型校验未实施，2026-10-01 重排并入 MS29-T02〕，MS19 于 2026-09-26 完成，MS18 于 2026-09-26 完成，MS25 于 2026-09-28 完成，MS20 一期于 2026-09-29 完成〔T02 二期跨文件 DML 待后续 change〕，MS21/MS26 于 2026-09-30 完成，MS28 于 2026-10-01 完成，MS29 于 2026-10-01 完成，MS20 于 2026-10-02 完成（T02 二期随 change `2026-10-02-ms20-cross-db-dml` 三 Iteration accepted 归档），MS27 于 2026-10-03 完成（change `2026-10-02-ms27-overflow-integrity` 三 Iteration accepted 归档），MS30 于 2026-10-21 完成（change `2026-10-20-ms30-semantic-binding-differential-net` 四 Iteration accepted 归档——单 change 承载两任务为 2026-10-20 用户指令，T03/T04 为裁定增补段），MS31 于 2026-10-23 完成（change `2026-10-21-ms31-typed-api-param-binding` 三 Iteration accepted 归档——单 change 承载 T01+T02 为 2026-10-21 用户裁定），MS32 于 2026-10-23 完成（change `2026-10-23-ms32-executor-batch-and-query-memory` 四 Iteration accepted 归档——000 生产攒批未过时间门撤回、001 经 replan Cycle；单 change 承载 T01+T02 为计划期裁定）），MS33 于 2026-10-24 完成（change `2026-10-23-ms33-drop-persistence-failure` 两 Iteration accepted 归档——Review 期修正 spec 类属），MS34 于 2026-10-24 完成（change `2026-10-24-ms34-cancellation-timeout-transaction` 两 Iteration accepted 归档——Review 期收窄取消触发来源口径：断开不是取消触发来源），MS35 于 2026-10-25 完成（change `2026-10-24-ms35-free-page-reuse-across-restart` 两 Iteration accepted 归档——空闲页跨重启复用；含一次 replan Cycle，规格增量场景的崩溃点对齐 DDL 语句边界有序落盘），MS36 于 2026-10-25 完成（change `2026-10-24-ms36-legacy-format-and-dump-compat` 两 Iteration accepted 归档——历史库与 dump 兼容；旧格式支持范围按目录行布局代际定义）。★初版达成★。
 
@@ -92,14 +92,14 @@
 
 ### MS42：可组合的模块边界
 
-- **Status**: planned（2026-10-27 用户批准；实施启动前须确认本机质量检查基线可通过，不等待 MS41 的跨平台分支）
+- **Status**: completed（2026-10-28。change `openspec/changes/archive/2026-10-28-ms42-module-boundaries/` 已归档，四个 Iteration 全部 accepted。默认组合与引入 feature 表之前的行为等价；`cli` / `network` / `crypto` 三个可选 feature 的构建门与行为验证集成立。收尾全量按 M19 分批串行执行一次：15 批 / 159 个测试目标，每批退出码 0、failed 为 0，missing / extra / duplicate 三项对账均为 0。六层公共接口与状态归属裁定、诊断报告接口约定分别移交 project-model M21 与 M22，MS43 可直接引用）
 - **Outcome**: 核心与入口层的接口、状态所有权及依赖方向明确，形成有实际用途且已验证的可选构建组合；拆分尺度由独立构建、裁剪或替换收益决定。
 - **Rationale**: I074 的模块边界、I093 的构建组合及 I095 的必要依赖适配服务于同一可组合结果。只划目录或只写接口不能完成该成果；实际消息协作另由 MS43 验收，避免构建依赖问题和运行期生命周期问题混在一轮排障中。
 - **Dependencies**: None（没有整项里程碑前置；本机检查基线是实施启动条件，MS41 完整跨平台结果不是硬前置）
 - **Scope**: 依据实际调用明确核心、存储、事务、规划、执行和入口层的公共接口及状态归属；评估 CLI、网络和加密的可选依赖，形成所选组合的构建与行为验证；约定模块向后续统一诊断报告信息的接口。先在模块内验证边界，有实际收益再拆 crate。I095 仅在本批需求被依赖真实阻碍时，选择公开扩展、最小定制或必要替代，并验证数据库所需行为。
 - **Non-goals**: 固定 crate 数量、全量依赖本地化、没有对象的依赖替换；把已有核心结果与网络协议解耦重复实施；异步协作全面改造、完整诊断系统、新 SQL、流式结果、索引算法及持久格式变更。
 - **Stable result**: 边界和所选构建组合可独立使用，公共接口及状态归属可被 MS43 直接依赖；原有可观察行为与磁盘格式保持。组合验证可使用等价本地流程，不以先建设 CI 为条件。
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-10-28-ms42-module-boundaries/`
 - **Consumes**: I074；I093（本批新增 feature 组合的兼容验证，与 MS41 的平台部分分开）；I095（仅本批实际触发的依赖适配，未触发部分保留候选，不以必须定制依赖作为完成条件）
 - **Split signals**: 拆分出现可独立复用的边界或独立迁移故障域时，由后续计划在本里程碑内保持稳定检查点；若已改变行为、格式或引出新的独立成果，返回范围和路线审议，不将其夹带进结构调整。
 
@@ -163,7 +163,7 @@ MS33 ──→ MS36 历史库与 dump 兼容
 MS37 缺陷台账收口（无前置）──→ MS38 索引键编码与字符串索引 ──→ MS39 组合索引与范围访问
 MS40 Join 算法补全与 ADD COLUMN 目录面两条缺陷（无硬前置；Join 与 ISS39、ISS40 分 change；建议序 MS37 后）
 MS41 构建与兼容验证基线 ✓（macOS 未运行，用户决定不再等待）
-MS42 可组合模块边界 ──→ MS43 异步服务状态协作 ──→ MS44 统一分级诊断
+MS42 可组合模块边界 ✓ ──→ MS43 异步服务状态协作 ──→ MS44 统一分级诊断
 ```
 
 建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 ✓ → MS32 ✓ → MS33 ✓ → MS34 ✓**，同时 **MS33 ✓ → MS35 ✓**、**MS33 ✓ → MS36 ✓**（MS35 与 MS36 互不依赖）。截至 2026-10-26，MS37 及之前的执行序各项已完成。MS22 已 superseded，退回 improvements。MS35、MS36 于 2026-10-25 完成（2026-10-24 依赖 MS33 已满足后转 ready，2026-10-25 实施完成并归档）。MS37 于 2026-10-26 完成（change `2026-10-25-ms37-defect-ledger-closure` 归档）。2026-10-25 新批建议执行序：**MS37 ✓ → MS38 ✓ → MS39 ✓ → MS40 ✓**（MS40 无硬前置，可与 MS38/MS39 换位；2026-10-26 起 MS40 同时承载 ISS39、ISS40，与 Join 分 change。ADD COLUMN 与 Join 两条 change 均已归档，MS40 状态为 completed。ISS39、ISS40、ISS41 已关闭（2026-10-27 fixed：ISS39、ISS40 → `openspec/changes/archive/2026-10-26-ms40-add-column-catalog`，ISS41 → `openspec/changes/archive/2026-10-26-ms40-join-smj-and-build-side`）。MS38 硬依赖 MS37——编码变更改变索引条目格式，ISS26/ISS27 的页级判据与有界读面须先在现格式上收口。MS38 于 2026-10-27 完成，change `2026-10-27-ms38-index-key-encoding-and-string-index` 已归档。MS39 于 2026-10-27 完成，change `2026-10-27-ms39-composite-index-and-range-access` 已归档。2026-10-28 change `2026-10-28-ms41-build-and-compat-baseline` 已归档：Linux 本机质量检查、gnu 冒烟、musl 静态二进制冒烟和一次 M19 分批全量已有结果。macOS 未运行。同日用户原话：「那就不管那个，直接收尾吧，因为我买不起MacBook」，MS41 记为 completed。风险：macOS 没有实测。ISS36 已关闭）。
