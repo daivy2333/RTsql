@@ -19,6 +19,7 @@
 //! / 节点）；定义计划以顶层上下文构建（定义内 ORDER BY / LIMIT / 集合操作 / 表达式
 //! 项 / DISTINCT 经既有装配全量复用）。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

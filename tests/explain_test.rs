@@ -19,6 +19,7 @@
 //! pipeline 构造臂**不构造内层执行器**（DerivedScan 急切物化与任何执行器副作用
 //! 都不触发）；渲染器 `render_plan_tree` 为逐变体纯函数（节点字段直出）。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

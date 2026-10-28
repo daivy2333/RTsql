@@ -17,6 +17,7 @@
 //!   页头 `slot_count` 写成越界值）——不是替身 / 桩；
 //! - 观察对象 = 打开 / 命令返回的错误与进程是否存活（panic ⇒ 用例失败）。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;

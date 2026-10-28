@@ -13,6 +13,7 @@
 //! T1.1：DROP TABLE 后崩溃——对象与 DROP 前的已提交内容仍在，
 //! `check_integrity` 的 error 级发现为 0。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::integrity::{check_integrity, FindingSeverity};

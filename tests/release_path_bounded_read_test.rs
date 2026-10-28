@@ -16,6 +16,7 @@
 //! 且落在**叶页**上）：释放路径按既有语义**计数 + 报出 + 跳过**（处置方向与
 //! 读 / 写路径的点名错误相反）。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;

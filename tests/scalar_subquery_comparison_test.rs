@@ -6,6 +6,7 @@
 //! 拒绝 + 谓词不下推计划形状见证；S18 投影位输出形状与请求一致（未请求列
 //! 不泄漏）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;

@@ -13,6 +13,7 @@
 //! 模型，与 reader 解析正交）。checkpoint 同时把 WAL 截断为 21B 旧格式
 //! Checkpoint 记录，其后的 INSERT 追加新格式帧，构成混合格式流。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

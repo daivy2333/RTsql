@@ -9,6 +9,7 @@
 //!
 //! CLI 臂与信号中断用例见本文件后半（T2/T3 阶段追加）。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

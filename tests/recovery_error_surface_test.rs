@@ -16,6 +16,7 @@
 //! S23 对照：同序列走 `close()` → open 成功、行可见——定向错误面只覆盖
 //! catalog 缺表形态，不误伤正常恢复。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

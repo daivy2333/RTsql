@@ -7,6 +7,7 @@
 //! sequences reproduce the pre-fix defects (update→delete scans resurrect the
 //! pre-update version; flushed uncommitted rows resurrect after restart).
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;

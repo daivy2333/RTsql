@@ -18,6 +18,7 @@
 //! 聚合 / 表达式项 / WHERE——D2 组合布局全量复用），复合节点列名取左侧列名；
 //! 去重与匹配共用 `HashSet<Vec<Value>>`（与 `DistinctExecutor` 同一内核）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

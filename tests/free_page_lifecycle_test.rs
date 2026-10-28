@@ -15,6 +15,7 @@
 //! in-process-crash-simulation.md` R49）、完整性断言沿用
 //! `check_integrity(...).error_count()`。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::free_page_rebuild::arm_free_page_rebuild_fault;

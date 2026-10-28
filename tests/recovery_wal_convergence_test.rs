@@ -13,6 +13,7 @@
 //! - WAL 从未含事务记录的形态（纯读会话、干净库）SHALL 保持零工作跳过；
 //! - redo > 0 的既有收敛路径零变化。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

@@ -28,6 +28,7 @@
 //!   lib   无注册会话零回归                  lib_path_two_part_name_keeps_flat_semantics
 //!   (plan cache 跳过由 src/pipeline.rs 单元测试见证——CLI 无 cache 读路径)
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;

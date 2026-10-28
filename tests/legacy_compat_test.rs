@@ -25,6 +25,7 @@
 //! 本文件是**刻画断言**（characterization）：断言的是当前已成立的既有行为，
 //! 首次运行即 GREEN；产品代码零改动。
 
+#![cfg(feature = "cli")]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;

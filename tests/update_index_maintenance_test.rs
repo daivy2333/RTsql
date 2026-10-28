@@ -16,6 +16,7 @@
 //! - R2 见证：非键列 SET 条目保持；键列原值 SET 条目保持（既有语义锚点，
 //!   变更前后恒 GREEN）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

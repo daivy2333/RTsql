@@ -6,6 +6,7 @@
 //! - 拒绝面：缺库 exit 1（点名库名、零文件创建）、锁冲突经预算 exit 4、
 //!   `--readonly`/`:memory:` 组合 exit 2、加密库错钥 exit 5。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

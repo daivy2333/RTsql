@@ -1,5 +1,6 @@
 //! SQL `CREATE INDEX` on string columns, and equality queries that use them.
 
+#![cfg(feature = "cli")]
 use rtsql::database::Database;
 use rtsql::storage::ColumnType;
 use rtsql::{ColumnMeta, SqlError, SqlOutcome, Value};

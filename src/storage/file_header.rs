@@ -22,9 +22,14 @@ pub const HEADER_SIZE: usize = 64;
 pub const FORMAT_VERSION: u32 = 1;
 /// 加密 flag 位（MS17-T01 激活；置位的文件按加密库处理）
 pub const FLAG_ENCRYPTED: u32 = 1;
-/// 当前构建支持的 flag 位集合。bit0 = encrypted；其余位拒绝——
+/// 当前构建支持的 flag 位集合。加密构建 bit0 = encrypted，其余位拒绝——
 /// 前向防护：不把更新版本的文件当明文库解析（spec「未知特性 flag 拒绝」）。
+#[cfg(feature = "crypto")]
 pub const KNOWN_FLAGS_MASK: u32 = FLAG_ENCRYPTED;
+/// no-crypto 构建不支持任何 flag 位：加密位文件同样按未知 flag 拒绝
+/// （沿用同一前向防护面，不进入加密分支）。
+#[cfg(not(feature = "crypto"))]
+pub const KNOWN_FLAGS_MASK: u32 = 0;
 
 /// magic 标识
 const MAGIC: [u8; 8] = *b"RTSQLDB\0";
@@ -73,7 +78,8 @@ impl FileHeader {
     }
 
     /// 当前构建创建加密新库时写入的头（加密位 + 盐 + KDF 参数编码）。
-    /// 不做值域校验——非法组合的拒绝发生在 `decode`。
+    /// 不做值域校验——非法组合的拒绝发生在 `decode`。仅 crypto 构建。
+    #[cfg(feature = "crypto")]
     pub(crate) fn current_encrypted(salt: [u8; 32], m_kib: u32, t: u32, p: u32) -> Self {
         let mut kdf_params = [0u8; 12];
         kdf_params[0..4].copy_from_slice(&m_kib.to_le_bytes());
@@ -130,30 +136,34 @@ impl FileHeader {
         if page_size != PAGE_SIZE {
             return Err(HeaderError::PageMismatch(page_size));
         }
-        let mut header = FileHeader {
+        let header = FileHeader {
             version,
             flags,
             page_size,
             salt: [0; 32],
             kdf_params: [0; 12],
         };
+        // 加密分支只在 crypto 构建编译；no-crypto 构建掩码为 0，加密位
+        // 文件已在上面的 unknown_flags 判定中拒绝，到达此处 flags 恒为 0。
+        #[cfg(feature = "crypto")]
         if flags & FLAG_ENCRYPTED != 0 {
-            header.salt.copy_from_slice(&buf[20..52]);
-            header.kdf_params.copy_from_slice(&buf[52..]);
-            if header.salt == [0; 32] {
+            let mut encrypted = header;
+            encrypted.salt.copy_from_slice(&buf[20..52]);
+            encrypted.kdf_params.copy_from_slice(&buf[52..]);
+            if encrypted.salt == [0; 32] {
                 return Err(HeaderError::ReservedNonZero("salt"));
             }
-            let (m_kib, t, p) = header.kdf_params();
+            let (m_kib, t, p) = encrypted.kdf_params();
             if super::crypto::validate_kdf_params(m_kib, t, p).is_err() {
                 return Err(HeaderError::ReservedNonZero("reserved"));
             }
-        } else {
-            if buf[20..52].iter().any(|&b| b != 0) {
-                return Err(HeaderError::ReservedNonZero("salt"));
-            }
-            if buf[52..].iter().any(|&b| b != 0) {
-                return Err(HeaderError::ReservedNonZero("reserved"));
-            }
+            return Ok(encrypted);
+        }
+        if buf[20..52].iter().any(|&b| b != 0) {
+            return Err(HeaderError::ReservedNonZero("salt"));
+        }
+        if buf[52..].iter().any(|&b| b != 0) {
+            return Err(HeaderError::ReservedNonZero("reserved"));
         }
         Ok(header)
     }
@@ -213,12 +223,14 @@ mod tests {
         assert_eq!(FileHeader::decode(&buf), Err(HeaderError::NewerVersion(99)));
     }
 
+    #[cfg(feature = "crypto")]
     #[test]
     fn encrypted_header_roundtrip() {
         let header = FileHeader::current_encrypted([7u8; 32], 19456, 2, 1);
         assert_eq!(FileHeader::decode(&header.encode()), Ok(header));
     }
 
+    #[cfg(feature = "crypto")]
     #[test]
     fn encrypted_header_salt_all_zero_rejected() {
         let buf = FileHeader::current_encrypted([0u8; 32], 19456, 2, 1).encode();
@@ -228,6 +240,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "crypto")]
     #[test]
     fn encrypted_header_invalid_kdf_params_rejected() {
         let buf = FileHeader::current_encrypted([7u8; 32], 19456, 0, 1).encode();

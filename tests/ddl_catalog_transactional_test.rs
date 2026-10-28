@@ -22,6 +22,7 @@
 //! 数据面读 `SELECT *` 的行宽（每行的值个数）。不引入身份证明机制、不建框架
 //! 外判定层。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::integrity::{check_integrity, FindingSeverity};

@@ -9,6 +9,7 @@
 //! `RTSQL_HOME` 指向该目录、stdout/stderr 管道（非 TTY → 默认 JSON）、
 //! SQL 负载 ≤128 KiB、60s 兜底等待。
 
+#![cfg(feature = "cli")]
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};

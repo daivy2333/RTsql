@@ -14,6 +14,7 @@
 //! （lib 不经 `RTSQL_HOME`，进程 CWD 不可安全改写）；CLI 侧以 CWD 与
 //! `RTSQL_HOME` 同指独立 TempDir 断言目录零新文件——那是真实的落盘面。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::Value;

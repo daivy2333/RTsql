@@ -6,6 +6,7 @@
 //! 3. truncate 后同句柄追加位置与 get_current_lsn 正确
 //! 4. 并发写后恢复解析完整无错
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::to_response;
 use rtsql::storage::RowId;

@@ -7,6 +7,7 @@
 //! 修复前：所有 DML 写入的 `create_tx_id = 0`，`commit_tx_id` 永为 None，
 //!         `active_transactions()` 永为 0。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::RowId;

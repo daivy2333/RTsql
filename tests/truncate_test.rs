@@ -10,6 +10,7 @@
 //!   R1-S5 空表幂等                          truncate_empty_table_idempotent
 //!   R2-S1 崩溃后行不复活（drop 不 close）    truncate_consistent_across_crash_recovery
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

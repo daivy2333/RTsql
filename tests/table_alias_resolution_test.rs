@@ -18,6 +18,7 @@
 //! - R5 ORDER BY 限定键（`order-by-alias-sorting` 的边界注记终止）。
 //! - `join-output-shape-resolution` 严格解析域：别名限定列可达，裸名歧义仍点名。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

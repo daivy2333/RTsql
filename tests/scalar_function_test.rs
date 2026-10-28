@@ -24,6 +24,7 @@
 //! 表首列被登记为隐式 PK，字符串 Eq 谓词落入 Filter(Scan) 回退返回空结果
 //! 集（pristine master 探针实锤，与函数无关）——测试表加声明 PK 列规避。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;

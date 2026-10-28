@@ -8,15 +8,16 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 
 - **语言**: Rust 2021 edition
 - **构建工具**: Cargo
+- **构建特性**: `[features]`——`default = ["cli", "network", "crypto"]`；`cli` / `network` / `crypto` 三个可选 feature 分别门控 CLI、network 模块与加密能力；`rtsql` 二进制经 `required-features = ["cli"]` 进出构建图
 - **异步运行时**: Tokio (rt-multi-thread, macros, sync, time, net, fs, io-util)
 - **SQL 解析**: sqlparser-rs 0.44
 - **序列化**: serde + serde_json
-- **并发原语**: dashmap, lru, tokio-util
-- **CLI**: clap 4 (derive/env) + clap_complete 4
-- **加密**: argon2 0.6 (Argon2id) + aes-gcm 0.11 (AES-256-GCM)
-- **CSV**: csv 1.4
+- **并发原语**: dashmap, tokio-util（network feature 可选依赖）
+- **CLI**: clap 4 (derive/env) + clap_complete 4（cli feature 可选依赖）
+- **加密**: argon2 0.6 (Argon2id) + aes-gcm 0.11 (AES-256-GCM)（crypto feature 可选依赖）
+- **CSV**: csv 1.4（cli feature 可选依赖）
 - **校验**: crc32fast
-- **测试框架**: criterion.rs (benchmark) + tempfile + rusqlite (对比)
+- **测试框架**: criterion.rs (benchmark) + tempfile + rusqlite (对比)；dev-dependencies 另含 futures / which / libc
 - **格式化**: rustfmt
 - **Lint**: clippy
 - **随机数**: rand 0.8
@@ -82,10 +83,10 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 目录约定
 
 - 源码: `src/`
-- 集成测试: `tests/`（157 个文件；最近一次分批全量 N=159，含 lib、bins 与这些集成测试，14 批，每批 failed 为 0；分批串行执行约束见 project-model M19）
+- 集成测试: `tests/`（158 个文件；最近一次分批全量 N=159，含 lib、bins 与这些集成测试，15 批，每批 failed 为 0；分批串行执行约束见 project-model M19）
 - 单元测试: 各文件内 `#[cfg(test)]`
-- 基准测试: `benches/`（8 套：micro / concurrent / scale / sqlite_compare / single / precise_compare / data_scan / visibility）
-- OpenSpec: `openspec/`（行为规格 `openspec/specs/` 87 域）
+- 基准测试: `benches/`（12 套：micro / concurrent / cache / scale / index_key_encoding / sqlite_compare / data_scan / wal_group_commit / tx_id / visibility / buffer_pool_concurrency / pipeline_stages）
+- OpenSpec: `openspec/`（行为规格 `openspec/specs/` 88 域）
 - 安装脚本: `install.sh`
 - 交叉构建脚本: `build-riscv64-musl.sh`（RISC-V 64 musl 固定 target；产物输出 `dist/`，Git 忽略）
 - 用户文档: `README.md`、`README.zh-CN.md`、`rtsql-docs/SKILL.md`
@@ -104,11 +105,11 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: d0a36292c32c622c0809f252ca11e6118632e837
-- **ahead of origin**: 27
-- **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline/`。
+- **提交基线**: BASELINE_PENDING
+- **ahead of origin**: AHEAD_PENDING
+- **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-10-28-ms42-module-boundaries/`。
 - **最新 tag**: 无
-- **行为规格**: `openspec/specs/` 下 87 个域。
+- **行为规格**: `openspec/specs/` 下 88 个域。
 
 ## 权威文档
 
@@ -118,15 +119,15 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - 参考: `.agents/memory/references.md` (Rxx)
 - 改进: `.agents/memory/improvements.md` (Ixx)
 - 任务与路线: `.agents/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-10-28-ms41-build-and-compat-baseline/`）
+- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-10-28-ms42-module-boundaries/`）
 - Legacy migration carrier: `.agents/legacy/2026-08-25-openspec-init-migration/`
 
-## 行为规格语料（87 域，权威以 `openspec/specs/` 为准）
+## 行为规格语料（88 域，权威以 `openspec/specs/` 为准）
 
 早期域：`dml-transaction-lifecycle`（DML 事务包裹）/ `plancache-key-normalization`（4）/ `wal-writer-handle-reuse`（4）/ `pipeline-stage-decomposition`（8）/ `schema-persistence`（7）/ `drop-table-physical-free`（7，含同进程 free-list 复用与跨重启 drop 安全）/ `planner-module-decomposition`（5）/ `ms07-rest-tx-checkpoint-pushdown`（4：显式事务/位点消费缩 redo/谓词-LIMIT 下推/checkpoint 零工作跳过）/ `storage-io-optimization`（3：页 I/O 位置参数化/零接口零格式变更/预取可选默认关闭）/ `wal-recovery-frame-parsing`（2）/ `database-file-lock`（2：锁等待预算策略化/生命周期释放）/ `wal-recovery-replay-integrity`（6：位置寻址幂等/无键行回退/tail 持久一致/自愈/错误面诚实等）/ `database-file-format-header`（5，含加密头扩展与格式版本产品契约）/ `transaction-isolation-levels`（4）/ `mvcc-tombstone-visibility`（7，含回滚索引还原、哨兵语义与未提交墓碑的键占用澄清）/ `join-executor-selection`（11）/ `correlated-subquery-cache`（6，含绑定期显式报错）/ `planner-key-equality-routing`（4）/ `update-index-maintenance`（5，含 rekey/回滚还原/未命中零副作用）/ `key-column-type-conformance`（1）/ `insert-column-list-mapping`（1，子集排列）/ `table-name-resolution`（4）/ `in-subquery-join-rejection`（2）/ `sql-expression-evaluation`（6）/ `sql-transaction-statements`（5）/ `sql-scalar-functions`（6）/ `datetime-type-system`（7）/ `datetime-functions`（4）/ `group-by-expression`（2）/ `no-from-select`（3）/ `cli-analytics-commands`（4）/ `database-encryption`（4）/ `install-script`（2）/ `riscv64-musl-build`（4）
 
 中期域：`sql-attach-session` / `cross-db-namespace-query`（4，附加库只读边界收窄）/ `create-table-as-select` / `sql-constraint-enforcement`（7，含非 INT PK 拒绝）/ `sql-write-surface`（9，含 INSERT SELECT/DEFAULT 声明期/重复列名/UPDATE 表达式）/ `sql-secondary-indexes`（9，含组合二级索引、范围路由，以及字符串单列与超容量完整值扫描）/ `alter-table-column-evolution`（3）/ `truncate-table`（2）/ `sql-views`（3）/ `readonly-open-mode`（6）/ `in-memory-database`（4）/ `wal-auto-checkpoint`（5）/ `cli-noninteractive-shell`（19）/ `sql-outer-join`（4）/ `select-distinct`（3）/ `sql-set-operations`（4）/ `sql-common-table-expressions`（3）/ `explain-plan-output`（3）/ `sql-aggregate-extensions`（5）/ `order-by-alias-sorting`（3）/ `join-output-shape-resolution`（5）/ `aggregate-output-shape-conformance`（2）/ `error-reporting`（8，含前缀单层与执行器通道）/ `sql-table-alias-resolution`（7）/ `cross-db-dml`（5）
 
-近期域：`catalog-update-persistence`（6）/ `overflow-page-storage`（5）/ `data-integrity-verification`（3，含建表首数据页初始化）/ `sql-differential-testing`（4）/ `sql-semantic-binding`（4）/ `sql-semantics-conformance`（4）/ `typed-library-results`（3）/ `sql-parameter-binding`（2）/ `executor-batch-interface`（2）/ `query-memory-budget`（6）/ `drop-persistence-boundary`（5，含受控 I/O 失败两种恢复结果与释放生命周期归属的移交）/ `statement-cancellation-outcome`（6，含取消触发来源收窄与键释放已知边界）/ `index-write-side-atomicity`（4，含写单元原子性与写侧串行化）/ `ddl-catalog-transactional`（4，含被放弃的 ADD COLUMN 不留下已落盘的列数上调）/ `free-page-lifecycle`（4，含跨重启空闲页重建与释放持久化判定）/ `legacy-format-compat`（5，含按目录行布局代际的旧库支持范围与旧 dump 恢复）/ `index-page-ownership`（3，含页归属唯一性与插入下降终止）/ `ddl-rewrite-consistency`（3，含改写窗口读一致性与墓碑放弃窗口）/ `release-path-bounded-read`（1）/ `release-durability-precondition`（2）/ `index-read-bounded-read`（1）/ `page-read-bounded-read`（1）/ `page-write-bounded-write`（1）/ `write-failure-state`（3）/ `ddl-layout-publication`（5）/ `index-key-encoding-evaluation`（2，编码采用先满足行为一致性再经实测取舍，并保留旧库与既有整数索引边界）
+近期域：`catalog-update-persistence`（6）/ `overflow-page-storage`（5）/ `data-integrity-verification`（3，含建表首数据页初始化）/ `sql-differential-testing`（4）/ `sql-semantic-binding`（4）/ `sql-semantics-conformance`（4）/ `typed-library-results`（3）/ `sql-parameter-binding`（2）/ `executor-batch-interface`（2）/ `query-memory-budget`（6）/ `drop-persistence-boundary`（5，含受控 I/O 失败两种恢复结果与释放生命周期归属的移交）/ `statement-cancellation-outcome`（6，含取消触发来源收窄与键释放已知边界）/ `index-write-side-atomicity`（4，含写单元原子性与写侧串行化）/ `ddl-catalog-transactional`（4，含被放弃的 ADD COLUMN 不留下已落盘的列数上调）/ `free-page-lifecycle`（4，含跨重启空闲页重建与释放持久化判定）/ `legacy-format-compat`（5，含按目录行布局代际的旧库支持范围与旧 dump 恢复）/ `index-page-ownership`（3，含页归属唯一性与插入下降终止）/ `ddl-rewrite-consistency`（3，含改写窗口读一致性与墓碑放弃窗口）/ `release-path-bounded-read`（1）/ `release-durability-precondition`（2）/ `index-read-bounded-read`（1）/ `page-read-bounded-read`（1）/ `page-write-bounded-write`（1）/ `write-failure-state`（3）/ `ddl-layout-publication`（5）/ `index-key-encoding-evaluation`（2，编码采用先满足行为一致性再经实测取舍，并保留旧库与既有整数索引边界）/ `build-feature-combinations`（5，feature 组合下的构建面与核心行为面）
 
 （域内 Requirement 数为当前值；逐域 Requirement/Scenario 正文见各 `spec.md`。）

@@ -6,6 +6,7 @@
 //! LIMIT）与列引用错误语义、R3 lib 直连与 CLI 面一致性抽检。CLI e2e
 //! （真二进制）承载表头 + 行形状 + 拒绝面文案断言。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;

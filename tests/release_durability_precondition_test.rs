@@ -17,6 +17,7 @@
 //! 既有一次性注入点 `Database::arm_io_failure(IoFailPoint::DataWrite)`；断言落在
 //! 页是否仍脏、内容是否落盘、页是否被发放、重开后目录与数据面是否一致。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::integrity::check_integrity;

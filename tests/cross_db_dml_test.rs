@@ -30,6 +30,7 @@
 //!   R8/S9 子查询形态继续拒绝     update_delete_subquery_shapes_still_rejected
 //!   （信号关闭 / close 失败状态保持见 `src/cli/mod.rs` 单元测试）
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::parser::parse_sql;

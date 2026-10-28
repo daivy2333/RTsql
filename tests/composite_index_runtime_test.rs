@@ -1,5 +1,6 @@
 //! 组合索引在取消、只读、内存、加密、附加库和旧库上的 SQL / CLI 证据。
 
+#![cfg(feature = "cli")]
 use rtsql::database::Database;
 use rtsql::storage::integrity::check_integrity;
 use rtsql::storage::StorageError;

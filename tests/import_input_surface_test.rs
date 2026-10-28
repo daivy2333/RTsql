@@ -4,6 +4,7 @@
 //! 子进程 e2e，沿 `tests/cli_test.rs` 的 `run_cli`/`run_cli_stdin` 夹具先例
 //! （RTSQL_HOME 注入 + RTSQL_KEY/RTSQL_BUSY_TIMEOUT 隔离，MS28 D8 校准先例）。
 
+#![cfg(feature = "cli")]
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
