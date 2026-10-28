@@ -1,3 +1,4 @@
+#![cfg(feature = "network")]
 // M8 切换到 PgProtocol (PostgreSQL protocol)，JsonProtocol 测试不再适用
 // 暂时跳过所有测试，等待新的 pg_integration_test
 // 参见 tests/e2e_test.rs 中的 PostgreSQL 协议集成测试

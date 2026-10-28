@@ -8,6 +8,7 @@
 //! (Repeatable Read) path is byte-for-byte unchanged. RED per Plan Context T1:
 //! `open_with_isolation` and `IsolationLevel` do not exist yet (compile RED).
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::transaction::IsolationLevel;

@@ -4,6 +4,7 @@ mod async_storage;
 pub mod btree;
 mod buffer_pool;
 pub mod catalog;
+#[cfg(feature = "crypto")]
 mod crypto;
 pub mod data;
 mod data_page;

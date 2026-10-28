@@ -12,6 +12,7 @@
 //! 可键控 Int 字面量的既有路由形状（`IndexScan` / `Filter(Scan)`）逐字节
 //! 不变（由 `pushdown_test` 两 PK 形状用例锁定，本文件 R3-S1 锁结果）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::executor::PhysicalPlan;
 use rtsql::network::protocol::{to_response, Response};

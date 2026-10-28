@@ -17,6 +17,7 @@
 //! 见 R2-S5 优先级锚点）。dump/restore/import 通道的类型化产出不误报
 //! （R2-S6）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

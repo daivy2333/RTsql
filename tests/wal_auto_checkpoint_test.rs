@@ -18,6 +18,7 @@
 //! 不引入任何旁路探针、旁路计数器或判定层：长度回落、失败点名与数据存
 //! 活全部在测试自身的断言内完成。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::ColumnType;

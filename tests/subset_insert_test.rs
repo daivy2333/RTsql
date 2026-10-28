@@ -12,6 +12,7 @@
 //! 持久化跨重启生效（dump/schema 渲染见 cli_test 增量）；全列清单与无清单
 //! 行为不变。dump→restore 往返保真由 cli_test 增量见证（S6）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

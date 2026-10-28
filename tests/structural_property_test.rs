@@ -11,6 +11,7 @@
 //! 3. 版本链可见性不变量：经 lib 显式事务的写入/更新/删除/回滚序列后，
 //!    可见行集与串行执行模型一致。
 
+#![cfg(feature = "network")]
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rtsql::database::Database;

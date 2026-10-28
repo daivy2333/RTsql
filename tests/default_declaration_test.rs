@@ -14,6 +14,7 @@
 //! 类型点名拒绝零副作用；TypedString 在日期族列上解析接受（目录形态与
 //! String 声明同态）、非日期族维持拒绝；ALTER ADD COLUMN 同款。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::{Path, PathBuf};

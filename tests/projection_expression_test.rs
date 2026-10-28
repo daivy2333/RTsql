@@ -11,6 +11,7 @@
 //! COALESCE/CAST 走 extract_columns 拒绝）；`SELECT 42 FROM t` 恒等回退
 //! 返回全 schema 行。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;

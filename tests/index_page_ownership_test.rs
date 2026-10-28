@@ -17,6 +17,7 @@
 //! 与 `src/wal/checkpoint.rs` 第 2 步同一条）；树形读面沿用
 //! `InternalNodeRef` 的公开读面。
 
+#![cfg(feature = "network")]
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

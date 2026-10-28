@@ -1,5 +1,6 @@
 //! 字符串二级索引在取消、超时、失败、重开和几种运行形态下的 SQL / CLI 证据。
 
+#![cfg(feature = "cli")]
 use rtsql::database::Database;
 use rtsql::storage::integrity::check_integrity;
 use rtsql::storage::StorageError;

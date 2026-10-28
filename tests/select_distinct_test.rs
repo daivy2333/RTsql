@@ -18,6 +18,7 @@
 //! 标量子查询项 × DISTINCT 计划期点名拒绝（SubqueryEval 在 Limit 之上插列，
 //! 链位冲突）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

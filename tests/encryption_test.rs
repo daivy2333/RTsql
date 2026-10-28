@@ -7,6 +7,7 @@
 //! migration path at lib level (CLI end-to-end is witnessed by the T5
 //! cli_test group).
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::StorageError;

@@ -17,6 +17,7 @@
 //! 输出名：`count_distinct_{col}` / `sum_distinct_{col}` / `avg_distinct_{col}` /
 //! `group_concat_{col}`。多组行序经 HashMap 分桶非确定：多组断言带 ORDER BY。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

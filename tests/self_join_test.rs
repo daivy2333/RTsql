@@ -14,6 +14,7 @@
 //! - Hash 与 NLJ 两执行器输出行（含外连接补齐行）按计划期显式侧标志归属，
 //!   自连接投影各读对应侧行；非自连接全部形态零回归。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

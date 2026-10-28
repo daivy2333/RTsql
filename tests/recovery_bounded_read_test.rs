@@ -21,6 +21,7 @@
 //! - 观察对象 = 打开结果、进程是否存活、stderr 文本（断言落在**行为**上，
 //!   不断言尚不存在的错误变体类型）。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;

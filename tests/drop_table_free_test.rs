@@ -4,6 +4,7 @@
 //! 将该表的 data page 链与 BTree 索引页释放到 `FileStorage::free_pages`，
 //! 使同进程内后续 `create_table` 复用 free-list（`file_len` 不再单调递增）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::page_format::ColumnType;

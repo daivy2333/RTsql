@@ -11,6 +11,7 @@
 //! 夹具说明：CREATE TABLE / CREATE INDEX 后显式 `checkpoint()` 使 catalog 页
 //! 落盘（DDL 无 WAL 记录，引擎持久化模型——wal_recovery_large_test.rs 先例）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

@@ -6,6 +6,7 @@
 //! PK paths are unchanged, and query results are identical to the
 //! pre-pushdown behavior (numeric / string / AND-chain / NULL boundaries).
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::executor::PhysicalPlan;
 use rtsql::network::protocol::{to_response, Response};

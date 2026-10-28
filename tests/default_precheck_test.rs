@@ -6,6 +6,7 @@
 //! 同名可重试；边界值（页容量内的大字面量）与全类型小字面量放行；
 //! ALTER TABLE ADD COLUMN 同款预检。夹具模式对齐 tests/e2e_test.rs。
 
+#![cfg(feature = "cli")]
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};

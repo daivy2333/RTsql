@@ -30,6 +30,7 @@
 //! 「`__columns` 少一行」——两列表删一列得到的是 1 ⇒ 与该断言矛盾。此处按
 //! **断言**取三列表（删第三列 ⇒ 窄化后 2 列 2 行定义），使断言自洽。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::executor::ddl_commit_window::{arm_ddl_commit_window, CommitWindowGate};
 use rtsql::network::protocol::{to_response, Response};

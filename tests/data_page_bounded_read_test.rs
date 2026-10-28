@@ -16,6 +16,7 @@
 //!   `0xFFFF`；T17：把页头的 `slot_count` 字段写成越界值）——不是替身 / 桩；
 //! - 观察对象 = 语句返回的错误与进程是否存活（panic ⇒ 用例失败）。
 
+#![cfg(feature = "network")]
 use std::path::{Path, PathBuf};
 
 use rtsql::database::Database;

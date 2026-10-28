@@ -6,6 +6,7 @@
 //! 子目录（CLI 不建目录，父目录缺失按契约报错退出 1）。stdout/stderr 始终
 //! 为管道（非 TTY），因此默认格式为 JSON。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::page_format::ColumnType;

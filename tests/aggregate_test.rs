@@ -1,5 +1,6 @@
 //! End-to-end tests for aggregate functions, GROUP BY, and HAVING.
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;

@@ -8,22 +8,19 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util", "signal"] }
 async-trait = "0.1"
-clap = { version = "4", features = ["derive", "env"] }
-clap_complete = "4"
+clap = { version = "4", optional = true, features = ["derive", "env"] }
+clap_complete = { version = "4", optional = true }
 thiserror = "1.0"
-anyhow = "1.0"
-futures = "0.3"
 sqlparser = "0.44"
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", optional = true, features = ["rt"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rand = "0.8"
-lru = "0.12"
 crc32fast = "1.4"
 dashmap = "6"
-csv = "1"
-argon2 = "0.6"
-aes-gcm = "0.11"
+csv = { version = "1", optional = true }
+argon2 = { version = "0.6", optional = true }
+aes-gcm = { version = "0.11", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
@@ -31,6 +28,18 @@ rusqlite = "0.31"
 tempfile = "3.0"
 which = "6.0"
 libc = "0.2"
+futures = "0.3"
+
+[features]
+default = ["cli", "network", "crypto"]
+cli = ["dep:clap", "dep:clap_complete", "dep:csv"]
+network = ["dep:tokio-util"]
+crypto = ["dep:argon2", "dep:aes-gcm"]
+
+[[bin]]
+name = "rtsql"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [[bench]]
 name = "micro_bench"

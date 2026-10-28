@@ -21,6 +21,7 @@
 //!   R3/S1 lib path rejected               execute_sql_rejects_attach_without_touching_plan_cache
 //!         (and inside a transaction)      execute_in_tx_rejects_attach_and_transaction_stays_usable
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::transaction::IsolationLevel;

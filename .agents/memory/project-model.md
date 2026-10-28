@@ -298,4 +298,40 @@
 - **状态**: active
 - **Legacy**: 无
 
+## M21: 六层公共接口与状态归属契约
+
+- **分类**: architecture
+- **范围**: 入口 / 核心 / 规划 / 执行 / 存储 / 事务六层的公共接口面、状态归属与依赖方向
+- **不变量**:
+  - 六层与各自对外公共接口面：入口（`cli/`、`network/`、`main.rs`——CLI 进程退出码与四格式输出合同；lib 面 `rtsql::cli::run()` 供 bin 装配；network 的 `Server::new`/`shutdown_token`、`network::protocol::to_response`、PgProtocol/JsonProtocol）、核心（`database.rs`、`pipeline.rs`、`plan_cache.rs`、`result.rs`、`profiling.rs`——`Database` open 家族与显式事务 API、`checkpoint()`、`prepare`/`PreparedStatement`、`set_query_memory_limit`；pipeline 的 parse/plan/execute 族与 `AttachRoute`/`RoutedTables`、`infer_ctas_column_types`；`SqlOutcome`/`SqlError`/`ColumnMeta`；`with_profiling_scope`/`is_profiling_enabled`；`PhysicalPlan`）、规划（`parser/` 七模块——`parse_sql`、`PlanBuilder`、`PlanError`、attach 与 transaction 语句分类面）、执行（`executor/`——`Value`、`ColumnType` 与 `datetime` 编码、`Executor` trait 与 `next_batch`、`query_budget` 预算面、32+ 执行器与 `ExplainExecutor`；渲染模块 `plan_format` 为执行层私有，不属对外公共面）、存储（`storage/`、`wal/`——`AsyncStorage` trait、`BufferPool`、`TableManager`/`TableMeta`、`IndexManager`、catalog 与页格式词表、`check_integrity`、`StorageError`；`WalWriter`/`WALBuffer`/`CheckpointManager`/Recovery）、事务（`transaction/`——`TransactionManager`、`TransactionId`、`Snapshot`/`IsolationLevel`、`VersionHeader`、`TransactionSession`、`abort_by_id`/`discard_tx_version_tables`）
+  - 入口层消费核心与各层 pub 面，不被任何层引用（network、cli 均为叶子）
+  - 会话级可变状态统一归 `Database` 协调器所有（`Arc` 共享，克隆共享全部可变态）；字段清单以 `pub struct Database` 的 15 个结构体字段为准
+  - `plan_cache` 读写独占 pipeline；`schema_version` 单点递增在 pipeline `bump_schema_version`；克隆共享、open 归零、不持久化
+  - `wal_buffer` 是唯一「三层持有入口」的字段（执行器写路径直接追加 + TransactionManager 内部槽 + CLI shutdown），归属仍为 Database；异步协作改造以本清单为起点
+  - `views` 注册表归 Database，planner 持有注入快照副本（非共享 Arc）；`io_failpoint` 打开期定型，主库 FileStorage 与 WalWriter 共享同一单元，ATTACH 附加库各自独立
+  - 会话级后台对象（WALBuffer 后台 flush/Notify、WalWriter 句柄与水位、TransactionManager 内部登记、BufferPool 并发结构、IndexManager 写侧闸门）归属其宿主管理器，生命周期随 `Database` 实例
+  - ATTACH 会话状态归入口层 CLI（`AttachSession`）——现存跨层归属先例：会话概念归入口，逐语句路由归核心
+  - 允许依赖方向：入口 → 核心 → {规划, 执行} → {存储, 事务, 持久化}；规划 → 执行（计划词表供给）；result 与 profiling 为零环跨切面
+  - 现存依赖环保留，处置为拆 crate 前置约束：环 1a（database→pipeline→executor→database——须把 executor 对 `Database` 的依赖面收敛为 trait 或参数包）、环 1b（executor↔pipeline——须为子查询重建臂的装配协议做专项设计）、环 1c（database↔transaction——须裁定 `TransactionSession` 执行臂注入方式）、环 2（storage↔transaction——须把 `Value`/`ColumnType` 词表归属下沉）
+  - 新增代码不得引入新的跨层环边
+  - 词表归属遗留决策：`Value` 在 `executor/value.rs`、`ColumnType` 在 `storage/page_format/tuple.rs` 与 `executor/value.rs`（两个同名类型分属存储与执行两层；lib 根重导出执行层版 `rtsql::ColumnType`，存储层版为 `rtsql::storage::ColumnType`）、`PhysicalPlan` 在 `executor/plan.rs`、`datetime` 在 `executor/datetime.rs`；归属调整属 crate 拆分 change 的专项设计
+- **证据**: `openspec/changes/archive/2026-10-28-ms42-module-boundaries/design.md` §5（六层接口、状态归属裁定、依赖方向与环清单；长期理由与逐条消费面数字以该 design 为准）；实施后代码事实的逐项核对见该 change 的 `iterations/003-combination-matrix-and-full-regression/000-initial.md` Plan Review
+- **状态**: active
+- **Legacy**: 无
+
+## M22: 模块向统一诊断报告信息的接口约定
+
+- **分类**: architecture
+- **范围**: 诊断信息的产生、采集与交付边界（面向 MS43 协作改造与 MS44 统一诊断衔接）
+- **不变量**:
+  - 统一门面：后续统一诊断经单一门面模块（约定名 `rtsql::diagnostics`）收发；各模块不得再新增 `eprintln!`/`println!` 直写出口
+  - 数据模型：`DiagnosticRecord { severity（分级枚举，名称由 MS44 定）、category（模块/阶段标识）、message、data（可选键值：耗时、资源计数） }`；分事件记录与性能统计两类；阶段计时沿用 `with_profiling_scope` 的 scope 语义（阶段 + 算子两级）
+  - 交付 API：`diagnostics::report(record)`（同步投递，门面决定丢弃/缓冲/输出，模块不得自持输出）与 `diagnostics::scope(name) -> ScopeGuard`；MS44 实现时可收敛参数与返回形态，但不得把输出决策移回模块
+  - 职责边界：模块产生自身事件与统计（模块自己持有阶段语义）；门面独占配置（详细程度/观察模块/采集内容三分离，对齐 I096）、跨异步上下文关联与输出限量；诊断只观察，不改变事务结果、不替代行为断言
+  - 迁移原则：现存 34 个 `eprintln!`/`println!` 直写出口（排除 `cfg(test)`）由 MS43/MS44 按域增量迁移——分布为 table_manager 12、wal/recovery 6、profiling 5、btree/index_manager 4、network/server 3、executor/drop_index 2、data_page 1、database 1；「用户可见 stderr 告警」的有无变化属行为变化，须由承载 change 的 spec 增量明示，不得借诊断名义静默吸收；`profiling.rs` 并入门面作计时提供方，4 个产品接线点语义保持
+  - 与错误通道的关系：错误继续走 `Result` 返回值（错误不是诊断事件）；SQLSTATE 三源分类不变
+- **证据**: `openspec/changes/archive/2026-10-28-ms42-module-boundaries/design.md` §6（诊断报告接口约定与现状出口清单；长期理由以该 design 为准）；实施后代码事实的逐项核对见该 change 的 `iterations/003-combination-matrix-and-full-regression/000-initial.md` Plan Review
+- **状态**: active
+- **Legacy**: 无
+
 <!-- arc: ARC-202609241843b --> 2 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609241843b/proposal.md

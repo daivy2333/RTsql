@@ -1,3 +1,4 @@
+#![cfg(feature = "network")]
 // BTree 多页规模正确性测试（Cycle 002-rework）
 //
 // 覆盖 R-T0b-R2（最小键搜索盲区）、R-T0b-R3（delete Page-full 泄漏）、

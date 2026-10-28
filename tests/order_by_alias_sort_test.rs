@@ -19,6 +19,7 @@
 //! SortExecutor 对表达式键逐行 decorate（owned `evaluate`，求值错误经 `Result`
 //! 传播）→ 按键序比较 → undecorate 回输入行形态，再施加既有投影裁剪。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

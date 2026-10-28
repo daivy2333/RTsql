@@ -5,6 +5,7 @@
 //! on page 0 / 1), and that `Database::open` rebuilds the in-memory
 //! `TableManager` cache from the catalog on restart.
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::to_response;
 use rtsql::storage::page_format::ColumnType;

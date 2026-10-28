@@ -12,6 +12,7 @@
 //! n..n+m）求值完整 ON 谓词，三值语义下非 Unknown 非假的组合按
 //! output_columns 产出。测试表全部为非 PK 表（规避键路由交互面）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::executor::{
     inject_correlated_values, ColumnExpression, ComparisonOp, ComparisonPredicate, FilterNode,

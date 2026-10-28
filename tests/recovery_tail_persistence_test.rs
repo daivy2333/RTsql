@@ -13,6 +13,7 @@
 //! 4080 − 4064 − 6 = 10B < 28B（墓碑 = 22B header + 0 tuple + 6B slot 目录）
 //! → DELETE 墓碑必然分配新页；每页恰一行，5 行跨 5 页。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

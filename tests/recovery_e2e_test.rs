@@ -8,6 +8,7 @@
 //! 2. RecoveryManager correctly classifies committed/aborted/uncommitted txns
 //! 3. When tables are recreated after restart, data pages are accessible
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::wal::{RecoveryManager, WalReader, WalRecord};
