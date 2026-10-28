@@ -224,4 +224,42 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+独立阅读 `875a3ab1ae519c4c8b831691a63cfb7a9b323a00...HEAD` 的 diff。HEAD 为 `a74c0b07c0b1ef672c5a33e1e47fc242f80ee9d6`，工作区干净。产品 diff 只有 `README.md` 与 `README.zh-CN.md`。没有 Rust 源码、`Cargo.toml` 或 `Cargo.lock` 改动。
+
+T3、T4 的构建和冒烟沿用 Act Response（`Status: reported`，提交 `a74c0b0`）。本 Cycle 没有再改这些命令覆盖的代码，本次不重跑两次冒烟。静态判定的原句和任务预写的子串不一致，所以对仍在的 `target/x86_64-unknown-linux-musl/release/rtsql` 补看了 `file` 和 `ldd`。`file` 的原句是 `ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, not stripped`。`ldd` 退出码 0，原句是 `statically linked`。与 Act Response 记录的两句相同。
+
+`file` 不含 `statically linked`，`ldd` 不含 `not a dynamic executable`。按 T4 的停止条件，这两个子串都缺失时要停下来回到计划，不开始 T5。Act 没有停，把 `ldd` 的 `statically linked` 当作静态判定，并写了 README。偏差原因是 Plan 错误和 Act 偏离：计划把 `statically linked` 派给 `file`，把 `not a dynamic executable` 派给 `ldd`；这台机器上的 `file` 对静态 PIE 写 `static-pie linked`，`ldd` 写 `statically linked`。
+
+这不阻塞 R4。proposal 第 4 条要的是 `file` 或 `ldd` 显示静态链接。两句原话都是静态链接：`static-pie linked` 是 file 对没有动态解释器的 PIE 的说法，`ldd` 的原句就是 `statically linked`。本 Cycle 的 Verification 把静态依据定为这两条原句。README 引用的是实际看到的 `ldd` 原句，没有写成不存在的 `not a dynamic executable`。冒烟的退出码和查询子串仍以 Act Response 为准。为了凑出旧子串去改链接参数，任务已经禁止。
+
+T3 有一处已经收回的环境偏差。第一次构建时 `CARGO_TARGET_DIR` 指向沙箱缓存，产物不在 `target/release/rtsql`。取消该变量后同一命令再次构建，退出码 0。记录下来的 T3 结果和冒烟用的都是计划路径上的二进制。这不留下缺口。
+
+T5 的六处与记录一致。开头第 2 段、构建节新增段和已知限制第一条，中英文都写了 gnu 构建命令、路径含 `/` 的临时库、三条 SQL、查询子串 `{"columns":["id"],"rows":[[1]]}`、musl 命令、链接器路径、`+crt-static` 和 `ldd` 原句 `statically linked`，并写明 macOS 本次未运行。已知限制仍保留 Windows 文件 I/O 未实现，以及 RISC-V 交叉构建未在硬件上运行。构建节原有的 `cargo build --release` 示例还在，没有改写成这次跑过 `cargo test --no-fail-fast`。gnu 与 musl 已运行，macOS 未运行，两份文档的完成状态一致。
+
+没有阻塞 Acceptance 的发现。当前 change 范围外没有新的实质缺陷。
+
+**Evidence**
+
+沿用 Act Response（`Status: reported`，提交 `a74c0b0`）的冒烟和环境复查。这些结论产生后，`src/`、`Cargo.toml` 和 `Cargo.lock` 没有变化。本次不重跑构建和四次二进制调用。
+
+- T3：`cargo build --locked --offline --release --bin rtsql` 退出码 0。`target/release/rtsql new` 与三条 `--format json` SQL 退出码都为 0。`SELECT` stdout 为 `{"columns":["id"],"rows":[[1]]}`。库路径 `/tmp/tmp.8k2qojAEig/smoke.db`。
+- T4：`rustup target add x86_64-unknown-linux-musl` 退出码 0。带链接器环境变量、`--target x86_64-unknown-linux-musl` 和 `+crt-static` 的 `cargo rustc` 退出码 0。musl 二进制对 `/tmp/tmp.A4zdYxRdk1/smoke.db` 的 `new` 与三条 SQL 退出码都为 0，`SELECT` stdout 相同。
+- 本次补看：`file target/x86_64-unknown-linux-musl/release/rtsql` 为 `static-pie linked`；`ldd` 退出码 0，原句 `statically linked`。
+- T5 复查沿用 Act Response：`uname -srm` 为 `Linux 6.18.40.1-microsoft-standard-WSL2 x86_64`。已安装 target 没有名称含 `apple` 或 `darwin` 的项。三个 Darwin 链接器的 `command -v` 退出码都是 1。macOS 未完成。
+- 六处 README 为本次直接阅读，见 Findings。Persisted Evidence 为 none。未因缺少 evidence 目录提出问题。
+
+**Follow-up Decision**
+
+R3、R4、R5、R7 都有与代码和文档一致的结果。musl 的工具子串和计划预写的不同，但原句已经表明静态链接，文档引用的也是这句原话。既有 Acceptance 满足，Iteration Plan 保持不变。不创建后继 Cycle。Iteration 002 仍只写在 `tasks.md`，本 Review 不展开它。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`tasks.md` 的 Iteration 002（分批全量，T6）。目录未创建。
