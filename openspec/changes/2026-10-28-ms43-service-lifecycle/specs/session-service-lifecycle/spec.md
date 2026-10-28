@@ -38,9 +38,9 @@
 
 #### Scenario: 循环停止后的提交等待返回成功
 
-- **GIVEN** `shutdown` 已经返回
+- **GIVEN** `shutdown` 已经返回，之后又 `append` 了一条未达容量的记录
 - **WHEN** 调用 `append_commit_and_wait`
-- **THEN** 调用在 2 秒内返回 `Ok(())`，且 WAL 可被完整读出
+- **THEN** 调用在 2 秒内返回 `Ok(())`，该记录出现在 WAL 中，且 WAL 可被 `WalReader` 完整读出
 
 ### Requirement: checkpoint 与关闭对刷盘循环的责任
 
