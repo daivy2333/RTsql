@@ -6,7 +6,7 @@
 
 - 需求与 BDD：completed。
 - 000：执行依据是 `iterations/000-quality-gates/000-initial.md`。Plan Context 为 ready。T1、T2 已完成，Act Response 为 reported。Review Result 为 accepted。
-- 001：只存在于本文件的 Iteration Plan，尚未展开 Cycle。
+- 001：执行依据是 `iterations/001-host-and-musl/000-initial.md`。Plan Context 为 ready。T3、T4、T5 尚未实施。
 - 002：只存在于本文件的 Iteration Plan，尚未展开 Cycle。
 - Persisted Evidence：none。
 - 无跳过项。
@@ -29,8 +29,8 @@
 
 ## 2. 目标平台运行
 
-- [ ] 2.1 T3：`cargo build --locked --offline --release --bin rtsql` 退出码 0。`target/release/rtsql --format json <含斜杠的临时库>` 依次执行 `CREATE TABLE t (id INT)`、`INSERT INTO t (id) VALUES (1)`、`SELECT id FROM t`。三条退出码都为 0。查询 stdout 包含 `{"columns":["id"],"rows":[[1]]}`。
-- [ ] 2.2 T4：缺失时 `rustup target add x86_64-unknown-linux-musl`。然后执行 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static`。`file` 含 `statically linked`，或 `ldd` 报告不是动态可执行文件。再用 `target/x86_64-unknown-linux-musl/release/rtsql` 重复 T3 的三条命令，通过条件相同。环境缺失或链接器不可用时记录命令与错误，不改依赖，该分支保持未完成。项目或依赖的编译错误则停止并回到计划。
+- [ ] 2.1 T3：`cargo build --locked --offline --release --bin rtsql` 退出码 0。临时库放在 `mktemp -d` 下，路径含 `/`，且不写入 `~/.rtsql`。主命令对不存在的库退出码为 1，所以先执行 `target/release/rtsql new <该路径>`，退出码 0，再用 `target/release/rtsql --format json <该路径>` 依次执行 `CREATE TABLE t (id INT)`、`INSERT INTO t (id) VALUES (1)`、`SELECT id FROM t`。三条 SQL 退出码都为 0。查询 stdout 包含 `{"columns":["id"],"rows":[[1]]}`。
+- [ ] 2.2 T4：缺失时 `rustup target add x86_64-unknown-linux-musl`。然后执行 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static`。`file` 含 `statically linked`，或 `ldd` 报告不是动态可执行文件。再用 `target/x86_64-unknown-linux-musl/release/rtsql` 对另一个临时库重复 T3 的 `new` 和三条 SQL，通过条件相同。环境缺失或链接器不可用时记录命令与错误，不改依赖，该分支保持未完成。项目或依赖的编译错误则停止并回到计划。
 - [ ] 2.3 T5：复查 `uname`、已安装 rustup target 和 Darwin 链接器。没有 macOS 执行环境则在 Act Response 记未完成。按 T3 与 T4 的实际结果更新 `README.md` 和 `README.zh-CN.md` 的构建与支持段落。未运行的平台不写成已验证。
 
 ## 3. 全量回归
@@ -90,4 +90,4 @@
 
 ## Gate 2
 
-PASS。无 BLOCKED。无 SKIPPED。批准来自本次目标对已通过 Gate 2 的计划的授权，不是跳过。当前 Cycle 的 Plan Context 为 ready。
+PASS。无 BLOCKED。无 SKIPPED。001 的批准来自本次目标对展开该 Iteration 的授权，不是跳过。当前 Cycle 是 `iterations/001-host-and-musl/000-initial.md`，Plan Context 为 ready。
