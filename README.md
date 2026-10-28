@@ -4,7 +4,7 @@
 
 RTsql is an embedded relational database written in Rust. It uses Tokio tasks for asynchronous I/O, stores each database in one main file, and provides a one-shot CLI for SQL execution and database management.
 
-This repository currently targets Linux and macOS and can cross-build static RISC-V 64 Linux (musl) binaries. It does not require a database server.
+On 2026-10-28, Linux x86_64 `cargo build --locked --offline --release --bin rtsql` produced a release binary. That binary created a temporary database at a path containing `/`, then ran `CREATE TABLE t (id INT)`, `INSERT INTO t (id) VALUES (1)`, and `SELECT id FROM t`. The query output contained `{"columns":["id"],"rows":[[1]]}`. The same statements completed with a static `x86_64-unknown-linux-musl` binary built by `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static`. `ldd` reported `statically linked`. macOS was not run. The repository can cross-build static RISC-V 64 Linux (musl) binaries. It does not require a database server.
 
 ## Quick start
 
@@ -330,6 +330,8 @@ cargo bench
 
 The repository also contains Criterion benchmarks and SQLite comparison benchmarks under `benches/`. RISC-V 64 Linux (musl) artifacts are produced by `build-riscv64-musl.sh`; see [Cross-build for RISC-V 64 Linux (musl)](#cross-build-for-risc-v-64-linux-musl).
 
+On 2026-10-28, Linux x86_64 `cargo build --locked --offline --release --bin rtsql` produced a release binary. That binary created a temporary database at a path containing `/`, then ran `CREATE TABLE t (id INT)`, `INSERT INTO t (id) VALUES (1)`, and `SELECT id FROM t`. The query output contained `{"columns":["id"],"rows":[[1]]}`. The same statements completed with a static `x86_64-unknown-linux-musl` binary built by `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static`. `ldd` reported `statically linked`. macOS was not run.
+
 ## Performance and resource comparison
 
 Measured 2026-09-24 on an Intel i9-13900HX (32 threads) Linux machine: RTsql 0.1.0 (release build) versus SQLite 3.37.2 (system `libsqlite3` linked via `rusqlite`, plus the `sqlite3` CLI). Both engines run with default settings on the same synthetic `bench (id INTEGER PRIMARY KEY, name TEXT, value INTEGER)` table; RTsql auto-commits each statement through its WAL while SQLite uses its default rollback journal. These are single-machine observations, not benchmark guarantees.
@@ -360,7 +362,7 @@ Reading the numbers: RTsql's per-statement insert path and index lookups are fas
 
 ## Known limitations
 
-- Linux and macOS hosts are supported; Windows file I/O is not implemented. RISC-V 64 Linux is delivered as a static musl cross-build artifact and has not been validated on real RISC-V hardware.
+- On 2026-10-28, Linux x86_64 `cargo build --locked --offline --release --bin rtsql` produced a release binary that created a temporary database at a path containing `/` and ran `CREATE TABLE t (id INT)`, `INSERT INTO t (id) VALUES (1)`, and `SELECT id FROM t`. The query output contained `{"columns":["id"],"rows":[[1]]}`. The same statements completed with a static `x86_64-unknown-linux-musl` binary built by `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static`. `ldd` reported `statically linked`. macOS was not run. Windows file I/O is not implemented. RISC-V 64 Linux is delivered as a static musl cross-build artifact and has not been validated on real RISC-V hardware.
 - Only the main database file is encrypted. WAL, checkpoint, and dump output remain plaintext.
 - There is no in-place plaintext/encrypted conversion; use `dump` and `restore`.
 - Key rotation, a key-management subcommand, key caching, and `--password-file` are not included.
