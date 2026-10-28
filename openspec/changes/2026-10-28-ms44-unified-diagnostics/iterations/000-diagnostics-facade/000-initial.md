@@ -120,4 +120,46 @@ None。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+独立阅读完整 diff（merge-base e69c7e2 到 HEAD 1081a5f；merge-base 到 3534e0e 之间无产品代码改动，产品代码全部位于 1081a5f）与四个改动文件的当前代码，逐项核对 Act Response 声明：
+
+- 声明与代码一致：`src/diagnostics.rs` 公开面（`Detail`/`Module`/`ModuleSet`/`Collect`/`DiagnosticsConfig` 默认 64/32、`Record` 恰好四字段、`ScopeEnd`→`Severity` 映射、`render`/`record_pre_measured`/`statement`）与 Act Response 「实际改动」逐条对应；摘要形成收敛在私有 `record_statement` 单点，`statement` 作用域结束与预量入口共用同一计算（`StatementScope::record` 构造根阶段后调 `record_statement`），与「同一套计算」声明一致。
+- 语义逐项复核代码：独占 = `inclusive.saturating_sub(直接子阶段包含之和)`；事件超限 `drain` 最旧并计 `dropped`，stages 不受影响；摘要超限 `drain` 最旧；SQL `chars().take(80)`；类别过滤逐节点独立判定、被过滤节点的子阶段仍递归判定（Wal `commit` 在 pipeline 被排除时保留）；`Detail::Off` 时摘要照常入会话、`render` 返回空串；`end_ok`/`end_err` 消费 `inner`，`Drop` 分支 `take` 后判空，无双重记录路径。
+- Preserve 全部成立：`Database` 仍 `#[derive(Clone)]`，新增 `diagnostics: Arc<…>` 随 Clone 共享；`open`/`execute_sql` 签名与行为为纯增量（构造器初始化 + 两个新方法）；`src/profiling.rs` 不在 diff 中；无任何 stderr 调用点文件被触碰（diff 仅 4 个产品文件 + change 文档）。
+- Forbidden 全部成立：`pipeline.rs`/`wal/`/`storage/`/`transaction/`/`executor/` 不在 diff；`Cargo.toml` 未改（无新 crate）；无 CLI/SQL 语法变化；`Record`/`Summary` 无操作标识、运行标识或内容哈希字段（`public_record_has_no_identity_field` 以四字段字面量构造并编译通过佐证）；`src/diagnostics.rs` 与测试文件 grep 无 `eprintln`/`stderr`/`print!`（模块 import 仅 `std`）；诊断未接入 `execute_sql` 路径（数据库侧只有会话槽与读写方法，符合「不接语句管道」）；Act 只跑了单测试二进制，未跑全量。
+- 测试文件包含 GREEN condition 列出的全部 10 个测试，名称逐一对应；断言为精确值（精确 `Duration`、精确字符串、精确计数），无因错误原因通过的形态；`default_session_execute_has_empty_summaries` 走真实入口（tempdir + `Database::open` + `execute_sql("SELECT 1")`）。
+- Act 的文档改动限于其自身区域（本文件 Act Response、`tasks.md` 的状态行与 1.1 勾选），无越权写入。
+
+非阻塞 Minor finding（记录，不返工）：
+
+1. Act Response 章节标题为中文变体（「实际改动」「与计划的偏差」等）而非 Cycle 模板的英文章节名。语义齐全（Status/Implemented/Deviations/Self-Review/Verification Evidence/Persisted Evidence/Experience Candidates/Remaining Issues 均有对应内容），按公共规则 › 通用能力 属平台适配，不构成偏差。
+2. 两处记录性说明（固定树多 `plan` 5ms 叶子、`detail_off` 测试增加 Summary 档对照断言）经代码核对属实，且均 strengthening 测试（前者使类别过滤断言可判定，后者防止空字符串因渲染恒空而通过），属 Act 细化而非偏离。
+
+**Acceptance Gaps**
+
+None。Acceptance 列出的 9 条证明点全部由代码与 GREEN 测试覆盖。
+
+**Evidence**
+
+- diff：`git diff e69c7e2..1081a5f`（merge-base）；产品代码改动 = `src/diagnostics.rs`（新建 440 行）、`tests/diagnostics_facade_test.rs`（新建 330 行）、`src/database.rs`（+16）、`src/lib.rs`（+1）。
+- 验证沿用 Act Response（公共规则 › 验证）：RED `cargo test --offline --test diagnostics_facade_test stats_without_trace_records_totals` → 退出码 101、`error[E0432]: unresolved import rtsql::diagnostics`；GREEN `cargo test --offline --test diagnostics_facade_test` → 退出码 0、`10 passed; 0 failed; 0 ignored`。结论产生后 HEAD 未再前进（1081a5f 即 Act 提交）、工作区 clean、覆盖范围未变化，无公共规则 › 验证 列出的重跑触发条件，Plan 未重跑，只做代码与 diff 独立检查。
+- Mode: none，无 required Evidence；未因目录不存在提出问题。
+
+**Follow-up Decision**
+
+Acceptance 已满足且无阻塞项，两条 Minor finding 均不阻塞（其一为格式适配，其二为测试强化），按 iteration-planning › Review 分类判 `accepted`。无 Issue 候选（Act 与 Plan 独立检查均未发现 change 范围外实质缺陷）。Iteration 001（T2 语句阶段）按 Map 展开。
+
+**Iteration Plan Update**
+
+None（accepted，无 replan）。
+
+**Next Cycle**
+
+None（当前 Cycle 修复不需要，accepted 无返工）。
+
+**Next Iteration**
+
+`openspec/changes/2026-10-28-ms44-unified-diagnostics/iterations/001-statement-phases/000-initial.md`

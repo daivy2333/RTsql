@@ -5,8 +5,9 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。
-- 000：当前 Cycle 是 `iterations/000-diagnostics-facade/000-initial.md`。Plan Context 为 ready。Act Response 为 `reported`，等待 Plan Review。
-- 001、002、003：只列在下面的 Iteration Plan 中，目录未创建。
+- 000：已完成——`iterations/000-diagnostics-facade/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论与后继）。
+- 001：当前 Cycle 是 `iterations/001-statement-phases/000-initial.md`。Plan Context 为 ready，等待 Act。
+- 002、003：只列在下面的 Iteration Plan 中，目录未创建。
 - Persisted Evidence：none。
 - 无跳过项。
 
@@ -16,8 +17,8 @@
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 门面、三项配置、上限和父子耗时可在不改语句结果的前提下读回 | 待 Review |
-| T2 | 001 | 000 accepted | 语句阶段、旧计时表、失败和取消接上；SQL 结果不变 | 未开始 |
+| T1 | 000 | 无 | 门面、三项配置、上限和父子耗时可在不改语句结果的前提下读回 | accepted |
+| T2 | 001 | 000 accepted | 语句阶段、旧计时表、失败和取消接上；SQL 结果不变 | 待执行（Cycle ready） |
 | T3 | 002 | 001 accepted | 等待类别、并发归属、文件页 I/O、三种开销；`[recovery]` 仍在 | 未开始 |
 | T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
 
