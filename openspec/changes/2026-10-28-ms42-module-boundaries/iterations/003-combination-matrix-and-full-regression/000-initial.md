@@ -407,3 +407,67 @@ None —— 本 Cycle 未发现可重复或高风险的操作路径缺口；全�
 3. **F3**：`design §5.3` 词表归属遗留未列出 `executor/value.rs:10` 的同名 `ColumnType`，待 Plan Review 决定是否补全。
 
 三项均为文档陈述精度问题，不影响任何 Acceptance、不阻塞 Iteration 003 的完成判定。
+
+## Plan Review
+
+- Review Result: accepted
+
+**Findings**
+
+独立阅读本 Cycle 完整 diff（`8cc35a5..ed13665`）与实际代码，核对 Act Response 声明与代码事实：无阻塞 finding。Act 遗留的三条 Minor 经独立复算确认 design 文本与代码事实不符，已在 Plan 写入面按代码事实修正 design.md；另记一条来自前序 Iteration 002 Review 的非阻塞 Minor。
+
+- 核查 A（Act 声明成立）：本 Cycle 产品代码零改动。`git diff --name-only 8cc35a5..ed13665` 恰命中 3 个 change 产物（本 Cycle 文件、`design.md`、`tasks.md`）；`git diff --name-only 8cc35a5..ed13665 -- src tests Cargo.toml Cargo.lock` 命中 **0**；工作区干净（`git status --porcelain --untracked-files=all` 为空，无脚本、夹具或临时产物残留）。
+- 核查 B（design 三处计数修正成立，Act 复算与代码事实相符）：
+  - §6.1 出口总数 35 → **34**：全仓 `grep -roE '\b(eprintln!|println!)' src/` 命中 35 次，其中 `src/wal/recovery.rs:169` 是文档注释里的形态引用（`/// 恢复告警的**报出**——沿用本文件既有的 `eprintln!` 形态（stderr）。`），非调用点；真实调用点 34。逐文件分解独立复算一致：table_manager 12、wal/recovery **6**（184、190、200、1635、1646、1658）、profiling 5、btree/index_manager 4、network/server 3、executor/drop_index 2、data_page 1、database 1，合计 34。三个含 `#[cfg(test)]` 的文件（`table_manager.rs:2819`、`btree/index_manager.rs:909`、`data_page.rs:417`）其全部出口行分别落在 2135–2715 / 809–884 / 408，均在 cfg(test) 段之前，无需再扣。
+  - §6.2 第 5 条随 §6.1 由 35 更正为 34，条款语义与六条结构未变。
+  - §5.2「12 字段」→ **15 字段**：`pub struct Database`（`src/database.rs:110-155`）逐字段核对实有 15 个字段，Act 列出的字段名与结构体字段逐项一致、顺序一致；「12」与结构体字段数、R79 §4.1 表 13 行三者互不相等成立。
+  - 三处修正只改计数与事实陈述，未改契约语义、未新增条款——与本 Cycle Invariants「契约记录性成果」及 Non-goals「契约条款新增或语义改写」一致。
+- 核查 C（tasks.md 状态同步成立）：T5、T6 两行 `pending → done`、§4.1/§4.2 复选框 `[ ] → [x]`、当前批次状态行与 Iteration 003「执行依据（落地信息）」行改为已完成，与本 Cycle Act Response `Status: reported` 及实际完成范围一致；T1–T4 的 `done` 与各自 Cycle 的 `Act Response: reported` + `Review Result: accepted` 一致。
+- F1（**已处置**·原 Act Minor·偏差成立）：`design §5.1` 执行层行「`Value` 值词表（存储 27 处…）」不可复现。独立穷举 storage 侧全部口径，无一为 27：引用 `Value` 的文件 4 个（其中 `btree/index_manager.rs:1256` 的 `use crate::Value;` 位于 `#[cfg(test)] mod tests` 内，非产品消费面）、`use …Value` import 3 条、匹配 `\bValue\b` 的行 143（剔除注释行 139）、token 159、`crate::executor::Value|crate::Value` 路径引用 31 行、`catalog.rs` 单文件 26 行 / 26 token / 25 处 `Value::`；而 `src/result.rs` 匹配 `\bValue\b` 的行恰为 **27**，在 R79 基线 revision `1f7dd6e` 上同样为 27（storage 侧 143/159 不变）。Act 的假设（R79 中 storage 与 result 的消费面数字互换）与代码事实相容，但原始统计口径无法从代码事实唯一确定，替换为任一其他数字都属猜测——故不替换数字，改为按代码事实给出可复现口径：**存储侧消费面按引用文件计 = 3 个产品文件（catalog.rs、data/table_manager.rs、page_format/tuple.rs）+ 1 个测试文件（btree/index_manager.rs）**，并保留 result/network/cli 消费面的原语义。契约语义（`Value` 是跨层共用词表，存储/result/network/cli 共同消费）不变。
+- F2（**已处置**·原 Act Minor·偏差成立）：`plan_format` 不是「对外公共接口（其他层实际消费）」。独立核对：`src/executor/mod.rs:39` 声明为私有 `mod plan_format;`；全仓唯一消费点是同层 `src/executor/explain.rs:8`（`use crate::executor::plan_format::render_plan_tree;`），无跨层消费者；EXPLAIN 的对外公共面是 `pub use explain::ExplainExecutor;`（`src/executor/mod.rs:76`），由 core 层 `src/pipeline.rs:8`（导入）、`:2929`（构造）实际消费。design §5.1 执行层行据此更正为 `ExplainExecutor`（EXPLAIN 计划树渲染，由 core 层 pipeline 消费；渲染模块 `plan_format` 为执行层私有，不属对外公共面）——契约语义（执行层对外提供 EXPLAIN 计划树渲染）成立且未变。
+- F3（**已处置**·原 Act Minor·偏差成立）：`ColumnType` 有两处同名定义——`src/storage/page_format/tuple.rs:41` 与 `src/executor/value.rs:10`；lib 根重导出执行层版（`src/lib.rs:19` 的 `rtsql::ColumnType`），存储层版为 `rtsql::storage::ColumnType`（`src/storage/mod.rs:45`）。design §5.3 的词表归属遗留列举补全为「`ColumnType` 在 storage/page_format/tuple.rs 与 executor/value.rs（两个同名类型分属存储与执行两层；lib 根重导出执行层版 …，存储层版为 …）」。归属决策本身未动（R25 词表归属下沉仍属 crate 拆分 change 的专项设计），本次只补全位置列举，未新增归属裁定或依赖方向条款。
+- F4（记录·非阻塞·**Plan 错误**，归 Iteration 002 Review F2）：该 Review 的静态复数记「`src/cli/**` 25 处」，独立复算为 **24**（`src/cli/lifecycle.rs` 5、`render.rs` 13、`mod.rs` 4、`resolve.rs` 2），其派生基数 437 应为 436。差额 1 不影响任何 Acceptance——组合间 `--lib` 用例数差额按本 Cycle Plan Context 风险说明不是对账门槛，且本次 Act 记录的五组合计数经独立静态分解完全自洽（见 Evidence）。仅记录，不返工。
+
+偏差分类：本 Cycle 无 Plan 遗漏、无 Plan 错误、无 Act 偏离、无现状变化。F1/F2/F3 属 **新证据**（Act 的契约核对新暴露的计数口径与可见性事实，Plan 独立复算后落为 design 修正）；F4 属 **Plan 错误**（Iteration 002 Plan Review 的静态计数，偏差 1，非阻塞）。F1–F3 均落在本 change 范围内（change 自有 design.md 的陈述精度），不构成 Issue 候选。
+
+**Acceptance Gaps**
+
+None。五条 Acceptance 逐条锚定：
+
+- R5（组合共存与验证命令面）：5 条组合构建门 + 4 组合行为验证集 + 3 条质量门，共 16 次 cargo 调用，Act 记录退出码全 0（12 项判定）；本次 Review 未重跑（覆盖未变化，直接沿用，来源见 Evidence）。
+- R6（默认组合 M19 分批全量）：15 批各自退出码 0 且 failed = 0；missing / extra / duplicate 三项对账经 Review 独立重算为 0/0/0（见 Evidence）。
+- R7（六层公共接口与状态归属契约与代码事实一致）：§5.1/§5.2/§5.3 逐项核对表完成；两处计数类偏差（§6.1 出口 35→34 与 wal/recovery 7→6、§5.2 12→15 字段）已由 Act 按代码事实修正，三条陈述精度偏差（F1/F2/F3）已由本 Review 按代码事实修正——§5 与代码事实的偏差至此全部处置，无未处置偏差。
+- R8（诊断报告接口约定与现状出口清单一致）：§6.1 出口清单与分解、计时设施、错误通道三源与 thiserror 三个 error.rs 逐项核对完成；§6.2 六条与现状不冲突（`src/` 内 `diagnostics` 零命中，门面未落地与 §6.3 自洽）；§6.3 理由成立。
+- R1 收尾级再验证：默认组合分批全量覆盖测试全集面（15 批 / 159 个测试目标 / 160 条 `test result:` 行），构成「默认组合行为等价」的收尾证据。
+
+**Evidence**
+
+代码与 diff 独立核对（静态，本次当次执行；**本 Review 未执行任何 cargo 命令，未重跑 M19 全量或任何已通过且覆盖未变化的验证**）：
+
+- diff 范围与零改动面（见 Findings 核查 A、C）。
+- §6.1 出口计数与分解：全仓 `grep -roE '\b(eprintln!|println!)' src/` = 35 命中，逐文件分布 12/7/5/4/3/2/1/1；`src/wal/recovery.rs` 命中行 169、184、190、200、1635、1646、1658，其中 169 为文档注释 ⇒ 真实调用点 6，其余模块调用点全部在 cfg(test) 段之前 ⇒ 合计 34。
+- §5.2 字段数：`pub struct Database` 结构体逐字段核对 = 15，字段名与 design 修正后列举逐项一致。
+- M19 批计划独立重算（不复用 Act 的切分结果）：`ls tests/*.rs | sort` ⇒ **N = 158**；`tests/fixtures/`、`tests/support/` 无 `main.rs`，不构成 cargo 测试目标；目标名去重后仍 158，无重复。`B = ceil(158/12) = 14`，`B×12−N = 10` ⇒ 前 10 批各 11、后 4 批各 12（实测规模序列 `11 11 11 11 11 11 11 11 11 11 12 12 12 12`，合计 158），`--lib --bins` 单独成第 15 批 ⇒ 15 批 / 159 个测试目标 / 160 条 `test result:` 行。
+- 三项对账独立重算：以执行时实际文件集合为基准按上述规则重切 14 个文件批，与 Act 批表**逐批逐目标比对**：14/14 批、目标清单**零差异**（0 处 mismatch），消耗文件恰为 158 ⇒ missing = 0、extra = 0、duplicate = 0 独立成立。
+- 逐批计数自洽性：文件批 passed 合计 149+191+143+110+175+65+116+96+221+101+126+185+157+97 = **1932**；`--lib --bins` 批 436（lib）+ 0（bin）⇒ 合计 **2368**，failed 0，ignored 2（`cli_test` 的两个长期 `#[ignore]`，独立核对 `tests/cli_test.rs` 恰 2 处 `#[ignore]`）；`test result:` 行数 2 + 158 = **160**。与 Act 声明逐值一致。
+- 组合 `--lib` 用例数独立静态分解：C0 436，剥除面 cli **24**（`src/cli/**` 静态用例数）、network **5**（`src/network/**`）、crypto **17**（`src/storage/crypto.rs` 8 + `file_header.rs` 3 + `file_storage.rs` 6，均带 `#[cfg(feature = "crypto")]` 门）⇒ C1 = 436 − 5 = 431、C2 = 436 − 17 = 419、C3 = 436 − 24 = 412、C4 = 436 − 24 − 5 − 17 = 390，与 Act 记录五个数字**逐值相同**。
+- 零用例目标与既有状态：`tests/crypto_off_build_test.rs:8` 为 `#![cfg(not(feature = "crypto"))]`，默认组合下 0 用例属预期（C2 组合内 3 个 `#[tokio::test]` 用例存在）；`tests/network_server_test.rs` 用例体自 M8 起整块注释，本 change 该文件 diff 仅 +1 行 `#![cfg(feature = "network")]`，0 用例为改动前既有状态，非本 change 引入。
+- 契约锚点抽查（§5.1/§5.2/§6.1）：`grep -l "network::protocol" tests/*.rs` = **97**，与含 `to_response` 的文件集同一集合；`src/executor/mod.rs` 中 `pub use …Executor` = **36**（满足「32+ 执行器」）；profiling 产品调用面为 **4** 个文件（`pipeline.rs`、`database.rs`、`executor/index_scan.rs`、`executor/index_scan_all.rs`）；`schema_version` 在 database 侧 5 处消费（796 读、804 写、993 读、998 读、1004 写）；持具体 `Database` 类型的 executor 文件 **13**；`RoutedTables` 在 executor 内 **12** 处；`create_executor_from_plan` 外部调用方 **5** 个文件（executor 侧 4 个子查询重建臂 + `transaction/snapshot.rs`，定义点在 `src/pipeline.rs`）；`grep -rn "crate::network\|crate::cli" src/` 在 `src/network/`、`src/cli/` 之外命中 **0**（入口层叶子性成立）。
+- 判定层与身份证明机制残留扫描（本次当次执行）：change 分支 diff（`40e9ee8..HEAD`）中无新增脚本、封装命令或专用参数（新增非 `.rs`/非 openspec 文件仅 `Cargo.toml`、`Cargo.lock`）；无 Hash/指纹/run-id/session-id/manifest/checksum 类机制（`grep` 命中项全部是 `Cargo.lock` 的依赖校验和与无关的 `HashMap`/`HashSet` 业务用法）；批次切分只用 `ls tests/*.rs | sort` + `sed -n` 单步通用管道；工作区无未跟踪残留。
+- 验证结论沿用来源：组合矩阵、质量门与 M19 全量结论产生于本 Cycle 的当次真实运行（Act Response 验证命令表 #1–#18），产生后覆盖范围未失效（HEAD 仍为 `ed13665`，工作区干净，本 Cycle 产品代码零改动），按公共规则 › 验证直接沿用，**未重跑**；本 Review 补跑的是 Act 未覆盖的独立静态复算（上述计数、切分与对账）。
+
+**Follow-up Decision**
+
+既有 Acceptance 全部满足且无阻塞项，Iteration 003 完成，本 change 的 Iteration Map 内无剩余 Iteration（T1/T2 → 000，T3 → 001，T4 → 002，T5/T6 → 003），不再创建后继 Cycle 或 Iteration。F1–F3 已在 Plan 写入面按代码事实修正 `design.md`（只改计数口径与事实陈述，未改契约语义、未新增条款、未新增归属裁定），修正后 §5/§6 与代码事实的偏差全部处置；F4 只记录不返工。Act Response 的 Runbook/Issue 候选均为 None，本次 Review 亦未发现本 change 范围外的实质缺陷，无 Issue 候选。收尾（规格合并、归档、状态同步）由 `openspec-docs-maintainer` 按职责执行，不在本 Review 范围内。
+
+**Iteration Plan Update**
+
+None
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
