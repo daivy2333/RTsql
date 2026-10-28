@@ -145,7 +145,51 @@ PASS。审查计划 11 项通过，RTM 无 Missing，无未批准的裁剪。无
 
 ## Act Response
 
-- Status: 待 Act 填写
+- Status: reported
+
+**实际改动**
+
+- `src/wal/buffer.rs` 的 `WALBuffer` 增加 `paused`、`flush_gate`、`session_gate`、`state_notify`。`do_flush` 取得 `flush_gate` 后调用 `flush_locked`。`flush_locked` 取走缓冲和 `pending_commits`，调用 `write_batch`，再唤醒这次取走的等待者。`append` 在容量达到时走 `flush_after_pause`。`append_commit_and_wait` 在闸门内登记并入队；已经停止则当场 `flush_locked`，否则释放闸门后 `notify` 循环。两种路径都在释放闸门之后 `await`。`shutdown` 持有闸门时把停止标志设为真并 `flush_locked`，释放后再唤醒循环并 join。`start_flush_loop` 看到停止标志就返回，不 `spawn`。
+- 新增 `pub(crate)` 方法：`quiesce_for_checkpoint`、`resume_after_checkpoint`、`session_gate`。未从 `lib.rs` 重导出。
+- `tests/wal_buffer_test.rs` 增加 `commit_wait_after_shutdown_returns_ok`。
+- `src/wal/buffer.rs` 的测试模块增加 `quiesce_flushes_then_pauses_timer`、`quiesce_does_not_take_session_gate`、`resume_lets_timer_flush`、`shutdown_after_quiesce_flushes_paused_records`、`resume_after_shutdown_does_not_flush_by_timer`、`second_shutdown_returns`、`overlapping_do_flush_preserves_record_count`。
+
+**与计划的偏差**
+
+- `tokio::sync::Mutex` 不可重入。`shutdown`、`quiesce_for_checkpoint` 和已停止的 `append_commit_and_wait` 在已经持有 `flush_gate` 时调用 `flush_locked`，不再次进入 `do_flush`。取走缓冲、`write_batch` 和唤醒仍在同一次持锁内。
+- 容量刷盘走 `flush_after_pause`：先在闸门外等待恢复或停止，拿到闸门后如果仍是暂停且未停止，就放开闸门继续等。暂停若插在等待和写盘之间，这一批不会被写出去。
+- 暂停、恢复和停止使用 `state_notify.notify_waiters`。`flush_notify` 仍只通知刷盘循环。两处等待若共用一把 `Notify`，`notify_one` 只能唤醒其中一个。
+- `session_gate` 字段，以及 `session_gate`、`quiesce_for_checkpoint`、`resume_after_checkpoint`，加了 `#[allow(dead_code)]`。提交和 checkpoint 还没有调用它们。同 crate 的单元测试会调用。不加的话，集成测试编译库时出现 dead_code。
+
+**自检**
+
+- 发现：第一次 `cargo test --offline --test wal_buffer_test` 编译库时有 2 条 dead_code 警告。一条指向 `session_gate` 字段，另一条指向 `session_gate`、`quiesce_for_checkpoint`、`resume_after_checkpoint`。该次测试结果是 5 passed、0 failed，退出码 0。
+- 已修复：加上 `#[allow(dead_code)]` 后重跑同一条命令。编译输出里没有这 2 条警告。
+- 遗留 Minor：无。
+- Gate 3：通过。单飞写盘、预刷后暂停、恢复、停止后 2 秒内返回、第二次 `shutdown`、调用方持有会话闸门时 `quiesce_for_checkpoint` 仍返回，都有对应用例。`flush_locked` 在 `write_batch` 返回 `Err` 时分支为空（`src/wal/buffer.rs` 287–295 行），唤醒在该分支之外（298–305 行），缓冲为空但 `committed_tx_ids` 非空时同样唤醒。`append_commit_and_wait` 的末尾仍是 `Ok(())`（128 行）。`get_current_lsn()` 的 `unwrap_or(0)` 仍在（277 行）。`notified().await` 和暂停等待都不持有 `flush_gate`。上述方法不获取 `session_gate`。diff 只有 `src/wal/buffer.rs` 和 `tests/wal_buffer_test.rs`，以及本轮的执行记录。
+- Gate 4：通过。下面两条 Verification 命令的退出码都是 0，失败计数都是 0。
+- Gate 5：未触发。
+- 跳过：不带目标过滤的 `cargo test`。Verification 写明本 Cycle 不跑；全量属于后续 Iteration 002。
+
+**验证**
+
+- 改前保持面：`cargo test --offline --test wal_buffer_test -- --test-threads=8`。退出码 0。`4 passed; 0 failed`。命令比计划多了 `--test-threads=8`，四个既有用例都执行了。
+- RED：`cargo test --offline --test wal_buffer_test commit_wait_after_shutdown_returns_ok`。退出码 101。`0 passed; 1 failed; 4 filtered out`，`finished in 2.00s`。失败断言是停止后的等待没有在 2 秒内返回。
+- RED：`cargo test --offline --lib quiesce_flushes_then_pauses_timer`。退出码 101。编译失败，3 个 E0599：`quiesce_for_checkpoint` 与 `session_gate` 不存在。
+- `cargo test --offline --lib wal::buffer`。退出码 0。`7 passed; 0 failed; 436 filtered out`，`finished in 1.06s`。`resume_lets_timer_flush` 第一次就通过，没有按计划复跑。这条命令在 `#[allow(dead_code)]` 和 rustfmt 之前。这两处不改变断言，也不改变刷盘路径。
+- `cargo test --offline --test wal_buffer_test`（dead_code 修复之后）。退出码 0。`5 passed; 0 failed; 0 filtered out`，`finished in 0.28s`。`commit_wait_after_shutdown_returns_ok` 为 ok。编译输出没有 dead_code。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None。
+
+**未解决问题**
+
+无。
 
 ## Plan Review
 

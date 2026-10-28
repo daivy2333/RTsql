@@ -5,7 +5,7 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed（场景草图与默认假设见 proposal.md）。
-- 000：当前轮。执行依据是 `iterations/000-wal-flush-owner/000-initial.md`。Plan Context 为 ready。尚未实施。
+- 000：当前轮。执行依据是 `iterations/000-wal-flush-owner/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。
 - 001：未展开。
 - 002：未展开。
 - Persisted Evidence：none。
@@ -17,13 +17,13 @@
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | `WALBuffer` 单飞刷盘、暂停/恢复、`shutdown` 后等待返回 `Ok` | 未开始 |
+| T1 | 000 | 无 | `WALBuffer` 单飞刷盘、暂停/恢复、`shutdown` 后等待返回 `Ok` | 已实施 |
 | T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持 | 未开始 |
 | T3 | 002 | 001 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
 
 ## 1. WAL 刷盘所有者（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-wal-flush-owner/000-initial.md` 的 Task Definition 执行。先写失败测试并看到 RED，再改 `src/wal/buffer.rs`。通过条件是该文件列出的 GREEN 命令。不改 `database.rs`、`transaction/manager.rs`、`checkpoint.rs`、`writer.rs`、`buffer_pool.rs`。
+- [x] 1.1 T1：按 `iterations/000-wal-flush-owner/000-initial.md` 的 Task Definition 执行。先写失败测试并看到 RED，再改 `src/wal/buffer.rs`。通过条件是该文件列出的 GREEN 命令。不改 `database.rs`、`transaction/manager.rs`、`checkpoint.rs`、`writer.rs`、`buffer_pool.rs`。
 
 ## 2. 会话 checkpoint 与关闭（Iteration 001）
 
