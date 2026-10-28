@@ -22,6 +22,7 @@
 //! 拒绝 Float 值；负 Int 行断言逐字节保留，I040 负 Int/负 Float 字面量
 //! 折叠覆盖完整。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::TempDir;

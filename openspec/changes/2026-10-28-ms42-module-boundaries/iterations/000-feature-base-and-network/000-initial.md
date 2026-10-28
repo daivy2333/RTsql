@@ -121,7 +121,69 @@ PASS（2026-10-28）。无 BLOCKED、无 SKIPPED。计划批准来自 goal 指�
 
 ## Act Response
 
-- Status: pending
+- Status: reported
+
+**实际改动**（107 files，+123/−28）
+
+- `Cargo.toml`（T1）：新增 `[features]`（`default = ["cli", "network", "crypto"]`；`cli/network/crypto` 均为 `dep:` 形式）与 `[[bin]] name = "rtsql" path = "src/main.rs" required-features = ["cli"]`；clap、clap_complete、csv、tokio-util、argon2、aes-gcm 六依赖标 `optional = true`；移除 `lru`、`anyhow`；`futures = "0.3"` 移入 `[dev-dependencies]`（版本不变）。未加任何 cfg 门。
+- `Cargo.lock`（T1，自动更新）：仅 19 行删除——`lru` 与其传递依赖 `allocator-api2` 整条移除；`anyhow` 因其他 crate 传递依赖仍在 lock 中。零版本变更、零新增。
+- `src/lib.rs`（T2）：`pub mod network;` 上方加 `#[cfg(feature = "network")]`（+1 行）；`pub mod cli` 未动。
+- `tests/`（T2，104 文件各 +1/−0）：33 个双锚定文件加 `#![cfg(all(feature = "network", feature = "cli"))]`；70 个 network-only 文件加 `#![cfg(feature = "network")]`（均插入于 `//!` 块之后、首个内容行之前；以 `//` 开头的文件插在注释前）；`tests/executor_test.rs` 的 `test_response_rows_serialization` 加函数级 `#[cfg(feature = "network")]`。断言与用例本体零改动。
+
+**门控清单与计数**（执行时 grep 重跑）
+
+- network 锚定 104、bin 锚定 44、交集 33——与规划值 104/44/33 完全一致。
+- network-only 71 = executor_test.rs（函数门）+ 其余 70（文件头门）；bin-only 11 本任务不动（T4 范围）。
+- `executor_test.rs` 全文件仅 497 行一处 `use rtsql::network::Response;`，无规划外的函数内 network 引用。
+- src/ 内 network 之外 `crate::network` 引用为零（grep 证实，Implementation Guidance 前提成立）。
+
+**TDD 轨迹**
+
+- T1（重构分支 GREEN→GREEN）：改前三命令退出码 0 → 改后同三命令退出码 0；C1 check 退出码 101 = T2 的 RED 输入。
+- T2 RED：`error[E0433]: cannot find module or crate \`tokio_util\` in this scope`。该命令运行于 T1 验证时；T2 开工点工作区状态与其完全相同（门控施加前零改动），按公共规则 › 验证 沿用，不重复运行。
+- T2 GREEN：同命令（加 `--bins`）退出码 0。
+
+**验证命令与结果**（全部当次真实运行；均 `--offline`，首次构建后均 `--locked`）
+
+| # | 命令 | 结果 |
+|---|---|---|
+| 1 | `cargo check --offline --lib --bins --tests`（改前） | exit 0 |
+| 2 | `cargo fmt --check`（改前） | exit 0 |
+| 3 | `cargo clippy --offline --all-targets -- -D warnings`（改前） | exit 0 |
+| 4 | 同 1（T1 改后，首次不带 `--locked`，lockfile 更新） | exit 0 |
+| 5 | 同 2、同 3（T1 改后） | exit 0 / exit 0 |
+| 6 | `cargo check --offline --locked --no-default-features --features cli,crypto --lib --tests`（T1 后） | exit 101，`error[E0433]: cannot find module or crate \`tokio_util\` in this scope`（预期失败，T2 RED） |
+| 7 | `cargo check --offline --locked --no-default-features --features cli,crypto --lib --bins --tests`（T2 后） | exit 0，9.3s |
+| 8 | `cargo test --offline --locked --no-default-features --features cli,crypto --lib` | 431 passed / 0 failed，exit 0，36.7s（含构建，首次 C1 --lib 实测时长） |
+| 9 | C1 `--test storage_test --test parser_test --test executor_test` | executor 38 passed（全文件 39 个测试函数 − 1 剥除，S8 成立）、parser 6、storage 21，exit 0 |
+| 10 | 默认组合 `--test pg_protocol_test --test pg_integration_test --test network_server_test --test pg_messages_test --test network_protocol_test --test connection_limit_test` | 11+6+0+9+5+3 全 passed / 0 failed，exit 0 |
+| 11 | T2 后默认组合：check（--lib --bins --tests）、clippy（--all-targets -D warnings）、fmt --check | 均 exit 0 |
+
+- S11 兼容事实核对：install.sh 与交叉脚本零改动；本 Cycle 未向任何外部入口传 feature flag。
+- M19 遵守：本 Cycle 未跑全量；全部为定向命令（单目标默认并行度）。
+
+**与计划的偏差**
+
+- 无实质偏差。两点记录：Plan Context Current-State Evidence 写「17 个运行时依赖」，实际 `Cargo.toml` 为 18 个；Required behavior 处置集（6 optional + lru/anyhow/futures）全部命中，计数误差不改变处置内容。T2 RED 未重跑命令，沿用依据见 TDD 轨迹。
+
+**自检发现与已修复内容**
+
+- `network_server_test.rs` 默认组合运行 0 用例为 HEAD 固有形态：M8 起测试体整体处于 `/* */` 块注释（HEAD 版本核实），非本次门控造成。
+- `storage_test.rs`、`parser_test.rs` 均不在 network 锚定集（membership 核实），C1 下完整执行，与计划将其选为 C1 行为验证一致。
+- 无已修复问题；遗留 Minor：None。
+
+**Persisted Evidence**
+
+- None required（Mode: none；组合构建失败/通过均可低成本用 cargo 命令复现）。
+
+**Experience Candidates**
+
+- Runbook 候选：feature 门控测试面的枚举与施加流程——`grep -l` 两类锚定 → `comm` 求交集 → 单行内层属性插入（`//!` 块后）→ C1/默认双面验证。本 Cycle 已端到端验证成功且 T4（cli 门控，44 文件）可直接复用。证据：本 Act Response 验证记录。
+- Issue 候选：None（未发现本 change 范围外的实质缺陷）。
+
+**未解决问题**
+
+- None。
 
 ## Plan Review
 

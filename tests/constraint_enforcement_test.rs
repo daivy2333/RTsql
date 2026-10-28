@@ -14,6 +14,7 @@
 //! 判定全部走 lib API（`Database::open` + `execute_sql` → `Response`），
 //! 错误文本断言点名列名与约束名。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

@@ -12,6 +12,7 @@
 //! post-checkpoint value, so the sentinel is semantically equivalent to a
 //! checkpoint-clean database.
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::{BufferPool, ColumnType, FileStorage};

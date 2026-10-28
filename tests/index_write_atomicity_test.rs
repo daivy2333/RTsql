@@ -15,6 +15,7 @@
 //! 断言全部落在可观察状态上（索引查找、SQL 执行结果、完整性报告），
 //! 判定逻辑在 `cargo test` 集合内，无框架外判定层。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::integrity::check_integrity;

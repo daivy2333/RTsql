@@ -11,6 +11,7 @@
 //! The tests below pin durability across independent sessions (the one-shot CLI
 //! main usage) and the persistence of index-root write-backs.
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

@@ -6,6 +6,7 @@
 //! double-commit/rollback errors, implicit auto-commit compatibility, and
 //! tx-id reuse across every statement inside one transaction.
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::transaction::{Snapshot, Transaction};

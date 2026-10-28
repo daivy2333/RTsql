@@ -6,6 +6,7 @@
 //! 与 `constraint_enforcement_test` 同模式；受影响计数按 SQLite 语义断言。
 //! 恢复两态与显式事务面在文件末段（2.5）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;

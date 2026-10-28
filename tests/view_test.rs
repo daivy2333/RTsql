@@ -18,6 +18,7 @@
 //!   R3-S2 组合面零特殊化                    view_combination_surface (T5-c/d)
 //!   R3-S3 既有面零回归                      全量矩阵（各 GREEN condition）
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;

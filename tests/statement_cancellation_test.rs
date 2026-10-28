@@ -25,6 +25,7 @@
 //! `session_keeps_working_after_abandoned_statement`（放弃之后会话继续可用）。
 //! 显式事务用例以 `ReadCommitted` 打开（见 [`setup_with_isolation`]）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::integrity::check_integrity;

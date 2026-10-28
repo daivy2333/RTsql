@@ -9,6 +9,7 @@
 //! S25 附加库目标经路由同语义（每文件独立提交、主库不变、中途失败回滚目标库）
 //! S26 TRUNCATE 与带 WHERE 形态零变化（第二重门文案逐字节、子查询拒绝面）
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::io::Read;

@@ -8,6 +8,7 @@
 //! explicit BEGIN/COMMIT in the SQL dialect. Each INSERT/DELETE/UPDATE is
 //! immediately visible to subsequent statements.
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::sync::Arc;

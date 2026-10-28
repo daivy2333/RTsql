@@ -10,6 +10,7 @@
 //! 覆盖缺口归因（change design.md）：既有 57 个子查询用例内层表零别名，全部落在
 //! 「碰巧正确」区——本文件是缺口修复的载体。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use tempfile::tempdir;

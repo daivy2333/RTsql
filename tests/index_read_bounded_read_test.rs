@@ -26,6 +26,7 @@
 //! 释放路径（`DROP TABLE` / `TRUNCATE` / `DROP INDEX`）的处置方向相反
 //! （计数 + 告警 + 跳过——Iteration 002 已确立），本文件不触碰它。
 
+#![cfg(feature = "network")]
 use std::path::{Path, PathBuf};
 
 use rtsql::database::Database;

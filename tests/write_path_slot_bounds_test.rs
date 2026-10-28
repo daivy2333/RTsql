@@ -24,6 +24,7 @@
 //!   另以**直接调用**覆盖：SQL 入口在到达写侧之前先被读侧的有界判据拦下
 //!   （Iteration 001 / 002 已交付），写侧原语自身才是写侧缺陷的入口。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

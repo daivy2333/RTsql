@@ -13,6 +13,7 @@
 //! - R2 键序无关：SELECT 项为分组键超集时按 SELECT 序出值。
 //! - R3 既有形状零回归（含两处白名单校准用例）。
 
+#![cfg(all(feature = "network", feature = "cli"))]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use serde_json::json;

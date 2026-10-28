@@ -5,7 +5,7 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed（场景草图与默认假设见 proposal.md）。
-- 000：执行依据是 `iterations/000-feature-base-and-network/000-initial.md`。Plan Context 为 ready。T1、T2 待执行。
+- 000：执行依据是 `iterations/000-feature-base-and-network/000-initial.md`。Plan Context 为 ready。T1、T2 已执行且验证通过（Act Response: reported），待 Plan Review。
 - 001：尚未展开（Map 内待执行；目录与 Cycle 由 000 accepted 后创建）。
 - 002：尚未展开。
 - 003：尚未展开。
@@ -16,8 +16,8 @@
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | features 表与 optional 依赖落地、死依赖处置；默认组合构建门与质量门退出码 0（改前改后等价） | pending |
-| T2 | 000 | T1 | network 可选化 + 测试面门；C1 组合构建门与验证集通过；默认组合协议测试通过 | pending |
+| T1 | 000 | 无 | features 表与 optional 依赖落地、死依赖处置；默认组合构建门与质量门退出码 0（改前改后等价） | done |
+| T2 | 000 | T1 | network 可选化 + 测试面门；C1 组合构建门与验证集通过；默认组合协议测试通过 | done |
 | T3 | 001 | 000 accepted | crypto 可选化 + 关闭态行为测试；C2 组合构建门与验证集通过；加密单元测试按组合门控 | pending |
 | T4 | 002 | 001 accepted | cli 可选化（bin required-features + 44 文件门）；C3/C4 组合构建门与验证集通过；默认组合 cli_test 通过 | pending |
 | T5 | 003 | 002 accepted | 五组合矩阵全绿（构建门 + 各验证集 + 双组合 clippy + fmt） | pending |
@@ -25,8 +25,8 @@
 
 ## 1. Feature 基座与 network 可选化（Iteration 000）
 
-- [ ] 1.1 T1：改前先跑默认组合基线命令（`cargo check --offline --lib --bins --tests`、`cargo fmt --check`、`cargo clippy --offline --all-targets -- -D warnings`）记录 GREEN。然后修改 `Cargo.toml`：按 design §2.1 增加 `[features]` 与 `[[bin]] required-features`，六个单一边界依赖转 optional，移除 `lru`、`anyhow`，`futures` 移入 `[dev-dependencies]`。首次构建不带 `--locked` 让 `Cargo.lock` 更新。改后同一组命令保持退出码 0。此阶段不加任何 cfg 门：非默认组合尚不可构建属预期，不作为本任务判据。
-- [ ] 1.2 T2：先记录 RED——`cargo check --offline --no-default-features --features cli,crypto --lib --tests` 因 network 模块未门控、tokio-util 未启用而失败（保留错误首行）。然后：`src/lib.rs` 的 `pub mod network` 加 `#[cfg(feature = "network")]`；按 design §2.3 规则给 network 锚定测试文件加门（含 `executor_test.rs` 函数级门）。GREEN = C1 组合构建门与验证集（design §2.5）通过，且默认组合 `cargo test --offline --test pg_protocol_test --test pg_integration_test --test network_server_test --test pg_messages_test --test network_protocol_test --test connection_limit_test` 全部通过。门控文件清单与计数记入 Act Response。
+- [x] 1.1 T1：改前先跑默认组合基线命令（`cargo check --offline --lib --bins --tests`、`cargo fmt --check`、`cargo clippy --offline --all-targets -- -D warnings`）记录 GREEN。然后修改 `Cargo.toml`：按 design §2.1 增加 `[features]` 与 `[[bin]] required-features`，六个单一边界依赖转 optional，移除 `lru`、`anyhow`，`futures` 移入 `[dev-dependencies]`。首次构建不带 `--locked` 让 `Cargo.lock` 更新。改后同一组命令保持退出码 0。此阶段不加任何 cfg 门：非默认组合尚不可构建属预期，不作为本任务判据。
+- [x] 1.2 T2：先记录 RED——`cargo check --offline --no-default-features --features cli,crypto --lib --tests` 因 network 模块未门控、tokio-util 未启用而失败（保留错误首行）。然后：`src/lib.rs` 的 `pub mod network` 加 `#[cfg(feature = "network")]`；按 design §2.3 规则给 network 锚定测试文件加门（含 `executor_test.rs` 函数级门）。GREEN = C1 组合构建门与验证集（design §2.5）通过，且默认组合 `cargo test --offline --test pg_protocol_test --test pg_integration_test --test network_server_test --test pg_messages_test --test network_protocol_test --test connection_limit_test` 全部通过。门控文件清单与计数记入 Act Response。
 
 ## 2. crypto 可选化（Iteration 001）
 

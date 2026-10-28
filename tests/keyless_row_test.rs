@@ -26,6 +26,7 @@
 //! 的 old-lookup 重放子路径自此无 SQL 运行期生产者（legacy WAL 兼容面，
 //! 恢复侧语义保持）。
 
+#![cfg(feature = "network")]
 use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use std::path::PathBuf;
