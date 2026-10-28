@@ -844,8 +844,16 @@ impl Database {
     /// MS26 T1: a read-only session holds no checkpoint manager at all
     /// (`readonly-open-mode` R3) — `close()` is a structural no-op there, not
     /// a zero-work skip that happens to match.
+    ///
+    /// Read-write `close` runs the same pre-flush and nine-step sequence as
+    /// [`Database::checkpoint`], then stops the flush loop. It does not call
+    /// the public `checkpoint()` method, so the loop is not resumed.
     pub async fn close(&self) -> Result<()> {
-        self.checkpoint().await
+        let result = self.checkpoint_under_session_gate().await;
+        if let Some(wal) = &self.wal_buffer {
+            wal.shutdown().await;
+        }
+        result
     }
 
     /// T2（change 2026-10-04-external-review-gaps D2）：打开时 WAL 是否曾含
@@ -872,9 +880,38 @@ impl Database {
     /// MS26 T1: non-read-write sessions own no checkpoint manager and take
     /// the zero-write path without touching the WAL, the site file, or the
     /// buffer pool (`readonly-open-mode` R3).
+    ///
+    /// Read-write `checkpoint` pauses the flush loop for the nine steps, then
+    /// resumes it. A nine-step error still resumes the loop before the
+    /// original error is returned.
     pub async fn checkpoint(&self) -> Result<()> {
+        // 调用方丢掉本 future 时，九步可能已经暂停循环且走不到下面的恢复。
+        // 守卫在 Drop 时把恢复排上运行时，避免循环停在暂停上。
+        let mut resume_on_drop = self.wal_buffer.clone().map(ResumeOnDrop::arm);
+        let result = self.checkpoint_under_session_gate().await;
+        if let Some(guard) = resume_on_drop.as_mut() {
+            guard.wal.resume_after_checkpoint().await;
+            guard.disarm();
+        }
+        result
+    }
+
+    /// Shared prefix of public `checkpoint` and `close`.
+    ///
+    /// A session with no checkpoint manager returns immediately and does not
+    /// take the session gate. Otherwise the gate is held across reclaim,
+    /// narrowing publication, the pre-flush, and the nine steps. Reclaim or
+    /// publication errors return before the loop is paused. The caller
+    /// resumes or shuts the loop down after this function returns, including
+    /// when the nine steps fail.
+    async fn checkpoint_under_session_gate(&self) -> Result<()> {
         let Some(manager) = &self.checkpoint_manager else {
             return Ok(());
+        };
+        let wal = self.wal_buffer.clone();
+        let _session = match &wal {
+            Some(wal) => Some(wal.session_gate().lock().await),
+            None => None,
         };
         // MS34 Iter000（T01）：回收先于 checkpoint——被放弃事务的未提交页不
         // 应随 checkpoint 落盘（WAL 证据随截断消失后无从判断其归属）。本
@@ -886,8 +923,11 @@ impl Database {
         // **永久丢失**（崩溃重开将无法发布该窄化 ⇒ 目录旧列数 + 数据面窄行
         // ⇒ 按位置错读，ISS25）。
         //
-        // 发布失败 ⇒ 不截断（返回错误）⇒ 意图仍在 WAL 中。
+        // 发布失败 ⇒ 不截断（返回错误）⇒ 意图仍在 WAL 中。循环此时尚未暂停。
         self.table_manager.publish_committed_narrowings().await?;
+        if let Some(wal) = &wal {
+            wal.quiesce_for_checkpoint().await;
+        }
         manager
             .checkpoint(|| self.transaction_manager.current_tx_id())
             .await
@@ -903,6 +943,39 @@ impl Database {
     /// 库持有各自独立的单元，arm 不波及。
     pub fn arm_io_failure(&self, point: IoFailPoint) {
         *self.io_failpoint.lock().unwrap() = Some(point);
+    }
+}
+
+/// 公开 `checkpoint` 被取消时恢复刷盘循环。
+///
+/// `resume_after_checkpoint` 不取得会话闸门。正常返回路径先显式恢复再解除
+/// 守卫，避免 Drop 再排一次。
+struct ResumeOnDrop {
+    wal: Arc<WALBuffer>,
+    armed: bool,
+}
+
+impl ResumeOnDrop {
+    fn arm(wal: Arc<WALBuffer>) -> Self {
+        Self { wal, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ResumeOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let wal = self.wal.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                wal.resume_after_checkpoint().await;
+            });
+        }
     }
 }
 

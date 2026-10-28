@@ -156,7 +156,69 @@ PASS。审查计划 11 项通过，RTM 无 Missing，无未批准的裁剪。无
 
 ## Act Response
 
-- Status: 待 Act 填写
+- Status: blocked
+
+**实际改动**
+
+- `src/database.rs` 的 `Database::close` 不再调用公开 `checkpoint()`。`Database::checkpoint` 与 `close` 共用 `checkpoint_under_session_gate`：没有 checkpoint manager 时立即 `Ok(())`；否则持有 `wal_buffer` 的会话闸门，依次回收被放弃的隐式事务、发布已提交窄化、`quiesce_for_checkpoint`、`CheckpointManager::checkpoint`。公开 `checkpoint` 在这段返回后调用 `resume_after_checkpoint`，九步的 `Err` 也先恢复再返回原来的 `StorageError::WalError`。`close` 在这段返回后调用 `shutdown`，不恢复循环。`maybe_auto_checkpoint` 的 `checkpoint failed after commit` 文案仍在 `src/database.rs` 704 行。
+- `Database::checkpoint` 增加 `ResumeOnDrop`。future 在恢复之前被丢掉时，`Drop` 用当前 runtime `spawn` 一次 `resume_after_checkpoint`。正常返回先显式恢复，再解除守卫。
+- `src/transaction/manager.rs` 的 `TransactionManager::commit` 在 `wal_buffer` 为 `Some` 时，从 `append(CommitTxn)` 之前到 `append_commit_and_wait` 返回持有会话闸门。闸门释放之后才 `commit_mark_versions`。`begin` 与 `abort_by_id` 不取闸门。
+- 新建 `tests/session_lifecycle_test.rs`：`close_stops_timer_flush`、`checkpoint_resumes_timer_flush`、`fresh_close_stops_timer_flush`、`uncommitted_row_absent_after_reopen`、`commit_after_close_wait_returns`、`commit_and_close_finish_within_2s`、`second_shutdown_after_close_returns`。
+- `tests/statement_cancellation_test.rs` 增加 `cancel_leaves_flush_loop_running`。
+
+**与计划的偏差**
+
+- `checkpoint` 的 future 可能在 `quiesce_for_checkpoint` 之后、`resume_after_checkpoint` 之前被丢掉。`committed_statement_survives_undelivered_result` 在事务离开活跃集后放弃 commit future，而阈值 1 的 `maybe_auto_checkpoint` 当时还在 `checkpoint` 里。丢掉 future 不会执行后面的恢复，循环停在暂停上，后续插入的提交等待不再返回。`ResumeOnDrop` 在 `Drop` 时把恢复排上运行时。`resume_after_checkpoint` 不取会话闸门。
+- `second_shutdown_after_close_returns` 给两次 `shutdown` 加了 2 秒 `timeout`。计划只要求两次都返回。没有超时的话，挂起会让整条测试命令停住。
+- `checkpoint_under_session_gate` 在 manager 为 `Some` 而 `wal_buffer` 为 `None` 时不取会话闸门，仍执行回收、发布和九步。计划写明这两种会话字段同时为 `None` 或同时为 `Some`，这条分支现有打开路径走不到。
+
+**自检**
+
+- 发现：按计划接线后，`uncommitted_row_absent_after_reopen` 失败。把 `src/database.rs` 临时恢复到本轮开始时的 `close`（只调用公开 `checkpoint()`）再跑同一用例，仍然失败，随后已把接线代码放回。失败不是这次暂停/停止引入的。
+- 发现：第一次保持面命令里，`committed_statement_survives_undelivered_result` 超过 60 秒仍未结束。进程被停掉，该次没有退出码。原因见上面的偏差。`ResumeOnDrop` 之后同一条命令退出码 0。
+- 已修复：取消 `checkpoint` future 后循环会恢复。
+- 遗留：`uncommitted_row_absent_after_reopen` 未通过。没有在本轮里中止活跃显式事务，也没有改九步、扫描或恢复。
+- Gate 3：刷盘循环的暂停、恢复、停止和提交闸门与 Task Definition 的接线顺序一致。未提交行重开不可见这一条没有实现，Gate 3 不通过。
+- Gate 4：不通过。`session_lifecycle_test` 退出码 101。
+- Gate 5：命中。见 Blocker Handoff。
+- 跳过：不带目标过滤的 `cargo test`，以及 `--test-threads=1` 的全量。Verification 写明本 Cycle 不跑。
+
+**验证**
+
+- RED：`cargo test --offline --test session_lifecycle_test close_stops_timer_flush -- --exact`。退出码 101。`0 passed; 1 failed; 1 filtered out`，`finished in 1.02s`。`close` 已返回。WAL 中有 `Checkpoint { lsn: 105, ... }` 和 `BeginTxn { tx_id: 424242 }`。
+- 改前：`cargo test --offline --test session_lifecycle_test checkpoint_resumes_timer_flush -- --exact`。退出码 0。`1 passed; 0 failed; 1 filtered out`，`finished in 1.05s`。
+- 改前对照：把 `close` 恢复成只调用公开 `checkpoint()` 后，`cargo test --offline --test session_lifecycle_test uncommitted_row_absent_after_reopen -- --exact`。退出码 101。`0 passed; 1 failed; 6 filtered out`，`finished in 0.24s`。查询结果是 `[[Int(7)]]`。跑完已恢复接线代码。
+- 保持面第一次：`cargo test --offline --test checkpoint_test --test checkpoint_skip_test --test checkpoint_redo_reduction_test --test statement_cancellation_test --test readonly_session_test --test memory_db_test`。`committed_statement_survives_undelivered_result` 超过 60 秒仍在运行，进程被停掉，没有退出码。其余已结束的二进制是 `checkpoint_redo_reduction_test` 9 passed、`checkpoint_skip_test` 6 passed、`checkpoint_test` 2 passed、`memory_db_test` 15 passed、`readonly_session_test` 15 passed，失败计数都是 0。`cancel_leaves_flush_loop_running` 在该次输出里为 ok。
+- 保持面修复后：同一条命令。退出码 0。`checkpoint_redo_reduction_test` 9 passed、0 failed，`finished in 0.17s`。`checkpoint_skip_test` 6 passed、0 failed，`finished in 0.03s`。`checkpoint_test` 2 passed、0 failed，`finished in 0.01s`。`memory_db_test` 15 passed、0 failed，`finished in 0.11s`。`readonly_session_test` 15 passed、0 failed，`finished in 1.40s`。`statement_cancellation_test` 9 passed、0 failed，`finished in 7.76s`。`cancel_leaves_flush_loop_running` 与 `committed_statement_survives_undelivered_result` 都是 ok。`dml_session_close_keeps_full_checkpoint`、`fresh_db_zero_work_close_creates_no_site`、`zero_work_close_skips_site_and_wal`、`r3_readonly_session_writes_nothing`、`t3_no_wal_or_checkpoint_channels` 都在其中通过。记录应当出现的 `cancel_leaves_flush_loop_running` 第一次就通过，没有复跑。
+- 接线与 `ResumeOnDrop` 都在之后：`cargo test --offline --test session_lifecycle_test`。退出码 101。`6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out`，`finished in 1.05s`。失败用例是 `uncommitted_row_absent_after_reopen`，查询结果 `[[Int(7)]]`。`close_stops_timer_flush`、`fresh_close_stops_timer_flush`、`checkpoint_resumes_timer_flush`、`commit_after_close_wait_returns`、`commit_and_close_finish_within_2s`、`second_shutdown_after_close_returns` 为 ok。记录不应当出现的两个 close 用例失败即失败，没有重跑。
+
+**Persisted Evidence**
+
+None required。失败用例可以重跑。
+
+**Experience Candidates**
+
+- Issue：显式事务 `begin` 后插入、不 `commit` 就 `close`，默认 `Database::open`（`RepeatableRead`）重新打开后该行仍在。改前只调用公开 `checkpoint()` 的 `close` 同样返回 `[[Int(7)]]`。证据是本 Response 的「验证」一节。本 Cycle 的 Acceptance 包含这条，所以它同时是下面的阻塞，不另建 Issue 文件，本轮也没有为它扩范围修改扫描、恢复或九步。
+
+**未解决问题**
+
+- `uncommitted_row_absent_after_reopen` 未通过。T2 未完成。
+
+**Blocker Handoff**
+
+- 位置：T2，Verification 的 `cargo test --offline --test session_lifecycle_test`，Gate 4。Gate 5 因此停止。
+- 计划预期：显式事务插入后不 `commit` 就 `close`，丢掉句柄再打开，查询不到该行。
+- 实际：`SELECT id FROM t WHERE id = 7` 得到 `[[Int(7)]]`。接线后的退出码 101，`6 passed; 1 failed`。把 `close` 换回本轮开始时的实现，同一断言同样失败。
+- 影响：T2 的其余接线已经落地，保持面命令在 `ResumeOnDrop` 之后退出码 0。这一条 Acceptance 还没达到。继续做需要新的关闭语义，Task Definition 的共用前段没有覆盖。
+- 现场：插入写的是 `VersionHeader::new(tx_id, None)`（`src/executor/insert.rs`）。默认打开是 `RepeatableRead`，`statement_snapshot` 返回 `None`，无快照的扫描会交出未删除槽。主键点查在无快照时走 `read_tuple_from_data_page`，不看 `is_deleted`。`close` 先 `quiesce_for_checkpoint` 把 `BeginTxn` 和插入记录写入 WAL，九步再 `flush_all` 并 `rewrite_truncate`，这些记录被截掉，脏页留在文件里。恢复只把 WAL 里仍有 `BeginTxn` 且没有提交或中止的事务放进 `uncommitted_tx_ids`。索引重建只在 `redo_count > 0` 时发生。
+- 没有沿这两条继续改：在 `close` 持有会话闸门时中止活跃显式事务，行会从页和索引里去掉，但 `commit_and_close_finish_within_2s` 要求同一个尚未写 `CommitTxn` 的事务同时 `commit` 成功。`tokio::join` 先轮询 `commit`，它在拿到会话闸门之前就会让出 `wal_buffer` 读锁；`close` 的第一个等待点就是会话闸门，因此 `close` 可以先拿闸门。此时中止会使 `commit` 返回错误。只在截断后补一条 `BeginTxn`，事务能进入未提交集合，但 `redo_count` 仍是 0，主键索引不重建，无快照的点查仍能读到该槽。改九步或 `flush_all` 属于禁止项。
+- 已完成：提交闸门、`checkpoint` 恢复、`close` 停止循环，以及除未提交重开以外的本轮用例。保持面在修复取消恢复之后通过。
+- 部分完成：T2。
+- 未开始：本 Cycle 没有其他任务。全量不在本 Cycle。
+- 修改文件：`src/database.rs`、`src/transaction/manager.rs`、`tests/session_lifecycle_test.rs`、`tests/statement_cancellation_test.rs`，以及本 Cycle 文件。未改 `src/wal/checkpoint.rs`、`src/wal/writer.rs`、`src/storage/buffer_pool.rs`、`src/wal/buffer.rs`。
+- 已通过的 Gate：Gate 5 之前，保持面命令和六条生命周期用例通过。Gate 3、Gate 4 未通过。
+- Evidence：None required。
+- 恢复条件：计划写明 `close` 遇到仍活跃的显式事务时怎样处理，并让「重开后查不到未提交行」和「并发 `commit` 与 `close` 都返回成功」同时成立。然后继续本 Cycle，或由计划另开 Cycle。不要在现有接线顺序上做第四次同类尝试。
 
 ## Plan Review
 

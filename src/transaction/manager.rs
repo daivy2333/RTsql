@@ -110,8 +110,13 @@ impl TransactionManager {
     pub async fn commit(&self, tx: Transaction, buffer_pool: &BufferPool) -> Result<()> {
         let tx_id = tx.id();
 
-        // WAL: write CommitTxn record and wait for persistence (Group Commit)
-        if let Some(wal) = self.wal_buffer.read().await.as_ref() {
+        // WAL: write CommitTxn and wait for persistence (Group Commit).
+        // The session gate covers only this wait, so checkpoint and close
+        // cannot run their quiesce/nine-step sequence in the middle of it.
+        // The gate is released before versions are marked committed.
+        let wal = self.wal_buffer.read().await.clone();
+        if let Some(wal) = wal {
+            let _session = wal.session_gate().lock().await;
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
