@@ -1,6 +1,6 @@
 # 仓库既有的 fmt / clippy 门在当前工具链下不可满足（无工具链版本固定，格式与 lint 基线漂移）
 
-- Status: open
+- Status: closed（2026-10-28 fixed → `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline`）
 - Filed: 2026-10-25
 - Source: Act Response 的 Issue 候选（「本仓在当前工具链下 `cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 于 HEAD 即失败 ⇒ README 列出的这两个门禁目前不可满足」），change `2026-10-25-ms37-defect-ledger-closure` Iteration 000 Cycle `iterations/000-index-leaf-entry-criterion/000-initial.md` 的 Act Response `Experience Candidates` 段；同 Cycle 的 Plan Review 在 `Evidence` 段独立核对了该基线
 - Environment: Linux x86_64 / WSL2 6.18.40.1、cargo 1.99.1 (5f94df478 2026-08-27)、rustc 1.99.1 (58cf8f9c3 2026-10-13)、rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)、clippy 0.1.99 (58cf8f9c35 2026-10-13)；仓库 HEAD `e9cb9d3`；**两次测量的工作区状态不同**——基线测量时未提交改动为 `.agents/docs/tasks.md`、`src/storage/integrity.rs`、`tests/index_read_bounded_read_test.rs`、`tests/release_path_bounded_read_test.rs`；第二次测量时在途 T3 实施已加入 `src/storage/buffer_pool.rs`、`src/storage/data_page.rs`、`src/storage/error.rs`、`src/storage/mod.rs`、`src/storage/page_format/slotted_page.rs` 的改动与新文件 `tests/data_page_bounded_read_test.rs`
@@ -40,6 +40,7 @@
   - 推论：**两个相隔约 8 个月的 rustfmt 版本给出逐字节相同的 diff** ⇒ 该漂移**不是** rustfmt 版本差异造成的，而是**代码确实未按 rustfmt 规则格式化**。
   - 对候选 (a) 的影响：**本机可得的两个可评估工具链上未发现可行版本** ⇒「固定到某个能通过的 rustfmt 版本」这条路在当前可得工具链上**走不通**；剩余可行处置为 (b)「以当前工具链一次性重排」或 (b')「一次性重排 + 固定当前工具链版本」。绝对命题「任何 rustfmt 版本都不可行」仍属**推断**（未做全版本枚举，见「证据」段未确认项 ①）。
   - 附带观测（当前工作区状态，Recorder 只读实测）：本次实测的 fmt diff 集合**与基线的 9 文件 / 50 处完全一致**——第二次测量记录的 +9 处 / +3 文件（`src/storage/buffer_pool.rs`、`src/storage/data_page.rs`、`tests/data_page_bounded_read_test.rs`）**已不在名单内** ⇒ 在途改动当前已是 rustfmt 干净，漂移集合回到基线的 9 文件 / 50 处。（**推断**：在途实施对其自身文件做过格式化；未核对执行者与执行时点。）此观测只更新**当前状态**，不改写第二次测量的历史记录。
+- 2026-10-28 关闭。归档变更 `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline` 的三轮 Plan Review 都是 `accepted`。Iteration 000 在当时的 stable 工具链上把 `cargo fmt --check` 与 `cargo clippy --offline --all-targets -- -D warnings` 做到退出码 0。Iteration 002 在 15 批 `cargo test --offline … -- --test-threads=1` 全部退出码 0、159 行汇总的 failed 都是 0 之后，再次运行这两条命令，退出码都是 0。该轮 Act Response 为 `reported`（提交 `46fb10431f41de89e023b8063a457550f27cf3ab`），Plan Review 为 `accepted`（提交 `8eb3950a7b3425312df5de9e710a267412e84e6f`）。三轮 Experience Candidates 都是 None，本次不新建 Runbook。上文各次测量保留为当时记录。
 
 ## 处置
 
@@ -50,6 +51,7 @@
   - **(c) 维持现状**：在文档中记录该门在当前工具链下暂不可满足，并把收尾口径改为「触碰文件零新增 finding」。
 - 需要 Plan / 用户判定的点：① 三个候选中选哪一个（或组合）；② 若选 (b)，重排 9 个既有文件与 MS37「缺陷清账」的**主题相关性**——把与主题无关的 9 个文件重排并入同一 change 违反 Surgical Changes ⇒ (b) 更适合**独立成 change**，而 (a) / (c) 更适合并入本 change；③ 收尾口径的措辞（「项目门通过」改为何种可验证的表述）。
 - 与本 change 的其它承接物的关系：MS37 的收尾（Iteration 005 / T16 全量回归 + Maintainer 收尾）在裁定前**无法**声明 fmt / clippy 干净 ⇒ 该口径须由 Plan 写入收尾判据。
+- 2026-10-28 关闭。原因：项目门 `cargo fmt --check` 与 `cargo clippy --offline --all-targets -- -D warnings` 在归档变更收尾时退出码都是 0。修复没有新增 `rust-toolchain.toml`；该变更的 `design.md` 记录当时的格式差异来自源码未按 rustfmt 排版，lint 按保持行为的改写清除。2026-10-25 的「处置指针当前为空」和三个候选保留为当时记录。处置指针：fixed → `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline`。
 
 ## 证据
 
@@ -65,3 +67,4 @@
   - 门禁声明处：`README.md:324-325`、`README.zh-CN.md:324-325`；工具链固定缺失：仓库根无 `rust-toolchain.toml` / `rust-toolchain`。
   - **Recorder 的复测本身未修改任何仓库文件**（复测只读）；各次测量之间的差异来自**在途 Act 的实施改动**，不是复测造成的。
 - **未确认项**：① 能让现有格式通过的 rustfmt 版本（(a) 的前提）——未做版本二分；**2026-10-25 追加部分二分结果**：本机可得的 stable rustfmt 1.10.0 与 nightly-2026-02-25 rustfmt 1.8.0 输出**逐字节相同** ⇒ 二者**均不可行**，结论限于「本机可得的工具链上未发现可行版本」；第三个工具链 `nightly` 因本机安装不完整（缺 `librustc_driver-*.so`）未能评估；全版本枚举仍未做；② 归档 change 记录中「clippy / fmt / validate 全 0 / PASS」的原话与其对应 revision——来自 Act Response 的转述，Recorder 未独立核对；③ `~/.cargo/config` 弃用告警是否应计入项目门（环境项）——随 (c) 的口径一并裁定；④ 「漂移增长归因于在途 T3 改动」依据的是：基线测量时 `src/storage/buffer_pool.rs` 与 `src/storage/data_page.rs` **未被修改**（与 HEAD 一致）且**不在** fmt 名单内 ⇒ 其现在的 3 处 diff 必来自在途改动；该归因对**新增测试文件**同理（基线时不存在）。
+- 2026-10-28 关闭依据：`openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline/iterations/000-quality-gates/000-initial.md`、`iterations/001-host-and-musl/000-initial.md`、`iterations/002-batched-full/000-initial.md` 的 Plan Review 都是 `accepted`，三轮 Experience Candidates 都是 None。收尾验证在 `iterations/002-batched-full/000-initial.md` 的 Act Response（`Status: reported`，提交 `46fb10431f41de89e023b8063a457550f27cf3ab`）：15 批 `cargo test --offline`，每批 `--test-threads=1`，159 行 `test result:` 汇总的 failed 都是 0，15 次退出码 0；随后 `cargo fmt --check` 与 `cargo clippy --offline --all-targets -- -D warnings` 退出码都是 0。同文件 Plan Review（提交 `8eb3950a7b3425312df5de9e710a267412e84e6f`）沿用这些退出码，Review Result 为 `accepted`。本次关闭没有重跑这些命令。该变更的 `design.md` 写明未新增 `rust-toolchain.toml`。macOS 在该变更中仍是未完成，不在本条主张内。
