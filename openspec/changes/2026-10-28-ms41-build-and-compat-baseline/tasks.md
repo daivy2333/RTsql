@@ -7,7 +7,7 @@
 - 需求与 BDD：completed。
 - 000：执行依据是 `iterations/000-quality-gates/000-initial.md`。Plan Context 为 ready。T1、T2 已完成，Act Response 为 reported。Review Result 为 accepted。
 - 001：执行依据是 `iterations/001-host-and-musl/000-initial.md`。Plan Context 为 ready。T3、T4 已完成。T5 已完成，macOS 记为未完成。Act Response 为 reported。Review Result 为 accepted。
-- 002：只存在于本文件的 Iteration Plan，尚未展开 Cycle。
+- 002：执行依据是 `iterations/002-batched-full/000-initial.md`。Plan Context 为 ready。T6 尚未执行。
 - Persisted Evidence：none。
 - 无跳过项。
 
@@ -90,4 +90,4 @@
 
 ## Gate 2
 
-PASS。无 BLOCKED。无 SKIPPED。001 的批准来自本次目标对展开该 Iteration 的授权，不是跳过。当前 Cycle 是 `iterations/001-host-and-musl/000-initial.md`，Plan Context 为 ready。
+PASS。无 BLOCKED。无 SKIPPED。002 的批准来自本次目标对展开该 Iteration 的授权，不是跳过。当前 Cycle 是 `iterations/002-batched-full/000-initial.md`，Plan Context 为 ready。
