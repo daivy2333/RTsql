@@ -208,4 +208,43 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+独立阅读 `a69fe86bbf08a04b0d0cc62d9183da4ae8a5008b...HEAD` 的产品 diff，并对照 Act Response。工作区干净，HEAD 为 `592e43ba36a625df80ba14274f85cf15d20e95d1`。计划内改写与代码一致。
+
+- `tests/hash_join_build_side_test.rs` 的 `pair`，以及 `tests/sort_merge_join_test.rs` 里五处断言，只改了换行和缩进。
+- `restore` 的失败臂仍把原来的六个参数交给 `sql_failure_status`。成功则进入下一条，循环结束后返回 `ExitStatus::Success`。
+- ADD COLUMN 用 `std::mem::drop` 丢掉 `JoinHandle`，不 await。`rx.await` 仍是 `Ok(Ok(()))`、`Ok(Err(error))` 和 `Err(_closed)` 三条臂。
+- `Executor`、`Protocol`、`AsyncStorage` 的 `#[allow(clippy::double_must_use)]` 都紧贴在 `#[async_trait]` 上方。方法签名未改。
+- `merge_product` 按 `left_index..left_end` 与 `right_index..right_end` 的切片顺序取 `.1`。外层仍是左行，内层仍是右行。
+- `flush_all` 与 `flush_all_except` 在 `write_page` 失败时把 `enumerate` 的 `index` 交给 `restore_dirty_from`。该函数从 `from` 起跳过，失败页及其后的页恢复脏位。失败当下这个下标等于原先的成功计数 `written`。成功页仍调用 `finish_write_in_flight(*page_id, true)`。`restore_dirty_from` 本身未改。
+- 去掉的转型两端类型相同。`pk_entry_count` 与 `live_row_pages` 的键是 `i64`。`readings` 的 `first_int` 是 `Option<i64>`。两处 `dump_chain` 的 `page_id` 来自返回 `Vec<u32>` 的 `chain_pages`，字段也是 `u32`。`as u64` 仍在。
+- `seed_statements` 的 `vec![]` 初值是原来的四条 `CREATE TABLE`。随机数仍从其后的循环开始消耗。
+
+有一条不阻塞 Acceptance 的 Minor finding。偏差原因是 Plan 遗漏。调查时全目标 clippy 全局允许了 `single_match`，所以 `tests/secondary_index_equality_test.rs` 的 `exec_ok` 没有进入列出的 6 条测试警告。Act 把它改成 `if let Response::Error` 时 panic，消息不变，其他响应继续。这与 restore 的同一条规则相同，也落在 T2 停止条件里：未列出的 lint 可以用既有的行为保持规则消除。该文件在点名目标之外，改动不改变 SQL、存储字节、错误文本或是否 await。Act 已在本 Cycle 修完并验证。
+
+没有阻塞 Acceptance 的发现。当前 change 范围外没有新的实质缺陷。
+
+**Evidence**
+
+沿用 Act Response（`Status: reported`，提交 `592e43b`）的当次结果。这些改动之后代码没有再变，阅读结果与退出码不矛盾，本次不重跑。
+
+- T1：`cargo fmt --check` 先行退出码 1，`cargo fmt` 后退出码 0。
+- T2 改写前，8 条 `cargo test --offline --test ...` 退出码 0、failed 为 0。deny clippy 退出码 101，lib 有 15 条错误。
+- 计划内改写后，同一组测试计数不变，`cargo fmt --check` 退出码 0。deny clippy 仍为 101，只剩 `exec_ok`。
+- `exec_ok` 改写后：`cargo test --offline --test secondary_index_equality_test` 退出码 0，3 passed，0 failed。`cargo fmt --check` 退出码 0。`cargo clippy --offline --all-targets -- -D warnings` 退出码 0。
+- Persisted Evidence 为 none。未因缺少 evidence 目录提出问题。
+
+**Follow-up Decision**
+
+R1、R2，以及 T2 列出的 8 条行为测试，都已有当次通过结果。产品 diff 里计划外的唯一改动是已经验证过的 `exec_ok`。既有 Acceptance 满足，Iteration Plan 保持不变。不创建后继 Cycle。Iteration 001 仍只写在 `tasks.md`，本 Review 不展开它。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`tasks.md` 的 Iteration 001（本机与 musl 运行，T3、T4、T5）。目录未创建。
