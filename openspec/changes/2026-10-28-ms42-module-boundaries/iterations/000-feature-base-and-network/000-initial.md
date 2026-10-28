@@ -187,4 +187,45 @@ PASS（2026-10-28）。无 BLOCKED、无 SKIPPED。计划批准来自 goal 指�
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+独立阅读完整 diff（c0ae5a7..ffd7482，109 文件）与实际代码，核对结论：
+
+- 无阻塞 finding；无身份证明机制或判定层。两条非阻塞 Minor：
+  - F1（Plan 错误）：Plan Context Current-State Evidence 记「17 个运行时依赖」，基点实际为 18 个（R79 §3.4 口径偏差传入）。处置集按名枚举（六 optional + lru/anyhow/futures），计数误差不影响执行与验收。Plan Context 不可改写，修正记录于此。
+  - F2（新证据）：`network_server_test` 默认组合 0 用例为 HEAD 固有形态——测试体整体处于 `/* */` 块注释（文件 :6 起），Act 已核实且本次门控非成因；六协议目标结论中该项为 0 passed / 0 failed，判定有效。
+
+**Acceptance Gaps**
+
+None。R1 与 R2 的 Iteration 验收逐条满足（见 Evidence）。
+
+**Evidence**
+
+代码与 diff 独立核对（静态，全部当次执行）：
+
+- diff 范围恰为预期 109 文件：`Cargo.toml`、`Cargo.lock`、`src/lib.rs`（仅 +1 行 network 门，`pub mod cli` 未动）、104 个 tests 文件（每文件恰 +1 行 cfg 头，断言与用例本体零改动——diff 逐文件核看，tests 无删除行）、Cycle 文件与 tasks.md。
+- `Cargo.toml` 与 design §2.1 逐项一致：features 表三 feature + default、六依赖 optional（`dep:` 形式）、`[[bin]] required-features = ["cli"]`、lru/anyhow 移除、futures 移 dev（版本不变）。
+- 门分布复算：HEAD 中 33 个 `#![cfg(all(feature = "network", feature = "cli"))]` + 70 个 `#![cfg(feature = "network")]` + `executor_test.rs:495` 函数级门（其后即 `#[test]`），合计 104。
+- 锚定计数独立复跑 grep：network 104、bin 44、交集 33——与 Act Response 及规划值一致。
+- `Cargo.lock` 差异仅删除 `lru` 与传递依赖 `allocator-api2` 两项；`anyhow` 仍存在（其他 crate 传递依赖，lock 保留正确），零版本变更。
+- tasks.md 状态同步（T1/T2 done、批次状态行、两个复选框）与实际完成一致。
+
+验证结论沿用 Act Response 表（命令 1–11）：验证产生于 ffd7482 工作区，当前 HEAD 即 ffd7482 且工作区干净，覆盖未变化，按公共规则 › 验证 直接沿用，不重跑。结论映射：R1 默认组合等价 = 命令 1–5、11（check/fmt/clippy 改前改后全 0）+ Cargo 差异核对；R2 = 命令 6（RED）、7（C1 构建门）、8–9（C1 行为，S8 的 38 = 39−1 成立）、10（默认协议面）；M19 遵守（未跑全量）。
+
+**Follow-up Decision**
+
+既有 Acceptance 全部满足且无阻塞项，Iteration 000 完成。两条 Minor finding 只记录不返工：F1 属记录误差且 Act Response 已如实标注；F2 属既有形态，与本次门控无关，收尾全量时该目标照常按 0 用例通过。Act Response 报告的 Runbook 候选（feature 门控测试面枚举流程）按职责留调度器派发 recorder 处置，不在本 Review 内登记；Issue 候选为 None。
+
+**Iteration Plan Update**
+
+None
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`iterations/001-crypto-optional/000-initial.md`（Iteration 001：crypto 可选化与关闭态行为，T3；本 Review 随批创建，Plan Context 置 ready）
