@@ -2,6 +2,7 @@
 //!
 //! 判定面只有成功/失败、错误消息、SQLSTATE 与目标表行数——不采样内存。
 
+#![cfg(feature = "cli")]
 use rtsql::database::Database;
 use rtsql::SqlOutcome;
 use std::io::Read;

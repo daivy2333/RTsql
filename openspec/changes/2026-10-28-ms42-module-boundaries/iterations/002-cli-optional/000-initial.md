@@ -103,7 +103,98 @@ PASS（2026-10-28）。无 BLOCKED、无 SKIPPED。批准来自 goal 指令对 M
 
 ## Act Response
 
-- Status: pending
+- Status: reported
+- Cycle: Iteration 002 / Cycle 000（initial）· Task T4
+- 基线: HEAD `8fb2f42`，分支 `changes/2026-10-28-ms42-module-boundaries`
+
+### 实际改动
+
+产品代码 —— cli 唯一门点：
+
+- `src/lib.rs:3` — `pub mod cli;` 前加 `#[cfg(feature = "cli")]`。cli 模块树仅在 cli feature 开启时编译。src 内 `crate::cli` 引用复核为 0，无其他调用点需改。
+
+测试面 —— 11 个 bin-only 文件各 +1 行文件级门（`#![cfg(feature = "cli")]`）：
+
+| 文件 | 门行位置 |
+|---|---|
+| `tests/composite_index_runtime_test.rs` | 3 |
+| `tests/datetime_function_test.rs` | 12 |
+| `tests/datetime_type_test.rs` | 12 |
+| `tests/default_precheck_test.rs` | 9 |
+| `tests/e2e_test.rs` | 12 |
+| `tests/group_by_expr_test.rs` | 11 |
+| `tests/import_input_surface_test.rs` | 7 |
+| `tests/legacy_compat_test.rs` | 28 |
+| `tests/query_memory_test.rs` | 5 |
+| `tests/string_index_runtime_test.rs` | 3 |
+| `tests/string_index_sql_test.rs` | 3 |
+
+插入形态沿用 Iteration 000 既成门施加形态（`//!` 文档块之后、空行之后、首个内容行之前），与 33 个双锚定文件同构。测试断言与用例本体零改动。
+
+### 门控清单与计数（Verification 8）
+
+- 本 Cycle 新增 cli-only 文件级门：**11 个**，与 Plan Context 的 11 文件清单逐项一致。
+- Iteration 000 既有的双锚定门 `#![cfg(all(feature = "network", feature = "cli"))]`：**33 个文件**，本 Cycle 未改动（diff 为证）。
+- 枚举重跑：grep `CARGO_BIN_EXE_rtsql` 命中 **44 个**测试文件（66 处引用，且为 tests/ 下唯一 bin 环境变量名，无 `option_env!` 变体）；其中含 `use rtsql::network::` 者 **33 个**（＝既有双锚定门集合，两者完全同一集合），不含者 **11 个**（＝本 Cycle 加门集合）。与 Plan Context 清单**零差异**。
+- 清单完备性的补充证据：C4 构建门 `--lib --tests` 编译**全部**集成测试目标并退出码 0 —— 若还有任何测试目标依赖 cli/network 而未加门，该命令必然失败。
+- 零改动核对：`src/main.rs`、`src/cli/`、`Cargo.toml`、`install.sh`、`build-riscv64-musl.sh` 均不在本 Cycle diff 内（`git diff --name-only` 命中 0）。`Cargo.toml` 的 `cli` feature 与 `[[bin]] required-features = ["cli"]` 由 T1 已就位，本 Cycle 零改动。
+
+### 与计划的偏差
+
+无实质偏差。两处非实质执行细节记录：
+
+1. Plan Context 的 11 文件清单与执行时 grep 重跑枚举完全一致，无需按风险说明记录差异。
+2. C3/C4 `--lib` 用例数差额 412 − 390 = 22：来源是 network/crypto 模块单测在 core-only 组合下剥除，**非** cli 侧剥除（cli 在 C3/C4 两组合中均未开启）。按 Plan Context 风险说明，差额不构成对账门槛。
+
+### 验证命令与实际结果
+
+**RED（改动前，Plan Context First test）**
+
+```
+cargo check --offline --locked --no-default-features --features network,crypto --lib --tests
+→ 退出码 101
+错误首行: error[E0432]: unresolved import `clap`
+定位:     src/cli/mod.rs:19:5
+```
+
+**GREEN**
+
+| # | 命令 | 退出码 | 实际结果 |
+|---|---|---|---|
+| V2 | `cargo check --offline --locked --no-default-features --features network,crypto --lib --tests` | 0 | C3 构建门通过，Finished dev profile，无 crate 告警 |
+| V3 | `cargo check --offline --locked --no-default-features --lib --tests` | 0 | C4 构建门通过，Finished dev profile，无 crate 告警 |
+| V4a | `cargo test --offline --locked --no-default-features --features network,crypto --lib` | 0 | 412 passed; 0 failed; 0 ignored |
+| V4b | `cargo test --offline --locked --no-default-features --features network,crypto --test storage_test --test parser_test --test executor_test` | 0 | executor_test 39 passed、parser_test 6 passed、storage_test 21 passed；0 failed |
+| V5a | `cargo test --offline --locked --no-default-features --lib` | 0 | 390 passed; 0 failed; 0 ignored |
+| V5b | `cargo test --offline --locked --no-default-features --test storage_test --test parser_test` | 0 | parser_test 6 passed、storage_test 21 passed；0 failed |
+| V6a | `cargo build --offline --locked --no-default-features --bin rtsql` | 101 | cargo 原生错误：`error: target 'rtsql' in package 'rtsql' requires the features: 'cli'` |
+| V6b | `cargo check --offline --locked --lib --bins --tests` | 0 | 默认组合 `--lib --bins --tests` 通过 |
+| V7a | `cargo test --offline --locked --test cli_test` | 0 | 126 passed; 0 failed; **2 ignored**（长期 `#[ignore]` 用例，按既有形态计 ignored） |
+| V7b | `cargo fmt --check` | 0 | 无输出 |
+| V7c | `cargo clippy --offline --locked --all-targets -- -D warnings` | 0 | Finished dev profile，无告警 |
+
+**Stop-when 复核**：`grep -rn "crate::cli" src/` → **0** 命中（src 内不存在 cli 模块的外部引用）。
+
+**M19 遵守**：本 Cycle 未跑全量套件，全量预算留在 Iteration 003（默认组合一次）。上述均为 Cycle Verification 列出的定向命令，单目标验证用默认并行度。判定只看 cargo 退出码与原生输出（required-features 面以 cargo 原生错误为判据，未查 target 目录产物存在性），未新增脚本、封装命令、专用参数、判定层或任何 Hash/指纹/run-id 类身份证明机制。
+
+### 自检发现
+
+- Gate 3（task 级 review）：diff 仅 12 文件 12 行新增，全部落在 T4 目标清单内；无计划外修改；无新增告警（clippy `-D warnings` 通过）；无 `#[allow]` 压告警；无新增 `eprintln!`/`println!` 直写出口；测试不会因错误原因通过（C3/C4 构建门 + cargo 原生错误双面确认门确实生效，而非空转）。
+- 禁改项复核：CLI 子命令/输出/退出码零变更（cli 模块内部零改动）；network/crypto 的门零改动（33 个双锚定门文件 diff 为空）；未新增测试；`src/main.rs`、`src/cli/`、`Cargo.toml`、两个脚本零改动。
+- 未发现 Critical / Important 问题，无需修复；**无遗留 Minor 问题**。
+- 未产生 change 范围外的实质缺陷。
+
+### Persisted Evidence
+
+None required（Plan Context Persisted Evidence = `none`；组合构建可由 cargo 命令低成本复现，不满足 required 白名单；未创建 `evidence/` 目录）。
+
+### Experience Candidates
+
+None —— 本 Cycle 未发现可重复或高风险的操作路径缺口，也未发现当前 change 范围外的实质缺陷；预期 RED 与普通测试通过不构成候选。
+
+### 未解决问题
+
+无。
 
 ## Plan Review
 

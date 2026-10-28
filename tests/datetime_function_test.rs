@@ -9,6 +9,7 @@
 //! TempDir 为 CWD 并把 `RTSQL_HOME` 指向该 TempDir（并行安全）；stdout/
 //! stderr 恒为管道（非 TTY，默认 JSON 渲染）。
 
+#![cfg(feature = "cli")]
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
