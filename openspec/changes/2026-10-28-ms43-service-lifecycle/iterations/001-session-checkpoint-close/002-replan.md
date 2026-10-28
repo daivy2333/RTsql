@@ -162,15 +162,35 @@ None。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未审查。
+- 非阻塞 Minor。`uncommitted_row_absent_after_reopen` 这个名字仍含 `absent`。计划的 Risks and Notes 写明改名不改变通过条件，本任务不要求改名。断言是 `rows == vec![vec![rtsql::Value::Int(7)]]`，失败文案是重开后应查到该行。规格场景标题是「关闭后未提交插入仍被查到」。这个名字没有把验收读成「行必须不存在」。不为此返工。
+
+没有阻塞 Acceptance 的发现。Act 的 diff 与 Task Definition 一致：只改了该断言和失败文案，并更新了 `tasks.md` 的 T2 状态。`begin`、`INSERT INTO t VALUES (7)`、不 `commit`、2 秒内 `close`、丢掉句柄、默认 `Database::open`、`SELECT id FROM t WHERE id = 7` 仍在。本提交没有改 `src/`，也没有改 `flushed_uncommitted_insert_does_not_resurrect`。
+
+**Acceptance Gaps**
+
+本 Cycle 的四条 Acceptance 都有对应结果。
+
+「未提交行在 `close` 后不可见」不是本 Cycle 的未关闭缺口。用户原话「我注意到了问题，我觉得可以接受replan更改计划，继续吧」批准撤回它。父 Cycle 没有满足它。这次通过不把它记成已经满足。
+
+**Evidence**
+
+- 提交 `cfb6c076d802b6fb4b05829b9dff646dc25714a8` 的 diff 只有三处：本文件的 Act Response、`tasks.md` 的 T2 状态，以及 `tests/session_lifecycle_test.rs`。测试改动是把 `assert!(rows.is_empty(), ...)` 换成 `assert_eq!(rows, vec![vec![rtsql::Value::Int(7)]], ...)`，失败文案改为 `an uncommitted insert must still be found after close and reopen`。
+- 该函数现文在 `tests/session_lifecycle_test.rs` 123–153 行。前置步骤没有 `commit`。查询走 `Database::open` 与 `execute_sql`。`query_rows` 取出 `SqlOutcome::Rows` 的 `rows`，断言比较的就是这个结果。
+- 验证沿用本文件 Act Response 的「验证」一节，不重跑。`cargo test --offline --test session_lifecycle_test` 退出码 0，`7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`，`uncommitted_row_absent_after_reopen` 为 ok。工作区在审查前干净，HEAD 就是该提交，断言与报告一致，没有公共规则里的重跑情形。
+- `tasks.md` 仍写「已撤回，不是已经满足」。规格场景「关闭后未提交插入仍被查到」仍记录现行可见结果，并写明不覆盖 `flushed_uncommitted_insert_does_not_resurrect`。
+- Persisted Evidence 为 none。未因缺少 evidence 目录提出问题。Experience Candidates 为 None。
 
 **Follow-up Decision**
 
-尚未审查。
+本 Cycle 的 Acceptance 已经满足，没有要留在当前 Cycle 的修复，也没有需要新执行依据的缺口。Iteration Plan 保持不变。全量不并进本 Cycle。展开 Iteration 002 的目录和 `000-initial.md`。
+
+**Iteration Plan Update**
+
+无。Map 仍是 000、001、002。全量仍只在 002。
 
 **Next Cycle**
 
@@ -178,4 +198,4 @@ None
 
 **Next Iteration**
 
-None
+`openspec/changes/2026-10-28-ms43-service-lifecycle/iterations/002-batched-full/000-initial.md`
