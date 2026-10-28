@@ -109,7 +109,75 @@ PASS（2026-10-28）。无 BLOCKED、无 SKIPPED。批准来自 goal 指令对 M
 
 ## Act Response
 
-- Status: pending
+- Status: reported
+
+**实际改动**（3 个修改文件 + 1 个新增文件；`Cargo.lock` 零变化）
+
+- `src/storage/mod.rs`：`mod crypto;` 加 `#[cfg(feature = "crypto")]`。
+- `src/storage/file_header.rs`：
+  - `KNOWN_FLAGS_MASK` 二值化——crypto 开 = `FLAG_ENCRYPTED`、关 = `0`（双 `#[cfg]` 常量）；`FLAG_ENCRYPTED` 常量两组合保留。
+  - `decode`：加密分支整体 `#[cfg(feature = "crypto")]`（if 语句级），原 else 改为顺序明文零区校验；加密分支内改为局部 `let mut encrypted = header;` 后 `return Ok(encrypted)`——默认组合判定序列逐项等价（magic → version → unknown_flags → page_size → 加密分支/零区校验 → Ok）。
+  - `current_encrypted` 加 `#[cfg(feature = "crypto")]`（C2 下全部调用点被门，消除 dead_code）。
+  - 单测门 3 个：`encrypted_header_roundtrip`、`encrypted_header_salt_all_zero_rejected`、`encrypted_header_invalid_kdf_params_rejected`。
+- `src/storage/file_storage.rs`：
+  - use 行：`rand::RngCore`、crypto 模块 use、`FLAG_ENCRYPTED` 单独 import 均加 `#[cfg(feature = "crypto")]`。
+  - `cipher` 字段加 `#[cfg(feature = "crypto")]`（C2 构建无该字段）；两处构造器字面量的 `cipher,` 初始化同步加门。
+  - `initialize_header` / `validate_header` 双 `#[cfg]` 变体：crypto 变体函数体零改动（默认组合行为与错误消息逐字节不变，含 `(false, Some)` 的 `database is not encrypted: {path}` 原文）；C2 变体在持锁之后拒绝携带密钥的打开——既有明文库路径（validate_header，decode 之后）与 0 字节新建路径（initialize_header，写任何头字节之前）均返回 `StorageError::InvalidKey`，消息 `encryption is not available in this build: {path}`；C2 明文路径（decode → 零区校验 → 整除校验 → set_len 分配）与默认组合逐字节一致。
+  - `read_page_blocking` / `write_page_blocking`：`cipher` 参数移至末位并加参数级 `#[cfg]`，match 重构为「crypto if-let + 早返回 + 明文直落」——两组合明文字节序列不变。
+  - `read_page` / `write_page`：spawn_blocking 调用按组合双 `#[cfg]` 块（C2 无 cipher 实参）。
+  - `allocate_page`：加密零页分支 `#[cfg]` + 早返回，offset 计算移入分支内（消除 C2 unused）；明文 set_len 路径零改动。
+  - 单测门 6 个（依赖加密能力的用例）：`encrypted_db_on_disk_shape`、`wrong_key_fails_on_first_read`、`encrypted_without_key_rejected`、`tampered_ciphertext_detected_on_read`、`encrypted_allocate_uses_4124_stride`、`encrypted_db_rejects_non_record_aligned_length`；`open_none_equivalent_to_open_for_plaintext` 与 `plaintext_with_key_rejected` 两组合保留（后者在 C2 断言的是新拒绝面 `InvalidKey`，默认组合断言既有消息，均只 `matches!` 变体）。tests 内 `use crate::storage::FLAG_ENCRYPTED;` 加门。
+- `tests/crypto_off_build_test.rs`（新增）：文件级 `#![cfg(not(feature = "crypto"))]`，三用例 (a)(b)(c) 按 Required behavior 第 5 条；断言直接锚定 `SqlOutcome`/`StorageError`，不依赖 network（C4 组合同可编译）。
+
+**TDD 轨迹**
+
+- RED：新建测试后 `cargo test --offline --locked --no-default-features --features cli,network --test crypto_off_build_test` → exit 101，错误首行 `error[E0433]: cannot find module or crate \`aes_gcm\` in this scope`（lib 因 crypto.rs 引用未启用依赖编译失败，测试目标无法运行）。
+- GREEN：门控后同命令 exit 0，三用例通过（S5/S6/S3 逐条锚定）。
+
+**验证命令与结果**（全部当次真实运行，`--offline --locked`；fmt 重排后全量重跑）
+
+| # | 命令 | 结果 |
+|---|---|---|
+| 1 | RED 命令（见上） | exit 101 →（门控后）exit 0，3 passed / 0 failed |
+| 2 | `cargo check --no-default-features --features cli,network --lib --bins --tests` | exit 0 |
+| 3 | `cargo test --no-default-features --features cli,network --lib` | 419 passed / 0 failed，exit 0 |
+| 4 | C2 `--test crypto_off_build_test --test storage_test --test parser_test` | 3 + 21 + 6 passed，exit 0 |
+| 5 | `cargo clippy --no-default-features --features cli,network --lib --tests -- -D warnings` | exit 0（关闭组合无 dead_code/unused 告警） |
+| 6 | 默认组合 `cargo test --test encryption_test --lib` | lib 436 passed + encryption_test 7 passed，exit 0 |
+| 7 | 默认组合 `cargo check --lib --bins --tests` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` | 均 exit 0 |
+| 8 | `git diff Cargo.lock` | 空输出（零变化，optional 声明已存在） |
+
+- 关闭态两处行为（用例 b 实测）：明文库携带密钥 → `InvalidKey("encryption is not available in this build: {path}")`；0 字节携带密钥新建 → 同型 `InvalidKey` 且文件长度保持 0（不写头字节）。加密头文件（用例 a）→ `IncompatibleHeader("unknown feature flags: 0x1 ({path})")`，沿用既有前向防护面。
+- C2 `--lib` 与默认组合差额：436 − 419 = 17 = crypto.rs 内部单测 8 + file_header 门控 3 + file_storage 门控 6（grep 计数核对一致，属预期剥除）。
+- 锁序守卫：两处拒绝点均在 `try_lock_with_backoff` 之后的 initialize/validate 阶段（结构不变，继承 database-encryption R2）。
+- S9 事实核对：C2 验证集不含 encryption_test 等加密正例目标（按 design §2.5 选定；该文件在 C2 可编译但不运行）。
+- M19 遵守：无全量，全部定向命令。
+
+**与计划的偏差**
+
+- 无实质偏差。门控形态按 Implementation Guidance 授权的非实质选择落地：分支级 cfg（if-let + 早返回）而非整函数拆分（initialize/validate 因返回类型不同采用双变体）；`current_encrypted` 随调用点一并 cfg，无 `#[allow]`。
+
+**自检发现、已修复内容与遗留 Minor**
+
+- 已修复（本 Cycle 内，各 1 次失败后定位）：
+  1. C2 构造块 if/else 两臂类型不一致（E0308）——补显式 `(record_size, 0)` 组元。
+  2. blocking 函数参数重排后 crypto 调用点实参顺序未同步（E0308，默认组合回归发现）——两处调用点改为 cipher 末位传参。
+  3. C2 两处编译警告（`unused_mut` file_header、`unused variable: offset` file_storage）——等效重构消除：可变绑定移入 crypto 分支、offset 计算移入加密零页分支；未用任何 `#[allow]`。
+- `cargo fmt` 在实施后应用（use 排序与闭包换行，格式性变化），此后全部验证面重跑。
+- 遗留 Minor：None。
+
+**Persisted Evidence**
+
+- None required（Mode: none；组合行为可低成本用 cargo 命令复现）。
+
+**Experience Candidates**
+
+- Issue 候选：None（未发现本 change 范围外的实质缺陷）。
+- Runbook 候选：None（门控枚举流程候选已在 Iteration 000 记录；本 Cycle 无新的可重复操作路径）。
+
+**未解决问题**
+
+- None。
 
 ## Plan Review
 
