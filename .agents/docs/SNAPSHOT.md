@@ -104,9 +104,9 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 28a94fd4ff6d941bc118cdb0941337ed0b79eb9a
-- **ahead of origin**: 12
-- **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-10-27-ms39-composite-index-and-range-access/`。
+- **提交基线**: BASELINE_PENDING
+- **ahead of origin**: AHEAD_PENDING
+- **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 87 个域。
 
@@ -118,7 +118,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - 参考: `.agents/memory/references.md` (Rxx)
 - 改进: `.agents/memory/improvements.md` (Ixx)
 - 任务与路线: `.agents/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-10-27-ms39-composite-index-and-range-access/`）
+- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-10-28-ms41-build-and-compat-baseline/`）
 - Legacy migration carrier: `.agents/legacy/2026-08-25-openspec-init-migration/`
 
 ## 行为规格语料（87 域，权威以 `openspec/specs/` 为准）
