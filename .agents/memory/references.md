@@ -692,4 +692,12 @@
 - **用途**: 格式检查与 deny clippy 在当时工具链上不可满足的缺陷台账。已由归档变更 `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline` 处置：Iteration 000 使两条命令退出码为 0，Iteration 002 收尾复测仍为 0。未新增 rust-toolchain.toml。
 - **状态**: closed（2026-10-28 fixed → openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline）
 
+## R79: MS42 模块边界现状事实面分析
+
+- **类型**: analysis
+- **路径**: `.agents/analysis/ms42-module-boundary-current-state.md`
+- **日期**: 2026-10-28（revision `1f7dd6e`，静态读码与 grep 统计，未运行测试）
+- **用途**: 当前 revision 的模块边界事实面——模块依赖图（更新 R25 的 11 模块/99 处 pub(crate) 至 12+1 模块/240 处 pub(crate)）、两条依赖环的精确现状、network/加密/CLI 可选化接缝、Database 共享状态归属清单、诊断出口与测试锚定分布；供 MS42 plan 阶段直接引用
+- **状态**: active
+
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
