@@ -63,7 +63,7 @@
 | 序 | 条目 | 内容 | 状态 |
 |---|---|---|---|
 | 4 | I016 | 代价模型 + Join 重排（降范围起步：选较小 Hash 构建侧） | promoted（降范围起步纳入 MS40，尚未开始；完整代价模型仍留本条） |
-| 5 | I012 | 消息传递重构（Arc<Mutex> → mpsc/oneshot/Notify/watch） | planned（P3），可进行 |
+| 5 | I012 | 消息传递重构（Arc<Mutex> → mpsc/oneshot/Notify/watch） | promoted（会话刷盘、提交等待、checkpoint 与 close 的状态归属已随 MS43 交付；原文 mpsc/oneshot/watch 通道替换未执行，仍留本条） |
 | 6 | I074 | 数据库模块化——依据必要 SQL 实现形成的边界，先评估 feature，再按接口拆分 crate | promoted（feature 边界与接口归属已随 MS42 交付；拆 crate 部分仍留本条） |
 | 10 | I065 | 扫描结果流式化（Response 物化架构重构） | long-term，未排期 |
 
@@ -131,7 +131,7 @@
 - **问题**: 多个模块用 `Arc<Mutex<_>>` 共享状态，实为生产者-消费者模式
 - **方案**: WAL→mpsc，提交→oneshot，Checkpoint→Notify，BufferPool→watch
 - **依赖**: M32（I011）
-- **状态**: planned（P3）
+- **状态**: promoted（2026-10-28 随 MS43 交付读写会话上 WAL 刷盘循环、提交等待、checkpoint 与 `close` 的状态归属和任务退出，change `openspec/changes/archive/2026-10-28-ms43-service-lifecycle/`。原文把 Mutex 队列换成 mpsc、提交通知换成 oneshot、缓冲池加 watch 的方案未执行，仍留本条，未排期）
 - **Legacy**: O012
 
 ## I015: M25 多 Join 算法
