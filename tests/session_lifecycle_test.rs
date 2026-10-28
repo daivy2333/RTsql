@@ -144,9 +144,10 @@ async fn uncommitted_row_absent_after_reopen() {
             .await
             .unwrap(),
     );
-    assert!(
-        rows.is_empty(),
-        "an uncommitted insert must be absent after close and reopen, got {rows:?}"
+    assert_eq!(
+        rows,
+        vec![vec![rtsql::Value::Int(7)]],
+        "an uncommitted insert must still be found after close and reopen, got {rows:?}"
     );
     db.close().await.unwrap();
 }

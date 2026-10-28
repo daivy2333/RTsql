@@ -122,7 +122,43 @@ PASS。无 BLOCKED。无 SKIPPED。
 
 ## Act Response
 
-- Status: 待 Act 填写
+- Status: reported
+
+**实际改动**
+
+- `tests/session_lifecycle_test.rs` 的 `uncommitted_row_absent_after_reopen`：`assert!(rows.is_empty(), ...)` 改为 `assert_eq!(rows, vec![vec![rtsql::Value::Int(7)]], ...)`。失败文案改为重开后应查到该行。`begin`、`INSERT INTO t VALUES (7)`、不 `commit`、2 秒内 `close`、丢掉句柄、默认 `Database::open`、`SELECT id FROM t WHERE id = 7` 未改。函数名未改。
+- `openspec/changes/2026-10-28-ms43-service-lifecycle/tasks.md`：T2 状态改为已实施，2.1 勾选。001 记为本 Cycle 的 Act Response `reported`、Review Result 仍为 `pending`。002 仍未展开。
+
+**与计划的偏差**
+
+无。
+
+**自检**
+
+- 发现：函数名仍是 `uncommitted_row_absent_after_reopen`。
+- 已修复：无。计划写明改名不改变通过条件，本任务不要求改名。
+- 遗留 Minor：函数名仍含 `absent`。
+- Gate 3：通过。规格场景「关闭后未提交插入仍被查到」由该用例走 `Database::open`、`close` 和 `execute_sql`，断言重开后的结果等于 `vec![vec![rtsql::Value::Int(7)]]`。diff 不改 `src/`，也不改 `flushed_uncommitted_insert_does_not_resurrect`。同文件其余 6 条留在同一条命令里，结果为 ok。没有新增产品错误路径，也没有身份证明或判定层。
+- Gate 4：通过。下面的命令退出码 0，failed 为 0。
+- Gate 5：未触发。
+- 跳过：不重跑父 Cycle 那条失败命令。不跑全量。全量留在 Iteration 002，按 T3 分批串行。
+
+**验证**
+
+- 变更前观察沿用父 Cycle Act Response（`iterations/001-session-checkpoint-close/000-initial.md` 的「验证」）：`cargo test --offline --test session_lifecycle_test` 退出码 101，`6 passed; 1 failed`，失败查询结果 `[[Int(7)]]`。本 Cycle 未重跑。
+- GREEN：`cargo test --offline --test session_lifecycle_test`。退出码 0。`7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`，`finished in 1.05s`。`uncommitted_row_absent_after_reopen` 为 ok。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None。
+
+**未解决问题**
+
+无待修项。原验收「未提交行在 `close` 后不可见」保持撤回，这次通过不补上它。
 
 ## Plan Review
 

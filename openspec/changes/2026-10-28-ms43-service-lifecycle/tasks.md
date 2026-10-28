@@ -6,7 +6,7 @@
 
 - 需求与 BDD：completed。S8 已按 proposal「验收修订」重写，场景草图见该文件。
 - 000：accepted。执行依据是 `iterations/000-wal-flush-owner/000-initial.md`。Review Result 为 accepted。
-- 001：审查结论 `replan-required`。原执行依据 `iterations/001-session-checkpoint-close/000-initial.md` 的 Plan Context 仍为 ready，不改写。`iterations/001-session-checkpoint-close/001-replan.md` 的 Plan Context 保持 draft，Gate 2 保持 BLOCKED，不改为 ready，不交给实施。当前执行依据是 `iterations/001-session-checkpoint-close/002-replan.md`，Plan Context 为 ready，Gate 2 为 PASS。原验收「未提交行在 close 后不可见」已按用户裁定撤回，父 Cycle 没有满足它。
+- 001：审查结论 `replan-required`。原执行依据 `iterations/001-session-checkpoint-close/000-initial.md` 的 Plan Context 仍为 ready，不改写。`iterations/001-session-checkpoint-close/001-replan.md` 的 Plan Context 保持 draft，Gate 2 保持 BLOCKED，不改为 ready，不交给实施。当前执行依据是 `iterations/001-session-checkpoint-close/002-replan.md`，Plan Context 为 ready，Gate 2 为 PASS，Act Response 为 reported，Review Result 仍为 pending。原验收「未提交行在 close 后不可见」已按用户裁定撤回，父 Cycle 没有满足它。
 - 002：未展开。
 - Persisted Evidence：none。
 - 无跳过项。
@@ -18,7 +18,7 @@
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
 | T1 | 000 | 无 | `WALBuffer` 单飞刷盘、暂停/恢复、`shutdown` 后等待返回 `Ok` | 已验收 |
-| T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持；未提交插入在 `close` 后重开仍被查到 | 接线已落地。原「未提交行在 close 后不可见」已撤回，不是已经满足。剩余工作见 `002-replan.md` |
+| T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持；未提交插入在 `close` 后重开仍被查到 | 已实施。原「未提交行在 close 后不可见」已撤回，不是已经满足。 |
 | T3 | 002 | 001 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
 
 ## 1. WAL 刷盘所有者（Iteration 000）
@@ -27,7 +27,7 @@
 
 ## 2. 会话 checkpoint 与关闭（Iteration 001）
 
-- [ ] 2.1 T2：接线已在父 Cycle 落地，本项不重做产品代码。剩余工作按 `iterations/001-session-checkpoint-close/002-replan.md` 执行：只改 `tests/session_lifecycle_test.rs` 的 `uncommitted_row_absent_after_reopen`。该用例不再要求该行不存在，改为断言默认重开后仍查到 `id = 7` 的那一行。
+- [x] 2.1 T2：接线已在父 Cycle 落地，本项不重做产品代码。剩余工作按 `iterations/001-session-checkpoint-close/002-replan.md` 执行：只改 `tests/session_lifecycle_test.rs` 的 `uncommitted_row_absent_after_reopen`。该用例不再要求该行不存在，改为断言默认重开后仍查到 `id = 7` 的那一行。
 
 已经落地、且本项必须保持的接线：`TransactionManager::commit` 在 `CommitTxn` 与 `append_commit_and_wait` 之间持有会话闸门；`Database::checkpoint` 在九步前 `quiesce_for_checkpoint`、九步后 `resume_after_checkpoint`，future 被丢掉时 `ResumeOnDrop` 恢复；`Database::close` 走同一段九步前序列，然后 `shutdown`，不恢复循环。只读和内存会话保持早退。
 
