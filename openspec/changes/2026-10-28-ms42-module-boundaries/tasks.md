@@ -6,7 +6,7 @@
 
 - 需求与 BDD：completed（场景草图与默认假设见 proposal.md）。
 - 000：执行依据是 `iterations/000-feature-base-and-network/000-initial.md`。T1、T2 已完成，Act Response 为 reported，Review Result 为 accepted（2026-10-28，两条非阻塞 Minor 见该 Cycle Plan Review F1/F2）。
-- 001：执行依据是 `iterations/001-crypto-optional/000-initial.md`。Plan Context 为 ready。T3 待执行。
+- 001：执行依据是 `iterations/001-crypto-optional/000-initial.md`。T3 已执行且验证通过（Act Response: reported），待 Plan Review。
 - 002：尚未展开（Map 内待执行；目录与 Cycle 由 001 accepted 后创建）。
 - 003：尚未展开。
 - Persisted Evidence：none（全 change）。
@@ -18,7 +18,7 @@
 |---|---|---|---|---|
 | T1 | 000 | 无 | features 表与 optional 依赖落地、死依赖处置；默认组合构建门与质量门退出码 0（改前改后等价） | done |
 | T2 | 000 | T1 | network 可选化 + 测试面门；C1 组合构建门与验证集通过；默认组合协议测试通过 | done |
-| T3 | 001 | 000 accepted | crypto 可选化 + 关闭态行为测试；C2 组合构建门与验证集通过；加密单元测试按组合门控 | pending |
+| T3 | 001 | 000 accepted | crypto 可选化 + 关闭态行为测试；C2 组合构建门与验证集通过；加密单元测试按组合门控 | done |
 | T4 | 002 | 001 accepted | cli 可选化（bin required-features + 44 文件门）；C3/C4 组合构建门与验证集通过；默认组合 cli_test 通过 | pending |
 | T5 | 003 | 002 accepted | 五组合矩阵全绿（构建门 + 各验证集 + 双组合 clippy + fmt） | pending |
 | T6 | 003 | T5 | M19 分批全量（默认组合）每批 0 failed + 对账 0/0/0；design §5/§6 契约与实施后代码事实一致性核对；change 结构自检 | pending |
@@ -30,7 +30,7 @@
 
 ## 2. crypto 可选化（Iteration 001）
 
-- [ ] 2.1 T3：先写 `tests/crypto_off_build_test.rs`（文件级 `#![cfg(not(feature = "crypto"))]`，三个用例：合成 64B 加密头打开 → `IncompatibleHeader` 且消息含 `unknown feature flags`；明文库携带密钥打开与 0 字节携带密钥新建 → `InvalidKey` 且消息点名构建未包含加密能力、新建路径不写头；明文库建表/写入/查询/重开往返）。记录 RED——C2 组合尚不能编译（crypto 未门控、argon2/aes-gcm 未启用），测试无法运行。然后实施门控：`storage/mod.rs` 的 `mod crypto`、`file_header.rs` 的 `KNOWN_FLAGS_MASK`（crypto 关 = 0）与 decode 加密分支、`file_storage.rs` 加密分支与携带密钥拒绝（design §3 表）、file_header/file_storage 内加密正例单测加 `#[cfg(feature = "crypto")]`（argon2/aes-gcm 的 optional 声明已由 T1 完成）。GREEN = C2 组合构建门与验证集（含新测试目标）通过；默认组合 `cargo test --offline --test encryption_test --lib` 通过。
+- [x] 2.1 T3：先写 `tests/crypto_off_build_test.rs`（文件级 `#![cfg(not(feature = "crypto"))]`，三个用例：合成 64B 加密头打开 → `IncompatibleHeader` 且消息含 `unknown feature flags`；明文库携带密钥打开与 0 字节携带密钥新建 → `InvalidKey` 且消息点名构建未包含加密能力、新建路径不写头；明文库建表/写入/查询/重开往返）。记录 RED——C2 组合尚不能编译（crypto 未门控、argon2/aes-gcm 未启用），测试无法运行。然后实施门控：`storage/mod.rs` 的 `mod crypto`、`file_header.rs` 的 `KNOWN_FLAGS_MASK`（crypto 关 = 0）与 decode 加密分支、`file_storage.rs` 加密分支与携带密钥拒绝（design §3 表）、file_header/file_storage 内加密正例单测加 `#[cfg(feature = "crypto")]`（argon2/aes-gcm 的 optional 声明已由 T1 完成）。GREEN = C2 组合构建门与验证集（含新测试目标）通过；默认组合 `cargo test --offline --test encryption_test --lib` 通过。
 
 ## 3. cli 可选化（Iteration 002）
 
