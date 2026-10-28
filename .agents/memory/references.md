@@ -684,4 +684,12 @@
 - **用途**: 检索未排期工作的排序建议、技术前置、按需启动条件、代码依据与验证边界，供后续路线和实施调查使用。
 - **状态**: active
 
+## R78: ISS36 仓库既有的 fmt / clippy 门在当前工具链下不可满足
+
+- **类型**: issue
+- **路径**: `.agents/issues/ISS36-fmt-clippy-gates-unsatisfiable.md`
+- **日期**: 2026-10-28
+- **用途**: 格式检查与 deny clippy 在当时工具链上不可满足的缺陷台账。已由归档变更 `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline` 处置：Iteration 000 使两条命令退出码为 0，Iteration 002 收尾复测仍为 0。未新增 rust-toolchain.toml。
+- **状态**: closed（2026-10-28 fixed → openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline）
+
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

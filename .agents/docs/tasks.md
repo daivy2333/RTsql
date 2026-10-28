@@ -79,7 +79,7 @@
 
 ### MS41：构建与兼容验证基线
 
-- **Status**: ready（2026-10-28。change `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline/` 已归档。Linux 本机质量检查、gnu 冒烟、musl 静态二进制冒烟和一次 M19 分批全量已有结果。macOS 仍未运行，不记作完成。ISS36 保持 open）
+- **Status**: ready（2026-10-28。change `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline/` 已归档。Linux 本机质量检查、gnu 冒烟、musl 静态二进制冒烟和一次 M19 分批全量已有结果。macOS 仍未运行，不记作完成。ISS36 closed（2026-10-28 fixed → `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline`））
 - **Outcome**: 项目质量检查可通过，在 Linux 本机、x86_64-linux-musl 与 macOS 上取得对应构建和实际运行验证，形成可复用的支持与兼容基线。
 - **Rationale**: 检查修复、目标平台验证及必要依赖兼容共同回答“受支持环境中的验证能否实际执行并通过”。聚合为同一阶段成果，避免把每个检查命令或平台配置拆成独立里程碑；本机与各平台故障分别定位，不混入功能扩展。
 - **Dependencies**: None
