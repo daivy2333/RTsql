@@ -181,4 +181,42 @@ PASS（2026-10-28）。无 BLOCKED、无 SKIPPED。批准来自 goal 指令对 M
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+独立阅读完整 diff（6b12771..8e9f2b0，6 文件）与实际代码，无阻塞 finding、无 Act 偏离（门控形态为 Implementation Guidance 授权的非实质选择；三次编译失败属本 Cycle 内逐一定位修复，各一次即收敛，不触发三次失败规则）。两条非阻塞 Minor：
+
+- F1（新证据，记录）：delta spec「携带密钥打开被拒绝」Scenario 含「CLI 侧 SHALL 映射退出码 5」语句；本 Cycle 证据口径为 lib 面 `InvalidKey`（用例 b 直锚）+ 既有 `InvalidKey`→exit 5 透传管线零改动（默认组合 `cli_test` 的错钥 exit 5 用例在收尾全量覆盖）。管线未动、变体未变，非阻塞；收尾规格合并时该语句以此口径登记。
+- F2（记录）：C2 `--lib` 差额对账——436 − 419 = 17 = crypto.rs 单测 8 + file_header 门 3 + file_storage 门 6，Review 独立复数一致；`plaintext_with_key_rejected` 两组合保留（变体级断言，两组合各自成立），对账口径两侧一致。
+
+**Acceptance Gaps**
+
+None。R3 三 Scenario（加密头拒绝、携带密钥拒绝、明文全功能）由 `crypto_off_build_test` 三用例逐条锚定；默认组合加密回归（encryption_test 7 + lib 436）与质量门通过。
+
+**Evidence**
+
+代码与 diff 独立核对（静态，全部当次执行）：
+
+- diff 范围恰为 6 文件：`src/storage/{mod.rs,file_header.rs,file_storage.rs}` + 新增 `tests/crypto_off_build_test.rs` + Cycle 文件（仅 Act Response 区，diff 无删除行——Plan Context 未改写）+ tasks.md（3 行：状态行、T3 行、复选框）。`Cargo.lock` 零变化。
+- `file_header.rs`：`KNOWN_FLAGS_MASK` 双 cfg 常量（crypto=`FLAG_ENCRYPTED` / no-crypto=0），`FLAG_ENCRYPTED` 保留；`decode` 的 crypto 组合判定序与返回值逐项等价（加密分支早返回 `Ok(encrypted)` 与原地修改后 `Ok(header)` 等值；明文零区校验顺序原样；no-crypto 到达该处 flags 恒 0，零区校验仍执行）；`current_encrypted` 随调用点 cfg（无 dead_code）；3 个加密单测门。
+- `file_storage.rs`：grep 全部 `cipher` 引用逐行核对，均位于门控区（字段、两处构造字面量、crypto 双变体、参数级 cfg、if-let 早返回臂）；crypto 变体 `initialize_header`/`validate_header` 函数体零内容改动（diff 仅 cfg/doc 行）；no-crypto 变体——initialize 在写头前拒绝 `Some(key)`（`InvalidKey`，消息 `encryption is not available in this build: {path}`）、明文写 `FileHeader::current()` 与默认组合同字节；validate 为 decode → key 拒绝 → 整除校验（顺序与默认组合一致）；read/write/allocate 三处明文臂的调用序与字节序列原样；`mark_write_succeeded/failed` 两组合保留；6 个加密单测门 + 测试内 `FLAG_ENCRYPTED` use 门；`SecondaryIndex::derive_key` 调用点零改动。
+- 无 `#[allow]`（四文件 grep 零命中）；三次自检修复均为等效重构。
+- `tests/crypto_off_build_test.rs` 三用例与 Task Definition Required behavior 5 (a)(b)(c) 逐项一致（含 0 字节不写头断言与消息子串）；`SqlOutcome` 直锚、无 network 依赖（C4 可编译主张成立）。
+- 验证结论沿用 Act Response 表（命令 1–8）：验证产生于 8e9f2b0 工作区，当前 HEAD 即 8e9f2b0 且工作区干净，覆盖未变化。C2 clippy 门（命令 5）exit 0 证实关闭组合无告警残留。
+
+**Follow-up Decision**
+
+既有 Acceptance 全部满足且无阻塞项，Iteration 001 完成。两条 Minor 只记录不返工：F1 属证据口径登记（管线未动、变体未变）；F2 属对账说明。Act Response 的 Runbook/Issue 候选均为 None。
+
+**Iteration Plan Update**
+
+None
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`iterations/002-cli-optional/000-initial.md`（Iteration 002：cli 可选化与组合测试面，T4；本 Review 随批创建，Plan Context 置 ready）
