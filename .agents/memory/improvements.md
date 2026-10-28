@@ -121,7 +121,7 @@
 | 45 | I045 | 14 个主 spec Purpose 占位补写 | promoted（MS37 已落位） |
 | 46 | I064 | WAL 提交确认与 checkpoint 边界文档化 | promoted（MS37 已落位） |
 | 48 | I093 | 依赖兼容升级与 feature 组合验证 | open，未承诺 |
-| 49 | I073 | x86_64-musl 静态与 macOS 构建验证 | planned，未排期 |
+| 49 | I073 | x86_64-musl 静态与 macOS 构建验证 | promoted（musl 已实测；macOS 按用户决定不再等待） |
 
 ## 改进条目（按编号）
 
@@ -401,7 +401,7 @@
 - **证据**: R18 主题 8 事实（musl 全静态可行——「本机未装 musl target，未实测」）+ 未确认项 8（musl 全静态与 macOS 构建未实测）
 - **影响**: macOS 支持无验证记录；musl 静态是容器/scratch 部署前提
 - **方案**: 装对应 rustup target 实测 cargo build + 测试套件 + CLI 冒烟，结果回写 README/分发文档；与 I052（预编译矩阵）相关但独立——本条是平台可编译性验证，I052 是发布设施
-- **状态**: planned（未排期）
+- **状态**: promoted（2026-10-28 随 MS41 收口。x86_64-linux-musl 静态二进制已在本机运行，change `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline/`。macOS 未运行。用户原话：「那就不管那个，直接收尾吧，因为我买不起MacBook」。风险：macOS 构建与运行没有实测。）
 
 ## I074: 数据库模块化与 workspace crate 化路线 B
 
@@ -471,7 +471,7 @@
 - **影响**: 长期维护与可选构建组合可能受版本变化影响，收益和兼容成本需要分开评估。
 - **建议**: 按真实兼容、安全或维护需求逐项核对官方版本与变更，再用受影响测试验证；保留 Rust/Tokio 基础选型。原生 async trait 的可用性与 `dyn Executor` 兼容单独判断，不能仅按编译器支持就移除 async-trait。
 - **关联**: I074 负责模块与 feature 边界，I095 负责需求驱动的依赖定制或替代；本条负责升级兼容与构建组合。I081 负责执行接口，I080 负责绑定语义；不为追新同时升级全部依赖。
-- **状态**: open（2026-10-18 用户接受方向，待具体升级理由）
+- **状态**: open（2026-10-18 用户接受方向，待具体升级理由。MS41 的目标平台没有需要改的依赖；feature 组合仍归 MS42）
 
 ## I094: CLI 运行时规格的目标权衡复评
 
