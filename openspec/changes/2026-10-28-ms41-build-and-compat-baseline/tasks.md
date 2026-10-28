@@ -7,7 +7,7 @@
 - 需求与 BDD：completed。
 - 000：执行依据是 `iterations/000-quality-gates/000-initial.md`。Plan Context 为 ready。T1、T2 已完成，Act Response 为 reported。Review Result 为 accepted。
 - 001：执行依据是 `iterations/001-host-and-musl/000-initial.md`。Plan Context 为 ready。T3、T4 已完成。T5 已完成，macOS 记为未完成。Act Response 为 reported。Review Result 为 accepted。
-- 002：执行依据是 `iterations/002-batched-full/000-initial.md`。Plan Context 为 ready。T6 尚未执行。
+- 002：执行依据是 `iterations/002-batched-full/000-initial.md`。Plan Context 为 ready。T6 已完成，Act Response 为 reported。Review Result 为 pending。
 - Persisted Evidence：none。
 - 无跳过项。
 
@@ -20,7 +20,7 @@
 | T3 | 001 | 000 accepted | gnu release 二进制对临时库完成建表、插入和查询 | completed |
 | T4 | 001 | T3 | musl 静态二进制在本机完成同一冒烟；环境缺失则该分支记未完成 | completed |
 | T5 | 001 | T3、T4 的实际结果 | macOS 无环境则记未完成。两份 README 与已取得的结果一致 | completed |
-| T6 | 002 | 001 accepted | M19 全部分批各自 0 failed。缺一批不算通过 | pending |
+| T6 | 002 | 001 accepted | M19 全部分批各自 0 failed。缺一批不算通过 | completed |
 
 ## 1. 质量检查
 
@@ -35,7 +35,7 @@
 
 ## 3. 全量回归
 
-- [ ] 3.1 T6：代码与文档都落地后，按 Iteration 002 的分批规则跑一次全量。每一批 `cargo test --offline … -- --test-threads=1` 退出码为 0，且该批每行 `test result:` 的 failed 为 0。记录各批计数。缺一批不得记通过。结束后再跑一次 `cargo fmt --check` 与 deny clippy，退出码都为 0。
+- [x] 3.1 T6：代码与文档都落地后，按 Iteration 002 的分批规则跑一次全量。每一批 `cargo test --offline … -- --test-threads=1` 退出码为 0，且该批每行 `test result:` 的 failed 为 0。记录各批计数。缺一批不得记通过。结束后再跑一次 `cargo fmt --check` 与 deny clippy，退出码都为 0。
 
 ## Iteration Plan
 
