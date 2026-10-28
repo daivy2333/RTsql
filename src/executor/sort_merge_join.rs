@@ -201,13 +201,13 @@ fn merge_product(
         if ordering == Ordering::Equal && same_key {
             let left_end = group_end(left_rows, left_index);
             let right_end = group_end(right_rows, right_index);
-            for left in left_index..left_end {
-                for right in right_index..right_end {
+            for left in &left_rows[left_index..left_end] {
+                for right in &right_rows[right_index..right_end] {
                     outputs.push(build_output_row(
                         output_columns,
                         output_sides,
-                        &left_rows[left].1,
-                        &right_rows[right].1,
+                        &left.1,
+                        &right.1,
                     ));
                 }
             }

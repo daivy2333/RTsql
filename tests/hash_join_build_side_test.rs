@@ -35,7 +35,10 @@ async fn join_tags(left_tags: &[&str], right_tags: &[&str]) -> Vec<Vec<Value>> {
 }
 
 fn pair(left: &str, right: &str) -> Vec<Value> {
-    vec![Value::String(left.to_string()), Value::String(right.to_string())]
+    vec![
+        Value::String(left.to_string()),
+        Value::String(right.to_string()),
+    ]
 }
 
 fn grouped_by_left(left: &[&str], right: &[&str]) -> Vec<Vec<Value>> {

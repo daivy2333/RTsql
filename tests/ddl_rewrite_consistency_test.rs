@@ -156,7 +156,7 @@ async fn live_row_pages(db: &Database, ids: &[i64]) -> BTreeSet<u32> {
     let meta = db.get_table("t").await.unwrap();
     let mut pages = BTreeSet::new();
     for id in ids {
-        let key = (*id as i64).to_be_bytes();
+        let key = id.to_be_bytes();
         let row_id = meta
             .index_manager
             .search(&key)
@@ -220,7 +220,7 @@ async fn dump_chain(db: &Database, head: PageId) -> Vec<SlotView> {
                             _ => None,
                         });
                         slots.push(SlotView {
-                            page_id: page_id as u32,
+                            page_id,
                             slot_id: slot.logical_id,
                             create_tx: vh.create_tx_id(),
                             deleted: vh.is_deleted(),
@@ -405,7 +405,7 @@ async fn readings(db: &Database, tx_id: u64) -> Readings {
         let old = slots.iter().find(|s| s.rid() == *rid);
         match old.and_then(|s| s.first_int) {
             Some(id) => {
-                let key = (id as i64).to_be_bytes();
+                let key = id.to_be_bytes();
                 pk_entry_present.push(meta.index_manager.search(&key).await.unwrap().is_some());
             }
             None => pk_entry_present.push(false),

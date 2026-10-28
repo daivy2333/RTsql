@@ -86,7 +86,7 @@ async fn scan_by_pk(db: &Database, id: i64) -> usize {
 /// 主键索引里某个键的条目数（重复条目的观测面）。
 async fn pk_entry_count(db: &Database, id: i64) -> usize {
     let meta = db.get_table("t").await.unwrap();
-    let key = (id as i64).to_be_bytes();
+    let key = id.to_be_bytes();
     meta.index_manager
         .scan_all()
         .await
@@ -169,7 +169,7 @@ async fn dump_chain(db: &Database, head: PageId) -> Vec<SlotView> {
                                     _ => None,
                                 });
                         slots.push(SlotView {
-                            page_id: page_id as u32,
+                            page_id,
                             slot_id: slot.logical_id,
                             create_tx: vh.create_tx_id(),
                             deleted: vh.is_deleted(),

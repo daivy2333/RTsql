@@ -5,7 +5,7 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed。
-- 000：执行依据是 `iterations/000-quality-gates/000-initial.md`。Plan Context 为 ready。
+- 000：执行依据是 `iterations/000-quality-gates/000-initial.md`。Plan Context 为 ready。T1、T2 已完成，Act Response 为 reported。Review Result 仍为 pending。
 - 001：只存在于本文件的 Iteration Plan，尚未展开 Cycle。
 - 002：只存在于本文件的 Iteration Plan，尚未展开 Cycle。
 - Persisted Evidence：none。
@@ -15,8 +15,8 @@
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | `cargo fmt --check` 退出码 0。只接受 rustfmt 写回的排版 | pending |
-| T2 | 000 | T1 | `cargo clippy --offline --all-targets -- -D warnings` 退出码 0。改写前后列出的行为测试都通过 | pending |
+| T1 | 000 | 无 | `cargo fmt --check` 退出码 0。只接受 rustfmt 写回的排版 | completed |
+| T2 | 000 | T1 | `cargo clippy --offline --all-targets -- -D warnings` 退出码 0。改写前后列出的行为测试都通过 | completed |
 | T3 | 001 | 000 accepted | gnu release 二进制对临时库完成建表、插入和查询 | pending |
 | T4 | 001 | T3 | musl 静态二进制在本机完成同一冒烟；环境缺失则该分支记未完成 | pending |
 | T5 | 001 | T3、T4 的实际结果 | macOS 无环境则记未完成。两份 README 与已取得的结果一致 | pending |
@@ -24,8 +24,8 @@
 
 ## 1. 质量检查
 
-- [ ] 1.1 T1：先确认 `cargo fmt --check` 退出码为 1，再执行 `cargo fmt`，然后检查退出码为 0。不手改排版，不改测试断言。
-- [ ] 1.2 T2：按 `iterations/000-quality-gates/000-initial.md` 的改写清除 15 条 lib lint 和 6 条测试 lint。改写前行为测试为 GREEN，deny clippy 为 RED。改写后同一组测试为 GREEN，且 `cargo fmt --check` 与 deny clippy 退出码都为 0。
+- [x] 1.1 T1：先确认 `cargo fmt --check` 退出码为 1，再执行 `cargo fmt`，然后检查退出码为 0。不手改排版，不改测试断言。
+- [x] 1.2 T2：按 `iterations/000-quality-gates/000-initial.md` 的改写清除 15 条 lib lint 和 6 条测试 lint。改写前行为测试为 GREEN，deny clippy 为 RED。改写后同一组测试为 GREEN，且 `cargo fmt --check` 与 deny clippy 退出码都为 0。
 
 ## 2. 目标平台运行
 
