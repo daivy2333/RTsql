@@ -80,7 +80,7 @@ cargo rustc --locked --offline --release --bin rtsql --target x86_64-unknown-lin
 
 ### 5. CLI 冒烟走真实二进制和临时路径
 
-release 二进制对含 `/` 的临时库路径执行三条命令，显式 `--format json`，避免 TTY 与非 TTY 的默认格式差异。查询成功时 stdout 含 `{"columns":["id"],"rows":[[1]]}`。这个字符串来自 `src/cli/render.rs` 的 JSON 行集形状。不调用 `install.sh`，不写用户的 `~/.rtsql`。
+release 二进制对含 `/` 的临时库路径执行三条 SQL，显式 `--format json`，避免 TTY 与非 TTY 的默认格式差异。主命令在库文件不存在时退出码为 1，所以先对同一路径执行 `rtsql new`，再执行这三条 SQL。临时目录用 `mktemp -d`，不使用裸库名。查询成功时 stdout 含 `{"columns":["id"],"rows":[[1]]}`。这个字符串来自 `src/cli/render.rs` 的 JSON 行集形状。不调用 `install.sh`，不写用户的 `~/.rtsql`。
 
 ### 6. 全量只在最后一轮做一次
 
