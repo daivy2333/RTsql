@@ -198,4 +198,45 @@ None —— 本 Cycle 未发现可重复或高风险的操作路径缺口，也�
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+独立阅读完整 diff（`8fb2f42..163d1a9`：12 个代码文件 + 1 个 Cycle 文件）与实际代码，无阻塞 finding、无 Act 偏离、无计划外修改。三条非阻塞 Minor：
+
+- F1（记录）：tasks.md §3.1 的 T4 描述保留「无 cli 组合 `cargo build --offline --no-default-features` 不产出 bin」的**产物存在性**口径；Cycle 002 Plan Context 已把该判定面精化为 **cargo 原生错误**（显式 `--bin rtsql` → `error: target 'rtsql' in package 'rtsql' requires the features: 'cli'`，退出码 101），Act 执行的正是精化后的口径。两者同指一条 Acceptance（delta spec「`rtsql` 二进制目标 SHALL NOT 构建」）；旧构建会残留同名二进制，产物存在性不是可靠判据，原生错误是更直接的可观察面。非阻塞；收尾规格合并时按原生错误口径登记该 Scenario。
+- F2（记录）：`--lib` 用例数差额 412 − 390 = 22 经独立静态复数一致——`src/cli/**` 25（cli 在 C3/C4 两组合中均关闭，两侧同量剥除）、`src/network/protocol.rs` 5、`src/storage/crypto.rs` 8、`file_header.rs` 的 crypto 门 3、`file_storage.rs` 的 crypto 门 6，合计 22；由 src 侧静态计数复算 C3 = 437 − 25 = **412**、C4 = 412 − 22 = **390**，与 Act 记录逐值相同。Act 的归因（差额来自 network/crypto 侧剥除，非 cli 侧）成立，按 Plan Context 风险说明不构成对账门槛。
+- F3（记录）：Act 提交 `163d1a9` 未同步 change `tasks.md` 的 T4 任务表状态行与 §3.1 复选框（`git show 163d1a9` 无 tasks.md 变更），与前序 Act 提交 `8e9f2b0` 的做法不一致。本 Review 一并按实际完成状态同步（T4 → done、§3.1 → [x]）；不影响 Acceptance。
+
+**Acceptance Gaps**
+
+None。R4 的两条 Scenario 逐条锚定：`required-features` 观察面（cargo 原生错误，退出码 101，且默认组合 `--lib --bins --tests` 退出码 0 证明 cli 开启时 bin 正常）、C3/C4 构建门、C3/C4 行为验证集、默认组合 `cli_test`（126 passed / 0 failed / 2 ignored，两个长期 `#[ignore]` 用例按既有形态计 ignored）。
+
+**Evidence**
+
+代码与 diff 独立核对（静态，本次当次执行）：
+
+- diff 范围恰为 12 个代码文件 + 1 个 Cycle 文件：`src/lib.rs`（+1 行 `#[cfg(feature = "cli")]`）+ 11 个 bin-only 测试文件（各 +1 行 `#![cfg(feature = "cli")]`）。**全部新增行都是 cfg 属性行**，无断言或用例本体改动；无 `#[allow]`、无新增 `println!`/`eprintln!`。
+- 门点唯一性与形态：`src/lib.rs:3-4` 是 `pub mod cli;` 的唯一门点（`#[cfg(feature = "cli")]` 置于其前，与 Iteration 000 的 `pub mod network` 门形态同构）；`grep -rn 'crate::cli' src/` 零命中；`grep -rn 'rtsql::cli' tests/` 零命中（无测试直接 import cli 模块）；`src/lib.rs` 无 `pub use cli::` 重导出；`src/main.rs` 仍为 `rtsql::cli::run()` 单行装配（未在本 Cycle diff 内）。
+- 11 文件清单完备性（独立重算，与 Act 记录逐项一致）：`grep -rl 'CARGO_BIN_EXE_rtsql' tests/` = **44** 文件 / 66 处引用；`tests/` 下唯一 bin 环境变量名（无 `option_env!` 变体）；其中含 `use rtsql::network::` 者 **33**、不含者 **11**。「含 network 的 33 个」与「带 `#![cfg(all(feature = "network", feature = "cli"))]` 的 33 个」是**同一集合**；「不含 network 的 11 个」与「带 `#![cfg(feature = "cli")]` 的 11 个」也是同一集合。11 处门头位置逐文件核对（`//!` 文档块之后、首个内容行之前），与 33 个双锚定门同构。
+- 全仓 bin 锚定面无遗漏：tests/ 内无 `which()` 用法、无硬编码二进制路径的 `.rs` 引用（仅 `tests/fixtures/legacy/README.md` 的文档示例），故 44 文件即全部 bin 锚定测试目标——Act 的「C4 构建门编译全部集成测试目标通过」是编译面证据，本条补上运行面枚举证据。
+- network 侧未受影响：104 个 network 锚定文件中 70 个带 `#![cfg(feature = "network")]` 文件门，`executor_test.rs` 按 design §2.3 规则 3 用函数级门（`#[cfg(feature = "network")]`）——与 Iteration 000 形态一致，本 Cycle 未改动（diff 为空）。
+- 零改动面核对：`src/main.rs`、`src/cli/`、`Cargo.toml`、`install.sh`、`build-riscv64-musl.sh` 均不在本 Cycle diff 内（`git diff --name-only 8fb2f42..163d1a9` 命中 0）。`Cargo.toml` 的 `cli` feature 与 `[[bin]] required-features = ["cli"]` 由 T1 就位。
+- 验证结论沿用 Act Response 表（RED 记录 + V2–V7c + Stop-when 复核）：验证产生于 `163d1a9` 工作区，当前 HEAD 即 `163d1a9` 且工作区干净（`git status` = nothing to commit），覆盖范围未失效，**未重跑**（公共规则 › 验证：Act 已报告且覆盖未失效的结论直接沿用）。
+- Act Response 声明与代码一致性核对：门点位置、11 文件清单与门行位置、门控计数（11 / 33）、零改动面、无 `#[allow]`、无新增直写出口——逐项与实际代码一致。
+
+**Follow-up Decision**
+
+既有 Acceptance 全部满足且无阻塞项，Iteration 002 完成，Iteration 003 按既有 Map 展开。三条 Minor 只记录不返工：F1 属判定面口径登记（两种口径同指一条 Acceptance，原生错误更直接）；F2 属差额对账（独立复算一致，差额按 Plan Context 风险说明不构成门槛）；F3 属状态同步缺口（本次已按实际完成状态修正）。Act Response 的 Runbook/Issue 候选均为 None。
+
+**Iteration Plan Update**
+
+None
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`iterations/003-combination-matrix-and-full-regression/000-initial.md`（Iteration 003：组合矩阵与收尾全量，T5、T6；本 Review 随批创建，Plan Context 置 ready）
