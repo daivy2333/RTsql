@@ -700,4 +700,12 @@
 - **用途**: 当前 revision 的模块边界事实面——模块依赖图（更新 R25 的 11 模块/99 处 pub(crate) 至 12+1 模块/240 处 pub(crate)）、两条依赖环的精确现状、network/加密/CLI 可选化接缝、Database 共享状态归属清单、诊断出口与测试锚定分布；MS42 已于 2026-10-28 收尾归档，本条事实面已被 design §5/§6 的边界与诊断契约（现载于 project-model M21 / M22）及收尾核对按代码事实修正后的数字取代，plan 阶段直接引用的用途已了结
 - **状态**: active
 
+## R80: Cargo feature 门控下测试面锚定文件的枚举与施加流程 Runbook
+
+- **类型**: runbook
+- **路径**: `.agents/runbooks/feature-gate-test-surface-anchoring.md`
+- **日期**: 2026-10-28
+- **用途**: Cargo feature 门控下集成测试面的锚定枚举（`grep -l` 两类锚定 → `comm` 求交集/差集）、文件级与函数级门的施加形态、双面（关闭组合 + 默认组合）验证形态，以及加密域源侧门控与关闭态专用测试文件的同源变体；MS42 module-boundaries change 的 Iteration 000/001/002/003 已端到端验证该路径。
+- **状态**: active
+
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
