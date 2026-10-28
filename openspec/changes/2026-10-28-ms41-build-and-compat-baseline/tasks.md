@@ -5,7 +5,7 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed。
-- 000：执行依据是 `iterations/000-quality-gates/000-initial.md`。Plan Context 为 ready。T1、T2 已完成，Act Response 为 reported。Review Result 仍为 pending。
+- 000：执行依据是 `iterations/000-quality-gates/000-initial.md`。Plan Context 为 ready。T1、T2 已完成，Act Response 为 reported。Review Result 为 accepted。
 - 001：只存在于本文件的 Iteration Plan，尚未展开 Cycle。
 - 002：只存在于本文件的 Iteration Plan，尚未展开 Cycle。
 - Persisted Evidence：none。
