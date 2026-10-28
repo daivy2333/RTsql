@@ -23,7 +23,7 @@ MS41 要求项目质量检查能够通过，并在 Linux 本机与 x86_64-linux-
 
 ## Impact
 
-- 代码：当前 fmt 差异在 `tests/hash_join_build_side_test.rs` 与 `tests/sort_merge_join_test.rs`。当前 lib 的 deny clippy 位于 `src/cli/lifecycle.rs`、`src/executor/alter_table.rs`、`src/executor/executor_trait.rs`、`src/executor/sort_merge_join.rs`、`src/network/protocol.rs`、`src/storage/async_storage.rs`、`src/storage/buffer_pool.rs`。测试与 bench 目标在 lib 失败时尚未被 deny 扫完，实施时以当时的完整命令输出为准。
+- 代码：当前 fmt 差异在 `tests/hash_join_build_side_test.rs` 与 `tests/sort_merge_join_test.rs`。lib 的 15 条 deny lint 位于 `src/cli/lifecycle.rs`、`src/executor/alter_table.rs`、`src/executor/executor_trait.rs`、`src/executor/sort_merge_join.rs`、`src/network/protocol.rs`、`src/storage/async_storage.rs`、`src/storage/buffer_pool.rs`。允许这 5 个 lint 后的全目标 clippy 退出码为 0，其余 6 条警告在 `tests/dml_tombstone_abandon_window_test.rs`、`tests/ddl_rewrite_consistency_test.rs` 和 `tests/sql_differential_test.rs`。
 - 文档：`README.md`、`README.zh-CN.md`。
 - 依赖与工具链：继续使用当前 `Cargo.lock` 和 stable 工具链。不新增 `rust-toolchain.toml`，不升级依赖，不写全局 Cargo 配置。
 - 环境：Linux x86_64 WSL2，rustc 1.99.1。musl 链接器已在 `/opt/musl/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc`。`x86_64-unknown-linux-musl` target 当前未安装，实施时用 `rustup target add` 安装。没有 macOS 执行环境。
@@ -60,7 +60,7 @@ MS41 要求项目质量检查能够通过，并在 Linux 本机与 x86_64-linux-
 
 ### lint 门通过且行为保持
 
-- 前置状态：`cargo clippy --offline --lib -- -D warnings` 退出码 101，lib 有 15 条 lint。测试目标因 lib 失败未被这条命令扫完。
+- 前置状态：`cargo clippy --offline --lib -- -D warnings` 退出码 101，lib 有 15 条 lint。允许这 5 个 lint 后，全目标检查退出码 0，另有 6 条测试警告。
 - 动作：按设计中的保持行为改写清除 lib lint，再重复全目标 deny，直到退出码为 0。既有相关测试在改写前后都通过。
 - 结果：全目标 deny clippy 退出码为 0。ADD COLUMN 仍以 oneshot 结果为准。sort-merge join 的行多重集合不变。flush 失败时仍从失败页起恢复脏位。
 - 失败边界：某条 lint 无法在不改变 SQL、存储、错误或运行形态的前提下清除时停止，回到计划。不升级 `async-trait`，不把 `JoinHandle` 改成 await。
