@@ -1,5 +1,6 @@
 //! RTsql library - Async embedded database components
 
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod database;
 pub mod executor;

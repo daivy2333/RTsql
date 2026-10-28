@@ -8,6 +8,7 @@
 //! 多组行序经 HashMap 分桶非确定：凡多组断言均带 ORDER BY（或测试内
 //! 排序后比较集合）。
 
+#![cfg(feature = "cli")]
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
