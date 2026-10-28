@@ -30,6 +30,7 @@ use rtsql::database::Database;
 use rtsql::network::protocol::{to_response, Response};
 use rtsql::storage::integrity::check_integrity;
 use rtsql::transaction::{IsolationLevel, Transaction};
+use rtsql::wal::{WalReader, WalRecord};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -912,4 +913,32 @@ async fn session_keeps_working_after_abandoned_statement() {
         "no error-level findings after the abandoned statement: {:?}",
         report.findings
     );
+}
+
+/// 放弃语句之后刷盘循环仍在：不调用 close / checkpoint，新的 BeginTxn 在 1 秒内
+/// 进入 WAL，同一会话随后的插入仍然成功。
+#[tokio::test]
+async fn cancel_leaves_flush_loop_running() {
+    let dir = TempDir::new().unwrap();
+    let db = setup(&dir).await;
+    let _abandoned = abandon_statement(&db, ABANDONED_SQL).await;
+
+    let tx = db.begin().await.unwrap();
+    let tx_id = tx.id();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let wal_path = db_path(&dir).with_extension("wal");
+    let records = WalReader::open(&wal_path)
+        .unwrap()
+        .read_all()
+        .expect("WAL must be readable to completion");
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record, WalRecord::BeginTxn { tx_id: id } if *id == tx_id)),
+        "BeginTxn {tx_id} must reach the WAL within 1 second after the statement is abandoned, got {records:?}"
+    );
+
+    expect_affected(&db, "INSERT INTO t VALUES (900001, 1)").await;
+    db.close().await.unwrap();
 }

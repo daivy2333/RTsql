@@ -205,3 +205,34 @@ async fn test_wal_buffer_shutdown_flushes() {
         records.len()
     );
 }
+
+#[tokio::test]
+async fn commit_wait_after_shutdown_returns_ok() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let db_path = temp_file.path();
+    let buffer = create_wal_buffer(db_path, 100, 10_000);
+
+    buffer.shutdown().await;
+
+    buffer.append(WalRecord::BeginTxn { tx_id: 42 }).await;
+
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        buffer.append_commit_and_wait(42),
+    )
+    .await;
+
+    assert!(
+        waited.is_ok(),
+        "append_commit_and_wait after shutdown should finish within 2 seconds"
+    );
+    waited.unwrap().unwrap();
+
+    let records = read_wal_records(db_path);
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record, WalRecord::BeginTxn { tx_id: 42 })),
+        "WAL should contain the BeginTxn appended after shutdown, got {records:?}"
+    );
+}
