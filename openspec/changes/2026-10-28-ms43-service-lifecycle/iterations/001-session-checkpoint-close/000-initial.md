@@ -222,19 +222,48 @@ None required。失败用例可以重跑。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: replan-required
 
 **Findings**
 
-尚未审查。
+阻塞，计划错误，并有现状证据。`uncommitted_row_absent_after_reopen` 未通过。显式 `begin` 后插入、不 `commit` 就 `close`，默认 `Database::open` 重新打开后 `SELECT id FROM t WHERE id = 7` 得到 `[[Int(7)]]`。这条结果不是本轮暂停和 `shutdown` 引入的。Act Response 的改前对照把 `close` 换回只调用公开 `checkpoint()`，同一断言仍失败，查询结果同样是 `[[Int(7)]]`。本审查沿用这两次结果，没有重跑：两次构建下断言都以同一行失败，不是偶发。
+
+现状来自已完成的 checkpoint 截断，不来自刷盘循环是否在 `close` 之后还活着。`close` 与公开 `checkpoint` 的共用前段在九步之前调用 `quiesce_for_checkpoint`，因此 `BeginTxn` 和插入记录先进入 WAL。`CheckpointManager::checkpoint` 随后 `flush_all`，再 `rewrite_truncate`，把捕获 LSN 之前的记录截掉（`src/wal/checkpoint.rs` 的截断步骤）。重开时 `src/wal/recovery.rs` 只把 WAL 里仍有 `BeginTxn`、且没有提交或中止记录的事务放进未提交集合；集合为空时 `mark_uncommitted_aborted` 直接返回。`redo_count == 0` 时不重建主键索引。默认隔离是 `RepeatableRead`，`Database::statement_snapshot` 返回 `None`。无快照的主键点查在 `src/executor/index_scan.rs` 里忽略版本头，直接读出槽内字节。无快照的扫描也只跳过已删除槽。页上的未提交插入因此仍被查到。
+
+既有规格里「落盘未提交行重启后不复活」的实施测试是 `tests/mvcc_tombstone_visibility_test.rs` 的 `flushed_uncommitted_insert_does_not_resurrect`：刷出 WAL 和脏页后丢弃句柄，不调用 `close`，WAL 里的 `BeginTxn` 还在，恢复才能把该行标成中止。`src/database.rs` 在回收处写明：被放弃的隐式事务要在 checkpoint 之前回收，因为截断之后 WAL 里不再有归属证据。这条回收只处理已放弃的隐式事务。`statement-cancellation-outcome` 规定显式事务的提交或回滚由调用方决定，库不代替调用方回滚。
+
+要把本轮这条验收改成重开后查不到行，两条路都会离开本里程碑已经排除的范围。在 `close` 持有会话闸门时中止仍活跃的显式事务，行可以从页上消失，但 `commit_and_close_finish_within_2s` 要求同一个尚未写 `CommitTxn` 的事务同时 `commit` 成功；`close` 可以先拿到闸门，此时中止会使 `commit` 返回错误。这是新的错误语义，也和「不新增错误类型、成功结果保持」冲突。只在截断后补 `BeginTxn`，事务能进入未提交集合，但 `redo_count` 仍是 0，主键点查仍读到该槽；要让点查看不到，得改恢复规则或九步。本变更的「不做」和里程碑排除项都包含改变既有事务与持久化合同、checkpoint 九步和恢复规则。
+
+因此这条验收不能在当前执行依据上补完，也不能靠放宽断言或删掉用例算作已经满足，也不能在本审查里把规格改成「该行应当可见」或「该行应当不可见」。
+
+非阻塞。`ResumeOnDrop` 是实施偏差：公开 `checkpoint` 的 future 在暂停之后、显式恢复之前被丢掉时，循环会停在暂停上。`committed_statement_survives_undelivered_result` 在加上守卫之前超过 60 秒没有结束；加上之后，保持面命令退出码 0。守卫不取会话闸门。本审查不要求拆掉它，也不把它扩成新的关闭语义。`second_shutdown_after_close_returns` 给两次 `shutdown` 加了 2 秒超时，计划只要求两次都返回。`checkpoint_manager` 为 `Some` 而 `wal_buffer` 为 `None` 时不取闸门，现有打开路径走不到。`close` 在回收或发布窄化失败时也会 `shutdown`；计划写的是此时循环还没暂停、直接返回错误。这三项都没有单独的验收缺口，不另开修复。
+
+提交 `454c87d` 只改了 `src/database.rs`、`src/transaction/manager.rs`、两个测试和本 Cycle 文件。没有改 `src/wal/checkpoint.rs`、`src/wal/writer.rs`、`src/storage/buffer_pool.rs`、`src/wal/buffer.rs`。`src/wal/buffer.rs` 的改动在已接受的上一轮。
+
+**Acceptance Gaps**
+
+`uncommitted_row_absent_after_reopen` 未通过。对应本 Cycle Acceptance「未提交行在 `close` 后不可见」，以及规格场景「未提交缓冲不在关闭后可见」、proposal 场景 S8。其余本轮验收沿用 Act Response：`session_lifecycle_test` 其余 6 条为 ok；保持面命令在 `ResumeOnDrop` 之后退出码 0，其中包含 `dml_session_close_keeps_full_checkpoint`、`cancel_leaves_flush_loop_running`、`r3_readonly_session_writes_nothing`、`t3_no_wal_or_checkpoint_channels`。这些结论的来源是本 Cycle Act Response 的「验证」一节，覆盖的代码在该次运行之后没有再改。
+
+**Evidence**
+
+- 失败与改前对照：本 Cycle Act Response「验证」。接线后 `cargo test --offline --test session_lifecycle_test` 退出码 101，`6 passed; 1 failed`，失败用例查询结果 `[[Int(7)]]`。改前对照同一用例退出码 101，查询结果 `[[Int(7)]]`。
+- 保持面：同一 Response。`ResumeOnDrop` 之后保持面命令退出码 0。本审查不重跑。
+- 代码：`src/database.rs` 的 `close`、`checkpoint`、`checkpoint_under_session_gate`；`src/transaction/manager.rs` 的 `commit`；`src/wal/checkpoint.rs` 的截断；`src/wal/recovery.rs` 的未提交集合；`src/executor/index_scan.rs` 的无快照点查；`tests/session_lifecycle_test.rs` 的 `uncommitted_row_absent_after_reopen`；`tests/mvcc_tombstone_visibility_test.rs` 的 `flushed_uncommitted_insert_does_not_resurrect`。
+- 合同位置：本变更 proposal 的 S8 和「不做」；规格 `session-service-lifecycle` 的场景「未提交缓冲不在关闭后可见」；`openspec/specs/mvcc-tombstone-visibility/spec.md` 的「落盘未提交行重启后不复活」；`openspec/specs/statement-cancellation-outcome/spec.md` 的「显式事务继续还是回滚由调用方决定」；`.agents/docs/tasks.md` 里本里程碑的 Non-goals。
 
 **Follow-up Decision**
 
-尚未审查。
+`replan-required`。缺口不在当前 Task Definition 能约束的接线顺序里。继续在旧依据上改 `close`，会中止调用方仍持有的显式事务，或改九步和恢复规则。两条都不在本里程碑范围内。本审查不要求 Act 恢复当前 Cycle。
+
+后继 Cycle 只记录这个阻塞和仍留在范围内的已落地接线，Plan Context 保持 `draft`。不把「重开后不可见」实现进产品，也不把失败用例改成期望可见后宣布原验收通过。
+
+**Iteration Plan Update**
+
+`tasks.md` 的 Iteration Plan 正文不改。验收边界要改的话，会碰到持久化合同或新的错误语义，这一步没有通过。Map 仍是 000、001、002。001 未完成。
 
 **Next Cycle**
 
-None
+`iterations/001-session-checkpoint-close/001-replan.md`
 
 **Next Iteration**
 

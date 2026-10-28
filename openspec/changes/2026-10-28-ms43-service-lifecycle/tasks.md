@@ -6,7 +6,7 @@
 
 - 需求与 BDD：completed（场景草图与默认假设见 proposal.md）。
 - 000：accepted。执行依据是 `iterations/000-wal-flush-owner/000-initial.md`。Review Result 为 accepted。
-- 001：当前轮。执行依据是 `iterations/001-session-checkpoint-close/000-initial.md`。Plan Context 为 ready。
+- 001：审查结论 `replan-required`。原执行依据 `iterations/001-session-checkpoint-close/000-initial.md` 的 Plan Context 仍为 ready，不改写。后继 `iterations/001-session-checkpoint-close/001-replan.md` 的 Plan Context 为 draft，Gate 2 为 BLOCKED，不交给实施。
 - 002：未展开。
 - Persisted Evidence：none。
 - 无跳过项。
@@ -18,7 +18,7 @@
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
 | T1 | 000 | 无 | `WALBuffer` 单飞刷盘、暂停/恢复、`shutdown` 后等待返回 `Ok` | 已验收 |
-| T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持 | 未开始 |
+| T2 | 001 | 000 accepted | `commit` / `checkpoint` / `close` 接到上述方法；取消与缓冲池行为保持 | 接线已落地；「未提交行在 close 后不可见」未通过，审查为 replan-required |
 | T3 | 002 | 001 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
 
 ## 1. WAL 刷盘所有者（Iteration 000）
