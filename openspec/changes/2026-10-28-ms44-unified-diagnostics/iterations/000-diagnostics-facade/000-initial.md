@@ -81,9 +81,42 @@ PASS。检查项均通过，无 BLOCKED，无 SKIPPED。批准来自本次 goal 
 
 ## Act Response
 
-- Status: 尚未由 Act 填写
+- Status: reported
+- Task：T1（change tasks.md 1.1）
 
-尚未执行。
+### 实际改动
+
+- 新建 `src/diagnostics.rs`：门面模块。公开类型 `Detail` / `Module` / `ModuleSet` / `Collect` / `DiagnosticsConfig`（默认 event_limit 64、summary_limit 32）、`Record`（仅严重级别、类别、消息、数据四字段）、`ScopeEnd` / `Severity` / `Category`、`StageSample` / `StageStat` / `TraceSample` / `Summary`；公开函数 `render`、`Diagnostics::record_pre_measured`（预量包含耗时入口）、`Diagnostics::statement`（作用域，`end_ok` / `end_err` / 析构未结束按 Dropped）。摘要形成收敛在私有 `Diagnostics::record_statement` 单点：采集全关不分配摘要、事件超限保留最新并计 `dropped`、SQL 截 80 字符、阶段按（类别,阶段名）聚合、独占 = 包含 − 直接子阶段包含之和（saturating）、摘要超限丢最旧。
+- `src/lib.rs`：新增 `pub mod diagnostics;`。
+- `src/database.rs`：私有字段 `diagnostics: Arc<crate::diagnostics::Diagnostics>`（随 `Clone` 共享，open 内构造），公开方法 `set_diagnostics` 与 `diagnostic_summaries`。`Database::open` / `execute_sql` 签名与行为未动。
+- 新建 `tests/diagnostics_facade_test.rs`：GREEN condition 列出的 10 个测试，全部使用固定耗时树（根 100 / parse 10 / plan 5 / execute 70 / commit 40）或门面直接断言；`default_session_execute_has_empty_summaries` 用 tempdir + `Database::open` + `execute_sql("SELECT 1")`。
+
+### 与计划的偏差
+
+无实质偏差。两处记录性说明：测试固定树比 Required behavior 的最小三元组多一个 `plan` 5ms 叶子——`module_filter_skips_pipeline_stages` 需要树中存在 `plan` 才能断言其被过滤；`detail_off_keeps_summary_and_renders_empty` 除断言 Off 渲染为空外，加了同摘要 Summary 档渲染以 `diagnostics ` 开头的对照断言，防止空字符串因渲染恒空而通过。
+
+### 自检发现与修复
+
+- Gate 3（spec compliance + code quality）逐项通过：Preserve 项（open/execute_sql 结果类型、Clone 共享、profiling panic 条件、34 个 stderr 调用点）未被触碰；Forbidden 项（pipeline/profiling/wal/storage/transaction/executor、新 crate、CLI/SQL 语法、标识字段、stderr 渲染、语句接线、全量测试）均未违反；诊断模块 import 只有 `std`，不依赖数据库各层；diff 无计划外修改；无新增编译警告（编译输出仅环境级 `~/.cargo/config` 弃用提示，与本项目无关）；测试断言均为具体值（精确 Duration、精确字符串、精确计数），不存在因错误原因通过。
+- 无 Critical / Important 发现；无遗留 Minor 问题。
+
+### 验证命令与实际结果
+
+- RED（先行测试）：`cargo test --offline --test diagnostics_facade_test stats_without_trace_records_totals` → 退出码 101，`error[E0432]: unresolved import rtsql::diagnostics`（诊断模块不存在，符合 Task Definition 预期失败）。
+- GREEN（Verification）：`cargo test --offline --test diagnostics_facade_test`（默认并行度）→ 退出码 0，`10 passed; 0 failed; 0 ignored`，覆盖 GREEN condition 全部 10 个测试。
+- 未跑全量（全量预算在 Iteration 003 / T4，遵守 M19 分批串行约束）。
+
+### Persisted Evidence
+
+None required（Mode: none，无 required 项，结论可低成本重跑）。
+
+### Experience Candidates
+
+None（未发现 change 范围外实质缺陷；测试命令为项目常规命令，无新 Runbook 价值）。
+
+### 未解决问题
+
+None。
 
 ## Plan Review
 

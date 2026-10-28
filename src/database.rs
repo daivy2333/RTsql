@@ -153,6 +153,10 @@ pub struct Database {
     /// `":memory:"`。测试支撑的注入点按路径限定（并行测试二进制互不抢对方
     /// 的注入点，先例 `src/storage/free_page_rebuild.rs`）。
     path: PathBuf,
+    /// MS44 Iter000（T1）：诊断会话槽——`set_diagnostics` 下发配置，
+    /// `diagnostic_summaries` 读回摘要；随 `Clone` 共享（同一会话）。
+    /// 默认采集全关，不产生任何摘要。
+    diagnostics: Arc<crate::diagnostics::Diagnostics>,
 }
 
 /// MS34 Iter000（T01）：库属隐式语句的作用域守卫。
@@ -485,6 +489,7 @@ impl Database {
             io_failpoint,
             implicit_transactions: Arc::new(Mutex::new(HashSet::new())),
             path: path.to_path_buf(),
+            diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
         })
     }
 
@@ -723,6 +728,17 @@ impl Database {
     /// 语句入口的上限快照读取（pipeline 预算构造点消费）。
     pub(crate) fn query_memory_limit(&self) -> u64 {
         self.query_memory_limit.load(Ordering::SeqCst)
+    }
+
+    /// MS44 Iter000（T1）：下发诊断配置（只影响之后形成的摘要；采集全关
+    /// 时不产生摘要）。
+    pub fn set_diagnostics(&self, config: crate::diagnostics::DiagnosticsConfig) {
+        self.diagnostics.configure(config);
+    }
+
+    /// MS44 Iter000（T1）：读回本会话已记录的诊断摘要（快照副本）。
+    pub fn diagnostic_summaries(&self) -> Vec<crate::diagnostics::Summary> {
+        self.diagnostics.summaries()
     }
 
     /// Roll back an explicit transaction: every version the transaction

@@ -5,7 +5,7 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。
-- 000：当前 Cycle 是 `iterations/000-diagnostics-facade/000-initial.md`。Plan Context 为 ready。Act 尚未执行。
+- 000：当前 Cycle 是 `iterations/000-diagnostics-facade/000-initial.md`。Plan Context 为 ready。Act Response 为 `reported`，等待 Plan Review。
 - 001、002、003：只列在下面的 Iteration Plan 中，目录未创建。
 - Persisted Evidence：none。
 - 无跳过项。
@@ -16,14 +16,14 @@
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 门面、三项配置、上限和父子耗时可在不改语句结果的前提下读回 | 未开始 |
+| T1 | 000 | 无 | 门面、三项配置、上限和父子耗时可在不改语句结果的前提下读回 | 待 Review |
 | T2 | 001 | 000 accepted | 语句阶段、旧计时表、失败和取消接上；SQL 结果不变 | 未开始 |
 | T3 | 002 | 001 accepted | 等待类别、并发归属、文件页 I/O、三种开销；`[recovery]` 仍在 | 未开始 |
 | T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
 
 ## 1. 诊断门面（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-diagnostics-facade/000-initial.md` 的 Task Definition 执行。先写 `tests/diagnostics_facade_test.rs` 的 `stats_without_trace_records_totals` 并看到 RED，再实现。通过条件是该 Cycle 的 GREEN 命令。不改语句管道、WAL、存储和旧计时表。
+- [x] 1.1 T1：按 `iterations/000-diagnostics-facade/000-initial.md` 的 Task Definition 执行。先写 `tests/diagnostics_facade_test.rs` 的 `stats_without_trace_records_totals` 并看到 RED，再实现。通过条件是该 Cycle 的 GREEN 命令。不改语句管道、WAL、存储和旧计时表。
 
 ## 2. 语句阶段（Iteration 001）
 
