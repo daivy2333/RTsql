@@ -10,6 +10,10 @@
 # Runtime session continuation state from Mavis/MiniMax Code skill runs
 /.omo/
 
+# Third-party reference sources (read-only, not part of the build)
+# redb: embedded key-value store used as a design reference, not a dependency
+/third_party/
+
 # Added by cargo
 # already existing elements were commented out
 
