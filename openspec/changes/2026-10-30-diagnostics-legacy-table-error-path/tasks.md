@@ -8,7 +8,7 @@ Gate 1 为 PASS，批准来自本次 goal 指令「除了 iss42，其他的都�
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`；规格 delta 在 `specs/unified-diagnostics/spec.md`。
 - 000：已完成——`iterations/000-initial/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录逐路径基点等价核对、Acceptance 逐条结论与四条非阻塞 Minor finding）。
-- 001：已展开——`iterations/001-final-regression/000-initial.md`（Plan Context `ready`，Gate 2 PASS），等待 `openspec-act` 执行 T3。这是本 change 唯一的一次全量。
+- 001：Act 已执行——`iterations/001-final-regression/000-initial.md`（Plan Context `ready`，Gate 2 PASS；Act Response 状态 `reported`）。这是本 change 唯一的一次全量：15 批全部 exit 0、failed 0，`--test` 名字集合与枚举集合对账成立。等待 `openspec-plan` 做 Plan Review。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -18,7 +18,7 @@ Gate 1 为 PASS，批准来自本次 goal 指令「除了 iss42，其他的都�
 |---|---|---|---|---|
 | T1 | 000 | 无 | 旧表只在走到执行阶段的返回路径输出；执行阶段之前不输出；表算法、错误文本与 SQLSTATE 不变 | accepted（Cycle 000 Review Result accepted） |
 | T2 | 000 | T1 | 权威规格「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句由测试锁定 | accepted（Cycle 000 Review Result accepted） |
-| T3 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | pending（Cycle 000 已展开，Plan Context ready） |
+| T3 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | executed（Cycle 001 Act Response `reported`：15 批全部 exit 0 / failed 0，2409 passed / 0 failed，目标集合对账成立；待 Plan Review） |
 
 ## 1. 旧表输出时机收敛（Iteration 000）
 
@@ -58,7 +58,9 @@ Verification：`cargo test --offline --test diagnostics_statement_test -- --test
 
 ## 3. 收尾全量（Iteration 001）
 
-- [ ] 3.1 T3：T2 通过后，按下面的分批方式跑一次全量。这是整个 change 的唯一一次全量。不改产品代码。失败时停止，不在本轮里修。执行依据见 `iterations/001-final-regression/000-initial.md` 的 T3 Task Definition（规程全文在该文件内）。
+- [x] 3.1 T3：T2 通过后，按下面的分批方式跑一次全量。这是整个 change 的唯一一次全量。不改产品代码。失败时停止，不在本轮里修。执行依据见 `iterations/001-final-regression/000-initial.md` 的 T3 Task Definition（规程全文在该文件内）。
+
+完成情况：按 M19 规程现场枚举 162 个集成测试目标，分 15 批（B1 为 `--lib --bins`，B2–B14 各 12 个 `--test` 目标，B15 为末批 6 个），批间串行、每批 `-- --test-threads=1`、全程无无过滤 `cargo test`。15 批退出码全部为 0、`failed` 全部为 0，合计 2409 passed / 0 failed；`--test` 名字并集与枚举集合相等（162 == 162，无缺失、无多余、无重复），`--lib` / `--bins` 只出现在第一批。无批次失败，因此未触发整批复核。本轮产品代码零改动。
 
 分批是通过条件的一部分：
 
@@ -86,7 +88,7 @@ Verification：`cargo test --offline --test diagnostics_statement_test -- --test
 
 - Tasks：T3
 - Depends on：000 accepted
-- 状态：已展开——`iterations/001-final-regression/000-initial.md`（Plan Context `ready`，Gate 2 PASS）。
+- 状态：Act 已执行——`iterations/001-final-regression/000-initial.md`（Plan Context `ready`，Gate 2 PASS；Act Response 状态 `reported`：15 批全 exit 0、failed 0，目标集合对账成立）。待 Plan Review 收口。
 - Stable result：默认构建上按 M19 分批串行的一次全量，每批退出码 0 且 failed 为 0，目标对账无缺无重。
 - Verification boundary：本节 T3 的分批方式。只此一次。失败批只整批复核一次。
 - Diagnostic boundary：按失败测试所在的批和目标文件定位。不把全量失败当成修改分批规则的理由。

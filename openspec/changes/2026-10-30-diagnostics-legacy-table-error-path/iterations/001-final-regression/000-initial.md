@@ -119,9 +119,79 @@ PASS。检查项均通过，无 BLOCKED，无 SKIPPED。调查基于本会话对
 
 ## Act Response
 
-- Status: 尚未由 Act 填写
+- Status: reported
 
-尚未执行。
+### 实际改动
+
+- 产品代码零改动、测试代码零改动、`Cargo.toml` / `Cargo.lock` 零改动、未新增任何测试、fixture、脚本、封装命令或判定层。
+- 本轮唯一写入是 change 文档：本文件（Act Response）与 `tasks.md` 的 T3 状态行。
+- `git status --porcelain` 在提交前为空，`git diff --stat HEAD` 为空——本轮开始与结束时工作区都只有 change 文档改动，产品树停在 `9401b2d`（本 Cycle 开始时的 HEAD `3391898` 的父提交内容）。
+
+### 逐批清单
+
+枚举（执行时现场执行）：`ls tests/*.rs | sort` → 162 个文件；去掉 `.rs` 得 162 个 `--test` 名字，集合 `E`。重名检查：`sort | uniq -d` 输出 0 行（无重名）。
+
+全部 15 批串行执行，同一时刻只有一批在跑（一条命令结束后才发下一条）。每批命令形如 `cargo test --offline --test <名>... -- --test-threads=1`；B1 形如 `cargo test --offline --lib --bins -- --test-threads=1`。全程没有不带 `--lib` / `--bins` / `--test` 过滤的 `cargo test`，全部批次都带 `-- --test-threads=1`。
+
+| 批 | 覆盖的测试目标 | 退出码 | passed | failed | ignored |
+|---|---|---|---|---|---|
+| B1 | `--lib`（`src/lib.rs` 单测）+ `--bins`（`src/main.rs` 单测）；无 `--test` 目标 | 0 | 443（lib）+ 0（bins） | 0 | 0 |
+| B2 | aggregate_extension_test, aggregate_output_shape_test, aggregate_test, alter_table_test, attach_session_test, btree_merge_test, btree_scale_test, btree_split_test, btree_test, busy_timeout_test, cache_perf_test, catalog_bounded_read_test | 0 | 154 | 0 | 0 |
+| B3 | catalog_durability_test, chain_join_test, check_command_test, checkpoint_command_test, checkpoint_redo_reduction_test, checkpoint_skip_test, checkpoint_test, cli_test, composite_index_lifecycle_test, composite_index_runtime_test, concurrent_test, connection_limit_test | 0 | 199 | 0 | 2 |
+| B4 | constraint_enforcement_test, cross_db_dml_test, cross_db_query_test, crypto_off_build_test, ctas_test, cte_test, data_page_bounded_read_test, database_file_lock_test, datetime_function_test, datetime_type_test, ddl_catalog_transactional_test, ddl_crash_recovery_test | 0 | 155 | 0 | 0 |
+| B5 | ddl_layout_publication_test, ddl_rewrite_consistency_test, default_declaration_test, default_precheck_test, derived_scan_alias_test, diagnostics_facade_test, diagnostics_statement_test, diagnostics_wait_test, dml_tombstone_abandon_window_test, dml_tx_id_test, drop_persistence_test, drop_table_free_test | 0 | 116 | 0 | 0 |
+| B6 | e2e_test, encryption_test, executor_test, explain_test, explicit_tx_test, expression_e2e_test, file_header_test, file_storage_io_test, free_page_lifecycle_test, full_table_dml_test, gc_test, group_by_expr_test | 0 | 184 | 0 | 0 |
+| B7 | hash_join_build_side_test, import_input_surface_test, index_key_encoding_evaluation_test, index_manager_test, index_page_ownership_stack_overflow_test, index_page_ownership_test, index_range_routing_test, index_read_bounded_read_test, index_write_atomicity_test, insert_column_list_test, insert_select_test, isolation_level_test | 0 | 76 | 0 | 0 |
+| B8 | join_output_resolution_test, join_test, key_type_conformance_test, keyless_eq_routing_test, keyless_row_test, legacy_compat_test, limit_test, memory_db_test, mvcc_abort_test, mvcc_commit_test, mvcc_record_test, mvcc_tombstone_visibility_test | 0 | 113 | 0 | 0 |
+| B9 | nested_loop_join_test, network_protocol_test, network_server_test, no_from_select_test, order_by_alias_sort_test, outer_join_test, overflow_page_test, param_binding_test, parser_test, pg_integration_test, pg_messages_test, pg_protocol_test | 0 | 133 | 0 | 0 |
+| B10 | pipeline_test, plan_cache_test, plan_exec_test, planner_test, predicate_test, prefetch_test, prepared_statement_test, projection_expression_test, projection_test, pushdown_test, query_memory_test, readonly_session_test | 0 | 240 | 0 | 0 |
+| B11 | recovery_bounded_read_test, recovery_e2e_test, recovery_error_surface_test, recovery_replay_convergence_test, recovery_tail_persistence_test, recovery_test, recovery_wal_convergence_test, release_durability_precondition_test, release_path_bounded_read_test, runtime_test, scalar_function_test, scalar_subquery_comparison_test | 0 | 92 | 0 | 0 |
+| B12 | schema_persistence_test, secondary_index_equality_test, secondary_index_test, select_distinct_test, self_join_test, session_lifecycle_test, set_operations_test, sort_merge_join_test, sort_test, sql_differential_test, statement_cancellation_test, storage_test | 0 | 147 | 0 | 0 |
+| B13 | string_index_runtime_test, string_index_sql_test, string_secondary_index_test, structural_property_test, subquery_alias_binding_test, subquery_test, subset_insert_test, sync_loader_test, table_alias_resolution_test, table_manager_test, truncate_test, tx_statement_test | 0 | 163 | 0 | 0 |
+| B14 | typed_api_test, update_expression_test, update_index_maintenance_test, upsert_test, value_test, version_chain_test, view_test, visibility_test, wal_auto_checkpoint_test, wal_buffer_test, wal_handle_test, wal_integration_test | 0 | 142 | 0 | 0 |
+| B15 | wal_record_test, wal_recovery_large_test, wal_writer_test, write_failure_state_test, write_path_slot_bounds_test, write_type_conformance_test（末批 6 个） | 0 | 52 | 0 | 0 |
+
+- 批次划分：162 = 13 批 × 12 + 末批 6 个；B2–B14 各 12 个，B15 为 6 个。总批数 15（含 B1 的 `--lib`/`--bins`）。
+- 合计：结果行共 164 行（lib 1 + bins 1 + 集成 162 个目标，各目标一行 `test result:`），passed 合计 2409（lib 443 + bins 0 + 集成 1966），failed 合计 0，ignored 2（B3 的 `cli_test`）。
+- 没有任何一批失败，因此没有触发规程第 8 条的整批复核；本轮没有重复运行任何批次。
+
+### 对账结论
+
+- 全部批次用到的 `--test` 名字并集与 `E` 逐元素相等：`diff` 输出为空，`used_total=162`、`enum_total=162`。
+- 无缺失、无多余、无重复（对实际使用的 162 个名字做 `sort | uniq -d`，输出 0 行）。
+- `--lib` 与 `--bins` 只出现在 B1；B2–B15 全部是纯 `--test` 过滤。
+- 规程第 6 步对账成立。
+
+### 验证命令与实际结果
+
+- 全量结论所依据的分批执行方式：M19 分批串行——现场枚举 `ls tests/*.rs | sort` 得到 162 个目标；第一批单独跑 `--lib --bins`；其余按该排序每 12 个一批（B2–B14），末批 6 个（B15）；每批一条 `cargo test --offline ... -- --test-threads=1`；批间串行，同一时刻只有一批在跑；全程无无过滤 `cargo test`，无默认并行度批次。
+- 判定依据：每批的退出码与输出中的 `failed` 计数。15 批退出码全为 0，`failed` 全为 0。
+- 观察到的相关细节（均为实际输出）：`crypto_off_build_test`（B4）与 `network_server_test`（B9）在默认构建下为 0 用例，退出码 0，不判为缺失目标；B5 的 `diagnostics_statement_test` 9 passed / 0 failed，与 Iteration 000 的定向结论一致；B5 的 `diagnostics_wait_test` 6 passed / 0 failed，MS44 收尾轮记录过的 `commit_wait_classes_present` 偶发断言本次未复现，无需启用规程第 8 条的复核。
+- 沿用结论：Iteration 000 的定向验证（`cargo test --offline --test diagnostics_statement_test -- --test-threads=1` → 9 passed / 0 failed）本轮不重复执行——该目标已作为 B5 的一部分被整套覆盖，且被覆盖代码此后未变化。
+
+### 与计划的偏差
+
+无。批次划分、命令形式、并行度、判定方式与 Task Definition 的 M19 规程完全一致。唯一实现性说明：读取每批输出时用 `awk` 单步管道提取 `test result:` 行并汇总计数（通用工具单步管道，读取既有输出），不是判定层——判定仍是退出码与 `failed` 计数；未新增任何脚本、fixture 或封装命令。
+
+### 自检发现
+
+- 未发现 Critical 或 Important 问题；无遗留 Minor 问题。
+- 本轮不改代码，因此 Gate 3 的「先行测试」项不适用（公共规则 › TDD 的例外：只有验证，无实现变更）；Gate 3 的其余检查（无计划外修改、无新增警告、无身份证明机制、无判定层、无产物外改动）逐项通过——`git status --porcelain` 在写入 change 文档前为空，`git diff --stat HEAD` 无产品代码条目。
+- Gate 4：Task Definition 的 Verification 全部满足（逐批退出码 0 + failed 0 + 对账成立 + Act Response 写齐每批计数）。
+
+### Persisted Evidence
+
+None required——命令、实际结果、逐批退出码与 passed / failed 计数、对账结论均已在本 Response 内，无失败批需要保留整批复核现场。
+
+### Experience Candidates
+
+None——本轮只有一次成功的全量回归，没有新的可复用操作路径（既有 Runbook 覆盖构建与测试命令），也没有发现本 change 范围外的实质缺陷。
+
+### 未解决问题
+
+- 无阻塞项，无 Blocker Handoff。
+- ISS42 保持 open（`record_time` 在旧 scope 外 panic 的既有行为），按计划不在本 change 承载，本轮未触碰。
+- 计划中记为既有噪声的 `cargo fmt --check` 两处漂移（`tests/diagnostics_facade_test.rs:216`、`tests/session_lifecycle_test.rs:15`）不在本轮判定面，本轮未处理。
 
 ## Plan Review
 
