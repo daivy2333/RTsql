@@ -1542,13 +1542,18 @@ async fn execute_staged(
     } else {
         None
     };
+    // MS44 Iter002（T3）：parse 开为 open 阶段——等待归属「当时最内层 open
+    // 阶段」，闭合后的结构与 Iteration 001 等价（parse 仍是根的直接子阶段）。
+    if parse_start.is_some() {
+        open_stage(Module::Pipeline, "parse");
+    }
     let parse_outcome = parse_stage(sql).await;
     if let Some(start) = parse_start {
         let elapsed = start.elapsed();
         if profiling {
             record_time("parse", elapsed);
         }
-        record_stage(Module::Pipeline, "parse", elapsed);
+        close_stage("parse", elapsed);
     }
     let mut statements = match parse_outcome {
         Ok(s) => s,
@@ -1597,13 +1602,18 @@ async fn execute_staged(
     } else {
         None
     };
+    // MS44 Iter002（T3）：plan 同 parse 开为 open 阶段（闭合后仍是根的
+    // 直接子阶段）。
+    if plan_start.is_some() {
+        open_stage(Module::Pipeline, "plan");
+    }
     let plan_outcome = plan_stage(database, sql, stmt, profiling).await;
     if let Some(start) = plan_start {
         let elapsed = start.elapsed();
         if profiling {
             record_time("plan", elapsed);
         }
-        record_stage(Module::Pipeline, "plan", elapsed);
+        close_stage("plan", elapsed);
     }
     let mut plan = match plan_outcome {
         Ok(p) => p,

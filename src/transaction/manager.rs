@@ -116,7 +116,16 @@ impl TransactionManager {
         // The gate is released before versions are marked committed.
         let wal = self.wal_buffer.read().await.clone();
         if let Some(wal) = wal {
+            // MS44 Iter002（T3）：会话闸门的等待记为 Lock——只含这一次
+            // `.lock().await`，不含之后的刷盘等待（Queue）。
+            let gate_start = crate::diagnostics::wait_timing_start();
             let _session = wal.session_gate().lock().await;
+            if let Some(start) = gate_start {
+                crate::diagnostics::record_wait(
+                    crate::diagnostics::Category::Lock,
+                    start.elapsed(),
+                );
+            }
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

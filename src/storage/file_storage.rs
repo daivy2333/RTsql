@@ -512,6 +512,9 @@ impl FileStorage {
 #[async_trait]
 impl AsyncStorage for FileStorage {
     async fn read_page(&self, page_id: PageId) -> Result<Page> {
+        // MS44 Iter002（T3）：整次调用记为 Io 并把页数加 1——计时包在
+        // `crypto` 分支之外，不需要复制读取函数体（守卫析构时落账）。
+        let _io_timer = crate::diagnostics::PageReadTimer::start();
         let file = self.file.clone();
         let page_size = self.page_size;
         let record_size = self.record_size;

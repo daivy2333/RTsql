@@ -125,3 +125,73 @@ PASS。检查项均通过，无 BLOCKED，无 SKIPPED。调查基于本会话对
 - `three_modes_match_rows` 沿用 `benches/pipeline_stages_bench.rs` 的负载形态（`bench` 表 100 行 + `SELECT * FROM bench WHERE id = 42`），判定放在 `cargo test` 内；三次各自新建文件库，避免计划缓存把后两次变成另一种路径。
 - `[recovery]` 断言面在 `tests/recovery_bounded_read_test.rs`，本轮只跑它作回归，不改其告警断言。
 - 本轮不跑全量（全量预算在 Iteration 003，整个 change 一次，按 M19 分批串行）。
+
+## Act Response
+
+- Status: reported
+- Cycle: Iteration 002 / Cycle 000（等待、归属和开销）
+- 承载任务：T3（change `tasks.md` 3.1）
+
+**实际改动**
+
+- `src/diagnostics.rs`：
+  - 新公开类型 `WaitTotals`：按既有 `Category`（Compute / Lock / Queue / Io / Schedule）索引的耗时累计 + 文件页数；公开方法 `get(Category)` / `pages()` / `wait_total()`（四类等待之和，不含 Compute）。不引入第二套类别名。
+  - `StageStat` / `TraceSample` 各增一个 `waits: WaitTotals` 字段——等待的公开载体是阶段汇总数（stats 口径）与逐条样本（trace 口径），两者都不含操作标识、运行标识或内容哈希字段。
+  - 新的内部节点 `StageNode`（`StageSample` 的结构 + 该阶段的等待累计）；公开 `StageSample` 保持 Iteration 000 的四字段不变，等待只经 `StageStat` / `TraceSample` 暴露。`collect_stats` / `collect_samples` 改走 `StageNode`。
+  - `StageStack` / `OpenStage`：open 阶段带 `id`（0 保留给语句根），语句级新增跨任务共享的等待槽。
+  - 新的跨任务槽 `WaitSlot`（`pub(crate)`）与其内部 `SlotShared` / `StageWait` / `FlushWait`：按阶段 id 存累计，并存最近一次刷盘回写的 Io / Schedule。语义由本模块解释，`src/wal/buffer.rs` 只持有句柄并回写。
+  - 新的 crate 内入口：`wait_timing_start`（有绑定才取时刻）、`record_wait`（归属「当时最内层 open 阶段」，无 open 阶段记语句根）、`record_page_read`（Io + 页数加 1）、`current_wait_slot`（当前语句的槽与阶段 id）、`PageReadTimer`（守卫析构时落账，不需要复制读取函数体）。无绑定时全部 no-op（默认配置零计时）。
+  - `StageStack::close_stage`：闭合时取走该阶段的等待累计，并按「独占耗时 − 自身等待之和」算出 Compute（内层等待不重复计入外层：外层独占耗时已扣除子阶段包含耗时）。
+- `src/pipeline.rs`：`execute_staged` 的 `parse` / `plan` 由「已完成阶段」改为 open 阶段（`open_stage` / `close_stage`），等待得以归属；闭合后 `parse` / `plan` 仍是根的直接子阶段，与 Iteration 001 结构等价；旧表的 `record_time` 调用点与测量窗口不变。
+- `src/database.rs`：`Database::commit` 的 `commit` 由 `record_stage` 改为 open 阶段（`stage_instant` 判定后 open / close），提交等待（Lock / Queue / Io / Schedule）归属该阶段；`commit` 仍是 `execute` 的子阶段；错误路径与返回值不变。
+- `src/transaction/manager.rs`：`TransactionManager::commit` 的会话闸门 `.lock().await` 记 Lock（只含这一次锁等待，不含之后的刷盘等待）。
+- `src/wal/buffer.rs`：
+  - 等待表条目由 `Arc<Notify>` 改为新的 `CommitWaiter`（通知句柄 + 诊断槽 + 登记时的阶段 id + 通知时刻 + 通知时刷盘循环是否空等）。登记发生在语句任务内，句柄与阶段 id 随等待者进入等待表。
+  - `append_commit_and_wait`：刷盘闸门 `.lock().await` 记 Lock；`notified().await` 的实测耗时减去本次刷盘的 Io 与 Schedule 记 Queue（小于 0 记 0）。
+  - 新增 `flush_loop_idle` 标志（刷盘循环是否停在 select 上空等）：通知到达时循环正忙则 Schedule 记 0。
+  - `flush_locked`：`write_batch` 的整段耗时记 Io（失败也照记），只回写给被本次刷盘释放且带槽的等待者；先回写 Io / Schedule、后唤醒等待者（语句侧读到的一定是本次的值）。
+- `src/storage/file_storage.rs`：`FileStorage::read_page` 的整次调用记 Io 并把页数加 1（`PageReadTimer` 守卫，计时包在 `crypto` 分支之外，不复制函数体）；`MemoryStorage::read_page` 未改（不记 Io）。
+- 新建 `tests/diagnostics_wait_test.rs`：`commit_wait_classes_present`（先行，RED 为编译失败）、`parse_stage_has_compute_without_io`、`file_page_read_records_io`、`stats_only_reports_wait_totals_without_samples`、`concurrent_inserts_keep_own_sql`、`three_modes_match_rows`。该文件不设置 `RTSQL_PROFILING`，按默认并行度执行。
+
+**与计划的偏差（Deviations from Plan）**
+
+1. `file_page_read_records_io` 的夹具用「只读重开」而不是计划写的普通重开。Plan 的 Current-State Evidence 断言「重开同一路径得到缓冲池为空的 `Database`」——只对打开的起点成立：读写打开在 `src/database.rs` 的 `rebuild_free_page_set`（MS35 `free-page-lifecycle` R2）里走遍全部活页并把它们读进缓冲池（容量 100），因此普通重开后目标页已在缓冲池里，查询不再读文件，Io 恒为 0（实测：重开时 `read_page` 被调用于页 0..3，查询期间一次也没有）。只读打开不做恢复、也不做该重建，缓冲池里只有目录页 → 查询真的从文件读页。只读打开满足 Required behavior 的前提「缓冲池尚未持有目标数据页」，夹具形态（建库 → 插入 → `close()` → 重开 → 查询）不变。此为 Plan 事实错误，不是行为偏离。
+2. 公开 `StageSample` 未加等待字段，等待改由内部 `StageNode` 承载。Plan 的 Current-State Evidence 称 `tests/diagnostics_facade_test.rs` 不字面量构造 `StageSample`——实际它字面量构造了 5 处。为不改 Iteration 000 已 accepted 的测试文件，公开 `StageSample` 保持四字段，等待只经 Plan 点名的 `StageStat` / `TraceSample` 暴露。
+3. 通知时刻取在「登记等待者时」（持刷盘闸门、紧邻释放闸门）而不是 `notify_one` 调用点：等待者条目必须在刷盘任务可能取走它之前就完整（否则槽、阶段 id、时刻会与刷盘任务读到的条目不一致）。登记与 `notify_one` 之间只隔一次原子读与一个分支。
+4. `flush_locked` 现在在写盘前就把本批等待者从等待表取走（原实现在写盘后取走）：回写必须精确命中「被本次刷盘释放」的等待者。唤醒顺序不变（仍在写盘之后），`write_batch` 失败仍唤醒等待者，`append_commit_and_wait` 仍返回 `Ok(())`，刷盘仍单飞（`flush_gate` 未变）。
+5. Io 只包住 `write_batch` 这一次调用（design D5 的表如此规定），不包 LSN 换算等准备开销；Schedule 的起点是本批开始处理的时刻（`flush_locked` 入口），终点是等待者的通知时刻。
+6. Queue 的测量窗口从 `notified().await` 之前起算（design D5 表格的「`notified().await` 的剩余部分」），减本次刷盘的 Io 与 Schedule；两值从语句自己的等待槽读回（刷盘任务先回写后唤醒）。
+
+**自检发现与修复**
+
+- Important（已修复）：初版 `flush_locked` 的 Io 把 LSN 换算等准备开销算进了写盘耗时——按 design D5 的表改为只包 `write_batch`。
+- Important（已修复）：初版先记 Queue 再读回 Io / Schedule，顺序与「先回写、后唤醒」相悖——改为先读回本次刷盘的 Io / Schedule，再算 Queue，再记 Queue。
+- Important（已修复）：初版等待表只存通知句柄，跨任务回写无处落账——等待者条目改为携带槽与阶段 id。
+- Important（已修复，测试侧）：`file_page_read_records_io` 初版失败（查询没读到页，Io = 0、页数 = 0）。定位结论见偏差 1（读写打开的空闲页重建已把活页读进缓冲池），夹具改为只读重开后通过；同一次修复顺带把「缓冲池已持有的页不记 Io」做成同文件内的显式断言（第二次查询 Io 与页数均为 0）。
+- 遗留 Minor（不阻塞，供 Plan Review 终审）：
+  - 组提交把整段 Io 写给每个被释放的等待者，单条语句看到的是自己等待的那次刷盘——按 spec 与 design D5 登记的放大效应；本轮没有任何断言把跨语句的 Io 相加，也不把它当进程级 I/O。
+  - `Schedule` 经常为 0（刷盘循环正忙，或通知到达时循环尚未停回 select）——spec 明确允许 Schedule 为 0。
+  - 仓库两处既有 rustfmt 漂移（`tests/diagnostics_facade_test.rs:216`、`tests/session_lifecycle_test.rs:15`）非本轮引入，未触碰；本轮触碰的 6 个文件均 rustfmt 干净。
+  - 上一轮 Review 留的两条非阻塞 Minor finding（错误路径新增旧表输出、需求 5 的 spec 子句缺断言）按本轮指令未处理。
+
+**验证命令与实际结果**
+
+- RED（先行）：`cargo test --offline --test diagnostics_wait_test commit_wait_classes_present` → 编译失败 `error[E0609]: no field 'waits' on type '&StageStat'`（等待类别字段尚不存在，与计划预期一致）。
+- GREEN 条件一：`cargo test --offline --test diagnostics_wait_test` → 退出码 0，`6 passed; 0 failed`（用例清单与 Task Definition 一致：`commit_wait_classes_present`、`parse_stage_has_compute_without_io`、`file_page_read_records_io`、`stats_only_reports_wait_totals_without_samples`、`concurrent_inserts_keep_own_sql`、`three_modes_match_rows`）。
+- GREEN 条件二：`cargo test --offline --test recovery_bounded_read_test` → 退出码 0，`6 passed; 0 failed`（`[recovery]` 告警原文仍在）。
+- 阶段记录代码变更（`parse` / `plan` / `commit` 改为 open 阶段）使 Iteration 001 的结论失效，按「被覆盖的代码在结论产生后发生变化」重跑受影响范围：`cargo test --offline --test diagnostics_statement_test -- --test-threads=1` → 退出码 0，`7 passed; 0 failed`；`cargo test --offline --test diagnostics_facade_test` → 退出码 0，`10 passed; 0 failed`。
+- 改动面（WAL / 存储 / 并发 / checkpoint）的定向回归：`cargo test --offline --lib wal::` → `17 passed; 0 failed`（其余 426 项被过滤）；`cargo test --offline --test wal_buffer_test --test wal_integration_test --test file_storage_io_test --test storage_test` → `5 + 2 + 21` 全 0 failed；`cargo test --offline --test concurrent_test --test checkpoint_test --test free_page_lifecycle_test --test wal_auto_checkpoint_test` → `2 + 10 + 12 + 11` 全 0 failed。
+- `cargo fmt --check` → 仅上述两处既有漂移；`cargo build --offline` 无新增警告。
+- 未跑全量（M19：全量预算在 Iteration 003 / T4，整个 change 一次，按分批串行执行）。
+
+**Persisted Evidence**
+
+None required（Mode: none；上述输出可低成本重跑，无需保存目录或日志）。
+
+**Experience Candidates**
+
+None。Issue 候选：本轮未发现当前 change 范围外、有证据的实质缺陷——偏差 1 是 Plan 的事实错误（读写打开后的空闲页重建会走遍活页），不是产品缺陷，且该重建是 MS35 `free-page-lifecycle` R2/R3 的既有设计，不作缺陷登记。Runbook 候选：None（观察到的「让查询真的读文件」的做法已写在测试文件的注释里，不构成高风险可复用操作路径）。
+
+**未解决问题**
+
+None（本 Cycle 范围内）。上述偏差均已在本 Response 记录原因与影响；无 Blocker Handoff。

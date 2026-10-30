@@ -580,17 +580,20 @@ impl Database {
         // 阶段的子阶段（隐式 DML 提交时最内阶段是 `execute`，阶段归属 Wal）；
         // 无绑定的任务（显式 COMMIT 的 session/CLI 调用、checkpoint 触发点）
         // 为 no-op，不创建根、不产生摘要。
+        //
+        // MS44 Iter002（T3）：`commit` 开为 open 阶段——提交等待（Lock /
+        // Queue / Io / Schedule）归属该阶段；闭合后的结构与 Iteration 001
+        // 等价（`commit` 仍是 `execute` 的子阶段）。
         let commit_start = crate::diagnostics::stage_instant();
+        if commit_start.is_some() {
+            crate::diagnostics::open_stage(crate::diagnostics::Module::Wal, "commit");
+        }
         let outcome = match self.transaction_manager.commit(tx, &self.buffer_pool).await {
             Ok(()) => self.maybe_auto_checkpoint().await,
             Err(e) => Err(e),
         };
         if let Some(start) = commit_start {
-            crate::diagnostics::record_stage(
-                crate::diagnostics::Module::Wal,
-                "commit",
-                start.elapsed(),
-            );
+            crate::diagnostics::close_stage("commit", start.elapsed());
         }
         outcome
     }
