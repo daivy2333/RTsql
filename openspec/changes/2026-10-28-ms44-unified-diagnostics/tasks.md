@@ -8,7 +8,7 @@
 - 000：已完成——`iterations/000-diagnostics-facade/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论与后继）。
 - 001：已完成——`iterations/001-statement-phases/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论、Minor finding 与两个 Issue 候选的判定）。
 - 002：已完成——`iterations/002-wait-attribution/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论、三条偏差的归类与 Minor finding）。
-- 003：当前 Cycle 是 `iterations/003-final-regression/000-initial.md`。Plan Context 为 `ready`，等待 Act。003 是本 change 的最后一轮（收尾全量）。
+- 003：Act 已完成，Act Response 状态为 `reported`，等待 Plan Review。Cycle 是 `iterations/003-final-regression/000-initial.md`。003 是本 change 的最后一轮（收尾全量）：15 个批次全部退出码 0、累计 164 个测试二进制 2407 passed / 0 failed，目标集合对账成立。
 - Persisted Evidence：none。
 - 无跳过项。
 
@@ -21,7 +21,7 @@
 | T1 | 000 | 无 | 门面、三项配置、上限和父子耗时可在不改语句结果的前提下读回 | accepted |
 | T2 | 001 | 000 accepted | 语句阶段、旧计时表、失败和取消接上；SQL 结果不变 | accepted（Cycle 000 Review Result accepted） |
 | T3 | 002 | 001 accepted | 等待类别、并发归属、文件页 I/O、三种开销；`[recovery]` 仍在 | accepted（Cycle 000 Review Result accepted） |
-| T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始（Cycle 000 Plan Context ready，等待 Act） |
+| T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | reported（Cycle 000 Act Response 状态 reported：15 批全部 exit 0 / 0 failed，对账成立；等待 Plan Review） |
 
 ## 1. 诊断门面（Iteration 000）
 
@@ -65,7 +65,7 @@ Verification：上面两条命令，默认并行度。不设置 `RTSQL_PROFILING
 
 ## 4. 收尾全量（Iteration 003）
 
-- [ ] 4.1 T4：T3 通过后，按下面的分批方式跑一次全量。这是整个 change 的唯一一次全量。不改产品代码。失败时停止，不在本轮里修。
+- [x] 4.1 T4：T3 通过后，按下面的分批方式跑一次全量。这是整个 change 的唯一一次全量。不改产品代码。失败时停止，不在本轮里修。（GREEN：15 个批次全部退出码 0、全部 failed 为 0，累计 164 个测试二进制 2407 passed / 0 failed；`--test` 名字并集与枚举集合相等，无缺失、无多余、无重复，`--lib` / `--bins` 只在第一批。逐批明细见 `iterations/003-final-regression/000-initial.md` 的 Act Response。）
 
 分批是通过条件的一部分：
 

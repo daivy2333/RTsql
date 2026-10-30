@@ -113,3 +113,106 @@ PASS。检查项均通过，无 BLOCKED，无 SKIPPED。调查基于本会话对
 - 机器承载：M19 的分批规程正是为「无过滤全量一次性构建链接全部测试二进制并长时间独占机器」而立；不得为了省时间把多批合并成一条命令或改用默认并行度。
 - 全量失败不等于「分批规则错了」——不把全量失败当成修改分批规则的理由（Iteration 003 的 Diagnostic boundary）。
 - 本轮不做任何超出收尾验证的清理；两处既有 rustfmt 漂移与前两轮的 Minor finding 均不在本轮处理面。
+
+## Act Response
+
+- Status: reported
+- Cycle: Iteration 003 / Cycle 000（收尾全量）
+- 承载任务：T4（change `tasks.md` 4.1）
+
+**实际改动**
+
+零产品代码改动。本轮只执行 M19 的分批全量并如实记录：不改产品代码、测试代码、夹具、`Cargo.toml` / `Cargo.lock`、criterion 门槛，不新增测试、fixture、脚本、封装命令或判定层，不引入任何 Hash / 指纹 / revision pin / run-id / 序号 / manifest / 时间顺序证明。本轮工作区的唯一改动是本文件与 change `tasks.md` 的文档更新；执行验证前后 `git status --short` 均为空输出。
+
+**与计划的偏差（Deviations from Plan）**
+
+None（仅一处执行细节说明，非行为差异）。Plan Context 的 Required behavior 第 3 条写「把 `E` 中除第一批外的名字按步骤 1 的排序，每 12 个一批」；`E` 是集成测试目标名集合，第一批只含 `--lib` / `--bins`、不含任何 `--test` 名字，故本轮按「`E` 的 162 个名字按步骤 1 的排序切成每批 12 个」执行，产出 14 个 `--test` 批（13 批 × 12 + 末批 6）。这与该条字面读法同形，且正是对账成立的前提（全部 `--test` 名字并集恰为 `E`）。除此之外逐条按 Required behavior 第 1–8 条执行，无偏差。
+
+**自检发现与修复**
+
+None（本轮零代码改动，无可检对象；无 Critical / Important / Minor 发现）。
+
+Gate 3（Task Review）以「执行依据合规性」核对：15 条命令逐条符合 Required behavior 第 2 / 3 / 5 条（第一批单独含 `--lib` `--bins`；其余每批 ≤ 12 个 `--test`；每批均带 `-- --test-threads=1`）；全程未运行任何不带 `--lib` / `--bins` / `--test` 过滤的 `cargo test`；无任何批使用默认并行度；批间串行（每批命令退出后才启动下一批，同一时刻只有一批在跑）；无失败批，故第 8 条的整批复核机会未动用；无已通过批被重跑；无批被跳过或删减。
+
+**验证命令与实际结果**
+
+执行时现场枚举：`ls tests/*.rs | sort` → 162 个文件，构成 `E` = 去掉 `.rs` 后的 162 个 `--test` 名字（枚举结果未写死进通过条件）。构建配置为 `Cargo.toml` 的 `default = ["cli", "network", "crypto"]`。
+
+逐批结果（批号 | 覆盖目标数 | 退出码 | passed | failed）：
+
+| 批 | 覆盖目标数 | 退出码 | passed | failed |
+|---|---|---|---|---|
+| B1 | `--lib` + `--bins`（2 个测试二进制） | 0 | 443 | 0 |
+| B2 | 12 | 0 | 154 | 0 |
+| B3 | 12 | 0 | 199 | 0 |
+| B4 | 12 | 0 | 155 | 0 |
+| B5 | 12 | 0 | 114 | 0 |
+| B6 | 12 | 0 | 184 | 0 |
+| B7 | 12 | 0 | 76 | 0 |
+| B8 | 12 | 0 | 113 | 0 |
+| B9 | 12 | 0 | 133 | 0 |
+| B10 | 12 | 0 | 240 | 0 |
+| B11 | 12 | 0 | 92 | 0 |
+| B12 | 12 | 0 | 147 | 0 |
+| B13 | 12 | 0 | 163 | 0 |
+| B14 | 12 | 0 | 142 | 0 |
+| B15 | 6 | 0 | 52 | 0 |
+| **合计** | **164 个测试二进制（162 个集成测试目标 + lib + bin）** | **全部 0** | **2407** | **0** |
+
+B1 的 443 passed 来自 `src/lib.rs` 的单测目标，`src/main.rs` 的 bin 目标为 0 个用例（0 passed / 0 failed，退出码 0）。
+
+全部 15 条命令（原样，逐批串行执行，每批一行）：
+
+```
+B1  cargo test --offline --lib --bins -- --test-threads=1  ->  exit 0  |  443 passed  |  0 failed
+B2  cargo test --offline --test aggregate_extension_test --test aggregate_output_shape_test --test aggregate_test --test alter_table_test --test attach_session_test --test btree_merge_test --test btree_scale_test --test btree_split_test --test btree_test --test busy_timeout_test --test cache_perf_test --test catalog_bounded_read_test -- --test-threads=1  ->  exit 0  |  154 passed  |  0 failed
+B3  cargo test --offline --test catalog_durability_test --test chain_join_test --test check_command_test --test checkpoint_command_test --test checkpoint_redo_reduction_test --test checkpoint_skip_test --test checkpoint_test --test cli_test --test composite_index_lifecycle_test --test composite_index_runtime_test --test concurrent_test --test connection_limit_test -- --test-threads=1  ->  exit 0  |  199 passed  |  0 failed
+B4  cargo test --offline --test constraint_enforcement_test --test cross_db_dml_test --test cross_db_query_test --test crypto_off_build_test --test ctas_test --test cte_test --test data_page_bounded_read_test --test database_file_lock_test --test datetime_function_test --test datetime_type_test --test ddl_catalog_transactional_test --test ddl_crash_recovery_test -- --test-threads=1  ->  exit 0  |  155 passed  |  0 failed
+B5  cargo test --offline --test ddl_layout_publication_test --test ddl_rewrite_consistency_test --test default_declaration_test --test default_precheck_test --test derived_scan_alias_test --test diagnostics_facade_test --test diagnostics_statement_test --test diagnostics_wait_test --test dml_tombstone_abandon_window_test --test dml_tx_id_test --test drop_persistence_test --test drop_table_free_test -- --test-threads=1  ->  exit 0  |  114 passed  |  0 failed
+B6  cargo test --offline --test e2e_test --test encryption_test --test executor_test --test explain_test --test explicit_tx_test --test expression_e2e_test --test file_header_test --test file_storage_io_test --test free_page_lifecycle_test --test full_table_dml_test --test gc_test --test group_by_expr_test -- --test-threads=1  ->  exit 0  |  184 passed  |  0 failed
+B7  cargo test --offline --test hash_join_build_side_test --test import_input_surface_test --test index_key_encoding_evaluation_test --test index_manager_test --test index_page_ownership_stack_overflow_test --test index_page_ownership_test --test index_range_routing_test --test index_read_bounded_read_test --test index_write_atomicity_test --test insert_column_list_test --test insert_select_test --test isolation_level_test -- --test-threads=1  ->  exit 0  |  76 passed  |  0 failed
+B8  cargo test --offline --test join_output_resolution_test --test join_test --test key_type_conformance_test --test keyless_eq_routing_test --test keyless_row_test --test legacy_compat_test --test limit_test --test memory_db_test --test mvcc_abort_test --test mvcc_commit_test --test mvcc_record_test --test mvcc_tombstone_visibility_test -- --test-threads=1  ->  exit 0  |  113 passed  |  0 failed
+B9  cargo test --offline --test nested_loop_join_test --test network_protocol_test --test network_server_test --test no_from_select_test --test order_by_alias_sort_test --test outer_join_test --test overflow_page_test --test param_binding_test --test parser_test --test pg_integration_test --test pg_messages_test --test pg_protocol_test -- --test-threads=1  ->  exit 0  |  133 passed  |  0 failed
+B10  cargo test --offline --test pipeline_test --test plan_cache_test --test plan_exec_test --test planner_test --test predicate_test --test prefetch_test --test prepared_statement_test --test projection_expression_test --test projection_test --test pushdown_test --test query_memory_test --test readonly_session_test -- --test-threads=1  ->  exit 0  |  240 passed  |  0 failed
+B11  cargo test --offline --test recovery_bounded_read_test --test recovery_e2e_test --test recovery_error_surface_test --test recovery_replay_convergence_test --test recovery_tail_persistence_test --test recovery_test --test recovery_wal_convergence_test --test release_durability_precondition_test --test release_path_bounded_read_test --test runtime_test --test scalar_function_test --test scalar_subquery_comparison_test -- --test-threads=1  ->  exit 0  |  92 passed  |  0 failed
+B12  cargo test --offline --test schema_persistence_test --test secondary_index_equality_test --test secondary_index_test --test select_distinct_test --test self_join_test --test session_lifecycle_test --test set_operations_test --test sort_merge_join_test --test sort_test --test sql_differential_test --test statement_cancellation_test --test storage_test -- --test-threads=1  ->  exit 0  |  147 passed  |  0 failed
+B13  cargo test --offline --test string_index_runtime_test --test string_index_sql_test --test string_secondary_index_test --test structural_property_test --test subquery_alias_binding_test --test subquery_test --test subset_insert_test --test sync_loader_test --test table_alias_resolution_test --test table_manager_test --test truncate_test --test tx_statement_test -- --test-threads=1  ->  exit 0  |  163 passed  |  0 failed
+B14  cargo test --offline --test typed_api_test --test update_expression_test --test update_index_maintenance_test --test upsert_test --test value_test --test version_chain_test --test view_test --test visibility_test --test wal_auto_checkpoint_test --test wal_buffer_test --test wal_handle_test --test wal_integration_test -- --test-threads=1  ->  exit 0  |  142 passed  |  0 failed
+B15  cargo test --offline --test wal_record_test --test wal_recovery_large_test --test wal_writer_test --test write_failure_state_test --test write_path_slot_bounds_test --test write_type_conformance_test -- --test-threads=1  ->  exit 0  |  52 passed  |  0 failed
+```
+
+**目标集合对账（Required behavior 第 6 条）**
+
+- 枚举集合 `E`：`ls tests/*.rs | sort` → 162 个文件 → 162 个 `--test` 名字。
+- 实际执行集合：从 B2–B15 十五条命令的运行输出中提取 `Running tests/<名>.rs` 行，得到 162 个 `--test` 名字。
+- 差集核对：两个有序列表 `diff` 结果为空（完全相同）——**无缺失、无多余、无重复**。
+- `--lib` / `--bins` 隔离：在 B2–B15 的运行输出中 `src/lib.rs` 与 `src/main.rs` 均不出现，只在 B1 出现——**`--lib` / `--bins` 只出现在第一批**。
+- 0 用例目标按 Plan Context 的口径处理，不判为缺失：
+  - `tests/crypto_off_build_test.rs`（B4）：默认构建开启 `crypto`，该目标为 `#![cfg(not(feature = "crypto"))]`，编译为 0 个用例，退出码 0、0 passed / 0 failed。
+  - `tests/network_server_test.rs`（B9）：文件体内的用例整体处于 `/* ... */` 注释块中（M8 起暂停 JsonProtocol 场景测试），编译为 0 个用例，退出码 0、0 passed / 0 failed。
+  - `src/main.rs`（B1 的 bin 目标）：0 个用例，退出码 0、0 passed / 0 failed。
+  - 三个目标都实际参与了构建与执行（运行输出中有对应 `Running` 行），均出现在枚举集合与批次中，对账成立。
+- 对账结论：**成立**。
+
+**全量结论**
+
+全量通过。本 change 唯一的一次全量回归按 M19 分批串行执行完成：15 个批次全部退出码 0、全部 failed 计数为 0，累计 164 个测试二进制、2407 passed / 0 failed；目标集合对账成立（162 个 `--test` 名字无缺失、无多余、无重复；`--lib` / `--bins` 只在第一批）。全量结论所依据的分批方式：现场枚举 → 第一批单独执行 `--lib --bins` → 其余按枚举排序每 12 个一批（末批 6 个）→ 批间串行 → 每批 `-- --test-threads=1`，无过滤 `cargo test` 一次未跑，无任何批使用默认并行度。
+
+**Persisted Evidence**
+
+None required（Mode: none）。全部判定依据是各批命令的退出码与输出中的 `test result:` 计数，可低成本按同一分批方式重跑；按公共规则 › 验证「验证辅助代码一旦需要独立协议、CLI、fixture、负向测试或审计器，即按身份证明机制处理」，不为本轮引入任何持久化协议或身份类字段。
+
+**Experience Candidates**
+
+None。
+
+- Runbook 候选：无。本轮是仓库既有的 `cargo test` 分批执行，不含新的可复用高风险操作路径；M19 的分批规程已在 `tasks.md` 与本 Cycle 的 Plan Context 中写明，无需另立 Runbook。
+- Issue 候选：无。本轮未发现当前 change 范围外的实质缺陷。ISS42 / ISS43 是变更范围外的既有行为，已在主仓库登记，处置沿用 Iteration 001 / 002 的判定（不在本 change 承载），本轮不重复报告。
+- 既有 Minor finding 沿用前轮结论，本轮不处理：Iteration 001 遗留的两条（错误路径新增旧表输出、需求 5 的 spec 子句缺断言）；`tests/diagnostics_facade_test.rs:216` 与 `tests/session_lifecycle_test.rs:15` 两处既有 rustfmt 漂移。
+
+**未解决问题**
+
+None（本 Cycle 范围内）。无 Blocker Handoff，无 Blocker Resolution。
+
+- Plan Context Risks 的两条已在本轮落地：`diagnostics_wait_test` 的 `commit_wait_classes_present` 首跑通过（6 passed / 0 failed），`Queue > 0` 断言未出现偶发失败，第 8 条的整批复核机会未动用；`crypto_off_build_test` 按上述判读口径处理，退出码 0、0 failed，不视为失败。
+- 本 change 范围内无遗留失败、无失败批、无未跑批。
