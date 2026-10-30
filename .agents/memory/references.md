@@ -721,7 +721,7 @@
 - **类型**: issue
 - **路径**: `.agents/issues/ISS43-import-auto-create-comment-contradicts-implicit-primary-key.md`
 - **日期**: 2026-10-30
-- **用途**: `src/cli/lifecycle.rs:825-827` 注释称自动建表「无主键——首列重复值合法，无键行语义」，与实现、规格与实测相反（INTEGER 首列重复值以 DuplicateKey fail-fast 拒绝，exit 3；FLOAT/STRING 首列重复合法）。行为侧经三个规格域与 README 判定为既定语义、非缺陷；本条只登记注释与规格/实现的矛盾及其误修风险（防止按注释改动隐式首列主键语义而违反三域 SHALL 条款）。修复已交付于主分支提交 `5035869`（只改注释文字，可观察行为未变）；关闭待用户指令，Issue 仍为 open。
-- **状态**: active
+- **用途**: `src/cli/lifecycle.rs:825-827` 注释称自动建表「无主键——首列重复值合法，无键行语义」，与实现、规格与实测相反（INTEGER 首列重复值以 DuplicateKey fail-fast 拒绝，exit 3；FLOAT/STRING 首列重复合法）。行为侧经三个规格域与 README 判定为既定语义、非缺陷；本条只登记注释与规格/实现的矛盾及其误修风险（防止按注释改动隐式首列主键语义而违反三域 SHALL 条款）。修复已交付于主分支提交 `5035869`（只改注释文字，可观察行为未变）；已按用户指令于 2026-10-30 关闭。
+- **状态**: closed（2026-10-30 fixed → `5035869`）
 
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md

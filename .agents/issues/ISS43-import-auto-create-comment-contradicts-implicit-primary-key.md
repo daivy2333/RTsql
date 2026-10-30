@@ -1,8 +1,8 @@
 # 自动建表路径的注释与「未声明主键 → 首列隐式主键」既定语义相反
 
-- Status: open（修复已交付于主分支提交 `5035869`，2026-10-30；关闭待用户指令——公共规则与 Recorder 规范把 Issue 的关闭限定为「按用户指令执行」，本次 goal 授权覆盖的是 M23 的「登记与承载」环节，不含缺陷台账的状态迁移）
+- Status: closed（2026-10-30 fixed → `5035869`）
 - Filed: 2026-10-30
-- Source: Act Response 的 Issue 候选 2 与该 Cycle 的 Plan Review「Issue 候选判定（只报告，不登记）」段，`openspec/changes/2026-10-28-ms44-unified-diagnostics/iterations/001-statement-phases/000-initial.md`（Act Response Status `reported`，Review Result `accepted`；该 change 尚未归档，位于 worktree `/home/daivy/projects/RTsql-changes/2026-10-28-ms44-unified-diagnostics`，主仓 `openspec/changes/` 下无此目录）
+- Source: Act Response 的 Issue 候选 2 与该 Cycle 的 Plan Review「Issue 候选判定（只报告，不登记）」段，`openspec/changes/archive/2026-10-28-ms44-unified-diagnostics/iterations/001-statement-phases/000-initial.md`（Act Response Status `reported`，Review Result `accepted`；该 change 已于 2026-10-30 归档，产物现位于 `openspec/changes/archive/2026-10-28-ms44-unified-diagnostics/`——登记时它尚未归档，位于 worktree `/home/daivy/projects/RTsql-changes/2026-10-28-ms44-unified-diagnostics`，主仓 `openspec/changes/` 下无此目录）
 - Environment: WSL2（Linux 6.18.40.1-microsoft-standard-WSL2 x64）；被测二进制为 change worktree 的 `target/debug/rtsql`（构建产物时间 2026-10-30 18:43，核验时工作树 HEAD `17ad6b1`）；`src/executor/create_table.rs`、`src/cli/lifecycle.rs`、`src/parser/planner/ddl_dml.rs`、`src/storage/data/table_manager.rs` 与 master `3686a05` 无差异（`git diff master -- <上述路径>` 为空），该二进制对 master 的同构行为有效；主仓 master 无构建产物，未在 master 实跑
 
 ## 缺陷描述
@@ -40,11 +40,11 @@ None。文档层缺陷，未引发故障；未观察到用户、数据或交付�
 - 明确不得做的事：不得以本条为据修改引擎的隐式首列主键语义——那会违反三个规格域的 SHALL 条款；本条的存在正是为防止这类误修。
 - 2026-10-30 登记。Status 为 open。任务列表尚未指向本条。
 - 2026-10-30 修复已交付：主分支提交 `5035869`（`fix: 修正 import 自动建表注释与首列隐式主键语义相反`，2026-10-30 19:14）把 `src/cli/lifecycle.rs` 的该段注释改写为与三域规格一致——「建表 DDL（不显式声明主键——新表沿用引擎『未声明主键 → 首列隐式主键』既有语义：INT 首列重复值以 DuplicateKey fail-fast 拒绝，FLOAT/STRING 首列重复值合法（非键行语义）；保留名/重复列名等常规建表守卫自然生效），失败走既有 SQL 失败通道（exit 3）且零副作用」。处置指针：fixed → `5035869`（`src/cli/lifecycle.rs`，注释文字 5 insertions / 3 deletions；可执行逻辑、参数与控制流未改，可观察行为未变）。该提交按公共规则 › 轻量工作直接在主分支执行，未建 change。
-- 关闭待用户指令：Status 仍为 open。关闭与重开只按用户指令执行（Recorder 规范与公共规则「Issue 的建立、关闭与重开由 Recorder 按用户指令执行」）；本次 goal 原文为「继续实施，把这个change做完，要求遵守各种规范」，M23 明确覆盖的是「登记 Issue」环节，缺陷台账的状态迁移不在其内，故本流程不代做关闭。用户确认后按既有格式记为 `closed（2026-10-30 fixed → 5035869）`，并在本段追加关闭原因与指针。
+- 已按用户指令关闭（2026-10-30）：Status 由 open 改为 `closed（2026-10-30 fixed → 5035869）`。关闭依据是上条已交付的修复（主分支提交 `5035869`，只改注释文字，可观察行为未变）与用户指令「除了 iss42，其他的都顺便做掉吧」。关闭原因与指针一并保留在本段；核实结论、事实与证据段未改写。
 
 ## 证据
 
-- `openspec/changes/2026-10-28-ms44-unified-diagnostics/iterations/001-statement-phases/000-initial.md`：Act Response 的「Experience Candidates」Issue 候选 2（记录 `CREATE TABLE u (a INT, b INT)` 后 `INSERT (1,1)` 成功、`INSERT (1,2)` 报 `Execution error: Duplicate key`、`INSERT (2,1)` 成功，并指出与 `src/cli/lifecycle.rs` 注释矛盾，问「是注释失效还是行为缺陷由 Recorder 判定」）；同文件 Plan Review 的「Issue 候选判定（只报告，不登记）」段（Review Result `accepted`，判为变更范围外、不在本 change 承载，建议 Recorder 登记）。同文件 Plan Review 的偏差 1 归类亦记录了 Plan 对 CLI 入口的事实错误，与本条无关。
+- `openspec/changes/archive/2026-10-28-ms44-unified-diagnostics/iterations/001-statement-phases/000-initial.md`：Act Response 的「Experience Candidates」Issue 候选 2（记录 `CREATE TABLE u (a INT, b INT)` 后 `INSERT (1,1)` 成功、`INSERT (1,2)` 报 `Execution error: Duplicate key`、`INSERT (2,1)` 成功，并指出与 `src/cli/lifecycle.rs` 注释矛盾，问「是注释失效还是行为缺陷由 Recorder 判定」）；同文件 Plan Review 的「Issue 候选判定（只报告，不登记）」段（Review Result `accepted`，判为变更范围外、不在本 change 承载，建议 Recorder 登记）。同文件 Plan Review 的偏差 1 归类亦记录了 Plan 对 CLI 入口的事实错误，与本条无关。
 - 规格条款位置：`openspec/specs/sql-constraint-enforcement/spec.md:215`（Requirement 正文）与 `:224-228`（Scenario「隐式主键语义零变化」）；`openspec/specs/create-table-as-select/spec.md:13`；`openspec/specs/cli-noninteractive-shell/spec.md:549`（Requirement 正文）与 `:632-637`（Scenario「自动建表首列隐式主键（引擎语义沿用）」）；`README.zh-CN.md:275`。
 - 代码事实（master `3686a05` 与 worktree 同构）：`src/cli/lifecycle.rs:825-827`（缺陷注释）、`src/cli/lifecycle.rs:838`（`db.execute_sql(&ddl)`）、`src/executor/create_table.rs:73-93`、`src/executor/insert.rs:155-187`、`src/storage/catalog.rs:118`、`src/pipeline.rs:985`。
 - 运行观察（2026-10-30，Linux x86_64，worktree 二进制 `target/debug/rtsql`，隔离的 `RTSQL_HOME` 与临时库）：
