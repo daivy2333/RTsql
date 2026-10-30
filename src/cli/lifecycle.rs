@@ -822,9 +822,11 @@ pub(super) async fn import_csv(
                             ))
                         }
                     };
-                    // 建表 DDL（无主键——首列重复值合法，无键行语义；保留名/
-                    // 重复列名等常规建表守卫自然生效），失败走既有 SQL 失败
-                    // 通道（exit 3）且零副作用
+                    // 建表 DDL（不显式声明主键——新表沿用引擎「未声明主键 →
+                    // 首列隐式主键」既有语义：INT 首列重复值以 DuplicateKey
+                    // fail-fast 拒绝，FLOAT/STRING 首列重复值合法（非键行语义）；
+                    // 保留名/重复列名等常规建表守卫自然生效），失败走既有 SQL
+                    // 失败通道（exit 3）且零副作用
                     let columns: Vec<String> = names
                         .iter()
                         .zip(inferred.iter())
