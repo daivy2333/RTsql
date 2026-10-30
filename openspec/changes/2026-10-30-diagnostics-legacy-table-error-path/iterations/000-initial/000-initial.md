@@ -261,4 +261,100 @@ None。本轮未发现 change 范围外的实质缺陷：ISS42（`RTSQL_PROFILIN
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+本 Review 独立阅读了完整 diff（merge-base `6412caf` → HEAD `9401b2d`）、实际代码与测试，逐条核对 Act Response 声明与代码的一致性、Acceptance 的满足情况与 Preserve / Forbidden 的成立情况。Act 已报告且覆盖范围未失效的验证结论直接沿用（来源见 Evidence），未重复运行任何已通过的定向验证，本次未跑全量。
+
+1. **T1 的打印点与基点 `e69c7e2` 逐条返回路径等价（偏差归类：无——Plan 判断正确、Act 实施正确）**
+
+   核对依据：`git show e69c7e2:src/pipeline.rs` 的基点 `execute_inner`（1411-1552 行，`print_timings` 仅 1449、1549 两处）与 HEAD `9401b2d` 的 `execute_inner`（1425-1477）/ `execute_staged`（1490-1665，`print_timings` 仅 1540、1662 两处；全仓 `grep -rn print_timings` 无第三处调用）。
+
+   | 返回路径 | 基点 `e69c7e2` | HEAD `9401b2d` | 等价 |
+   |---|---|---|---|
+   | `RTSQL_PROFILING` 未设置 | `total_start = None`，两处打印点均不触发 | 同（`execute_inner:1441-1445` 建点，两处 `if let Some(start) = total_start` 均不成立） | 是 |
+   | 计时窗口起点 | `execute_inner` 开头、缓存查找之前（1423-1427） | 同（1441-1445，仍在 `execute_staged` 调用之前；缓存查找在 `execute_staged:1506-1510`） | 是 |
+   | 缓存命中 → 执行（成功或失败） | `execute_stage` 返回后 `print_timings`（1448-1450）；命中路径不记 `execute` 行 | `execute_staged:1534-1542`：`execute_stage` 返回 → `close_stage` → `print_timings` → return；仍不 `record_time("execute")` | 是（表内容与行集合不变） |
+   | 缓存未命中 → 解析失败 | `record_time("parse")` 后 `return Err`，不打印（1462-1473） | `record_time("parse")` 在分支前记一次（1559-1565），`return Err` 于 1569，不打印 | 是（记录次数与时点等价） |
+   | → 多语句拒绝 | `return Err`，不打印（1479-1480） | 同（1577-1579） | 是 |
+   | → 无语句可执行 | `return Err`，不打印（1482-1491） | 同（1580-1588） | 是 |
+   | → 占位符编号失败 | `return Err`，不打印（1493-1503） | 同（1592-1601） | 是 |
+   | → 参数个数不匹配 | `return Err`，不打印（1505-1507） | 同（1603-1605） | 是 |
+   | → 规划失败 | `record_time("plan")` 后 `return Err`，不打印（1516-1526） | `record_time("plan")` 在分支前记一次（1619-1625），`return Err` 于 1629，不打印 | 是 |
+   | → 进入执行阶段（成功或失败） | `record_time("execute")` 后 `print_timings`，再返回结果（1544-1552） | `record_time("execute")` + `close_stage` 后 `print_timings`（1652-1664），返回结果 | 是（执行失败同样打印） |
+
+   结论：两版的打印点数量与位置语义一致（基点 2 处 = 当前 2 处），六个执行阶段之前的早退在两版都不经过打印点。**「精确恢复基点 `e69c7e2` 的旧表输出条件」成立**，且没有落入「所有错误路径都不输出」的过度收敛——执行阶段内的失败路径仍打印。
+
+   三点补充核对：
+   - 旧表内容不受诊断阶段影响：`close_stage` / `record_stage` 是诊断侧 API，无绑定时 `try_with` 为 no-op（`src/diagnostics.rs:733-741`），不写 `PROFILING_DATA`；旧表 map 只由 `record_time` 写（`src/profiling.rs:21-25`）。因此缓存命中路径新增的 `close_stage("execute", ...)` 不会给旧表新增 `execute` 行，与基点一致。
+   - 旧表与诊断摘要的相对顺序不变：变更前（merge-base `6412caf`）是「先打印旧表 → 后渲染诊断摘要」（`execute_inner:1456-1458` → `1461-1474`）；当前实现把打印点移入 `execute_staged`，仍在摘要渲染之前，顺序不变。
+   - `print_timings` 仍在 `PROFILING_DATA` 作用域内调用（`execute_with_params` 的 `with_profiling_scope`，`src/pipeline.rs:129-141`），ISS42 的 scope 外 panic 前提未被触碰。
+
+2. **T2 的断言与权威规格一致（偏差归类：无）**
+
+   `tests/diagnostics_statement_test.rs:215-217` 在既有的 severity、错误文本逐字节、SQLSTATE 断言之后追加 `stage_stat(&summaries[0], Module::Pipeline, "parse")`；`stage_stat` 在阶段缺失时 panic（该文件 37-43 行），断言强度与文件既有风格一致。对应权威规格 `openspec/specs/unified-diagnostics/spec.md:133-138` 场景「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句。产品代码零改动（diff 只触及 `src/pipeline.rs` 与 `tests/diagnostics_statement_test.rs`）。
+
+3. **delta 规格与实现逐条对应（偏差归类：无）**
+
+   - Requirement 正文：「只在执行阶段被触达的返回路径输出这张表」+ 六类执行阶段之前的失败路径「SHALL NOT 输出」→ 实现侧这六条路径（`src/pipeline.rs:1569/1578/1583/1596/1604/1629`）都没有打印点，规则逐条成立；「执行阶段被触达指两种情形：计划缓存命中后直接执行，以及解析与规划都成功后进入执行」→ 实现侧正是 `1534-1542`（命中）与 `1651-1663`（未命中进入执行）两条，无第三条路径。
+   - 场景「失败路径也输出旧的三段计时表」（改写后收窄到已触达执行阶段的失败路径）→ `1659-1663` 在 execute 阶段之后打印，execute 失败也打印；测试 `legacy_table_present_on_execute_stage_failure` 覆盖。
+   - 场景「执行阶段之前的失败路径不输出旧的三段计时表」（新增）→ 六个早退无打印点；测试 `legacy_table_absent_before_execute_stage` 覆盖其中的规划期失败实例。
+   - 场景「旧开关仍输出三段耗时」与「恢复告警原文仍在」→ 前者由未改动的 `legacy_profiling_table_follows_env_var` 覆盖；后者涉及的 `[recovery]` 告警代码本轮未触及（Acceptance 6，按计划推迟到 T3 复核）。
+   - OpenSpec 集成约束（MODIFIED 块保留既有场景标题）：delta 保留「旧开关仍输出三段耗时」「恢复告警原文仍在」「失败路径也输出旧的三段计时表」三个既有标题，并新增互补的一个；Requirement 标题「既有计时出口和 stderr 告警保持」未改。`openspec validate --strict` 通过（沿用 Act 结论；delta 文件自 `f0e36a5` 起未被改动）。
+
+4. **Act Response 声明与代码一致（偏差归类：无）**
+
+   Act Response「实际改动」表的 5 行与 diff 逐条相符：`execute_inner` 删除无条件打印并把 `total_start` 传入 `execute_staged`（1453）、`execute_staged` 新增参数与两处打印（1538-1541、1659-1663）、两个新用例（`legacy_table_absent_before_execute_stage` 473 行、`legacy_table_present_on_execute_stage_failure` 549 行）、补断言（217 行）。Act Response 的三条偏差属实：偏差 2「delta 未改写」经 `git diff f0e36a5..9401b2d` 证实（该区间只含 Cycle 文件与 `tasks.md`）。
+
+5. **Preserve 与 Forbidden 逐条成立（偏差归类：无）**
+
+   `src/profiling.rs` 零改动（diff 未触及该文件：表头、列、`Total` 行算法、`is_profiling_enabled` 判定、`record_time` 的 scope 外 panic 行为均未变）；`record_time` 的四个调用点未变（`cache_hit_check` 1514、`parse` 1562、`plan` 1622、`execute` 1655），`profiling` 布尔参数的传递未变；`SqlError` 构造路径零改动（错误文本与 SQLSTATE 逐字不动）；诊断（新摘要）的采集、渲染与时序未变；`[recovery]` 等既有告警原文未触及；未引入操作标识字段、运行标识、内容哈希或其他身份证明机制；未新增判定层、专用 CLI、专用参数、脚本或审计器；未修改 `openspec/specs/` 权威正文；本轮未跑全量。
+
+6. **Minor findings（均不阻塞，不要求返工）**
+
+   - Minor 1（实施细节，Act 偏差 1）：打印点的实现机制与 Plan Context 的字面表述不同——把既有的 `total_start` 作为参数传入 `execute_staged`，而不是 Plan 在 design D1 已否决的「是否打印」标志。可观察行为与基点等价，不是缺陷。
+   - Minor 2（覆盖缺口，Plan 已记录）：六个执行阶段之前的早退中，只有规划期失败被测试直接覆盖；解析失败、多语句、占位符、参数个数、无语句靠「这些路径上不存在打印点」的结构性等价保证。CLI 侧到不了解析失败面，libtest 捕获 `eprintln!` 使库入口 stderr 不可读回。当前实现让六条路径结构完全一致，该缺口已被构造消除，不是被忽略的缺口。
+   - Minor 3（判定面粒度）：delta 的两个失败场景都含「AND 返回的错误文本与 SQLSTATE 不变」；CLI 层只能观察退出码与错误文案，SQLSTATE 由未改动的 `SqlError` 构造路径与库级断言 `parse_error_keeps_error_text_and_summary_fails` 保证。
+   - Minor 4（既有噪声，不在本 change 判定面）：`tests/diagnostics_facade_test.rs:216` 与 `tests/session_lifecycle_test.rs:15` 的既有 rustfmt 漂移（Act 实测报告；两处都不在本 change 的 diff 内，本轮未触碰）。
+
+**Acceptance Gaps**
+
+无阻塞缺口。逐条对照 Cycle 的 7 条 Acceptance：
+
+| # | Acceptance | 结论 | 依据 |
+|---|---|---|---|
+| 1 | 执行阶段之前的失败路径不输出旧表 | 满足 | 实现：六个早退无打印点（`src/pipeline.rs:1569/1578/1583/1596/1604/1629`）；测试 `legacy_table_absent_before_execute_stage` |
+| 2 | 进入执行阶段后失败仍输出该表 | 满足 | 实现：`1659-1663` 在 execute 阶段之后打印；测试 `legacy_table_present_on_execute_stage_failure` |
+| 3 | 成功路径与开关语义不变 | 满足 | 实现：`1659-1663` 覆盖成功路径；既有 `legacy_profiling_table_follows_env_var` 未改且随批通过；用例一的正例步骤覆盖「设置变量即出表」 |
+| 4 | 错误文本与 SQLSTATE 不变 | 满足 | diff 未触及任何 `SqlError` 构造；用例断言退出码 3 与 `duplicate column name` / `Duplicate key` 文案；库级 `parse_error_keeps_error_text_and_summary_fails` 锁定错误文本与 SQLSTATE |
+| 5 | 诊断行为不变 / 含解析阶段 | 满足 | T2 断言（`tests/diagnostics_statement_test.rs:217`）；`src/diagnostics.rs` 零改动 |
+| 6 | 既有告警原文不变 | 计划内推迟到 T3 | `[recovery]` 告警代码未触及；由 `tests/recovery_bounded_read_test.rs` 所在批次在全量中复核（Iteration 001） |
+| 7 | 规格同步 | 满足 | delta 的 MODIFIED 块保留三个既有场景标题并新增一个；`openspec validate --strict` 通过（沿用 Act 结论） |
+
+Acceptance 6 是 Plan Context 明确推迟到 T3 的项（Verification 表写明「T3 分批全量中 `tests/recovery_bounded_read_test.rs` 所在批次」），不构成本轮缺口；其余 6 条本轮全部满足。
+
+**Evidence**
+
+- Diff 范围：change 分支 merge-base `6412caf` → HEAD `9401b2d`，8 个文件：change 产物 6 个（`.openspec.yaml` / `design.md` / `proposal.md` / `specs/unified-diagnostics/spec.md` / `tasks.md` / 本 Cycle 文件），产品与测试 2 个（`src/pipeline.rs` +17/-4、`tests/diagnostics_statement_test.rs` +154/-0）。
+- 基点核对：`git show e69c7e2:src/pipeline.rs`——基点 `execute_inner` 1411-1552；`print_timings` 两处（1449、1549）；六个早退（1462、1479、1482、1493、1505、1516）。
+- 当前实现：`src/pipeline.rs::execute_inner`（1425-1477）、`execute_staged`（1490-1665）；全仓 `print_timings` 调用点仅 `src/pipeline.rs:1540` 与 `1662`（`grep -rn`）。
+- 测试断言落点：`tests/diagnostics_statement_test.rs`——`legacy_table_absent_before_execute_stage`（473）、`legacy_table_present_on_execute_stage_failure`（549）、`stage_stat(&summaries[0], Module::Pipeline, "parse")`（217）；`spawn_cli` / `wait_cli` / `stage_stat` 复用文件内既有实现，未新增进程管理代码。
+- 沿用的验证结论（来源：本 Cycle 的 Act Response「验证命令与实际结果」；被覆盖代码自 `9401b2d` 起未变化，无公共规则 › 验证 列出的重跑触发条件）：RED `cargo test --offline --test diagnostics_statement_test -- --test-threads=1` → 8 passed / 1 failed（失败点为「stderr 不含 `Time (µs)`」，当次 stderr 实含一张表）；GREEN（T1 后）同一命令 → 9 passed / 0 failed；GREEN（T2 断言后）同一命令 → 9 passed / 0 failed；真实 CLI 三场景核对——成功导入 exit 0 / 2 张表、规划期失败 exit 3 / 0 张表且文案含 `duplicate column name`、执行期失败 exit 3 / 恰好 1 张表且文案含 `Duplicate key`，与基点 `e69c7e2` 的 Plan 记录逐行一致；`openspec validate 2026-10-30-diagnostics-legacy-table-error-path --strict` → `Change '...' is valid`；`openspec validate --all --strict` → 91 passed / 0 failed。
+- 本 Review 实际执行的命令：`git diff`（两处区间）、`git show e69c7e2:src/pipeline.rs`、`git diff --numstat`、`git status`、`git log`、`grep -rn`（只读检索）。未跑全量，未重复运行任何已通过的定向验证。
+
+**Follow-up Decision**
+
+接受。逐条返回路径与基点 `e69c7e2` 的等价性成立（对照表见 Findings 1），delta 与实现逐条对应，Acceptance 除计划内推迟到 T3 的第 6 条外全部满足，Preserve / Forbidden 无违反，无阻塞 finding。四条 Minor 均不阻塞，按公共规则 › Iteration 与 Cycle 线程 不为其创建修复、不要求当前 Cycle 返工。当前 Cycle 无需修复，不创建 rework / replan Cycle；Iteration 000 完成，展开 Map 中的下一 Iteration。
+
+**Iteration Plan Update**
+
+None。目标、范围、依赖、验证方式与验收边界均未改变：`tasks.md` 的 Iteration Plan 保持 000 = 旧表输出时机收敛（T1、T2）、001 = 收尾全量（T3）。
+
+**Next Cycle**
+
+None。
+
+**Next Iteration**
+
+`openspec/changes/2026-10-30-diagnostics-legacy-table-error-path/iterations/001-final-regression/000-initial.md`（Iteration 001：收尾全量，任务 T3）。

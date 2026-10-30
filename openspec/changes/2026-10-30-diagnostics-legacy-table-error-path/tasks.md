@@ -7,8 +7,8 @@ Gate 1 为 PASS，批准来自本次 goal 指令「除了 iss42，其他的都�
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`；规格 delta 在 `specs/unified-diagnostics/spec.md`。
-- 000：实施完成——Act 已执行 T1、T2（Gate 3 与 Gate 4 通过；定向验证退出码 0、failed 0）。等待 `openspec-plan` Review 当前 Cycle。
-- 001：收尾全量，只保留在下方 Iteration Plan，未展开目录。
+- 000：已完成——`iterations/000-initial/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录逐路径基点等价核对、Acceptance 逐条结论与四条非阻塞 Minor finding）。
+- 001：已展开——`iterations/001-final-regression/000-initial.md`（Plan Context `ready`，Gate 2 PASS），等待 `openspec-act` 执行 T3。这是本 change 唯一的一次全量。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -16,9 +16,9 @@ Gate 1 为 PASS，批准来自本次 goal 指令「除了 iss42，其他的都�
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 旧表只在走到执行阶段的返回路径输出；执行阶段之前不输出；表算法、错误文本与 SQLSTATE 不变 | completed |
-| T2 | 000 | T1 | 权威规格「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句由测试锁定 | completed |
-| T3 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | pending |
+| T1 | 000 | 无 | 旧表只在走到执行阶段的返回路径输出；执行阶段之前不输出；表算法、错误文本与 SQLSTATE 不变 | accepted（Cycle 000 Review Result accepted） |
+| T2 | 000 | T1 | 权威规格「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句由测试锁定 | accepted（Cycle 000 Review Result accepted） |
+| T3 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | pending（Cycle 000 已展开，Plan Context ready） |
 
 ## 1. 旧表输出时机收敛（Iteration 000）
 
@@ -58,7 +58,7 @@ Verification：`cargo test --offline --test diagnostics_statement_test -- --test
 
 ## 3. 收尾全量（Iteration 001）
 
-- [ ] 3.1 T3：T2 通过后，按下面的分批方式跑一次全量。这是整个 change 的唯一一次全量。不改产品代码。失败时停止，不在本轮里修。
+- [ ] 3.1 T3：T2 通过后，按下面的分批方式跑一次全量。这是整个 change 的唯一一次全量。不改产品代码。失败时停止，不在本轮里修。执行依据见 `iterations/001-final-regression/000-initial.md` 的 T3 Task Definition（规程全文在该文件内）。
 
 分批是通过条件的一部分：
 
@@ -76,6 +76,7 @@ Verification：`cargo test --offline --test diagnostics_statement_test -- --test
 
 - Tasks：T1、T2
 - Depends on：None
+- 状态：已完成——`iterations/000-initial/000-initial.md` 的 Review Result 为 `accepted`。
 - Stable result：旧三段计时表只在走到执行阶段的返回路径输出，执行阶段之前的失败路径不输出；表算法、错误文本、SQLSTATE 与诊断行为不变；解析失败摘要含解析阶段的断言就位。
 - Verification boundary：`cargo test --offline --test diagnostics_statement_test -- --test-threads=1`，退出码 0 且 failed 为 0。不跑全量。全量预算在 001，整个 change 一次。
 - Diagnostic boundary：`src/pipeline.rs` 的旧表打印点与 `src/profiling.rs` 的表渲染；`tests/diagnostics_statement_test.rs` 的 CLI 子进程断言。诊断摘要内容变化、错误文本变化、SQLSTATE 变化不属于「移动打印点」能解释的失败。
@@ -85,6 +86,7 @@ Verification：`cargo test --offline --test diagnostics_statement_test -- --test
 
 - Tasks：T3
 - Depends on：000 accepted
+- 状态：已展开——`iterations/001-final-regression/000-initial.md`（Plan Context `ready`，Gate 2 PASS）。
 - Stable result：默认构建上按 M19 分批串行的一次全量，每批退出码 0 且 failed 为 0，目标对账无缺无重。
 - Verification boundary：本节 T3 的分批方式。只此一次。失败批只整批复核一次。
 - Diagnostic boundary：按失败测试所在的批和目标文件定位。不把全量失败当成修改分批规则的理由。
