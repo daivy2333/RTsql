@@ -10,12 +10,31 @@
 
 use super::record::{WalError, WalRecord};
 use super::writer::WalWriter;
+use crate::diagnostics::{Category, WaitSlot};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time;
+
+/// 等待 flush 确认的登记项：通知句柄 + 诊断归属。
+///
+/// 诊断部分只在采集打开时存在：登记发生在语句任务内，句柄与阶段 id 随
+/// 等待者进入等待表，刷盘任务只回写 Io 与 Schedule（不解释语义）。
+struct CommitWaiter {
+    /// 提交被刷盘释放后唤醒本等待者。
+    notify: Arc<Notify>,
+    /// 本等待者所属语句的等待槽（采集关闭时为空）。
+    slot: Option<WaitSlot>,
+    /// 登记时最内层 open 阶段的 id（`None` = 语句根）。
+    stage_id: Option<u64>,
+    /// 通知刷盘的时刻（Schedule 的起点）。
+    notified_at: Instant,
+    /// 通知时刷盘循环是否在空等（正忙时 Schedule 记 0）。
+    flush_was_idle: bool,
+}
 
 /// WAL 内存缓冲 + Group Commit
 pub struct WALBuffer {
@@ -29,8 +48,8 @@ pub struct WALBuffer {
     flush_notify: Notify,
     /// 等待 flush 确认的 tx_id 列表
     pending_commits: Mutex<Vec<u64>>,
-    /// tx_id -> 等待通知（commit 完成后唤醒）
-    commit_waiters: Mutex<HashMap<u64, Arc<Notify>>>,
+    /// tx_id -> 等待者（通知句柄 + 诊断归属）
+    commit_waiters: Mutex<HashMap<u64, CommitWaiter>>,
     /// 关闭标志。为真后后台循环退出，且不再 spawn。
     shutdown: AtomicBool,
     /// 暂停标志。为真时后台循环不刷盘，直到恢复或停止。
@@ -43,6 +62,8 @@ pub struct WALBuffer {
     session_gate: Mutex<()>,
     /// 暂停、恢复或停止时唤醒后台循环和容量刷盘等待。
     state_notify: Notify,
+    /// 刷盘循环是否正停在 select 上空等（正忙时通知不产生调度等待）。
+    flush_loop_idle: AtomicBool,
     /// 缓冲区容量
     capacity: usize,
     /// 定时刷盘间隔（毫秒）
@@ -66,6 +87,7 @@ impl WALBuffer {
             flush_gate: Mutex::new(()),
             session_gate: Mutex::new(()),
             state_notify: Notify::new(),
+            flush_loop_idle: AtomicBool::new(false),
             capacity,
             flush_interval_ms,
             flush_handle: std::sync::Mutex::new(None),
@@ -102,13 +124,39 @@ impl WALBuffer {
     ///
     /// 调用者应先 append CommitTxn/Commit 记录，再调用此方法等待持久化确认。
     /// 多个并发事务的 commit 会合并到同一次 fsync（Group Commit）。
+    ///
+    /// MS44 Iter002（T3）：刷盘闸门的等待记为 Lock；`notified().await` 的
+    /// 剩余部分记为 Queue（减去本次刷盘的 Io 与 Schedule）。登记时把当前
+    /// 语句的等待槽与阶段 id 一起放进等待表——刷盘任务只对被它释放的等待者
+    /// 回写 Io 与 Schedule。
     pub async fn append_commit_and_wait(&self, tx_id: u64) -> Result<(), WalError> {
+        // 采集关闭时为 `None`——不建立归属，也不计时。
+        let (slot, stage_id) = match crate::diagnostics::current_wait_slot() {
+            Some((slot, stage_id)) => (Some(slot), stage_id),
+            None => (None, None),
+        };
+        let gate_start = crate::diagnostics::wait_timing_start();
         let waiter = {
             let _gate = self.flush_gate.lock().await;
+            if let Some(start) = gate_start {
+                crate::diagnostics::record_wait(Category::Lock, start.elapsed());
+            }
             let notify = Arc::new(Notify::new());
+            // 通知时刻与刷盘循环的空闲状态：Schedule 的起点与「是否正忙」。
+            let notified_at = Instant::now();
+            let flush_was_idle = self.flush_loop_idle.load(Ordering::SeqCst);
             {
                 let mut waiters = self.commit_waiters.lock().await;
-                waiters.insert(tx_id, notify.clone());
+                waiters.insert(
+                    tx_id,
+                    CommitWaiter {
+                        notify: notify.clone(),
+                        slot: slot.clone(),
+                        stage_id,
+                        notified_at,
+                        flush_was_idle,
+                    },
+                );
             }
             {
                 let mut pending = self.pending_commits.lock().await;
@@ -124,7 +172,20 @@ impl WALBuffer {
             self.flush_notify.notify_one();
         }
 
+        // Queue：`notified().await` 的实测耗时减去本次刷盘已记入该语句的
+        // Io 与 Schedule（刷盘任务先回写、后唤醒，这里读到的一定是本次的）。
+        let queue_start = crate::diagnostics::wait_timing_start();
         waiter.notified().await;
+        if let Some(start) = queue_start {
+            let elapsed = start.elapsed();
+            let (io, schedule) = slot
+                .as_ref()
+                .and_then(|slot| slot.last_flush(stage_id))
+                .map(|flush| (flush.io, flush.schedule))
+                .unwrap_or((Duration::ZERO, Duration::ZERO));
+            let queue = elapsed.saturating_sub(io).saturating_sub(schedule);
+            crate::diagnostics::record_wait(Category::Queue, queue);
+        }
         Ok(())
     }
 
@@ -154,11 +215,13 @@ impl WALBuffer {
                 continue;
             }
 
+            self.flush_loop_idle.store(true, Ordering::SeqCst);
             tokio::select! {
                 _ = self.flush_notify.notified() => {}
                 _ = self.state_notify.notified() => {}
                 _ = time::sleep(interval) => {}
             }
+            self.flush_loop_idle.store(false, Ordering::SeqCst);
 
             if self.shutdown.load(Ordering::SeqCst) {
                 break;
@@ -260,9 +323,15 @@ impl WALBuffer {
     ///
     /// 取走缓冲和 pending，尝试 `write_batch`，然后唤醒这次取走的等待者。
     /// `write_batch` 失败时仍然唤醒，避免等待者停在 `notified()`。
+    ///
+    /// MS44 Iter002（T3）：本次刷盘的 Io（`write_batch` 的整段耗时）与
+    /// Schedule（通知到开始处理这批的间隔）只回写给被这次刷盘释放、且带
+    /// 诊断槽的等待者——先回写、后唤醒，保证语句侧读到的是本次的值。
     async fn flush_locked(&self) {
         let records: Vec<(u64, WalRecord)>;
         let committed_tx_ids: Vec<u64>;
+        // 本批开始处理的时刻（Schedule 的终点）。
+        let batch_start = Instant::now();
 
         {
             let mut buf = self.buffer.lock().await;
@@ -271,6 +340,22 @@ impl WALBuffer {
             let mut pending = self.pending_commits.lock().await;
             committed_tx_ids = std::mem::take(&mut *pending);
         }
+
+        // 本批等待者（含诊断归属）：先取走，写盘后再回写并唤醒。
+        let waiters: Vec<CommitWaiter> = {
+            let mut waiters = self.commit_waiters.lock().await;
+            let mut taken = Vec::with_capacity(committed_tx_ids.len());
+            for tx_id in &committed_tx_ids {
+                if let Some(waiter) = waiters.remove(tx_id) {
+                    taken.push(waiter);
+                }
+            }
+            taken
+        };
+
+        // 有诊断归属的等待者才需要给写盘计时（采集全关时零成本）。
+        let tracing = waiters.iter().any(|waiter| waiter.slot.is_some());
+        let mut io = Duration::ZERO;
 
         if !records.is_empty() {
             // Compute file-offset-based LSN for each record so WalReader can parse them
@@ -284,6 +369,8 @@ impl WALBuffer {
                 offset += serialized_len;
             }
 
+            // Io = 这次 `write_batch` 的整段耗时（失败也照记）。
+            let io_start = if tracing { Some(Instant::now()) } else { None };
             if self
                 .wal_writer
                 .write_batch(file_offset_lsn_records)
@@ -293,15 +380,29 @@ impl WALBuffer {
                 // Log error but don't panic - WAL write failures are critical
                 // but we still need to notify waiters to avoid hanging
             }
+            io = io_start
+                .map(|start| start.elapsed())
+                .unwrap_or(Duration::ZERO);
         }
 
-        if !committed_tx_ids.is_empty() {
-            let mut waiters = self.commit_waiters.lock().await;
-            for tx_id in &committed_tx_ids {
-                if let Some(notify) = waiters.remove(tx_id) {
-                    notify.notify_one();
-                }
-            }
+        // 回写 Io 与 Schedule（先回写，后唤醒）。
+        for waiter in &waiters {
+            let Some(slot) = &waiter.slot else {
+                continue;
+            };
+            // 通知到达时刷盘循环不在空等（正忙）时，调度等待记 0。
+            let schedule = if waiter.flush_was_idle {
+                batch_start
+                    .checked_duration_since(waiter.notified_at)
+                    .unwrap_or(Duration::ZERO)
+            } else {
+                Duration::ZERO
+            };
+            slot.record_flush(waiter.stage_id, io, schedule);
+        }
+
+        for waiter in waiters {
+            waiter.notify.notify_one();
         }
     }
 }

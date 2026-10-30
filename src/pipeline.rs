@@ -1,4 +1,5 @@
 use crate::database::Database;
+use crate::diagnostics::{close_stage, open_stage, record_stage, Module};
 use crate::executor::query_budget::{row_bytes, QueryBudget, SharedBudget};
 use crate::executor::{
     inject_correlated_values, AggregateExecutor, AggregateNode, AlterTableExecutor,
@@ -118,10 +119,23 @@ pub async fn execute_with_params(
     params: &[Value],
 ) -> std::result::Result<SqlOutcome, SqlError> {
     let profiling = is_profiling_enabled();
+    // MS44 Iter001（T2）：会话采集打开时建立语句阶段绑定（profiling.rs 同款
+    // task-local 机制；绑定点单一——无参与参数化入口都经过这里）。采集全关
+    // 不建立——默认配置零成本。
+    let diagnostics = database.diagnostics_collecting();
 
     if profiling {
         // Wrap entire execution in profiling scope for task-local storage
-        return with_profiling_scope(execute_inner(database, sql, params)).await;
+        let fut = execute_inner(database, sql, params);
+        if diagnostics {
+            return with_profiling_scope(crate::diagnostics::with_statement_stages(fut)).await;
+        }
+        return with_profiling_scope(fut).await;
+    }
+
+    if diagnostics {
+        return crate::diagnostics::with_statement_stages(execute_inner(database, sql, params))
+            .await;
     }
 
     execute_inner(database, sql, params).await
@@ -1415,6 +1429,11 @@ async fn execute_inner(
 ) -> std::result::Result<SqlOutcome, SqlError> {
     let profiling = is_profiling_enabled();
 
+    // MS44 Iter001（T2）：任务内阶段绑定存在时开根作用域（含 SQL 文本）——
+    // Ok / Err 显式结束（end_ok / end_err），语句 future 被放弃时随 future
+    // 析构按 Dropped 记录。开根先于 total_start：旧表的计时窗口内容不变。
+    let statement_scope = database.diagnostics_session().enter_statement(sql);
+
     if profiling {
         init_profiling();
     }
@@ -1425,8 +1444,55 @@ async fn execute_inner(
         None
     };
 
+    let response = execute_staged(
+        database,
+        sql,
+        params,
+        profiling,
+        profiling || statement_scope.is_some(),
+    )
+    .await;
+
+    if let Some(start) = total_start {
+        print_timings(start.elapsed());
+    }
+
+    // MS44 Iter001（T2）：Result 确定后结束根作用域形成摘要；按会话 Detail
+    // 渲染本语句摘要，非空写一次 stderr（design D2）。默认配置（采集全关）
+    // 无摘要、`Detail::Off` 渲染为空——结构性不写；诊断投递在语句执行过程
+    // 中不写 stderr。
+    if let Some(scope) = statement_scope {
+        let summary = match &response {
+            Ok(_) => scope.end_ok(),
+            Err(_) => scope.end_err(),
+        };
+        if let Some(summary) = summary {
+            let text = database
+                .diagnostics_session()
+                .render_with_session_detail(&summary);
+            if !text.is_empty() {
+                eprintln!("{text}");
+            }
+        }
+    }
+
+    response
+}
+
+/// 语句的缓存查找与 parse / plan / execute 分段（原 `execute_inner` 主体）。
+///
+/// MS44 Iter001（T2）：`stage_timers`（旧开关或会话采集任一打开）为真时每段
+/// 取一次测量——同一次测量同时喂旧表（`record_time`，仅旧开关打开时调用）
+/// 与诊断阶段上报（绑定不存在时 no-op）：每个阶段只测一次。
+async fn execute_staged(
+    database: &Database,
+    sql: &str,
+    params: &[Value],
+    profiling: bool,
+    stage_timers: bool,
+) -> std::result::Result<SqlOutcome, SqlError> {
     // Step 1: cache lookup (cache_hit_check 子指标保持)
-    let cache_hit_check_start = if profiling {
+    let cache_hit_check_start = if stage_timers {
         Some(Instant::now())
     } else {
         None
@@ -1439,14 +1505,31 @@ async fn execute_inner(
         None
     };
     if let Some(start) = cache_hit_check_start {
-        record_time("cache_hit_check", start.elapsed());
+        let elapsed = start.elapsed();
+        if profiling {
+            record_time("cache_hit_check", elapsed);
+        }
+        // 命中路径 cache_hit_check 同时是诊断阶段；未命中路径不作为诊断阶段
+        //（design D4），仍只由旧开关记录。
+        if cached_plan.is_some() {
+            record_stage(Module::Pipeline, "cache_hit_check", elapsed);
+        }
     }
 
     if let Some(plan) = cached_plan {
         // Cache hit — skip parse + plan, directly execute.
+        let execute_start = if stage_timers {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        // MS44 Iter001（T2）：execute 开为 open 阶段——`Database::commit` 在此
+        // 期间把 commit 记为其子阶段。旧开关的命中路径不记 execute（既有
+        // 行为保持）；诊断照记 execute 阶段。
+        open_stage(Module::Pipeline, "execute");
         let response = execute_stage(database, plan, profiling).await;
-        if let Some(start) = total_start {
-            print_timings(start.elapsed());
+        if let Some(start) = execute_start {
+            close_stage("execute", start.elapsed());
         }
         return response;
     }
@@ -1454,26 +1537,33 @@ async fn execute_inner(
     // Cache miss — three-stage pipeline.
 
     // Stage 1: parse
-    let parse_start = if profiling {
+    let parse_start = if stage_timers {
         Some(Instant::now())
     } else {
         None
     };
-    let mut statements = match parse_stage(sql).await {
+    // MS44 Iter002（T3）：parse 开为 open 阶段——等待归属「当时最内层 open
+    // 阶段」，闭合后的结构与 Iteration 001 等价（parse 仍是根的直接子阶段）。
+    if parse_start.is_some() {
+        open_stage(Module::Pipeline, "parse");
+    }
+    let parse_outcome = parse_stage(sql).await;
+    if let Some(start) = parse_start {
+        let elapsed = start.elapsed();
+        if profiling {
+            record_time("parse", elapsed);
+        }
+        close_stage("parse", elapsed);
+    }
+    let mut statements = match parse_outcome {
         Ok(s) => s,
         Err(message) => {
-            if let Some(start) = parse_start {
-                record_time("parse", start.elapsed());
-            }
             return Err(SqlError {
                 message: format!("Parse error: {message}"),
                 sqlstate: Some(PARSE_SQLSTATE.to_string()),
             });
         }
     };
-    if let Some(start) = parse_start {
-        record_time("parse", start.elapsed());
-    }
     // MS10-T04：单结果执行路径仅支持单语句——多语句从静默截断改为显式拒绝，
     // 拒绝发生在 plan_stage / cache put 之前（完整串键污染随之消失）。
     if statements.len() > 1 {
@@ -1507,26 +1597,33 @@ async fn execute_inner(
     }
 
     // Stage 2: plan
-    let plan_start = if profiling {
+    let plan_start = if stage_timers {
         Some(Instant::now())
     } else {
         None
     };
-    let mut plan = match plan_stage(database, sql, stmt, profiling).await {
+    // MS44 Iter002（T3）：plan 同 parse 开为 open 阶段（闭合后仍是根的
+    // 直接子阶段）。
+    if plan_start.is_some() {
+        open_stage(Module::Pipeline, "plan");
+    }
+    let plan_outcome = plan_stage(database, sql, stmt, profiling).await;
+    if let Some(start) = plan_start {
+        let elapsed = start.elapsed();
+        if profiling {
+            record_time("plan", elapsed);
+        }
+        close_stage("plan", elapsed);
+    }
+    let mut plan = match plan_outcome {
         Ok(p) => p,
         Err(failure) => {
-            if let Some(start) = plan_start {
-                record_time("plan", start.elapsed());
-            }
             return Err(SqlError {
                 message: failure.to_string(),
                 sqlstate: Some(failure.sqlstate.to_string()),
             });
         }
     };
-    if let Some(start) = plan_start {
-        record_time("plan", start.elapsed());
-    }
 
     // MS31 Iteration 001（T7）：参数物化——表达式位注入（谓词 / 投影 / UPDATE
     // 赋值右值）+ DML 值位槽位物化（INSERT / UPSERT 待插值位）。
@@ -1535,18 +1632,21 @@ async fn execute_inner(
     }
 
     // Stage 3: execute
-    let execute_start = if profiling {
+    let execute_start = if stage_timers {
         Some(Instant::now())
     } else {
         None
     };
+    // MS44 Iter001（T2）：execute 开为 open 阶段（隐式 DML 提交的 commit 挂
+    // 其下）；收尾用同一次测量喂旧表与 close。
+    open_stage(Module::Pipeline, "execute");
     let response = execute_stage(database, plan, profiling).await;
     if let Some(start) = execute_start {
-        record_time("execute", start.elapsed());
-    }
-
-    if let Some(start) = total_start {
-        print_timings(start.elapsed());
+        let elapsed = start.elapsed();
+        if profiling {
+            record_time("execute", elapsed);
+        }
+        close_stage("execute", elapsed);
     }
     response
 }

@@ -153,6 +153,10 @@ pub struct Database {
     /// `":memory:"`。测试支撑的注入点按路径限定（并行测试二进制互不抢对方
     /// 的注入点，先例 `src/storage/free_page_rebuild.rs`）。
     path: PathBuf,
+    /// MS44 Iter000（T1）：诊断会话槽——`set_diagnostics` 下发配置，
+    /// `diagnostic_summaries` 读回摘要；随 `Clone` 共享（同一会话）。
+    /// 默认采集全关，不产生任何摘要。
+    diagnostics: Arc<crate::diagnostics::Diagnostics>,
 }
 
 /// MS34 Iter000（T01）：库属隐式语句的作用域守卫。
@@ -485,6 +489,7 @@ impl Database {
             io_failpoint,
             implicit_transactions: Arc::new(Mutex::new(HashSet::new())),
             path: path.to_path_buf(),
+            diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
         })
     }
 
@@ -571,10 +576,26 @@ impl Database {
     /// 顺序不可颠倒：事务提交（WAL fsync + 版本标 committed + 出活跃集）
     /// 恒先于水位检查，checkpoint 失败不回滚已提交事务（R4）。
     pub async fn commit(&self, tx: Transaction) -> Result<()> {
-        self.transaction_manager
-            .commit(tx, &self.buffer_pool)
-            .await?;
-        self.maybe_auto_checkpoint().await
+        // MS44 Iter001（T2）：任务内阶段绑定存在时，把 `commit` 记为当前最内
+        // 阶段的子阶段（隐式 DML 提交时最内阶段是 `execute`，阶段归属 Wal）；
+        // 无绑定的任务（显式 COMMIT 的 session/CLI 调用、checkpoint 触发点）
+        // 为 no-op，不创建根、不产生摘要。
+        //
+        // MS44 Iter002（T3）：`commit` 开为 open 阶段——提交等待（Lock /
+        // Queue / Io / Schedule）归属该阶段；闭合后的结构与 Iteration 001
+        // 等价（`commit` 仍是 `execute` 的子阶段）。
+        let commit_start = crate::diagnostics::stage_instant();
+        if commit_start.is_some() {
+            crate::diagnostics::open_stage(crate::diagnostics::Module::Wal, "commit");
+        }
+        let outcome = match self.transaction_manager.commit(tx, &self.buffer_pool).await {
+            Ok(()) => self.maybe_auto_checkpoint().await,
+            Err(e) => Err(e),
+        };
+        if let Some(start) = commit_start {
+            crate::diagnostics::close_stage("commit", start.elapsed());
+        }
+        outcome
     }
 
     /// MS34 Iter000（T01）：为本条库属隐式语句创建作用域守卫。
@@ -723,6 +744,28 @@ impl Database {
     /// 语句入口的上限快照读取（pipeline 预算构造点消费）。
     pub(crate) fn query_memory_limit(&self) -> u64 {
         self.query_memory_limit.load(Ordering::SeqCst)
+    }
+
+    /// MS44 Iter000（T1）：下发诊断配置（只影响之后形成的摘要；采集全关
+    /// 时不产生摘要）。
+    pub fn set_diagnostics(&self, config: crate::diagnostics::DiagnosticsConfig) {
+        self.diagnostics.configure(config);
+    }
+
+    /// MS44 Iter000（T1）：读回本会话已记录的诊断摘要（快照副本）。
+    pub fn diagnostic_summaries(&self) -> Vec<crate::diagnostics::Summary> {
+        self.diagnostics.summaries()
+    }
+
+    /// MS44 Iter001（T2）：诊断会话（pipeline 语句入口开根与渲染出口用）。
+    pub(crate) fn diagnostics_session(&self) -> &Arc<crate::diagnostics::Diagnostics> {
+        &self.diagnostics
+    }
+
+    /// MS44 Iter001（T2）：会话采集是否打开——`execute_with_params` 的绑定
+    /// 判定；采集全关时整条语句零诊断成本。
+    pub(crate) fn diagnostics_collecting(&self) -> bool {
+        self.diagnostics.collecting()
     }
 
     /// Roll back an explicit transaction: every version the transaction

@@ -3,6 +3,7 @@
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod database;
+pub mod diagnostics;
 pub mod executor;
 #[cfg(feature = "network")]
 pub mod network;
