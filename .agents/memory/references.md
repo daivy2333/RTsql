@@ -708,4 +708,20 @@
 - **用途**: Cargo feature 门控下集成测试面的锚定枚举（`grep -l` 两类锚定 → `comm` 求交集/差集）、文件级与函数级门的施加形态、双面（关闭组合 + 默认组合）验证形态，以及加密域源侧门控与关闭态专用测试文件的同源变体；MS42 module-boundaries change 的 Iteration 000/001/002/003 已端到端验证该路径。
 - **状态**: active
 
+## R81: ISS42 CLI 主命令路径未建立 profiling scope（`RTSQL_PROFILING` 无三段计时表，索引扫描查询 panic）
+
+- **类型**: issue
+- **路径**: `.agents/issues/ISS42-cli-main-command-profiling-scope-absent.md`
+- **日期**: 2026-10-30
+- **用途**: CLI 主命令形态 `rtsql <db> "<sql>"` 在 `RTSQL_PROFILING` 存在时既无旧的三段计时表，又在计划含索引扫描时于 `src/profiling.rs:22` panic 退出（exit 101）的缺陷台账。根因是 profiling scope 只由 `pipeline::execute_with_params` 建立，主命令自建的执行分段不经该入口；缺陷为既有（非 MS44 change 引入）。当前状态：待用户裁定，未在任何变更内承载（Plan Review 判为变更范围外既有行为；与 MS44 已批准的 Preserve 项「`record_time` 在旧 scope 外仍 panic」冲突，需先裁定该 Preserve）。
+- **状态**: active
+
+## R82: ISS43 自动建表路径的注释与「未声明主键 → 首列隐式主键」既定语义相反
+
+- **类型**: issue
+- **路径**: `.agents/issues/ISS43-import-auto-create-comment-contradicts-implicit-primary-key.md`
+- **日期**: 2026-10-30
+- **用途**: `src/cli/lifecycle.rs:825-827` 注释称自动建表「无主键——首列重复值合法，无键行语义」，与实现、规格与实测相反（INTEGER 首列重复值以 DuplicateKey fail-fast 拒绝，exit 3；FLOAT/STRING 首列重复合法）。行为侧经三个规格域与 README 判定为既定语义、非缺陷；本条只登记注释与规格/实现的矛盾及其误修风险（防止按注释改动隐式首列主键语义而违反三域 SHALL 条款）。修复已交付于主分支提交 `5035869`（只改注释文字，可观察行为未变）；关闭待用户指令，Issue 仍为 open。
+- **状态**: active
+
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
