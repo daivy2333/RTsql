@@ -8,7 +8,7 @@ Gate 1 为 PASS，批准来自本次 goal 指令「除了 iss42，其他的都�
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`；规格 delta 在 `specs/unified-diagnostics/spec.md`。
 - 000：已完成——`iterations/000-initial/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录逐路径基点等价核对、Acceptance 逐条结论与四条非阻塞 Minor finding）。
-- 001：Act 已执行——`iterations/001-final-regression/000-initial.md`（Plan Context `ready`，Gate 2 PASS；Act Response 状态 `reported`）。这是本 change 唯一的一次全量：15 批全部 exit 0、failed 0，`--test` 名字集合与枚举集合对账成立。等待 `openspec-plan` 做 Plan Review。
+- 001：已完成——`iterations/001-final-regression/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录逐批自洽核对、Acceptance 逐条结论与三条非阻塞 Minor finding）。这是本 change 唯一的一次全量：15 批全部 exit 0、failed 0，`--test` 名字集合与枚举集合对账成立。本 change 无剩余 Iteration。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -18,7 +18,7 @@ Gate 1 为 PASS，批准来自本次 goal 指令「除了 iss42，其他的都�
 |---|---|---|---|---|
 | T1 | 000 | 无 | 旧表只在走到执行阶段的返回路径输出；执行阶段之前不输出；表算法、错误文本与 SQLSTATE 不变 | accepted（Cycle 000 Review Result accepted） |
 | T2 | 000 | T1 | 权威规格「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句由测试锁定 | accepted（Cycle 000 Review Result accepted） |
-| T3 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | executed（Cycle 001 Act Response `reported`：15 批全部 exit 0 / failed 0，2409 passed / 0 failed，目标集合对账成立；待 Plan Review） |
+| T3 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | accepted（Cycle 001 Review Result accepted：15 批全部 exit 0 / failed 0，2409 passed / 0 failed，目标集合对账成立，逐批计数与源码静态计数一致） |
 
 ## 1. 旧表输出时机收敛（Iteration 000）
 
@@ -88,7 +88,7 @@ Verification：`cargo test --offline --test diagnostics_statement_test -- --test
 
 - Tasks：T3
 - Depends on：000 accepted
-- 状态：Act 已执行——`iterations/001-final-regression/000-initial.md`（Plan Context `ready`，Gate 2 PASS；Act Response 状态 `reported`：15 批全 exit 0、failed 0，目标集合对账成立）。待 Plan Review 收口。
+- 状态：已完成——`iterations/001-final-regression/000-initial.md` 的 Review Result 为 `accepted`（15 批全 exit 0、failed 0，目标集合对账成立；逐批 passed/failed 计数已由源码静态计数复核）。
 - Stable result：默认构建上按 M19 分批串行的一次全量，每批退出码 0 且 failed 为 0，目标对账无缺无重。
 - Verification boundary：本节 T3 的分批方式。只此一次。失败批只整批复核一次。
 - Diagnostic boundary：按失败测试所在的批和目标文件定位。不把全量失败当成修改分批规则的理由。
