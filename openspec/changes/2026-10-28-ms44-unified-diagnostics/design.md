@@ -53,7 +53,7 @@ M21：诊断模块不得依赖 `database`、`pipeline`、`wal` 或 `storage`，�
 
 ### 2. 会话持有配置，任务内持有当前语句
 
-`Database` 增加私有字段，类型为 `Clone + Arc` 的会话槽，克隆后共享。`set_diagnostics` 替换配置。`diagnostic_summaries` 返回当前保留的已结束摘要。默认配置三项采集都关闭、`Detail::Off`。本 change 不改 `project-model.md`；私有字段不进入 M21 的公开字段清单，收尾时由维护者决定是否补记。
+`Database` 增加私有字段，类型为 `Clone + Arc` 的会话槽，克隆后共享。`set_diagnostics` 替换配置。`diagnostic_summaries` 返回当前保留的已结束摘要。默认配置三项采集都关闭、`Detail::Summary`——采集全关时没有摘要可渲染，默认下不写出新的诊断 stderr；实际渲染档位由调用方显式设置（MS44 Iter003 Plan Review 记录：设计稿原写 `Detail::Off`，实现取 `Summary`，两者在该默认下不可观测，文字按实现对齐）。本 change 不改 `project-model.md`；私有字段不进入 M21 的公开字段清单，收尾时由维护者决定是否补记。
 
 `diagnostics::bind` 把配置和会话槽装进当前任务。`scope(name)` 在已有语句上嵌套；没有语句且采集打开时创建根。采集全关时 `scope`、`report`、`wait` 不记录、不分配摘要。`report` 不写 stderr。
 

@@ -8,7 +8,7 @@
 - 000：已完成——`iterations/000-diagnostics-facade/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论与后继）。
 - 001：已完成——`iterations/001-statement-phases/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论、Minor finding 与两个 Issue 候选的判定）。
 - 002：已完成——`iterations/002-wait-attribution/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论、三条偏差的归类与 Minor finding）。
-- 003：Act 已完成，Act Response 状态为 `reported`，等待 Plan Review。Cycle 是 `iterations/003-final-regression/000-initial.md`。003 是本 change 的最后一轮（收尾全量）：15 个批次全部退出码 0、累计 164 个测试二进制 2407 passed / 0 failed，目标集合对账成立。
+- 003：已完成——`iterations/003-final-regression/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论、逐批自洽性核对、delta 与实现的对齐处理与遗留 Minor finding）。003 是本 change 的最后一轮（收尾全量）：15 个批次全部退出码 0、累计 164 个测试二进制 2407 passed / 0 failed，目标集合对账成立。本 change 无剩余 Iteration，等待 `openspec-docs-maintainer` 收尾。
 - Persisted Evidence：none。
 - 无跳过项。
 
@@ -21,7 +21,7 @@
 | T1 | 000 | 无 | 门面、三项配置、上限和父子耗时可在不改语句结果的前提下读回 | accepted |
 | T2 | 001 | 000 accepted | 语句阶段、旧计时表、失败和取消接上；SQL 结果不变 | accepted（Cycle 000 Review Result accepted） |
 | T3 | 002 | 001 accepted | 等待类别、并发归属、文件页 I/O、三种开销；`[recovery]` 仍在 | accepted（Cycle 000 Review Result accepted） |
-| T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | reported（Cycle 000 Act Response 状态 reported：15 批全部 exit 0 / 0 failed，对账成立；等待 Plan Review） |
+| T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | accepted（Cycle 000 Review Result accepted：15 批全部 exit 0 / 0 failed，对账成立） |
 
 ## 1. 诊断门面（Iteration 000）
 

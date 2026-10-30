@@ -216,3 +216,82 @@ None（本 Cycle 范围内）。无 Blocker Handoff，无 Blocker Resolution。
 
 - Plan Context Risks 的两条已在本轮落地：`diagnostics_wait_test` 的 `commit_wait_classes_present` 首跑通过（6 passed / 0 failed），`Queue > 0` 断言未出现偶发失败，第 8 条的整批复核机会未动用；`crypto_off_build_test` 按上述判读口径处理，退出码 0、0 failed，不视为失败。
 - 本 change 范围内无遗留失败、无失败批、无未跑批。
+
+## Plan Review
+
+- Review Result: accepted
+
+**Findings**
+
+1. **零产品代码改动：声明与仓库现场一致。**
+   - `git diff --name-only 80fea5e f63591f` 只含两个 change 文档：`iterations/003-final-regression/000-initial.md` 与 `tasks.md`。产品代码（`src/`）、测试代码（`tests/`）、夹具、`Cargo.toml` / `Cargo.lock`、criterion 门槛均不在 diff 中——Act Response 的「零产品代码改动」属实。
+   - `git diff --stat 80fea5e f63591f`：2 files changed, 106 insertions(+), 3 deletions(-)（Cycle 文件 +103 行 Act Response；`tasks.md` +3/-3 状态同步）。
+   - 工作区 `git status --short` 空输出；分支 HEAD 仍是 Act 提交 `f63591f`，被覆盖代码此后未变化。
+2. **逐批记录自洽（Plan 独立复核，未重跑全量）。**
+   - 命令条数：Cycle 文件里 15 条 `cargo test` 命令 = 表中 15 行。B1 含 `--lib --bins`；B2–B15 的命令串中 `--lib` / `--bins` 出现次数为 0（grep 计数 1，仅 B1）。
+   - 批内目标数：B2–B14 各 12 个 `--test`，B15 6 个 → 13×12 + 6 = 162，与枚举集合大小相等。
+   - 目标集合对账：从命令串抽出 162 个 `--test` 名字，与 `ls tests/*.rs | sort` 去掉 `.rs` 后的 162 个名字 `diff` 为空（无缺失、无多余、无重复）；162 个名字按批展开后的顺序与字典序枚举逐行相同（分组顺序固定、批内有序）。
+   - 逐批 passed 计数：Plan 用 `cargo test --offline --test <名> -- --list` 枚举每个目标的实际用例数（只枚举、不执行），逐批求和与 Act 表格比对——B2–B15 全部相等（154 / 199 / 155 / 114 / 184 / 76 / 113 / 133 / 240 / 92 / 147 / 163 / 142 / 52），集成批合计 1964。
+   - 两处口径差异已核实来源：`tests/cli_test.rs` 有 2 个 `#[ignore]` 用例（不计入 passed，故 B3 = 201 − 2 = 199）；`cache_perf_test` 与 `index_page_ownership_stack_overflow_test` 的 `--list` 输出是「1 test」单数形式，首轮解析漏计，各补 1（B2、B7 各 +2）。
+   - B1 独立核对：`cargo test --offline --lib -- --list` → `443 tests, 0 benchmarks`；`cargo test --offline --bins -- --list` → `0 tests, 0 benchmarks`，与 Act 的「443 来自 lib，bin 目标 0 个用例」一致。
+   - 总计：443 + 1964 = 2407，与 Act 记录的 2407 相等；15 批退出码全 0、failed 全 0。
+   - 0 用例目标：`cargo test --offline --test crypto_off_build_test -- --list` → `0 tests`；`--test network_server_test -- --list` → `0 tests`。两者都在枚举集合与批次中（B4 / B9），不判为缺失，与 Plan Context 的口径一致。
+   - M19 合规：分批执行、批大小 12（经验值 8–12 内）、字典序固定分组、批间串行、每批 `-- --test-threads=1`、全程无无过滤 `cargo test`、全量只跑一次——Act Response 的记录与规程逐条一致。
+3. **Acceptance 逐条核对。**
+   - 「全部批次退出码为 0 且 failed 计数为 0」✓（15/15）。
+   - 「`--test` 名字集合等于枚举集合，无缺失、无多余、无重复；`--lib` / `--bins` 只出现在第一批」✓（集合 diff 空、顺序一致、grep 计数 1）。
+   - 「批间串行、每批 `-- --test-threads=1`、全程无无过滤 `cargo test`」✓（命令串逐条核对）。
+   - 「Act Response 写齐每批的命令、退出码、passed / failed 计数，并写明全量结论所依据的分批方式」✓（15 行表格 + 15 条原样命令 + 对账段 + 全量结论段）。
+   - 「本轮的产品代码零改动」✓（diff 只含两个 change 文档）。
+   - 「M19 分批执行」✓（全量 Gate 等价于全部批次各自 0 failed，缺一批不得声明全量通过——15/15 批均有记录）。
+4. **delta 与实现一致性（Plan 只改 change 产物，不改产品代码）。**
+   - 需求 8：实现已在**所有**返回路径统一输出旧的三段计时表——`src/pipeline.rs:1456-1458` 的 `print_timings` 在 `execute_staged` 返回后无条件调用；变更前的 `e69c7e2:src/pipeline.rs` 在 parse / plan 失败等早退路径直接 `return`，不调 `print_timings`。因此 `RTSQL_PROFILING` 打开时失败语句现在也会打一张只含已完成阶段的旧表（parse 失败时阶段行为 `cache_hit_check` 与 `parse`）。这是 Iteration 001 Review 记录的非阻塞 Minor finding 1。
+   - 本次处置：**不改产品代码**，把 delta 的需求 8 文字对齐到实现——新增一句「经语句管道执行的语句在该变量已设置时，每条返回路径都会输出这张表，含解析、规划等失败路径；失败路径的表只列出该语句返回前已完成的阶段」，并新增一个 Scenario「失败路径也输出旧的三段计时表」。`proposal.md` 的需求 8 原文、本 Cycle 的 Acceptance 与 Plan Context 均未改写。
+   - 需求 5 的子句「含有解析阶段」：实现满足——`src/pipeline.rs:1547-1557` 在返回 parse 错误前先 `close_stage("parse", elapsed)`，`StageStack::finish`（`src/diagnostics.rs:624`）取走根的已完成子阶段，`collect_stats`（`src/diagnostics.rs:488`）把它收成 `StageStat`。但 `tests/diagnostics_statement_test.rs:184-215` 只断言 severity 与错误文本 / SQLSTATE，未锁定该子句——沿用 Iteration 001 的 Minor finding 2，按 Minor finding 口径记录，不返工。
+   - delta 本次新增的句子与 Scenario 同样没有对应断言（与需求 5 的既有缺口同类），一并记录，供用户决定。
+   - 需求 1 的默认档位：delta 原写「未修改过的会话配置 SHALL 三项采集都关闭，且输出详细程度为关闭」，实现的 `DiagnosticsConfig::default()`（`src/diagnostics.rs:90-100`）是三项采集全关、输出详细程度为 `Detail::Summary`。两者在该默认下不可观测（采集全关 → `record_statement` 返回 `None` → 没有摘要可渲染 → 不写出新的诊断 stderr），但文字与实现不一致，且 `design.md` 的决策记录同样写的是 `Detail::Off`。本次处置：**不改产品代码**，把 delta 的该句改为「三项采集都关闭，输出详细程度为 Summary。该默认下没有摘要可渲染，SHALL NOT 产生新的诊断 stderr」，并把 `design.md` 的默认档位改为 `Detail::Summary` 并注明原设计稿写的是 `Detail::Off`、两者在该默认下不可观测。`proposal.md` 的需求 1 原文（「默认全部关闭」）未改——其可观察含义（默认不采集、不输出）成立。
+5. **Issue 候选：无新增。** ISS42 / ISS43 已在主仓库登记，均为变更范围外的既有行为，不在本 change 承载，本轮不重复报告。
+
+非阻塞 Minor finding（记录，不返工）：
+
+1. **旧开关错误路径新增旧表输出（Iteration 001 遗留，Act 偏离）**：本轮只把 delta 文字对齐到实现，未改产品代码。可选处置留给用户：(a) 保持现状——delta 与实现一致，规格如实记录该行为；(b) 收敛为「错误路径不打印旧表」——那是产品语义变更（改 `src/pipeline.rs` 的返回路径、补断言、改 delta），超出 MS44 已批准范围，需另起 change 并由用户裁定，本轮不实施。
+2. **需求 5 的 spec 子句缺断言（Iteration 001 遗留）**：行为已满足，测试未锁定「含有解析阶段」。记录，不返工；如用户要求，可在后续 change 补断言。
+3. **delta 需求 8 本次新增的句子与 Scenario 无对应断言**：与 finding 2 同类，记录。
+4. **默认输出档位的文字与实现不一致**：delta 与 `design.md` 原写默认 `Detail::Off`，实现是 `Detail::Summary`（`src/diagnostics.rs:90-100`），在该默认下不可观测。本轮已把两处文字对齐到实现并保留原设计稿的记述。可选处置留给用户：若要求「默认档位即 `Off`」（用户只开采集、不设档位时也不写 stderr），那是产品语义变更，需另起 change 改默认值并补断言，本轮不实施。
+5. **两处既有 rustfmt 漂移**（`tests/diagnostics_facade_test.rs:216`、`tests/session_lifecycle_test.rs:15`）非本变更引入，本轮未触碰。
+6. **Act Response 的章节标题为中文变体**而非 Cycle 模板的英文名——语义项一一对应，属平台适配，不构成偏差。
+7. **严重级别名称空间**：delta 允许 Error / Warn / Info / Debug / Trace，实现的 `Severity`（`src/diagnostics.rs:106-110`）只有 Info / Warn / Error 三个变体。delta 的措辞是「只使用」这五个名字（约束取值空间），实现取其子集，成立；但 Debug / Trace 当前不可产出，供维护者合并规格时知悉。
+
+**Acceptance Gaps**
+
+None。Acceptance 的 6 条逐条成立：全批 0 failed（15/15）、目标集合对账成立（162 = 162，无缺失 / 多余 / 重复，`--lib` / `--bins` 只在第一批）、批间串行与每批单线程、无无过滤全量、逐批记录完整、产品代码零改动。M19 的全量 Gate「全部批次各自 0 failed，缺一批不得声明全量通过」满足。
+
+**Evidence**
+
+- diff：`git diff --name-only 80fea5e f63591f` → 只有 `iterations/003-final-regression/000-initial.md` 与 `tasks.md`；`git diff --stat 80fea5e f63591f` → 2 files changed, 106 insertions(+), 3 deletions(-)。`git status --short` 空输出。
+- 本次 Review 的写入范围：只有 change 产物——本 Cycle 文件的 `## Plan Review` 段、`tasks.md` 的状态同步、`specs/unified-diagnostics/spec.md`（需求 1 默认档位一句 + 需求 8 一句与一个 Scenario）、`design.md`（默认档位一句）。产品代码、测试代码、构建配置零改动。
+- 验证沿用 Act Response（来源：Iteration 003 Cycle 000 的「验证命令与实际结果」；Act 提交后 HEAD 未再前进、被覆盖代码未变化，且 M19 的全量预算在本 change 只有一次且已由 Act 用尽——**Plan 未重跑任何批次，未重跑全量**）。
+- Plan 独立执行的只读检查（不执行用例，不消耗全量预算）：
+  - 从 Cycle 文件抽出 15 条命令与 162 个 `--test` 名字，与 `ls tests/*.rs | sort` 做集合与顺序比对（diff 空、展开顺序逐行相同）。
+  - `cargo test --offline --lib -- --list` → `443 tests, 0 benchmarks`；`cargo test --offline --bins -- --list` → `0 tests, 0 benchmarks`。
+  - 162 个集成目标逐个 `cargo test --offline --test <名> -- --list`，求和得每批实际用例数，与 Act 的 15 行表格逐批相等（B2–B15 全等，集成合计 1964）。
+  - `cargo test --offline --test crypto_off_build_test -- --list` → `0 tests`；`cargo test --offline --test network_server_test -- --list` → `0 tests`。
+  - 代码核对：`src/pipeline.rs:1425-1480`（`execute_inner` 的统一 `print_timings`）、`src/pipeline.rs:1547-1557`（parse 失败前的 `close_stage`）、`src/diagnostics.rs:488`（`collect_stats`）、`src/diagnostics.rs:624`（`StageStack::finish`）、`git show e69c7e2:src/pipeline.rs`（变更前错误路径不调 `print_timings`）。
+  - 定位到 2 个定向用例被执行（`cache_perf_test`、`index_page_ownership_stack_overflow_test`）：首次 `--list` 解析未识别「1 test」单数输出而改为直接运行，各 1 passed / 0 failed。属 M19 允许的单目标定向运行，未重跑全量、未改动任何已通过批次。
+- Mode: none，无 required Evidence；未因目录不存在提出问题。
+
+**Follow-up Decision**
+
+Acceptance 已满足且无阻塞项；7 条 Minor finding 均不阻塞（其一为已对齐 delta 的错误路径旧表输出，其二与三为 spec 断言缺口但行为已满足，其四为已对齐文字的默认档位，其五为既有格式化基线，其六为格式适配，其七为严重级别名称空间），按 iteration-planning › Review 分类判 `accepted`。Act Response 的 Issue 候选为 None，本轮独立核对也未发现当前 change 范围外的新实质缺陷。T1–T4 全部完成，本 change 无剩余 Iteration，按公共规则 › Iteration 与 Cycle 线程记录 `Next Iteration: None`，收尾（规格合并、归档、全局状态同步）交由 `openspec-docs-maintainer` 执行。
+
+**Iteration Plan Update**
+
+None（accepted，无 replan）。
+
+**Next Cycle**
+
+None（当前 Cycle 无需修复，accepted 无返工）。
+
+**Next Iteration**
+
+None（本 change 无剩余 Iteration：T1 / T2 / T3 已 accepted，T4 由本 Cycle 承载并 accepted）。

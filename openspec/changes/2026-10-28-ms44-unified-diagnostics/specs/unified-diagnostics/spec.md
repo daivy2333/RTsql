@@ -10,7 +10,7 @@
 
 输出详细程度 SHALL NOT 决定是否采集。详细程度为关闭时，已经采集的摘要 SHALL 仍能在进程内读回，并且该次执行 SHALL NOT 因此写出新的诊断 stderr。
 
-未修改过的会话配置 SHALL 三项采集都关闭，且输出详细程度为关闭。该默认下 SHALL NOT 产生新的诊断 stderr。
+未修改过的会话配置 SHALL 三项采集都关闭，输出详细程度为 Summary。该默认下没有摘要可渲染，SHALL NOT 产生新的诊断 stderr。
 
 严重级别 SHALL 只使用 Error、Warn、Info、Debug、Trace。阶段成功结束 SHALL 记为 Info，失败 SHALL 记为 Error，取消 SHALL 记为 Warn。
 
@@ -187,6 +187,8 @@ SHALL 在同一条已有的单行查询负载上分别测量诊断关闭、只�
 
 `RTSQL_PROFILING` 未设置时，既有三段计时 SHALL 保持关闭。该变量已设置且会话诊断配置保持默认时，stderr SHALL 仍包含 parse、plan、execute 三段耗时，子指标能力 SHALL 保持。
 
+经语句管道执行的语句在该变量已设置时，每条返回路径都会输出这张表，含解析、规划等失败路径；失败路径的表只列出该语句返回前已完成的阶段。
+
 诊断配置为默认时，现有用户可见 stderr 告警 SHALL 保持原文。恢复路径上已有的 `[recovery]` 告警 SHALL 仍出现在产生它的失败条件下。本变更 SHALL NOT 删除或改写这些告警来充当诊断输出。
 
 #### Scenario: 旧开关仍输出三段耗时
@@ -200,6 +202,14 @@ SHALL 在同一条已有的单行查询负载上分别测量诊断关闭、只�
 - **GIVEN** 诊断配置为默认
 - **WHEN** 走到会写出 `[recovery]` 告警的既有恢复失败条件
 - **THEN** stderr 仍包含 `[recovery]`
+
+#### Scenario: 失败路径也输出旧的三段计时表
+
+- **GIVEN** `RTSQL_PROFILING` 已设置，会话诊断配置保持默认
+- **WHEN** 经语句管道执行一条无法解析的语句
+- **THEN** stderr 仍含一张三段计时表
+- **AND** 表内的阶段行只列出该语句返回前已完成的阶段
+- **AND** 返回的错误文本与 SQLSTATE 不变
 
 ### Requirement: 诊断不改变事务结果
 
