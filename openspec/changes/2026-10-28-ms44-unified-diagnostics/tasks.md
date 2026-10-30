@@ -18,7 +18,7 @@
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
 | T1 | 000 | 无 | 门面、三项配置、上限和父子耗时可在不改语句结果的前提下读回 | accepted |
-| T2 | 001 | 000 accepted | 语句阶段、旧计时表、失败和取消接上；SQL 结果不变 | 待执行（Cycle ready） |
+| T2 | 001 | 000 accepted | 语句阶段、旧计时表、失败和取消接上；SQL 结果不变 | 已实施（Cycle 000 reported，待 Review） |
 | T3 | 002 | 001 accepted | 等待类别、并发归属、文件页 I/O、三种开销；`[recovery]` 仍在 | 未开始 |
 | T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
 
@@ -28,7 +28,7 @@
 
 ## 2. 语句阶段（Iteration 001）
 
-- [ ] 2.1 T2：在 000 的门面之上，把 `pipeline::execute_with_params` / `execute_inner` 和 `Database::commit` 接上阶段记录。
+- [x] 2.1 T2：在 000 的门面之上，把 `pipeline::execute_with_params` / `execute_inner` 和 `Database::commit` 接上阶段记录。（GREEN：`cargo test --offline --test diagnostics_statement_test -- --test-threads=1` 7 passed / 0 failed，见 `iterations/001-statement-phases/000-initial.md` 的 Act Response。）
 
 当前行为：只有 `RTSQL_PROFILING` 存在时，`execute_inner` 向 stderr 打 parse/plan/execute。失败和取消没有诊断摘要。`is_profiling_enabled` 只看该变量。
 

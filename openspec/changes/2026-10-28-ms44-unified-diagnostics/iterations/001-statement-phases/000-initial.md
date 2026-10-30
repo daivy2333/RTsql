@@ -123,9 +123,51 @@ PASS。检查项均通过，无 BLOCKED，无 SKIPPED。调查基于本会话对
 
 ## Act Response
 
-- Status: 尚未由 Act 填写
+- Status: reported
 
-尚未执行。
+**实际改动**
+
+- `src/diagnostics.rs`：
+  - 新增任务内阶段绑定（`tokio::task_local` 的 `STATEMENT_STAGES`，`profiling.rs` 同款机制）：`with_statement_stages`（绑定点包装）、`stage_instant` / `record_stage` / `open_stage` / `close_stage`（绑定外均为 no-op）、`StageStack`（root_children + open 栈；close 时以调用方单次测量挂父级，未关的 open 阶段在根结束时不计耗时弃置）。
+  - `Diagnostics` 新增 `collecting` / `render_with_session_detail`（均 `pub(crate)`）与 `enter_statement`（绑定存在才开根并接阶段树；无绑定返回 `None`，默认配置零成本）。
+  - `record_statement` 返回 `Option<Summary>`（采集全关返回 `None`）；`StatementScope::end_ok` / `end_err` 返回本次形成的摘要（facade 测试忽略返回值，仍 10/10 GREEN）；scope 持有阶段树句柄而非回读 task-local——语句 future 被放弃时析构发生在绑定作用域外，仍能取到已记录阶段。
+- `src/pipeline.rs`：`execute_with_params` 为绑定点（旧开关、会话采集各自独立决定是否包装，可叠加）；`execute_inner` 拆为「开根 → `execute_staged` → 旧表 `print_timings` → 结束根 + 按会话 Detail 渲染非空写一次 stderr」；新 `execute_staged` 承载原缓存查找 / parse / plan / execute 分段，每段一次测量同时喂 `record_time`（仅旧开关）与诊断上报。开根先于 `total_start`、渲染在 `print_timings` 之后：旧表计时窗口内容不变。
+- `src/database.rs`：`Database::commit` 在绑定存在时把 `commit`（`Module::Wal`）经 `stage_instant` / `record_stage` 记为当前最内阶段的子阶段，错误传播路径逐字节等价（`?` 改为等价 match，签名不变）；新增 `pub(crate)` 访问器 `diagnostics_session` / `diagnostics_collecting`。
+- 新建 `tests/diagnostics_statement_test.rs`（`#![cfg(feature = "cli")]`，批内单线程）：`insert_commit_is_child_of_execute` 先行（RED：断言失败，摘要为空）→ 实现 GREEN；其余 6 个用例按 Task Definition 补齐。
+
+**与计划的偏差（Deviations from Plan）**
+
+1. `legacy_profiling_table_follows_env_var` 的真实入口用 `rtsql import <db> <table> <csv> --csv`（自动建表 DDL 与逐行 INSERT 都经 `Database::execute_sql`），不是 Investigation Facts 推断的 CLI 主命令 `rtsql <db> "<sql>"`。原因：主命令的 `run_sql`（`src/cli/mod.rs`）自行分段 parse/plan/execute 且 `profiling=false`，不经 `execute_with_params`，`RTSQL_PROFILING` 对它本来就无效——Plan 的 Current-State Evidence 在此点与实际代码矛盾。import 入口满足 Required behavior 原文（`CARGO_BIN_EXE_rtsql` 子进程执行 SQL、stderr 含三段表、未设置时无表），且全程无进程内 `Database` 句柄（比「spawn 前释放句柄」更简单）。该矛盾同时登记为 Issue 候选（见下）。
+2. 建库用 `rtsql new` 子进程而非进程内 `Database::open`（同上，避免句柄）。
+3. `execute_inner` 主体拆出 `execute_staged` 私有函数（等价局部实现）：为单一收尾点（结束根 + 渲染）服务，不改任何分支语义；parse/plan 的计时改为「await 后一次测量、再分支处理」，比原「两臂各记一次」少一次重复，测量点与原语义相同。
+
+**自检发现与修复**
+
+- Self-Review 发现（Important，已修复）：`enter_statement` 初版外层 `Some(...)` 无条件——采集全关（默认配置）时每条语句仍开根并在结束时锁会话状态，与「默认配置零成本」不变量不符。已改为无绑定返回 `None`，修复后两个测试文件重跑均 GREEN。
+- 遗留 Minor（不阻塞，供 Plan Review 终审）：
+  - 仓库存在两处既有 rustfmt 漂移（`tests/diagnostics_facade_test.rs:216`、`tests/session_lifecycle_test.rs:15`），非本 Cycle 引入，未触碰（Surgical Changes）；本 Cycle 三份触碰文件已格式化。
+  - 放弃路径的摘要只含已完结阶段（parse/plan），进行中的 `execute` 无耗时、按设计弃置——`abandoned_future_summary_is_cancelled` 断言 severity 与行可见性，不断言阶段集合。
+
+**验证命令与实际结果**
+
+- GREEN 条件：`cargo test --offline --test diagnostics_statement_test -- --test-threads=1` → `test result: ok. 7 passed; 0 failed`（7 个用例与 Task Definition 清单一致；RED 先行观察过 `insert_commit_is_child_of_execute` 断言失败 `summaries: []`）。
+- 受影响范围：`cargo test --offline --test diagnostics_facade_test` → `10 passed; 0 failed`（Iteration 000 结论在 API 扩展后保持）。
+- Issue 候选的定性运行（真实 CLI，见下）。
+- 编译无新增警告；未跑全量（预算在 003）。
+
+**Persisted Evidence**
+
+None required（Mode: none；上述输出可低成本重跑）。
+
+**Experience Candidates**
+
+- Issue 候选 1（change 范围外，有证据）：`RTSQL_PROFILING` 对 CLI 主命令 `rtsql <db> "<sql>"` 无效——`run_sql`（`src/cli/mod.rs` 的 `parse_stage` + `plan_stage_routed(..., false, ...)` + `execute_stage_routed(..., false, ...)`）不经 `execute_with_params`，也不建立 profiling scope；同一变量在 `rtsql import`（经 `Database::execute_sql`）路径有效。证据：本 Act Response 与 `legacy_profiling_table_follows_env_var` 的两次子进程运行（import 有表、主命令形态无表——后者为本 Cycle 调查所证）。对本 change 的影响：需求 8 的「旧表保持」经 import 入口证明；主命令形态是否应接旧表属产品决策，建议 Recorder 登记。
+- Issue 候选 2（change 范围外，有证据）：无显式主键建表把首列当唯一键——`CREATE TABLE u (a INT, b INT)` 后 `INSERT (1,1)` 成功、`INSERT (1,2)` 报 `Execution error: Duplicate key`、`INSERT (2,1)` 成功（真实 CLI 运行，2026-10-30）；与 `src/cli/lifecycle.rs` 自动建表注释「无主键——首列重复值合法」矛盾。是注释失效还是行为缺陷由 Recorder 判定。
+- Runbook 候选：None（无高风险新操作路径；测试内技术已随测试文件自说明）。
+
+**未解决问题**
+
+- None（本 Cycle 范围内）。上述两个 Issue 候选只报告不登记。
 
 ## Plan Review
 
