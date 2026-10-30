@@ -195,3 +195,82 @@ None。Issue 候选：本轮未发现当前 change 范围外、有证据的实�
 **未解决问题**
 
 None（本 Cycle 范围内）。上述偏差均已在本 Response 记录原因与影响；无 Blocker Handoff。
+
+## Plan Review
+
+- Review Result: accepted
+
+**Findings**
+
+独立阅读 merge-base `e69c7e2` 到 HEAD `c767973` 的完整 diff 与当前代码（本轮产品代码改动集中在 `c767973`：`src/diagnostics.rs`、`src/pipeline.rs`、`src/database.rs`、`src/transaction/manager.rs`、`src/wal/buffer.rs`、`src/storage/file_storage.rs`，新建 `tests/diagnostics_wait_test.rs`；`src/lib.rs` 只加 `pub mod diagnostics;`，属 Iteration 000），逐条核对 Act Response 的声明：
+
+1. 声明与代码一致（实际改动）：
+   - `src/diagnostics.rs`：公开 `WaitTotals`（`by_category: [Duration; 5]` + `pages: u64`；公开 `get(Category)` / `pages()` / `wait_total()`，`wait_total` = Lock + Queue + Io + Schedule，不含 Compute）；内部 `StageNode`（`StageSample` 的结构 + 本阶段等待累计）；公开 `StageStat.waits` 与 `TraceSample.waits` 各增一个 `WaitTotals` 字段；公开 `StageSample` 仍是四字段（`module` / `name` / `inclusive` / `children`），其 `exclusive()` / `children_inclusive()` 原本就是私有方法，随实现移入 `StageNode` 不构成公开 API 变化；`StageStack` 增 `waits: WaitSlot` 与 `next_stage_id`，`OpenStage` 增 `id`（0 保留给语句根）；`WaitSlot`（`pub(crate)`，`Arc<Mutex<SlotShared>>`，按阶段 id 存 `StageWait`，另存最近一次刷盘回写的 `FlushWait`）；crate 内入口 `wait_timing_start` / `record_wait` / `record_page_read` / `current_wait_slot` / `PageReadTimer`；`close_stage` 取走该阶段等待并按「独占耗时 − 自身等待之和」算 Compute。逐条对应 Act Response「实际改动」，无遗漏项。
+   - `src/pipeline.rs`：`parse` / `plan` 由 `record_stage` 改为 `open_stage` / `close_stage`（`execute` 在 Iteration 001 已是 open 阶段）；旧表的 `record_time` 调用点与测量窗口不变（同一次 `Instant` 同时喂旧表与新摘要）。
+   - `src/database.rs`：`Database::commit` 的 `commit` 由 `record_stage` 改为 open 阶段（`stage_instant()` 判定后 open / close）；错误路径与返回值逐字未变。
+   - `src/transaction/manager.rs`：会话闸门 `.lock().await` 记 Lock（只含这一次锁等待，不含之后的刷盘等待）。
+   - `src/wal/buffer.rs`：`CommitWaiter`（通知句柄 + 诊断槽 + 登记时阶段 id + 通知时刻 + 通知时刷盘循环空闲标志）；`append_commit_and_wait` 记刷盘闸门 Lock 与 Queue（实测减去本次 Io / Schedule，饱和减不下溢）；`flush_loop_idle` 标志；`flush_locked` 记 `write_batch` 的 Io、回写 Io / Schedule、先回写后唤醒。
+   - `src/storage/file_storage.rs`：`PageReadTimer` 守卫置于 `read_page` 函数体顶部（包在 `crypto` 分支之外，不复制读取函数体）；`MemoryStorage::read_page` 未改。
+   - `tests/diagnostics_wait_test.rs`：6 个用例与 Task Definition 的 GREEN 清单逐一对应，断言全为精确值关系（`> Duration::ZERO` / `== Duration::ZERO` / `pages >= 1` / 行集相等），无「因错误原因通过」的形态。
+2. 等待归属与口径（代码核对）：
+   - 归属点 = 当时最内层 open 阶段：`record_wait` / `record_page_read` 取 `stack.open.last()` 的阶段 id；无 open 阶段时落语句根（id 0），而根的等待不进阶段汇总数（`finish()` 只取根的子阶段）——与 Plan 的 Risks 一致，未新增根阶段名。
+   - 阶段结构与 Iteration 001 等价：`parse` / `plan` / `execute` 仍是根的直接子阶段，`commit` 仍是 `execute` 的子阶段（`Database::commit` 在 `execute` open 期间开 `commit`）。open / close 配对经代码核对成立：`stage_timers = profiling || statement_scope.is_some()`，与「绑定是否存在」同步，故 `parse` / `plan` 的 open 与 close 不会只做一半；`close_stage` 的名字断言与实际嵌套一致。
+   - 内层等待不重复计入外层：外层 Compute = 独占耗时（已扣除子阶段包含耗时）− 自身等待之和；内层等待记在内层阶段 id 的桶里，外层桶不含内层。
+   - 跨任务回写：登记时把 `WaitSlot` 与阶段 id 随等待者放进等待表；刷盘任务只对本次释放且带槽的等待者回写 Io / Schedule，且先回写后唤醒——语句侧 `notified().await` 返回后 `last_flush` 读回的一定是本次的值。
+   - 并发边界：锁序只有「语句侧 STATEMENT_STAGES → WaitSlot」单向（刷盘侧只持 WaitSlot），无反向嵌套，无死锁路径；等待槽按语句隔离（`StageStack` 每语句新建），跨语句不共享。
+   - 采集全关时零成本：`wait_timing_start()` 在无绑定时返回 `None`（不取时刻），`PageReadTimer` 因此不做任何计时；刷盘侧 `tracing` 为假时不计 Io、不回写。
+3. Preserve 逐条成立：`append_commit_and_wait` 在 `write_batch` 失败时仍返回 `Ok(())`（失败只打日志、仍回写并唤醒）；刷盘仍单飞（`flush_locked` 的三个调用点 `flush_loop` / `do_flush` / `append_commit_and_wait` 的 shutdown 分支都持 `flush_gate`）；`MemoryStorage::read_page` 不记 Io（文件未改）；`[recovery]` 原文不改（`tests/recovery_bounded_read_test.rs` 不在 diff 中）；SQL 结果 / 错误文本 / SQLSTATE / 取消后的行可见性与回收语义未触碰（`Database::commit` 与 `pipeline` 的错误路径逐字未变）；`print_timings` 的列与 `Total` 行算法（`src/profiling.rs` 零改动）；`src/diagnostics.rs` 只 import `std` 与 `tokio`（M21 成立，不依赖 database / pipeline / wal / storage / transaction）；默认配置不产生摘要、不写新的诊断 stderr；公开 `Summary` / `StageStat` / `TraceSample` / `Record` 无操作标识、运行标识或内容哈希字段（`WaitTotals` 只有类别耗时与页数）。
+4. Forbidden 逐条成立：只对 design D5 列出的两个锁计时（`session_gate` / `flush_gate`，`grep` 确认 `record_wait` 仅这两处 + Queue）；没有给全部 await 计时；没有新建后台写出任务；没有任何断言把跨语句的 Io 相加（`file_page_read_records_io` 的求和只在单条语句的阶段之间）；没有用操作标识、运行标识或内容哈希判定通过；`tests/recovery_bounded_read_test.rs` 与 `benches/`、`src/executor/`、`src/profiling.rs`、`Cargo.toml` / `Cargo.lock` 均不在 diff 中；未跑全量；无新 crate、CLI 参数或 SQL 语法。
+5. Acceptance 逐条核对：
+   - `commit_wait_classes_present`：提交子阶段的 Lock / Queue / Io 非零、Schedule ≥ 0（断言形态 `Schedule ≤ wait_total` 与 Plan 的「Schedule ≥ 0」等价）；摘要只有被诊断覆盖的那条语句；后续查询无 `commit` 阶段且全部阶段等待为 0——证明等待只进入被释放的那条语句。✓
+   - `parse_stage_has_compute_without_io`：解析阶段 Compute > 0、Io == 0，与「解析阶段独占耗时即 Compute、无文件页读取」的实现一致。✓
+   - `file_page_read_records_io`：只读重开后查询摘要的 Io > 0 且页数 ≥ 1、解析阶段 Io == 0；同库第二次查询 Io == 0 且页数 == 0——证明「缓冲池已持有的页不因被访问而记 Io」。✓
+   - `stats_only_reports_wait_totals_without_samples`：`samples` 为空、提交阶段的等待类别汇总数与 Compute 均非零——与 `collect_stats` / `collect_samples` 的开关分离一致。✓
+   - `concurrent_inserts_keep_own_sql`：两条并发插入各自一条摘要、各自只含自己的 SQL 文本、两行都可见；公开摘要无标识字段（类型上就没有）。✓
+   - `three_modes_match_rows`：三种配置各用新库、三次行集相同、每次 30 秒内返回、关闭配置无摘要、另两次 `total > 0`；未比较三者差值。✓
+   - `recovery_bounded_read_test` 退出码 0、failed 为 0：`[recovery]` 原文仍在。✓
+   - Requirement Traceability：需求 3 / 4 / 7 与需求 8 的 `[recovery]` 部分逐条落到上述证明点，RTM 无 Missing、无 Simplified。✓
+6. **偏差归类（三条）**：
+   - **偏差 ①（`file_page_read_records_io` 改用只读重开）＝ Plan 错误（事实层），非 Act 偏离。** Plan 的 Current-State Evidence 断言「重开同一路径得到缓冲池为空的 `Database`」与实际代码矛盾：读写打开在 `src/database.rs:454` 调用 `rebuild_free_page_set`（`src/storage/data/table_manager.rs:2323`），它走遍目录链、目录行、数据链与索引树，把活页读进缓冲池；只读打开（`src/database.rs:411` 的 `if mode == OpenMode::ReadWrite` 之外）不做恢复也不做该重建。Act 改用只读重开，Required behavior 的前提「缓冲池尚未持有目标数据页」成立，夹具形态（建库 → 插入 → `close()` → 重开 → 查询）与真实入口不变，验收语义未被削减。归类为 Plan 错误，不改 Acceptance，不阻塞。
+   - **偏差 ②（公开 `StageSample` 未加等待字段，改用内部 `StageNode`）＝ Plan 错误（事实层），非 Act 偏离。** Plan 的 Current-State Evidence 称 `tests/diagnostics_facade_test.rs` 不字面量构造 `StageSample`——实际该文件在第 31 / 36 / 42 / 48 / 52 行字面量构造了 5 处。Act 为不改 Iteration 000 已 accepted 的测试文件，保留公开 `StageSample` 的四字段，等待只经 Plan 点名的公开承载 `StageStat` / `TraceSample` 暴露，内部另设 `StageNode` 承载。验收要求的「提交子阶段给出四类等待」由 `StageStat.waits` 满足（测试即经 `stage_stat(...)` 读取），公开 API 形状未扩大。归类为 Plan 错误，不改 Acceptance，不阻塞。
+   - **偏差 ③（通知时刻取在登记时；`flush_locked` 改为写盘前取走本批等待者）＝ Act 偏离（机制层），不阻塞。** Plan 的 Implementation Guidance 要求「在发出 `notify_one` 时把通知时刻一并记录到该等待者」，Act 改在登记时取该时刻，并把本批等待者改为写盘前取走。偏离成立：登记与 `notify_one` 之间隔着闸门释放与分支，而刷盘任务可能在 `notify_one` 之前就取走该等待者条目——此时「在 notify_one 处补写时刻」已无处可写。Act 的做法是 Plan 自身「先回写、后唤醒」与「回写必须精确命中被本次刷盘释放的等待者」两项要求的必要实现，且 Plan 的 Implementation Guidance 未覆盖这段竞态（含 Plan 遗漏成分）。影响面有界：Schedule 的起点由 `notify_one` 时刻前移到登记时刻（区间略长，`checked_duration_since` 兜底为 0），`flush_was_idle` 的采样点同样前移；spec 只要求「Schedule 允许为 0」且不断言精确区间，Acceptance 的断言是 `Schedule ≤ wait_total`，仍成立；`flush_locked` 提前取走等待者不改变唤醒顺序（仍在写盘之后）、不改变 `write_batch` 失败仍唤醒的合同、不改变单飞（`flush_gate` 未变），也不影响 SQL 结果。归类为 Act 偏离，非实质，不阻塞。
+   - Act 另列的偏差 ⑤（Io 只包 `write_batch`）与 ⑥（Queue 的测量窗口与减项）与 design D5 的表一致，不构成偏差。
+7. 非阻塞 Minor finding（记录，不返工）：
+   1. **`Queue > 0` 的严格断言依赖唤醒延迟**：按实现，Queue = `notified().await` 实测耗时 − Io − Schedule；其中 Io 与 Schedule 之和覆盖到「刷盘回写并发出通知」的时刻，余量取决于等待任务被唤醒并再次轮询的延迟（实测为微秒量级），不是结构性下界。Plan 的 Verification 本就规定「Lock / Queue / Io 非零」，实现与之一致；风险是 T4 的一次性全量中该用例可能出现偶发失败。公共规则 › 验证 只允许一次失败后整批复核，M19 第 7 条也只允许失败批再跑一次——已写入 Iteration 003 的 Risks。
+   2. 组提交把整段 Io 写给每个被释放的等待者（跨语句相加会放大）——spec 与 design D5 已登记该口径，本轮无任何断言把跨语句的 Io 相加。
+   3. `Schedule` 经常为 0（刷盘循环正忙或通知到达时循环尚未停回 select）——spec 明确允许。
+   4. 两处既有 rustfmt 漂移（`tests/diagnostics_facade_test.rs:216`、`tests/session_lifecycle_test.rs:15`）非本轮引入；Plan 独立跑 `cargo fmt --check` 复核，输出恰为该两处，本轮触碰的 6 个文件 rustfmt 干净。
+   5. Iteration 001 遗留的两条 Minor finding（错误路径新增旧表输出、需求 5 的 spec 子句缺断言）按上一轮 Review 的 accepted 结论保持不返工。
+   6. Act Response 的章节标题为中文变体（实际改动 / 与计划的偏差 / 自检发现与修复 / 验证命令与实际结果 / 未解决问题）而非 Cycle 模板的英文名——语义项一一对应，属平台适配，不构成偏差。
+
+**Acceptance Gaps**
+
+None。Acceptance 的 6 个证明点与 `recovery_bounded_read_test` 全部由当前代码与 GREEN 测试覆盖；Preserve 与 Forbidden 逐条核对成立；三条偏差中两条为 Plan 事实错误、一条为不影响验收的机制偏离。
+
+**Evidence**
+
+- diff：`git diff 5d0d212..c767973`（本轮产品代码改动：+1090/−41，10 个文件）与 `git diff e69c7e2..c767973`（merge-base 到 HEAD 的完整分支：+3622/−41，18 个文件）。
+- 验证沿用 Act Response（来源：Iteration 002 Cycle 000 的「验证命令与实际结果」；Act 提交后 HEAD 未再前进、工作区 clean、被覆盖代码未变化，无公共规则 › 验证 列出的重跑触发条件，Plan 未重跑已通过的验证）：`cargo test --offline --test diagnostics_wait_test` 退出码 0、6 passed / 0 failed；`cargo test --offline --test recovery_bounded_read_test` 退出码 0、6 passed / 0 failed；`cargo test --offline --test diagnostics_statement_test -- --test-threads=1` 退出码 0、7 passed / 0 failed；`cargo test --offline --test diagnostics_facade_test` 退出码 0、10 passed / 0 failed；`cargo test --offline --lib wal::` 17 passed / 0 failed；`--test wal_buffer_test --test wal_integration_test --test file_storage_io_test --test storage_test` 5 + 2 + 21 全 0 failed；`--test concurrent_test --test checkpoint_test --test free_page_lifecycle_test --test wal_auto_checkpoint_test` 2 + 10 + 12 + 11 全 0 failed。用例数与本轮实际文件核对一致（wait 6 / recovery 6 / statement 7 / facade 10）。
+- Plan 独立执行的只读检查：`cargo fmt --check`（输出恰为上述两处既有漂移）；`src/database.rs:411`/`:454` 与 `src/storage/data/table_manager.rs:2323`（`rebuild_free_page_set` 只在读写打开时执行并走遍活页）；`tests/diagnostics_facade_test.rs:30-52`（5 处 `StageSample` 字面量）；`src/diagnostics.rs` 的 import 清单（只有 `std` 与 `tokio`）；全仓 `grep`（`StageStat` / `TraceSample` / `Summary` 无仓库内字面量构造，新增 `waits` 字段不破坏既有测试）；`src/pipeline.rs:1495-1651` 的 `stage_timers` 与 open / close 配对；`src/wal/buffer.rs:132-190` / `:218-238` / `:330-407`（登记、刷盘循环、单飞与先回写后唤醒）；`src/storage/file_storage.rs:514-534`（守卫位置与 `crypto` 分支的关系）。
+- Mode: none；无 required Evidence，未因目录不存在提出问题。
+
+**Follow-up Decision**
+
+Acceptance 已满足且无阻塞项；六条 Minor finding 均不阻塞（其一为断言强度对唤醒延迟的依赖，已在 Iteration 003 的 Risks 中给出处理口径；其余为已登记口径、允许值、既有格式化基线与上一轮遗留），按 iteration-planning › Review 分类判 `accepted`。Act Response 报告的 Issue 候选为 None，本轮独立核对也未发现当前 change 范围外的新实质缺陷。Iteration 003（T4 收尾全量）按 Map 展开——它是本 change 的最后一轮。
+
+**Issue 候选判定（只报告，不登记）**
+
+- 本轮无新候选：等待归属、等待口径与并发归属的实现均在本 change 范围内，未发现范围外的实质缺陷。
+- 已登记的 ISS42（`RTSQL_PROFILING` 对 CLI 主命令无效）与 ISS43（import 自动建表的注释与隐式主键语义相反）已在主仓库登记，两者的判定沿用 Iteration 001 的结论：均属变更范围外的既有行为，不在本 change 承载。ISS42 的修复会新增「CLI 主命令接入旧计时表」的产品语义（并与 Iteration 001 已批准的 Preserve 项「`record_time` 在旧 scope 外仍 panic」相抵触），属产品决策，需用户裁定；ISS43 是注释面且已在主分支以轻量修改修正。处置留给用户与后续流程，本 change 不追加承载轮次。
+
+**Iteration Plan Update**
+
+None（accepted，无 replan）。
+
+**Next Cycle**
+
+None（当前 Cycle 无需修复，accepted 无返工）。
+
+**Next Iteration**
+
+`openspec/changes/2026-10-28-ms44-unified-diagnostics/iterations/003-final-regression/000-initial.md`

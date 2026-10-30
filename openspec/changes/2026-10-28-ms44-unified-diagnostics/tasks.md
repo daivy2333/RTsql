@@ -7,12 +7,12 @@
 - 需求与 BDD：completed。场景草图在 `proposal.md`。
 - 000：已完成——`iterations/000-diagnostics-facade/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论与后继）。
 - 001：已完成——`iterations/001-statement-phases/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论、Minor finding 与两个 Issue 候选的判定）。
-- 002：当前 Cycle 是 `iterations/002-wait-attribution/000-initial.md`。Act 已实施（T3），Act Response 状态为 `reported`，等待 Plan Review。
-- 003：只列在下面的 Iteration Plan 中，目录未创建。
+- 002：已完成——`iterations/002-wait-attribution/000-initial.md` 的 Review Result 为 `accepted`（Plan Review 已记录结论、三条偏差的归类与 Minor finding）。
+- 003：当前 Cycle 是 `iterations/003-final-regression/000-initial.md`。Plan Context 为 `ready`，等待 Act。003 是本 change 的最后一轮（收尾全量）。
 - Persisted Evidence：none。
 - 无跳过项。
 
-本 goal 覆盖 M20 的「不在当前 change 内扩范围修复」，仅限本 change 实施中新发现的实质缺陷。登记后由后续派发在当前 change 增加一轮 Iteration。本计划不预建那一轮。
+本 goal 覆盖 M20 / M23 的缺陷承载：实施中新发现的实质缺陷登记为 Issue（ISS42 / ISS43，已在主仓库登记，均属变更范围外的既有行为）。ISS42 的修复需产品裁定（与 Iteration 001 已批准的 Preserve 项「`record_time` 在旧 scope 外仍 panic」相抵触），按 M23 停机回报用户决定；ISS43 是注释面，已在主分支以轻量修改修正。两者都不在本 change 内承载，003 之后不再排轮。
 
 ## 全部任务与归属
 
@@ -20,8 +20,8 @@
 |---|---|---|---|---|
 | T1 | 000 | 无 | 门面、三项配置、上限和父子耗时可在不改语句结果的前提下读回 | accepted |
 | T2 | 001 | 000 accepted | 语句阶段、旧计时表、失败和取消接上；SQL 结果不变 | accepted（Cycle 000 Review Result accepted） |
-| T3 | 002 | 001 accepted | 等待类别、并发归属、文件页 I/O、三种开销；`[recovery]` 仍在 | 已实施（Cycle 000 reported，待 Review） |
-| T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始 |
+| T3 | 002 | 001 accepted | 等待类别、并发归属、文件页 I/O、三种开销；`[recovery]` 仍在 | accepted（Cycle 000 Review Result accepted） |
+| T4 | 003 | 002 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始（Cycle 000 Plan Context ready，等待 Act） |
 
 ## 1. 诊断门面（Iteration 000）
 
