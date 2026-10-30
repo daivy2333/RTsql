@@ -7,7 +7,7 @@ Gate 1 为 PASS，批准来自本次 goal 指令「除了 iss42，其他的都�
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`；规格 delta 在 `specs/unified-diagnostics/spec.md`。
-- 000：计划就绪——`iterations/000-initial/000-initial.md` 的 Plan Context 状态 `ready`，Gate 2 PASS。等待 `openspec-act` 执行 T1、T2。
+- 000：实施完成——Act 已执行 T1、T2（Gate 3 与 Gate 4 通过；定向验证退出码 0、failed 0）。等待 `openspec-plan` Review 当前 Cycle。
 - 001：收尾全量，只保留在下方 Iteration Plan，未展开目录。
 - Persisted Evidence：none。
 - 跳过项：无。
@@ -16,13 +16,13 @@ Gate 1 为 PASS，批准来自本次 goal 指令「除了 iss42，其他的都�
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 旧表只在走到执行阶段的返回路径输出；执行阶段之前不输出；表算法、错误文本与 SQLSTATE 不变 | pending |
-| T2 | 000 | T1 | 权威规格「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句由测试锁定 | pending |
+| T1 | 000 | 无 | 旧表只在走到执行阶段的返回路径输出；执行阶段之前不输出；表算法、错误文本与 SQLSTATE 不变 | completed |
+| T2 | 000 | T1 | 权威规格「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句由测试锁定 | completed |
 | T3 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | pending |
 
 ## 1. 旧表输出时机收敛（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-initial/000-initial.md` 的 T1 Task Definition 执行。先写 RED 断言，再改实现。本 change 的 delta 规格（`specs/unified-diagnostics/spec.md`）已随 change 产物就位，改实现时不重写规格正文。
+- [x] 1.1 T1：按 `iterations/000-initial/000-initial.md` 的 T1 Task Definition 执行。先写 RED 断言，再改实现。本 change 的 delta 规格（`specs/unified-diagnostics/spec.md`）已随 change 产物就位，改实现时不重写规格正文。
 
 当前行为：`RTSQL_PROFILING` 已设置时，`execute_inner` 在 `execute_staged` 返回后**无条件**调用 `print_timings`（`src/pipeline.rs:1456-1458`），因此解析失败、规划失败、多语句拒绝、占位符编号失败、参数个数不匹配、无语句这些执行阶段之前的失败路径也会打一张只含已完成阶段的旧表。
 
@@ -40,7 +40,7 @@ Verification：`cargo test --offline --test diagnostics_statement_test -- --test
 
 ## 2. 解析阶段断言补强（Iteration 000）
 
-- [ ] 2.2 T2：给 `tests/diagnostics_statement_test.rs` 的 `parse_error_keeps_error_text_and_summary_fails` 补上权威规格场景「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句断言。只加断言，不改产品代码，不改该测试已有的 severity、错误文本与 SQLSTATE 断言。
+- [x] 2.2 T2：给 `tests/diagnostics_statement_test.rs` 的 `parse_error_keeps_error_text_and_summary_fails` 补上权威规格场景「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句断言。只加断言，不改产品代码，不改该测试已有的 severity、错误文本与 SQLSTATE 断言。
 
 当前行为：该测试只断言 severity 为 Error、错误文本逐字节相同、SQLSTATE 相同；规格写明的「含有解析阶段」没有断言锁定。
 

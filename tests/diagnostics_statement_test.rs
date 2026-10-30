@@ -212,6 +212,9 @@ async fn parse_error_keeps_error_text_and_summary_fails() {
         Severity::Error,
         "a failed statement ends its record as Error"
     );
+    // 权威规格场景「解析失败留下失败摘要且错误不变」的「含有解析阶段」子句：
+    // 解析失败语句的摘要含 parse 阶段（`stage_stat` 在阶段缺失时 panic）。
+    stage_stat(&summaries[0], Module::Pipeline, "parse");
 }
 
 /// 锚点：活跃事务集合中出现「已记录版本数 ≥ 2」的事务（先例
@@ -454,6 +457,157 @@ fn legacy_profiling_table_follows_env_var() {
     assert!(
         !out.stderr.contains("Time (µs)"),
         "no profiling table without RTSQL_PROFILING: {}",
+        out.stderr
+    );
+}
+
+/// 需求「既有计时出口和 stderr 告警保持」/ 场景「执行阶段之前的失败路径不
+/// 输出旧的三段计时表」：`RTSQL_PROFILING` 已设置时，执行阶段之前失败的
+/// 语句不输出旧的三段计时表。
+///
+/// 观察面是 CLI 真实子进程的 stderr（库入口的 `eprintln!` 被测试框架捕获，
+/// 进程内读不回）。失败形状取 `rtsql import` 的自动建表 DDL 规划期拒绝
+/// （重复列名）——失败发生在 execute 阶段之前。用例先用一次成功导入证明
+/// stderr 观测面有效（该次导入打出旧表）。
+#[test]
+fn legacy_table_absent_before_execute_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("legacy_absent.db");
+    let db_str = db_path.to_str().unwrap().to_string();
+
+    let out = wait_cli(spawn_cli(dir.path(), &["new", &db_str], None));
+    assert_eq!(out.code, Some(0), "rtsql new must succeed: {}", out.stderr);
+
+    // 正例：成功导入 → 旧表出现（本次 stderr 观测面有效）。
+    let csv_ok = dir.path().join("ok.csv");
+    std::fs::write(&csv_ok, "id\n1\n").unwrap();
+    let out = wait_cli(spawn_cli(
+        dir.path(),
+        &[
+            "import",
+            db_str.as_str(),
+            "t_ok",
+            csv_ok.to_str().unwrap(),
+            "--csv",
+        ],
+        Some("1"),
+    ));
+    assert_eq!(
+        out.code,
+        Some(0),
+        "import must succeed: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Time (µs)"),
+        "the successful import prints the legacy table: {}",
+        out.stderr
+    );
+
+    // 反例：重复列名 → 自动建表 DDL 规划期失败（execute 阶段之前）→ 无旧表。
+    let csv_bad = dir.path().join("bad.csv");
+    std::fs::write(&csv_bad, "id,id\n1,2\n").unwrap();
+    let out = wait_cli(spawn_cli(
+        dir.path(),
+        &[
+            "import",
+            db_str.as_str(),
+            "t_bad",
+            csv_bad.to_str().unwrap(),
+            "--csv",
+        ],
+        Some("1"),
+    ));
+    assert_eq!(
+        out.code,
+        Some(3),
+        "the auto-create DDL failure exits 3: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("duplicate column name"),
+        "the failure text is unchanged: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("Time (µs)"),
+        "a failure before the execute stage prints no legacy table: {}",
+        out.stderr
+    );
+}
+
+/// 需求「既有计时出口和 stderr 告警保持」/ 场景「失败路径也输出旧的三段
+/// 计时表」（执行阶段被触达的那一半）：进入执行阶段后失败的语句仍输出
+/// 旧表。
+///
+/// 失败形状取预置同键行后 `rtsql import` 的逐行 INSERT 执行期拒绝
+/// （Duplicate key）——失败发生在 execute 阶段内。该次导入只执行一条语句，
+/// 所以子进程 stderr 里的这张表只能是失败的那条 INSERT 打出的。
+#[test]
+fn legacy_table_present_on_execute_stage_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("legacy_present.db");
+    let db_str = db_path.to_str().unwrap().to_string();
+
+    let out = wait_cli(spawn_cli(dir.path(), &["new", &db_str], None));
+    assert_eq!(out.code, Some(0), "rtsql new must succeed: {}", out.stderr);
+
+    // 主命令不经语句管道（不在旧表的观察面内）：只用来预置同键行。
+    let out = wait_cli(spawn_cli(
+        dir.path(),
+        &[db_str.as_str(), "CREATE TABLE t (id INT PRIMARY KEY)"],
+        None,
+    ));
+    assert_eq!(
+        out.code,
+        Some(0),
+        "CREATE TABLE must succeed: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    let out = wait_cli(spawn_cli(
+        dir.path(),
+        &[db_str.as_str(), "INSERT INTO t VALUES (1)"],
+        None,
+    ));
+    assert_eq!(
+        out.code,
+        Some(0),
+        "the pre-seed INSERT must succeed: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+
+    let csv = dir.path().join("dup.csv");
+    std::fs::write(&csv, "id\n1\n").unwrap();
+    let out = wait_cli(spawn_cli(
+        dir.path(),
+        &[
+            "import",
+            db_str.as_str(),
+            "t",
+            csv.to_str().unwrap(),
+            "--csv",
+        ],
+        Some("1"),
+    ));
+    assert_eq!(
+        out.code,
+        Some(3),
+        "the duplicate key import exits 3: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Duplicate key"),
+        "the failure text is unchanged: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Time (µs)"),
+        "a failure inside the execute stage still prints the legacy table: {}",
         out.stderr
     );
 }

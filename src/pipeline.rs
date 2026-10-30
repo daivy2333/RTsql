@@ -1450,12 +1450,9 @@ async fn execute_inner(
         params,
         profiling,
         profiling || statement_scope.is_some(),
+        total_start,
     )
     .await;
-
-    if let Some(start) = total_start {
-        print_timings(start.elapsed());
-    }
 
     // MS44 Iter001（T2）：Result 确定后结束根作用域形成摘要；按会话 Detail
     // 渲染本语句摘要，非空写一次 stderr（design D2）。默认配置（采集全关）
@@ -1484,12 +1481,19 @@ async fn execute_inner(
 /// MS44 Iter001（T2）：`stage_timers`（旧开关或会话采集任一打开）为真时每段
 /// 取一次测量——同一次测量同时喂旧表（`record_time`，仅旧开关打开时调用）
 /// 与诊断阶段上报（绑定不存在时 no-op）：每个阶段只测一次。
+///
+/// 旧表打印（`total_start` 计时窗口的起点在缓存查找之前，与基点一致）随
+/// 返回路径走：缓存命中路径在 `execute_stage` 返回后打印，未命中路径在
+/// execute 阶段之后打印——execute 成功与失败都打印。执行阶段之前的六个
+/// 早退（parse 失败、多语句拒绝、无语句、占位符编号失败、参数个数不匹配、
+/// plan 失败）不打印。
 async fn execute_staged(
     database: &Database,
     sql: &str,
     params: &[Value],
     profiling: bool,
     stage_timers: bool,
+    total_start: Option<Instant>,
 ) -> std::result::Result<SqlOutcome, SqlError> {
     // Step 1: cache lookup (cache_hit_check 子指标保持)
     let cache_hit_check_start = if stage_timers {
@@ -1530,6 +1534,10 @@ async fn execute_staged(
         let response = execute_stage(database, plan, profiling).await;
         if let Some(start) = execute_start {
             close_stage("execute", start.elapsed());
+        }
+        // 旧表：缓存命中路径在 execute 返回后打印（基点位置）。
+        if let Some(start) = total_start {
+            print_timings(start.elapsed());
         }
         return response;
     }
@@ -1647,6 +1655,11 @@ async fn execute_staged(
             record_time("execute", elapsed);
         }
         close_stage("execute", elapsed);
+    }
+    // 旧表：未命中路径在 execute 阶段之后打印（基点位置）——execute 成功
+    // 与失败都打印；执行阶段之前的早退不经此处。
+    if let Some(start) = total_start {
+        print_timings(start.elapsed());
     }
     response
 }

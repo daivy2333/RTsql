@@ -190,9 +190,74 @@ PASS。Plan 审查 11 项逐条通过：规格 delta 与权威正文一致且 `o
 
 ## Act Response
 
-- Status: 尚未由 Act 填写
+- Status: reported
 
-尚未执行。
+### 实际改动
+
+| 文件 | 符号 | 改动 |
+|---|---|---|
+| `src/pipeline.rs` | `execute_inner`（1425） | 删除「`execute_staged` 返回后无条件 `print_timings`」；`total_start` 的创建点不动，改为随 `execute_staged` 调用传入 |
+| `src/pipeline.rs` | `execute_staged`（1490） | 新增参数 `total_start: Option<Instant>`；新增两处旧表打印——缓存命中路径在 `execute_stage` 返回后（1538-1541）、未命中路径在 execute 阶段之后（1659-1663）。执行阶段之前的六个早退不经过这两处 |
+| `tests/diagnostics_statement_test.rs` | `legacy_table_absent_before_execute_stage`（新增） | CLI 子进程：执行阶段之前失败（自动建表 DDL 规划期拒绝——重复列名）→ stderr 不含 `Time (µs)`；同用例先做一次成功导入证明 stderr 观测面有效 |
+| `tests/diagnostics_statement_test.rs` | `legacy_table_present_on_execute_stage_failure`（新增） | CLI 子进程：执行阶段内失败（预置同键行后导入触发 `Duplicate key`）→ stderr 仍含 `Time (µs)`，守「执行阶段失败仍输出」这一半 |
+| `tests/diagnostics_statement_test.rs` | `parse_error_keeps_error_text_and_summary_fails`（断言在 215-217） | 补 `stage_stat(&summaries[0], Module::Pipeline, "parse")` 断言，锁定「含有解析阶段」子句 |
+
+产品改动只落在旧表的打印点：`src/profiling.rs` 零改动（表渲染与 `record_time` 的 scope 外 panic 行为未触碰）；`record_time` 的调用点与 `profiling` 布尔参数传递不变；`SqlError` 构造路径不变（错误文本与 SQLSTATE 逐字不动）；诊断（新摘要）的采集、渲染与 stderr 时序不变。
+
+### 与计划的偏差（Deviations from Plan）
+
+1. **`total_start` 的传递方式（实施细节，Plan 未指定）**：Plan 只写「把旧表的打印改回到执行阶段的返回路径」，未定打印点如何拿到外层计时起点。实现选择把 `execute_inner` 里既有的 `total_start` 作为参数传给 `execute_staged`（创建点不动 ⇒ 计时窗口起点仍在缓存查找之前，与基点一致），而没有在 `execute_staged` 内重建起点，也没有引入「是否打印」标志（design D1 已否决后者）。可观察行为与基点一致。
+2. **delta 规格未改写**：Plan 已把 delta 写进 change 产物（Task Definition 的 Forbidden 项写明「delta 已就位，不在 Act 改写」）。Act 逐条核对 delta 与实现一致（输出时机段落、两个失败场景的适用范围），确认无需改动，未改写；`openspec validate --strict` 通过。
+3. **手工核对场景 C 的预置行**：手工核对时目标表已含 id=1 行，预置 INSERT 因主键冲突退出 3（主命令不经语句管道，本就不产生旧表）。判定不受影响——随后的导入仍触发执行期 `Duplicate key` 并打出恰好 1 张表。
+
+### 自检发现与处理
+
+| 项 | 发现 | 处理 |
+|---|---|---|
+| 格式 | `cargo fmt --check` 标出我新增测试中的一处数组字面量排版 | 已按 rustfmt 修正；本次触碰的两个文件现在 rustfmt 干净 |
+| 既有基线偏差 | `cargo fmt --check` 仍标出 `tests/diagnostics_facade_test.rs:216` 与 `tests/session_lifecycle_test.rs:15`（HEAD 即存在，本次未触碰） | 未改（Surgical Changes；与本 change 无关） |
+| lint | `cargo clippy --offline --lib --test diagnostics_statement_test` 只有 1 条 warning（`src/diagnostics.rs:396` redundant closure，既有） | 本次触碰的文件 0 条 warning；既有 lint 未改 |
+| 行为核对 | 三个场景的真实 CLI 运行结果与 Plan 记录的基点 `e69c7e2` 实测表逐行一致 | 无问题 |
+
+无 Critical / Important 问题，无遗留 Minor 问题；未引入操作标识字段、运行标识、内容哈希或任何判定层、专用 CLI、脚本、审计器。
+
+### Gate 记录
+
+- Gate 3（T1，GREEN 后）：requirement 与两个场景完整实现；计划列出的文件与符号全部处理；`src/profiling.rs` 与 `record_time` 调用面未破坏；先行测试符合任务类型（用例一 RED 证明目标行为、用例二防过度收敛）。通过。
+- Gate 3（T2，GREEN 后）：只加断言、零产品改动；既有 severity / 错误文本 / SQLSTATE 断言原样保留；断言强度与文件既有风格一致（`stage_stat` 缺失即 panic）。通过。
+- Gate 4：定向验证退出码 0、failed 为 0；完成声明基于当次真实运行。通过。
+
+### 验证命令与实际结果
+
+1. **RED（T1 先行测试）**：`cargo test --offline --test diagnostics_statement_test -- --test-threads=1`
+   → `test result: FAILED. 8 passed; 1 failed`；失败用例 `legacy_table_absent_before_execute_stage`，失败点是第 3 步「stderr 不含 `Time (µs)`」——当次 stderr 实际含一张表（parse / plan / cache_hit_check + `Total`）。同批 `legacy_table_present_on_execute_stage_failure` 通过（改前 GREEN，守另一半）。
+2. **GREEN（T1 实现后）**：同一命令 → `test result: ok. 9 passed; 0 failed`。
+3. **GREEN（T2 断言后 + rustfmt 修正后复跑）**：同一命令 → `test result: ok. 9 passed; 0 failed`（含既有 `legacy_profiling_table_follows_env_var`、`parse_error_keeps_error_text_and_summary_fails`）。
+4. **真实 CLI 运行核对**（被测二进制为 change worktree 的 `target/debug/rtsql`，HEAD `f0e36a5` + 本 Cycle 改动；`RTSQL_PROFILING=1`）：
+
+   | 场景 | 观测 | 基点 `e69c7e2`（Plan 记录） |
+   |---|---|---|
+   | 成功导入 1 行 | exit 0，stderr 2 张旧表 | exit 0，2 张旧表 |
+   | 自动建表 DDL 规划期失败（重复列名） | exit 3，stderr 0 张旧表，错误文本含 `duplicate column name` | exit 3，无旧表 |
+   | 逐行 INSERT 执行期失败（同键） | exit 3，stderr 恰好 1 张旧表，错误文本含 `Duplicate key` | exit 3，恰好 1 张旧表 |
+
+5. **规格**：`openspec validate 2026-10-30-diagnostics-legacy-table-error-path --strict` → `Change '2026-10-30-diagnostics-legacy-table-error-path' is valid`，退出码 0；`openspec validate --all --strict` → `Totals: 91 passed, 0 failed`。
+6. **全量**：本轮不跑（全量在 T3 / Iteration 001，M19 分批预算）。
+
+### Persisted Evidence
+
+None required（Plan 设定的模式为 `none`；命令、实际结果与修改清单已在本 Response 记录）。
+
+### Experience Candidates
+
+None。本轮未发现 change 范围外的实质缺陷：ISS42（`RTSQL_PROFILING` 对 CLI 主命令无效、scope 外 panic）按用户指令不承载、保持 open，本 change 未触碰 `src/profiling.rs`，也未让 CLI 主命令接入旧表；未产生新的可复用 Runbook 候选。
+
+### 未解决问题与需要用户决定的事项
+
+- **ISS42 保持 open**：按 goal 指令「除了 iss42，其他的都顺便做掉吧」，本 change 不承载其修复，也未改变其判定前提。
+- **全量回归待下一轮**：T3（Iteration 001）尚未执行，按 M19 分批串行跑一次；本 Cycle 不宣称全量通过。
+- **已知覆盖缺口（Plan 已记录，非本轮新增）**：解析失败等执行阶段之前的早退在库入口的 stderr 于本仓库测试框架内不可观察（libtest 捕获 `eprintln!`），因此该面由「打印点逐条对齐基点」保证，不由测试直接覆盖。
+- **无其它需要用户决定的事项**：本 Cycle 未扩大已批准范围，未修改已批准 Acceptance，未新增产品语义。
 
 ## Plan Review
 
