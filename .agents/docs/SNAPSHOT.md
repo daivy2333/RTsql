@@ -28,7 +28,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - **便捷**: one-shot CLI、12 个可见生命周期/分析子命令（`rtsql delete <db>` 删库：锁探测同窗口删除、伴生清理、逐文件报告、`--dry-run`；`rtsql checkpoint <db>` 显式落盘：WAL 截断 + checkpoint 位点推进、零工作明示 `no pending work` exit 0；`rtsql check <db>` 只读结构完整性校验：页 census/catalog/数据链/溢出链/三类索引树扫描、error 级损坏逐行报告页位置与语义 exit 1、info 级〔未引用溢出链、恢复后 tail 良性领先〕不改退出码、不修复不修改文件、`:memory:`/`--readonly` exit 2、pending WAL 经纯读恢复会话收敛后再 check、新建零行表即干净〔存量 0x00 head 打开不自愈、首次写入/TRUNCATE 自然转绿〕）；import 输入面（stdin `-` 通道、目标表缺失按 CSV 表头自动建表〔字段猜测 + CTAS 推导矩阵合并、冲突点名拒绝零副作用、首列隐式主键语义〕、`:memory:` import 豁免〔`--key` exit 2〕）；隐藏 shell 补全生成与本机安装脚本；锁等待预算可配置——`--busy-timeout <MS>` global flag/env `RTSQL_BUSY_TIMEOUT`/lib 三通道（默认 5000ms、显式 0 不额外等待、非法值 open 前 exit 2、flag 优先、`:memory:` 接受忽略、`delete` 探测永不等待），并发 one-shot 逐个原子完成；dump 数据链完整性预检（断链库 stderr 一行告警、rc 0 继续、stdout 纯 SQL 不受影响）；dump DDL 仅 INTEGER 主键列输出 `PRIMARY KEY`、仅 INTEGER 唯一列输出 `UNIQUE`（存量非 INT PK 与非 INT UNIQUE 表 dump→restore 往返可达）；主命令对缺失库显式拒绝（exit 1 + `rtsql new` 指引、零文件创建，创建通道收敛 `rtsql new`，lib 与生命周期子命令建库/拒绝语义不变）
 - **错误面可操作**: 不支持语句/表达式报错点名能力；PG 协议错误按类携带 SQLSTATE（0A000/42601/42P01/42703/42702/58000 兜底归类）；CLI 错误输出渲染 SQLSTATE（文本格式错误行尾 ` [SQLSTATE xxxx]`、`--format json` 错误对象 `sqlstate` 字段无分类时省略，退出码/文案/PG 面零变化）；计划期列解析显式化（未知投影列/未知排序键/列缺失点名）；恢复重放对「WAL 记录引用的表在 catalog 缺失」定向指因（点名表名与可能原因，打开拒绝与不跳过记录语义不变）
 - **高效**: 基于协程的异步 I/O、MVCC 无锁读、零拷贝页访问、DashMap 缓冲池；one-shot 只读会话零工作关闭整体跳过 checkpoint（无 WAL 追加且无脏页时，「close 即落盘」语义不变）
-- **统一分级诊断**: 会话内统一诊断门面（`Database::set_diagnostics` 下发配置 / `diagnostic_summaries` 读回摘要）——输出详细程度（`Detail::{Off, Summary, Full}`）、观察类别（`Module::{Pipeline, Wal, Storage, Index}`，默认全集）与采集内容（`Collect::{events, stats, trace}`）三项分开配置，输出详细程度不决定是否采集；未修改的会话配置三项采集全关、无摘要、不产生新的诊断 stderr。双上限（单条语句保留的事件与追踪样本默认 64 条，会话摘要默认只留最近 32 条）。语句阶段树：解析 / 规划 / 执行分列，实际提交记为执行的子阶段，语句总耗时取根阶段包含耗时而非父子相加，计划缓存命中不记解析与规划。等待类别 `Category::{Compute, Lock, Queue, Io, Schedule}`：未被等待包住的阶段时间记 Compute，内层等待不重复计入外层，同一次刷盘释放的每个提交各带该次刷盘的整段 Io。样本按同一次语句归属，刷盘任务上的样本只进该次提交的摘要，并发语句不互串；摘要只带自身 SQL 文本（超长截断），不含操作标识、运行标识或内容哈希字段。成功 / 失败 / 取消三种结局都结束记录并留下对应状态摘要。诊断只观察：SQL 结果、错误文本、SQLSTATE、取消后的行可见性与既有 stderr 告警（含 `[recovery]`）均不改变，诊断投递不在语句执行过程中写 stderr；`RTSQL_PROFILING` 的旧三段计时表只在走到执行阶段的返回路径输出，解析、规划等执行阶段之前的失败路径不输出该表
+- **统一分级诊断**: 会话内统一诊断门面（`Database::set_diagnostics` 下发配置 / `diagnostic_summaries` 读回摘要）——输出详细程度（`Detail::{Off, Summary, Full}`）、观察类别（`Module::{Pipeline, Wal, Storage, Index}`，默认全集）与采集内容（`Collect::{events, stats, trace}`）三项分开配置，输出详细程度不决定是否采集；未修改的会话配置三项采集全关、无摘要、不产生新的诊断 stderr。双上限（单条语句保留的事件与追踪样本默认 64 条，会话摘要默认只留最近 32 条）。语句阶段树：解析 / 规划 / 执行分列，实际提交记为执行的子阶段，语句总耗时取根阶段包含耗时而非父子相加，计划缓存命中不记解析与规划。等待类别 `Category::{Compute, Lock, Queue, Io, Schedule}`：未被等待包住的阶段时间记 Compute，内层等待不重复计入外层，同一次刷盘释放的每个提交各带该次刷盘的整段 Io。样本按同一次语句归属，刷盘任务上的样本只进该次提交的摘要，并发语句不互串；摘要只带自身 SQL 文本（超长截断），不含操作标识、运行标识或内容哈希字段。成功 / 失败 / 取消三种结局都结束记录并留下对应状态摘要。诊断只观察：SQL 结果、错误文本、SQLSTATE、取消后的行可见性与既有 stderr 告警（含 `[recovery]`）均不改变，诊断投递不在语句执行过程中写 stderr；`RTSQL_PROFILING` 已设置时，主命令把索引扫描的查询结果或既有 SQL 错误交回调用方，进入执行阶段的语句向 stderr 输出旧三段计时表，解析、规划以及 BEGIN、COMMIT、ROLLBACK、ATTACH 等未进入执行阶段的路径不输出该表；未设置该变量时主命令不输出该表
 - **读面代数完整**: OUTER JOIN 三态（LEFT/RIGHT/FULL，含非等值 ON 三值语义）、`SELECT DISTINCT`、`UNION [ALL]` / `INTERSECT` / `EXCEPT`（左结合、NULL 相等）、非递归 CTE（`WITH`，前向引用/列别名/遮蔽基表）、聚合扩展（`COUNT/SUM/AVG(DISTINCT …)` 真实去重、`group_concat`）、聚合嵌套值表达式（`SELECT MAX(id)+1`、`COALESCE(MAX(id),0)`、HAVING 完整表达式、聚合查询 ORDER BY 聚合键、常量项混排合法、显示名重名按注册输出正确解析）、`ORDER BY <输出别名>` 按输出列真实排序、FROM 表别名全子句面解析（自连接多别名 × SELECT/ON/WHERE/GROUP BY/聚合参数/ORDER BY，限定符归一化单点，未知限定符 `TableNotFound` 42P01 点名、三段限定仅 attach 复合键可达）；JOIN 基座 ORDER BY 限定键真实排序（含无 WHERE 形态与自连接同名列限定符精确解析）、JOIN 纯列清单输出列序 = SELECT 序、单 FROM ≥3 表左深等值链端到端可达（hash+hash/hash+NLJ 混合）、自连接等值 JOIN 正确配对与投影（两腿同侧 `InvalidQuery` 点名）、WHERE 标量子查询比较（非相关/相关语句级缓存、多行点名拒绝、零行 NULL 三值、JOIN 基座 WHERE 维持拒绝、谓词不下推）、SELECT 投影位标量子查询输出形状与请求一致、FROM 派生表内集合操作（IN/EXISTS 表达式子查询内维持拒绝）、无键基表（PK 列非 INT）JOIN/SemiJoin 行完整可见（Scan 枚举通道回退数据页走查，带主键表索引枚举零变化）、`NOT IN` NULL 三值折叠（外键 NULL 行与右集含 NULL 时不返回、右集空集全返回；IN/NOT EXISTS 通道不变）、TEXT 相关参数按真实值求值（含参树 owned 求值通道）、聚合派生表与聚合 CTE 外层列引用按 SELECT 清单名解析（键位别名生效）、碰撞形状（外层同名未别名 + 内层别名声明同表 + 基名限定引用）四面解析为外层相关参数（对齐 SQLite 别名遮蔽语义）
 - **差分与性质测试保护网**: rusqlite 跨引擎差分（语义一致子集双向对比、别名/派生表/等价谓词变换一致性、已知分歧白名单逐条带分类与规避——现余 1 条 NULL 排序位置已知差异）+ 结构性质三组（编码往返 / B-Tree 插删查 / 版本链可见性，固定种子可重现）；全部判定位于 `cargo test` 集合内、无框架外判定层
 - **跨库交互**: `ATTACH '<path>' AS <alias>` 会话注册（路径解析复用 `resolve_db_path`、独占 advisory 锁冲突 exit 4、自附加 flock 同 inode 拒绝、DETACH 豁免 I076）+ 两段限定名路由（`alias.table` 命中附加库、未命中扁平名回落零回归、三段列引用路由命中可用）+ SELECT 全形态跨库组合 + 附加库写入（DML 路由目标库事务/WAL/缓冲池绑定、每文件独立提交非原子、显式主库事务 0A000 源求值前拒绝、只读会话 25006 优先、全部退出路径统一关闭且关闭失败不撤销已提交、UPDATE/DELETE 无子查询执行能力保持既有边界；`INSERT INTO … SELECT` 主库/附加目标物化写入）+ 附加库 DDL/CTAS 附加目标计划期拒绝；`CREATE TABLE AS SELECT` 主库物化（列名取输出表头、类型推导矩阵、建表→`flush_all()`→插入崩溃一致性序、失败零副作用、LIKE/CLONE/混合形态/事务内点名拒绝）
@@ -85,7 +85,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 目录约定
 
 - 源码: `src/`
-- 集成测试: `tests/`（162 个 `tests/*.rs`；最近一次分批全量 15 批，第 1 批 `--lib --bins`，其后 162 个集成测试目标，每批退出码 0、failed 为 0，`--test` 对账无缺失、无多余、无重复；分批串行执行约束见 project-model M19）
+- 集成测试: `tests/`（163 个 `tests/*.rs`；最近一次分批全量 15 批，第 1 批 `--lib --bins`，其后 163 个集成测试目标，每批退出码 0、failed 为 0，`--test` 对账无缺失、无多余、无重复；分批串行执行约束见 project-model M19）
 - 单元测试: 各文件内 `#[cfg(test)]`
 - 基准测试: `benches/`（12 套：micro / concurrent / cache / scale / index_key_encoding / sqlite_compare / data_scan / wal_group_commit / tx_id / visibility / buffer_pool_concurrency / pipeline_stages）
 - OpenSpec: `openspec/`（行为规格 `openspec/specs/` 90 域）
@@ -109,7 +109,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - **分支**: master
 - **提交基线**: 56c6819d72ccc9fe5703da6db8fb526477e7b328
 - **ahead of origin**: 42
-- **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-10-30-diagnostics-legacy-table-error-path/`。
+- **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 90 个域。
 
@@ -121,7 +121,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - 参考: `.agents/memory/references.md` (Rxx)
 - 改进: `.agents/memory/improvements.md` (Ixx)
 - 任务与路线: `.agents/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-10-30-diagnostics-legacy-table-error-path/`）
+- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-11-03-ms45-main-command-profiling/`）
 - Legacy migration carrier: `.agents/legacy/2026-08-25-openspec-init-migration/`
 
 ## 行为规格语料（90 域，权威以 `openspec/specs/` 为准）
