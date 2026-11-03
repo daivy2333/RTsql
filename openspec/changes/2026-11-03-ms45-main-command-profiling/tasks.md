@@ -17,12 +17,12 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 变量已设置时，主命令的索引扫描不再中止，进入执行阶段的语句输出旧三段表；未设置变量、未进入执行阶段、import 与统一诊断输出口径保持 | 未开始 |
+| T1 | 000 | 无 | 变量已设置时，主命令的索引扫描不再中止，进入执行阶段的语句输出旧三段表；未设置变量、未进入执行阶段、import 与统一诊断输出口径保持 | 完成 |
 | T2 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | 未开始 |
 
 ## 1. 主命令三段表（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-main-command-profiling/000-initial.md` 的 T1 Task Definition 执行。先写 `tests/cli_main_profiling_test.rs` 并看到 RED，再改 `src/cli/mod.rs` 的 `run_sql`。规格 delta 已在本变更里，实施时不改 `openspec/specs/` 的权威正文。
+- [x] 1.1 T1：按 `iterations/000-main-command-profiling/000-initial.md` 的 T1 Task Definition 执行。先写 `tests/cli_main_profiling_test.rs` 并看到 RED，再改 `src/cli/mod.rs` 的 `run_sql`。规格 delta 已在本变更里，实施时不改 `openspec/specs/` 的权威正文。
 
 当前行为：变量已设置时，主键等值与二级索引等值会在 `record_time` 处中止进程；没有索引点查的语句能结束，但没有旧表。变量未设置时不打表，结果与现在相同。import 已有旧表。
 

@@ -168,6 +168,57 @@ Gate 2: PASS
 
 ## Act Response
 
+Status: reported
+
+`run_sql` 在 `RTSQL_PROFILING` 已设置时，为每条进入 plan 与 execute 的语句建立 `with_profiling_scope`，execute 返回后调用现有的 `print_timings`。变量未设置时不取 `Instant`，不进入 scope，不打表。
+
+### 改动
+
+- `src/cli/mod.rs` 的 `run_sql` 开头读一次 `is_profiling_enabled`。整段 SQL 仍只调用一次 `parse_stage`。解析失败仍返回 `Parse error:` 与空 SQLSTATE，不建 scope，不打表。
+- ATTACH 与 BEGIN / COMMIT / ROLLBACK 的分派保持原样。
+- 其余语句在变量已设置时，scope 包住该语句的 plan 与 execute。`plan_stage_routed` 传入 `true`。事务外的 `execute_stage_routed` 传入 `true`。事务内仍调用 `execute_stage_in_tx_routed`。
+- plan 返回错误时不调用 `print_timings`，仍走 `sql_failure_status`。execute 返回后，无论成败，在同一 scope 里用这一次解析的耗时记下 `parse`，用该语句的 plan 与 execute 耗时记下 `plan` 和 `execute`，再 `print_timings`。传给它的 `Total` 是解析耗时加上从 `plan_stage_routed` 调用前到 execute 返回的墙钟。然后才走原来的 stdout 渲染或 `sql_failure_status`。每条语句各用一个 scope。
+- 新增 `tests/cli_main_profiling_test.rs`，10 个子进程用例。准备步骤移除 `RTSQL_PROFILING`，观察步骤显式设置或移除。
+- 本变更 `tasks.md` 的 T1 标为完成。
+
+### 偏差
+
+缺表用例断言 `Table 'missing' not found` 与 `42P01`。改前 stderr 是 `Table 'missing' not found: table not found: missing`，其中没有连续子串 `Table not found`。按实际文本断言后，该用例在改 `run_sql` 之前通过，错误文本未改。
+
+### 自检
+
+`execute` 与 `Total` 的取样曾落在 `record_time` 之后。已改为 execute 返回当时取样，再 `record_time` 和 `print_timings`。主命令定向测试在这次修改后重跑通过。无遗留 Minor。Gate 3 通过。Gate 5 未发生。
+
+### 验证
+
+改 `run_sql` 之前：
+
+```text
+cargo test --offline --test cli_main_profiling_test -- --test-threads=1
+```
+
+退出码 101。6 failed，4 passed。失败用例是主键扫描、二级索引扫描、`COUNT(*)`、重复键、显式事务、两条语句。通过的是未设置变量、解析失败、缺表、只 ATTACH。
+
+```text
+cargo test --offline --test diagnostics_statement_test -- --test-threads=1
+```
+
+退出码 0。0 failed，9 passed。
+
+`run_sql` 接上打表并 `rustfmt` 之后，诊断命令再跑一次：退出码 0，0 failed，9 passed。随后只把耗时取样移到 execute 返回当时。这条改动不经过 import 或诊断输出，诊断结果沿用这一轮。主命令命令重跑：退出码 0，0 failed，10 passed。
+
+### Persisted Evidence
+
+None required.
+
+### Experience Candidates
+
+None
+
+### 未解决
+
+无
+
 ## Plan Review
 
 - Review Result: pending
