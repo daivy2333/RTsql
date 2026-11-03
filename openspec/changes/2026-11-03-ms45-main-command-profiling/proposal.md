@@ -77,7 +77,8 @@ MS45 把「主命令是否输出这张表」留到需求批准时裁定。本次
 | S7 | Sad | 变量已设置；主键行已存在 | 主命令再次插入同一主键 | 退出码 3，stderr 含 `Execution error: Duplicate key` 且错误对象无 sqlstate；同时有这张表 | 执行期错误被吃掉，或不再打表 |
 | S8 | 组合 | 变量已设置；同 S1 的表 | 主命令一次执行 `BEGIN`、主键等值 `SELECT`、`COMMIT` | 退出码 0，stdout 有该行；stderr 恰好一张表，含三段 | 事务内索引扫描仍中止，或 BEGIN/COMMIT 各打一张表 |
 | S9 | 组合 | 变量已设置；同 S1 的表 | 主命令先主键等值 `SELECT`，再 `SELECT COUNT(*)` | 退出码 0；两张表都有三段；后一张没有 `index_manager_search` | 两句共用一张表，或子指标串到后一句 |
-| S10 | 兼容 | 变量已设置 | `rtsql import` 成功导入 | stderr 仍含 parse、plan、execute；统一诊断默认配置下不出现新的诊断输出口径 | 为了主命令改动 import 或诊断摘要 |
+| S10 | 兼容 | 变量已设置；另一个库已经创建 | 主命令只执行一条 `ATTACH` | 退出码 0；stderr 没有 `Time (µs)` | 不进入执行阶段的语句也打表 |
+| S11 | 兼容 | 变量已设置 | `rtsql import` 成功导入 | stderr 仍含 parse、plan、execute；统一诊断默认配置下不出现新的诊断输出口径 | 为了主命令改动 import 或诊断摘要 |
 
 ## 回滚
 

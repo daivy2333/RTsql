@@ -82,6 +82,13 @@ import 路径在该变量已设置时 SHALL 仍按既有规则输出这张表。
 - **THEN** 退出码为 0，stderr 含两张三段计时表，两张都有 parse、plan、execute
 - **AND** 后一张表不含 `index_manager_search`
 
+#### Scenario: 主命令只执行 ATTACH 时不输出三段表
+
+- **GIVEN** `RTSQL_PROFILING` 已设置，主库和另一个已创建的库都在
+- **WHEN** 主命令只执行一条把另一个库附上来的 `ATTACH`
+- **THEN** 退出码为 0
+- **AND** stderr 不含 `Time (µs)`
+
 #### Scenario: 导入路径仍输出三段表
 
 - **GIVEN** `RTSQL_PROFILING` 已设置，会话诊断配置保持默认
