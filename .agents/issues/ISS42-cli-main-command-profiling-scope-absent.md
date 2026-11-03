@@ -1,6 +1,6 @@
 # CLI 主命令路径未建立 profiling scope：`RTSQL_PROFILING` 无三段计时表，索引扫描查询 panic
 
-- Status: open
+- Status: closed
 - Filed: 2026-10-30
 - Source: Act Response 的 Issue 候选 1 与「与计划的偏差（Deviations from Plan）」第 1 条，`openspec/changes/2026-10-28-ms44-unified-diagnostics/iterations/001-statement-phases/000-initial.md`（Act Response Status `reported`；该 change 尚未归档，位于 worktree `/home/daivy/projects/RTsql-changes/2026-10-28-ms44-unified-diagnostics`，主仓 `openspec/changes/` 下无此目录）；Recorder 资格核验时在同一入口补证 panic 表现
 - Environment: WSL2（Linux 6.18.40.1-microsoft-standard-WSL2 x64）；被测二进制为 change worktree `/home/daivy/projects/RTsql-changes/2026-10-28-ms44-unified-diagnostics` 的 `target/debug/rtsql`（工作树 HEAD `5d0d212`，构建产物时间 2026-10-30 18:43）；主仓 master `3686a05` 无构建产物，master 同构性由代码比对确认，未在 master 实跑
@@ -52,6 +52,7 @@
   - 三段表部分（主命令形态是否输出旧表）属产品决策：`openspec/specs/pipeline-stage-decomposition/spec.md` 的「三段顶层计时观测」未把入口写死，需产品侧决定主命令是否接入旧表；若决定接入，可与 MS44 的统一诊断门面一并处理（该 change 的 `proposal.md` 需求 8 只要求「`RTSQL_PROFILING` 旧表保持」，已在 import 入口验证）。
 - 2026-10-30 登记。Status 为 open。任务列表尚未指向本条。
 - 2026-10-30 当前状态：**待用户裁定，未在任何变更内承载**。该 Cycle 的 Plan Review（Iteration 001，Review Result `accepted`）已把本候选独立复核为变更范围外的既有行为，判「不在本 change 承载」——修复需要新增「CLI 主命令接入旧计时表」的产品语义，超出 MS44 已批准范围，属产品决策。另有一处约束冲突需先裁定：MS44 的 Preserve 项写明「`src/profiling.rs` 零改动；`record_time` 仍只在旧 scope 内调用（scope 外 panic 条件未变）」（同 Review 的 Preserve 核对第 3 条），因此让 `record_time` 具备 scope 安全性、或让 CLI 主命令补 scope，都会改动本 change 已批准的 Preserve 语义；是否解除该 Preserve 由用户裁定后再决定承载方式（另起 change 或纳入后续里程碑）。本条保持 open，不在本流程内修复、也不在本流程内关闭。
+- 2026-11-03 关闭。Status 为 closed。处置指针：fixed → openspec/changes/archive/2026-11-03-ms45-main-command-profiling/。`RTSQL_PROFILING` 已设置时，主命令不中止；进入执行阶段的语句输出旧三段表；未设置时不输出该表。预编译语句不在该次验收内。`run_sql` 在该变量已设置时，对该语句的 plan 与 execute 调用 `with_profiling_scope`，并在 execute 返回后输出旧表；plan 返回错误时不输出该表。未设置时不调用 `with_profiling_scope`。
 
 ## 证据
 
@@ -61,3 +62,4 @@
 - 运行观察（2026-10-30，Linux x86_64，change worktree `5d0d212` 的 `target/debug/rtsql`）：见「事件记录」四条命令与实际输出。
 - 变更范围比对：`git diff master -- src/profiling.rs src/executor/ src/cli/` 输出为空；`git diff master -- src/pipeline.rs` 的改动限于 `execute_with_params` / `execute_inner` / 新增 `execute_staged`。master 为 `3686a05`，change 分支为 `5d0d212`。
 - 未知项：主命令形态「应当」输出旧表这一点，规格文本与产品意图均未写明；崩溃后数据库文件完整性未检查；`PreparedStatement::execute` 路径的 panic 未实跑。
+- 2026-11-03 关闭所依据的位置：`openspec/changes/archive/2026-11-03-ms45-main-command-profiling/iterations/000-main-command-profiling/000-initial.md`（Act Response Status `reported`；Plan Review Result `accepted`）；`openspec/changes/archive/2026-11-03-ms45-main-command-profiling/iterations/001-full-suite/000-initial.md`（Act Response Status `reported`；15 批第一次都是退出码 0、failed 0；Plan Review Result `accepted`）；`openspec/specs/pipeline-stage-decomposition/spec.md` 的 Requirement「三段顶层计时观测」。
