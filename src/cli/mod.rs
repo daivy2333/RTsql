@@ -13,6 +13,7 @@ use crate::pipeline::{
     execute_stage_in_tx_routed, execute_stage_routed, parse_stage, plan_stage_routed, AttachRoute,
     RoutedTables,
 };
+use crate::profiling::{is_profiling_enabled, print_timings, record_time, with_profiling_scope};
 use crate::result::{value_to_json, SqlOutcome};
 use crate::storage::StorageError;
 use crate::transaction::{IsolationLevel, TransactionSession};
@@ -25,7 +26,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// MS26 T4：`:memory:` 内存库实参（`in-memory-database` R1）——精确串相等，
 /// 不做大小写/引号变体归一；主命令特判，生命周期子命令点名拒绝。
@@ -851,7 +852,12 @@ async fn run_sql(
     lock_wait: Option<Duration>,
     attach_session: &mut AttachSession,
 ) -> ExitStatus {
-    let statements = match parse_stage(sql).await {
+    // 整段 SQL 只读一次开关、只解析一次。未设置时不取 Instant，也不建 scope。
+    let profiling = is_profiling_enabled();
+    let parse_start = profiling.then(Instant::now);
+    let parsed = parse_stage(sql).await;
+    let parse_elapsed = parse_start.map(|start| start.elapsed());
+    let statements = match parsed {
         Ok(statements) => statements,
         // parse 错误无 SQLSTATE 分类（单层 `Parse error:` 前缀 + 文本自带行列
         // 定位，ISS11；前缀由本漏斗点统一赋予，parse_stage 返回裸解析器文本）。
@@ -961,34 +967,82 @@ async fn run_sql(
                 // 解析到附加库，执行期据此取库。注册表为空时与既有路径等价。
                 let route = AttachRoute::new(attach_session.dbs.clone());
                 let mut routed = RoutedTables::new();
-                let plan = match plan_stage_routed(
-                    db,
-                    &statement_text,
-                    stmt,
-                    false,
-                    Some(&route),
-                    &mut routed,
-                )
-                .await
-                {
-                    Ok(plan) => plan,
-                    Err(e) => {
+                // 开关打开时，scope 包住这一条语句的 plan 与 execute，索引扫描
+                // 的 record_time 才能看见 task-local。计划失败不打表；执行返回
+                // 后无论成败都先记下三段耗时再打表，然后才渲染或返回错误。
+                let ready = if profiling {
+                    let parse_elapsed =
+                        parse_elapsed.expect("profiling records one parse duration");
+                    with_profiling_scope(async {
+                        let wall_start = Instant::now();
+                        let plan = match plan_stage_routed(
+                            db,
+                            &statement_text,
+                            stmt,
+                            true,
+                            Some(&route),
+                            &mut routed,
+                        )
+                        .await
+                        {
+                            Ok(plan) => plan,
+                            Err(error) => return Err(error),
+                        };
+                        let plan_elapsed = wall_start.elapsed();
+                        let columns = PlanBuilder::new().get_plan_output_columns(&plan);
+                        let execute_start = Instant::now();
+                        let response = match session.tx_id() {
+                            Some(tx_id) => {
+                                execute_stage_in_tx_routed(db, plan, tx_id, &routed).await
+                            }
+                            None => execute_stage_routed(db, plan, true, &routed).await,
+                        };
+                        let execute_elapsed = execute_start.elapsed();
+                        let wall_elapsed = wall_start.elapsed();
+                        record_time("parse", parse_elapsed);
+                        record_time("plan", plan_elapsed);
+                        record_time("execute", execute_elapsed);
+                        print_timings(parse_elapsed + wall_elapsed);
+                        Ok((columns, response))
+                    })
+                    .await
+                } else {
+                    match plan_stage_routed(
+                        db,
+                        &statement_text,
+                        stmt,
+                        false,
+                        Some(&route),
+                        &mut routed,
+                    )
+                    .await
+                    {
+                        Ok(plan) => {
+                            let columns = PlanBuilder::new().get_plan_output_columns(&plan);
+                            let response = match session.tx_id() {
+                                Some(tx_id) => {
+                                    execute_stage_in_tx_routed(db, plan, tx_id, &routed).await
+                                }
+                                None => execute_stage_routed(db, plan, false, &routed).await,
+                            };
+                            Ok((columns, response))
+                        }
+                        Err(error) => Err(error),
+                    }
+                };
+                let (columns, response) = match ready {
+                    Ok(ready) => ready,
+                    Err(error) => {
                         return sql_failure_status(
                             index + 1,
                             total,
-                            &e.to_string(),
+                            &error.to_string(),
                             &statement_text,
                             rollback_session(db, &mut session).await,
                             // T7：计划失败携 SQLSTATE（PlanFailure 分类面）。
-                            Some(e.sqlstate.to_string()),
+                            Some(error.sqlstate.to_string()),
                         );
                     }
-                };
-                let columns = PlanBuilder::new().get_plan_output_columns(&plan);
-
-                let response = match session.tx_id() {
-                    Some(tx_id) => execute_stage_in_tx_routed(db, plan, tx_id, &routed).await,
-                    None => execute_stage_routed(db, plan, false, &routed).await,
                 };
                 match response {
                     Ok(SqlOutcome::Rows { rows, .. }) => {
