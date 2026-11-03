@@ -107,8 +107,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 56c6819d72ccc9fe5703da6db8fb526477e7b328
-- **ahead of origin**: 42
+- **提交基线**: 2ca8a54abb475fb4e2b1465ac5543450878f49b1
+- **ahead of origin**: 8
 - **工作区**: 干净。无活跃 change。最新归档 `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 90 个域。
