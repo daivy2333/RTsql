@@ -7,8 +7,8 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 ## 当前批次状态
 
 - 需求与规格增量：已写入。delta 已通过 `openspec validate --strict`（Gate 1 提交时）。
-- 000：执行依据已展开，`iterations/000-main-command-profiling/000-initial.md`。Plan Context 状态为 `ready`。
-- 001：只保留在下面的 Iteration Plan，不建目录，不建 Cycle。
+- 000：已完成。`iterations/000-main-command-profiling/000-initial.md` 的 Review Result 为 `accepted`。
+- 001：已展开。`iterations/001-full-suite/000-initial.md` 的 Plan Context 为 `ready`，Gate 2 为 PASS。这一轮只规划全量，尚未执行。
 - 跳过项：无。
 
 000 的任务级执行依据以 Cycle 里的 Task Definition 为准。本文件与它冲突时，以 Cycle 为准。
@@ -17,8 +17,8 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 变量已设置时，主命令的索引扫描不再中止，进入执行阶段的语句输出旧三段表；未设置变量、未进入执行阶段、import 与统一诊断输出口径保持 | 完成 |
-| T2 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | 未开始 |
+| T1 | 000 | 无 | 变量已设置时，主命令的索引扫描不再中止，进入执行阶段的语句输出旧三段表；未设置变量、未进入执行阶段、import 与统一诊断输出口径保持 | 完成（Review Result accepted） |
+| T2 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | 未开始（执行依据已展开，Plan Context ready） |
 
 ## 1. 主命令三段表（Iteration 000）
 
@@ -47,7 +47,7 @@ cargo test --offline --test diagnostics_statement_test -- --test-threads=1
 
 ## 2. 收尾全量（Iteration 001）
 
-- [ ] 2.1 T2：T1 的 Iteration Review Result 为 `accepted` 之后，按下面的分批方式跑一次全量。这是整个变更的唯一一次全量。不改产品代码。失败时停止，不在本轮里修。展开 001 时，把本节规程写入该 Iteration 的 `000-initial.md`，不改这套分批规则。
+- [ ] 2.1 T2：T1 的 Iteration Review Result 为 `accepted` 之后，按下面的分批方式跑一次全量。这是整个变更的唯一一次全量。不改产品代码。失败时停止，不在本轮里修。展开 001 时，把本节规程写入该 Iteration 的 `000-initial.md`，不改这套分批规则。规程已写入 `iterations/001-full-suite/000-initial.md` 的 T2，分批条文与本节一致。
 
 分批是通过条件的一部分：
 
@@ -65,6 +65,7 @@ cargo test --offline --test diagnostics_statement_test -- --test-threads=1
 
 - Tasks: T1
 - Depends on: None
+- 状态：已完成。`iterations/000-main-command-profiling/000-initial.md` 的 Review Result 为 `accepted`。
 - Stable result: `RTSQL_PROFILING` 已设置时，主命令的索引扫描返回结果或既有 SQL 错误，进入执行阶段的语句向 stderr 输出旧三段表；未设置该变量时主命令不打这张表。import 的旧表和统一诊断的默认输出保持。
 - Verification boundary: 上面两条定向 `cargo test`。不跑全量。全量预算在 001，整个变更一次。
 - Diagnostic boundary: `src/cli/mod.rs::run_sql` 的 scope 与打表，以及 `tests/cli_main_profiling_test.rs` 的子进程断言。import 用例失败时再看 `src/pipeline.rs` 的既有打印点有没有被碰到。错误文本或 SQLSTATE 变化不属于「补上 scope」能解释的失败。
@@ -74,6 +75,7 @@ cargo test --offline --test diagnostics_statement_test -- --test-threads=1
 
 - Tasks: T2
 - Depends on: 000 accepted
+- 状态：已展开。`iterations/001-full-suite/000-initial.md` 的 Plan Context 为 `ready`，Gate 2 为 PASS。
 - Stable result: 默认构建上按 M19 分批串行的一次全量，每批退出码 0 且 failed 为 0，目标对账无缺无重。
 - Verification boundary: 本节 T2 的分批方式。只此一次。失败批只整批复核一次。
 - Diagnostic boundary: 按失败测试所在的批和目标文件定位。不把全量失败当成修改分批规则的理由。

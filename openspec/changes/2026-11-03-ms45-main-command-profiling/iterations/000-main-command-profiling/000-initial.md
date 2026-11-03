@@ -221,4 +221,57 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+相对 merge-base `b1cec3c` 到 `2054329` 的 diff，产品代码只有 `src/cli/mod.rs` 和新增的 `tests/cli_main_profiling_test.rs`。`src/profiling.rs`、`src/pipeline.rs`、`src/database.rs`、两个索引执行器、`src/cli/lifecycle.rs`、`src/diagnostics.rs` 和 `tests/diagnostics_statement_test.rs` 没有改动。
+
+`run_sql`（`src/cli/mod.rs` 847 行起）在开头读一次 `is_profiling_enabled`。变量未设置时，`profiling.then(Instant::now)` 不调用 `Instant::now`，走 1009–1031 行的原分派。`plan_stage_routed` 与事务外的 `execute_stage_routed` 仍传入 `false`，不进入 `with_profiling_scope`，不调用 `print_timings`。
+
+变量已设置时，整段 SQL 仍只调用一次 `parse_stage`（858 行）。解析失败在 864 行返回 `Parse error:` 与空 SQLSTATE，此时还没有 scope，也没有打表。ATTACH 与 BEGIN / COMMIT / ROLLBACK 仍在 883–964 行的原分派里结束，不进入 scope。
+
+其余语句在 973–1008 行进入一个新的 `with_profiling_scope`。scope 包住该语句的 `plan_stage_routed(..., true)` 与 execute 的 `.await`，没有 `spawn`。事务外的 `execute_stage_routed` 传入 `true`。事务内仍调用 `execute_stage_in_tx_routed(db, plan, tx_id, &routed)`，签名未改。`print_timings` 的另外两处调用仍在 `execute_staged`（`src/pipeline.rs` 1540 行和 1662 行）。主命令不经过 `execute_staged`，不会打出第二张表。
+
+plan 返回 `Err` 时，987–989 行在 `record_time` 和 `print_timings` 之前把错误送出 scope，外层 1033–1045 行仍走 `sql_failure_status`。execute 返回之后，无论 `Ok` 还是 `Err`，999–1005 行先取 `execute_elapsed` 和 `wall_elapsed`，再记下 `parse`、`plan`、`execute`，然后 `print_timings(parse_elapsed + wall_elapsed)`。`wall_start` 在 977 行，位于 `plan_stage_routed` 调用之前；`wall_elapsed` 取在 execute 返回当时。传给 `print_timings` 的 `Total` 是这一次解析耗时加上这段墙钟。打表之后才回到原有的 stdout 渲染或 `sql_failure_status`。每条语句各用一个 scope。
+
+`print_timings`（`src/profiling.rs` 33–51 行）仍负责表头 `Time (µs)`、按耗时降序和末行 `Total`。主命令没有新的 `eprintln!` 出口，也没有新的子指标名。
+
+十个用例的断言与 T1 的用例表一致。用例 6 断言的是 `Table 'missing' not found` 与 `42P01`，见下面这条非阻塞记录。
+
+取样点与诊断测试的沿用。Act Response 写：诊断定向测试在「耗时取样移到 execute 返回当时」之前通过，退出码 0，0 failed，9 passed，之后沿用；主命令测试在取样点改完后重跑通过，退出码 0，0 failed，10 passed。公共规则列出的重跑条件里，和这次序列有关的是「被覆盖的代码在结论产生后发生变化」。这次移动只落在 `run_sql` 的 `if profiling` 分支里，execute 返回之后、`record_time` 之前的两行 `elapsed`（999–1000 行）。`diagnostics_statement_test` 不执行这两行。
+
+- `legacy_profiling_table_follows_env_var` 和 `legacy_table_absent_before_execute_stage` 走 `rtsql import`，进入 `src/cli/lifecycle.rs` 的 `execute_sql`，再进入 `execute_staged` 的既有打印点。这些文件不在本次 diff 里。
+- `legacy_table_present_on_execute_stage_failure` 里仅有的主命令调用是预置 `CREATE TABLE` 和 `INSERT`。`spawn_cli` 的 profiling 参数为 `None`，变量被移除，走 `run_sql` 的 `else` 分支。该分支没有这两行取样。
+- 同文件其余用例是进程内 `Database::execute_sql`，不进入 `run_sql`。
+
+这次取样点改动没有改变诊断测试覆盖的代码。该结论与当前 diff 一致。没有失败，没有独立复现要求，也没有第三次失败。本 Review 不把这一轮收成受该测试影响的返工或重规划。诊断结果沿用 Act Response 里取样点移动之前的那一次。本 Review 没有重跑它。主命令定向测试覆盖的就是这段取样代码，Act 已在移动之后重跑。`2054329` 之后没有新的产品提交，工作区干净。本 Review 也没有重跑主命令测试。
+
+非阻塞。这是计划里的错误引用，Act 已记录偏离。调查和 `design.md` 把缺表文案写成连续子串 `Table not found`。未改动的 `register_table`（`src/pipeline.rs` 3867–3870 行）写成 `Table '{}' not found: {}`，存储错误的展示是 `table not found: {0}`（`src/storage/error.rs` 125 行）。查询 `missing` 时，stderr 里是 `Table 'missing' not found: table not found: missing`。这里没有连续子串 `Table not found`，有小写的 `table not found`。SQLSTATE 仍由 `PlanError::TableNotFound` 取 `42P01`。Act 把断言改成改前就能通过的实际文本。T1 的保持项和停止条件要求用例 6 的错误文本和 SQLSTATE 与改前相同。该断言锁住了退出码 3、`42P01`、没有 `Time (µs)`，以及这条未改的文案。
+
+**Acceptance Gaps**
+
+无。
+
+**Evidence**
+
+- diff 范围是 `b1cec3ce34b0dcb575b03cc89b1bdb20fed7cc0c...2054329`。产品文件为 `src/cli/mod.rs` 和 `tests/cli_main_profiling_test.rs`。
+- 取样与打表在 `src/cli/mod.rs` 973–1008 行。表渲染在 `src/profiling.rs` 33–51 行。import 的打印点未改，仍是 `src/pipeline.rs` 1540 行和 1662 行。
+- 缺表文案在 `src/pipeline.rs` 3867–3870 行。测试断言在 `tests/cli_main_profiling_test.rs` 250–256 行。
+- 诊断测试的主命令预置在 `tests/diagnostics_statement_test.rs` 557–581 行，profiling 为 `None`。import 观察在同文件 391–612 行。
+- 沿用的验证来自当前 Cycle 的 Act Response。本 Review 未重跑。
+  - `cargo test --offline --test diagnostics_statement_test -- --test-threads=1`：取样点移动前，退出码 0，0 failed，9 passed。
+  - `cargo test --offline --test cli_main_profiling_test -- --test-threads=1`：取样点移动后，退出码 0，0 failed，10 passed。
+- 阅读时工作区干净，HEAD 为 `2054329`。Persisted Evidence 为 none。没有因为缺少证据目录提出问题。
+
+**Follow-up Decision**
+
+T1 的 11 条验收都有对应实现，并且定向测试已通过。缺表文案的字符串差异不要求当前 Cycle 修复，也不需要新的执行依据。Iteration Plan 仍是两轮。当前轮完成，下一轮只跑全量。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`iterations/001-full-suite/000-initial.md`
