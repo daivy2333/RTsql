@@ -330,7 +330,7 @@
 - **路径**: `.agents/issues/archive/ISS05-secondary-index-equality-scan-wrong-results.md`
 - **日期**: 2026-10-12
 - **用途**: 非唯一二级索引等值查询静默错结果的缺陷台账——`search_all_from_page_async` 等值分隔键无 break 双侧收集共享子树成倍重访（根因 Confirmed，`index_manager.rs:214-237`）+ 索引条目缺失（UPDATE KeyNotFound 探针证实、产生行 Unconfirmed）；含失败 UPDATE 索引面副作用与同步版漏行潜伏变体；修复 change 立项与验收（结果集与 DataScan 严格相等）的输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，闭区间下探 + `delete_exact` 同集合下探，叶链破坏与 scan_all 同面缺陷一并修复，双向严格相等与零副作用验收）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，闭区间下探 + `delete_exact` 同集合下探，叶链破坏与 scan_all 同面缺陷一并修复，双向严格相等与零副作用验收） [ARCHIVED 2026-10-15]
 
 ## R34: ISS06 import 自动建表后未 checkpoint 崩溃整库砖化
 
@@ -338,7 +338,7 @@
 - **路径**: `.agents/issues/archive/ISS06-crash-after-auto-create-table-bricks-db.md`
 - **日期**: 2026-10-12
 - **用途**: DDL catalog 脏页仅池内 + WAL 已有该表已提交行 + SIGKILL 后全命令 exit 1、`check` 恢复指引不可达死锁的缺陷台账（DDL 不入 WAL/池驱逐时序/redo 硬拒绝机制链）；恢复策略设计决策与修复 change 立项的输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，DDL 语句边界 catalog 有序落盘（列行先、表行最后 = commit point + `flush_commit_point` 接线），建后即崩恢复可达）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，DDL 语句边界 catalog 有序落盘（列行先、表行最后 = commit point + `flush_commit_point` 接线），建后即崩恢复可达） [ARCHIVED 2026-10-15]
 
 ## R35: ISS07 派生表与视图内层别名/表达式项外层不可见
 
@@ -346,7 +346,7 @@
 - **路径**: `.agents/issues/archive/ISS07-derived-view-inner-alias-invisible.md`
 - **日期**: 2026-10-12
 - **用途**: FROM 派生表与视图通道 `building_subquery` 抑制面致内层列别名与计算列外层 42703/58000、CTE 通道正常的三通道不一致缺陷台账（含语料 `sql-views` R3 矛盾）；修复 change 立项与语料同步处置的输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`building_from_derived` 放行扩 + 视图展开同型置位，语料 `sql-views` 矛盾同步收敛）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`building_from_derived` 放行扩 + 视图展开同型置位，语料 `sql-views` 矛盾同步收敛） [ARCHIVED 2026-10-15]
 
 ## R36: ISS08 CREATE TABLE 失败残留半表（DDL 无原子性）
 
@@ -354,7 +354,7 @@
 - **路径**: `.agents/issues/archive/ISS08-create-table-failure-residual-half-table.md`
 - **日期**: 2026-10-12
 - **用途**: 超大 DEFAULT 页满建表失败后残留可写半表、同名重建被拒的缺陷台账；预检先行拒绝或 catalog 写入回滚的方案取舍与立项输入（与 ISS14 同场景交叉）
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，建表失败零残留（孤儿列行清理/`open_or_init` 裁剪/页释放），同名可重试）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，建表失败零残留（孤儿列行清理/`open_or_init` 裁剪/页释放），同名可重试） [ARCHIVED 2026-10-15]
 
 ## R37: ISS09 IN/EXISTS 子查询（SemiJoin）下 ORDER BY 非输出列 42703
 
@@ -362,7 +362,7 @@
 - **路径**: `.agents/issues/archive/ISS09-semijoin-orderby-non-output-column.md`
 - **日期**: 2026-10-12
 - **用途**: SemiJoin/AntiJoin `output_columns` 按投影窄集装配与排序键校验联合致非输出列拒绝、字面量 IN 不受影响的缺陷台账；SemiJoin 形状对齐 design D10 或校验放行的方案取舍输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，SemiJoin/AntiJoin 基座全宽承载 + `sort_projection` 两消费面对齐，ORDER BY 非输出列可用）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，SemiJoin/AntiJoin 基座全宽承载 + `sort_projection` 两消费面对齐，ORDER BY 非输出列可用） [ARCHIVED 2026-10-15]
 
 ## R38: ISS10 CLI help 文本泄漏内部任务标记
 
@@ -370,7 +370,7 @@
 - **路径**: `.agents/issues/archive/ISS10-help-internal-marker-leak.md`
 - **日期**: 2026-10-12
 - **用途**: `--busy-timeout`/`--readonly` help 含「MS28 T1：」「MS26 T1：」「proposal 假设 10」（`cli/mod.rs:107-114` doc comment）的文案缺陷台账；小文案批修复输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，help 用户视角改写，内部标记移出用户可见面）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，help 用户视角改写，内部标记移出用户可见面） [ARCHIVED 2026-10-15]
 
 ## R39: ISS11 错误消息前缀双层包装
 
@@ -378,7 +378,7 @@
 - **路径**: `.agents/issues/archive/ISS11-error-prefix-double-wrapping.md`
 - **日期**: 2026-10-12
 - **用途**: `Parse error: Parse error:` 嵌套（`pipeline.rs:113` 与 `error.rs:74` 两层包装、既有断言锁定双层形态）的文案缺陷台账；单一包装层选定与断言校准输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`parse_stage` 去前缀 + 漏斗点单层赋予，断言校准矩阵随批落地）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`parse_stage` 去前缀 + 漏斗点单层赋予，断言校准矩阵随批落地） [ARCHIVED 2026-10-15]
 
 ## R40: ISS12 schema/dump DDL 渲染类型短名
 
@@ -386,7 +386,7 @@
 - **路径**: `.agents/issues/archive/ISS12-ddl-renders-short-type-names.md`
 - **日期**: 2026-10-12
 - **用途**: 声明 INTEGER/TEXT 渲染为 INT/STRING（`lifecycle.rs:1025` `column_type_sql`）的保真度缺陷台账（往返可达、数据无损）；渲染声明名或文档化规范化语义的决策输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`column_type_sql` 标准长名（INTEGER/TEXT/FLOAT/BOOLEAN/DATE/TIMESTAMP），dump→restore 多代幂等）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`column_type_sql` 标准长名（INTEGER/TEXT/FLOAT/BOOLEAN/DATE/TIMESTAMP），dump→restore 多代幂等） [ARCHIVED 2026-10-15]
 
 ## R41: ISS13 RTSQL_BUSY_TIMEOUT 非法值报错只引用 flag
 
@@ -394,7 +394,7 @@
 - **路径**: `.agents/issues/archive/ISS13-busy-timeout-env-error-mentions-flag-only.md`
 - **日期**: 2026-10-12
 - **用途**: env 通道非法值报错渲染为 flag 参数错误、未点名 `RTSQL_BUSY_TIMEOUT` 的排障误导缺陷台账；与 `RTSQL_KEY`/`RTSQL_WAL_CHECKPOINT_BYTES` 同族 env 校验面一并核对输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，env 非法值代码侧校验点名变量与实际值（`RTSQL_KEY` 同族核对非误报不动））
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，env 非法值代码侧校验点名变量与实际值（`RTSQL_KEY` 同族核对非误报不动）） [ARCHIVED 2026-10-15]
 
 ## R42: ISS14 超大 DEFAULT 建表失败报 Page full 不指名默认值过大
 
@@ -402,7 +402,7 @@
 - **路径**: `.agents/issues/archive/ISS14-oversized-default-error-message.md`
 - **日期**: 2026-10-12
 - **用途**: DEFAULT 字面量超 catalog 页内容量时拒绝文案为泛化 Page full 的错误质量缺陷台账（文档已承认边界、错误面未承载）；与 ISS08 预检方向合并处置输入
-- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`catalog_column_row_fits` 计划期点名预检（ALTER 同款），与 ISS08 零残留同批收敛）
+- **状态**: closed（2026-10-14 fixed → change `2026-10-13-e2e-verification-and-defect-closure` 归档，`catalog_column_row_fits` 计划期点名预检（ALTER 同款），与 ISS08 零残留同批收敛） [ARCHIVED 2026-10-15]
 
 ## R43: ISS15 table 渲染列宽未封顶致 ≥65536 字符单元格 panic（exit 101）
 
@@ -410,39 +410,39 @@
 - **路径**: `.agents/issues/archive/ISS15-table-renderer-panics-on-64k-cell.md`
 - **日期**: 2026-10-14
 - **用途**: `--format table`（TTY 默认）下行集单元格字符数 ≥ 65536 时 `render_table` 未封顶列宽触发 std::fmt 动态宽度上限 panic 的输出面崩溃缺陷台账；影响 SELECT/stats/sample/profile 全部 table 渲染面，JSON/CSV/TSV 不受影响
-- **状态**: closed（2026-10-15 fixed → change `2026-10-14-iss15-table-truncation-and-combination-gaps` 归档，`render_table` 列宽封顶 64 字符截断 + 组合面 e2e 见证补齐；规格 1 MODIFIED + 2 ADDED 合并）
+- **状态**: closed（2026-10-15 fixed → change `2026-10-14-iss15-table-truncation-and-combination-gaps` 归档，`render_table` 列宽封顶 64 字符截断 + 组合面 e2e 见证补齐；规格 1 MODIFIED + 2 ADDED 合并） [ARCHIVED 2026-10-15]
 
 ## R44: ISS16 相关标量子查询外参未绑定（WHERE 静默空集 / select list 塌缩或报错）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS16-correlated-scalar-subquery-unbound.md`
+- **路径**: `.agents/issues/archive/ISS16-correlated-scalar-subquery-unbound.md`
 - **日期**: 2026-10-15
 - **用途**: 相关标量子查询外层参数绑定失效的正确性缺陷台账（文档宣称 correlated included）；WHERE 形态静默空集、select list 形态输出塌缩或 `Subquery returns multiple rows` 报错；最小 2 表库即复现，上游 subquery 测试全绿的覆盖缺口输入
-- **状态**: closed（2026-10-15 fixed → change `2026-10-15-subquery-alias-binding-and-error-prefix` 归档，`extract_subquery_table_names` 声明限定符化〔别名优先 + 基表名并列保留的用户豁免裁定〕消除幻影相关参数源；规格 `sql-table-alias-resolution` +1 Requirement）
+- **状态**: closed（2026-10-15 fixed → change `2026-10-15-subquery-alias-binding-and-error-prefix` 归档，`extract_subquery_table_names` 声明限定符化〔别名优先 + 基表名并列保留的用户豁免裁定〕消除幻影相关参数源；规格 `sql-table-alias-resolution` +1 Requirement） [ARCHIVED 2026-10-15]
 
 ## R45: ISS17 EXISTS 内层带别名静默错误结果（空集/按位截断/全放行/全拒）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS17-exists-aliased-inner-silent-wrong-results.md`
+- **路径**: `.agents/issues/archive/ISS17-exists-aliased-inner-silent-wrong-results.md`
 - **日期**: 2026-10-15
 - **用途**: `EXISTS` 内层表带别名时四种静默错误形态（非相关谓词非首列恒空集、谓词首列按内层存活行数截断外层、相关经非 PK 列全放行，评测主库同形状全拒）的缺陷台账；与 ISS16/ISS18 同属子查询别名/参数绑定面，同批调查输入
-- **状态**: closed（2026-10-15 fixed → 同 change，`extract_subquery_table_names` 声明限定符化 + 三执行器绑参未命中点名报错加固；同批覆盖缺口审计四形状〔NOT EXISTS/NOT IN 别名全放行、EXISTS JOIN 双臂别名恒空集、EXISTS Derived 别名截断〕一并修复并由形状覆盖矩阵钉住）
+- **状态**: closed（2026-10-15 fixed → 同 change，`extract_subquery_table_names` 声明限定符化 + 三执行器绑参未命中点名报错加固；同批覆盖缺口审计四形状〔NOT EXISTS/NOT IN 别名全放行、EXISTS JOIN 双臂别名恒空集、EXISTS Derived 别名截断〕一并修复并由形状覆盖矩阵钉住） [ARCHIVED 2026-10-15]
 
 ## R46: ISS18 IN 内层带别名 ∧ 索引谓词静默恒空集
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS18-in-aliased-inner-index-predicate-silent-empty.md`
+- **路径**: `.agents/issues/archive/ISS18-in-aliased-inner-index-predicate-silent-empty.md`
 - **日期**: 2026-10-15
 - **用途**: `IN` 子查询「内层别名 ∧ 二级索引服务谓词」合取触发恒空集的缺陷台账（别名无索引、无别名有索引均正确）；IN 反连接 × 索引自动服务交叉面的正确性输入
-- **状态**: closed（2026-10-15 fixed → 同 change，`extract_subquery_table_names` 声明限定符化后别名谓词不再走幻影相关路径；矩阵 `in_alias_with_secondary_index_predicate` + e2e 见证钉住）
+- **状态**: closed（2026-10-15 fixed → 同 change，`extract_subquery_table_names` 声明限定符化后别名谓词不再走幻影相关路径；矩阵 `in_alias_with_secondary_index_predicate` + e2e 见证钉住） [ARCHIVED 2026-10-15]
 
 ## R47: ISS19 执行器错误文案双层前缀（ISS11 同族残余）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS19-execution-error-double-prefix.md`
+- **路径**: `.agents/issues/archive/ISS19-execution-error-double-prefix.md`
 - **日期**: 2026-10-15
 - **用途**: 执行器子查询路径 `Execution error: execution error:` 双层前缀文案缺陷台账（ISS11 修复 parse/plan 漏斗后的执行器漏网点）；错误面断言校准与顺手收敛输入
-- **状态**: closed（2026-10-15 fixed → 同 change T3，`StorageError::ExecutionError` Display 去 thiserror 前缀、单层 `Execution error: ` 由 pipeline 漏斗唯一赋予；锚点 `subquery_test.rs:632` 校准 + e2e 端到端断言）
+- **状态**: closed（2026-10-15 fixed → 同 change T3，`StorageError::ExecutionError` Display 去 thiserror 前缀、单层 `Execution error: ` 由 pipeline 漏斗唯一赋予；锚点 `subquery_test.rs:632` 校准 + e2e 端到端断言） [ARCHIVED 2026-10-15]
 
 ## R48: M19 分批全量回归执行配方 Runbook
 
@@ -503,10 +503,10 @@
 ## R55: ISS25 DDL 提交点窗口内的位置性错读（窄 tuple 在未移位目录下按位置取值）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS25-ddl-commit-point-positional-misread.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS25-ddl-commit-point-positional-misread.md`
 - **日期**: 2026-10-26
 - **用途**: DDL 提交完成、目录应用尚未发生的窗口内按位置错读窄 tuple 的缺陷台账——`deserialize_tuple_width`（`src/storage/page_format/tuple.rs:189-222`）按位置取值、尾部补 `Value::Null`、不校验列序，全部读路径经它 ⇒ 2 宽元组在未移位的 3 列目录下读作 `[id, w, NULL]`（`v` 列读到 `w` 的值），影响全部已改写的行且无声；**登记时的措辞「未实跑复现」已不成立——可达性已由 change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 003 实跑坐实**：变体 (a)「窗口内并发读」**已闭合**（引入纯内存的窄化在途状态，读路径在窗口内**显式拒绝**：用户实际所见 `Execution error: table 't' is being modified by an in-flight ALTER TABLE DROP COLUMN; read refused`，常态化用例已落地），变体 (b)「窗口内崩溃后重开并查询」**仍开放**（在途状态纯内存、崩溃即消失 ⇒ 重开后目录仍广告旧列数而数据面已是窄化后的已提交行 ⇒ 读仍按位置错位，实测重开后读出 `[Int(1), Int(100), Null], …`）；闭合变体 (b) 需要**持久标记**（改磁盘格式 ⇒ 破坏 MS36 的 G1/G2/G3 兼容面）或**移动提交点**（与 `ddl-catalog-transactional` R1「被放弃的 DDL 不留目录变更」冲突）⇒ 属范围外的设计决定；行为规格 `openspec/specs/ddl-rewrite-consistency/spec.md`（Requirement「改写在途期间读路径不静默错读」，四个 Scenario 全部限定在**进程内**窗口 ⇒ 与已实现行为一致）
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R56: 索引写侧原子性的确定性复现配方 Runbook
 
@@ -527,74 +527,74 @@
 ## R58: ISS26 索引树页级判据缺叶页条目长度检查（短于条目格式的叶条目被静默跳过）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS26-index-leaf-entry-length-unchecked.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS26-index-leaf-entry-length-unchecked.md`
 - **日期**: 2026-10-26
 - **用途**: 索引树页级判据的缺陷台账——`integrity::check_tree_page` 的**叶分支只校验槽边界**，缺少内部节点分支已有的长度检查 ⇒ 槽负载短于条目格式（38 字节）的叶条目落在页内时 `violations` 为空、不被标记 ⇒ `node.rs` 的 `get_key` / `get_row_id` 返回 `None` ⇒ `read_leaf_pair` / `scan_all_async_from_root` / `find_key_position_binary` 把它当作「无此条目」⇒ **静默跳过**（与 `index-read-bounded-read` 域要求的「点名损坏的页与该索引树」方向相反）；既有缺陷、非回归；承载 change `2026-10-24-open-defect-batch-storage-ddl-legacy-evidence` Iteration 006 的 Issue 候选 IC-1（Plan Review F6 判定为明确在 Plan 范围外），Iteration 007 沿用同一编号；IRBR 的 Requirement 正文已收敛为「未通过页级判据的索引树页」⇒ 该行为**不在**该域已验收主张之内；承载建议为独立 change（叶分支补长度检查，读 / 写路径与释放路径的处置方向相反），字节级损坏注入手法可复用
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R59: ISS27 存储层其余页型的无界读点（数据页 / 目录页 / 恢复面 / 缓冲池，同形态约 17 处）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS27-unbounded-slot-reads-other-page-types.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS27-unbounded-slot-reads-other-page-types.md`
 - **日期**: 2026-10-26
 - **用途**: 存储层页内容读取无界化的缺陷台账——`SlottedPageRef::get_slot_data` 的**未检查调用点**分布在 `src/storage/data_page.rs` / `catalog.rs` / `buffer_pool.rs` / `data/table_manager.rs` / `src/wal/recovery.rs` / `src/executor/*`，**同形态约 17 处**；该函数直接按页内槽目录的 `offset` / `length` 切字节且**无范围检查** ⇒ 槽偏移或长度越界 ⇒ 越界切片 panic（发生在异步执行路径 ⇒ 进程 abort）；各页型的**正确行为不同**（索引树页是「下降决策」，数据页是「行内容」，目录页是「目录行」）⇒ 处置方向不能一次统一；已被承载 change Iteration 002（释放路径）与 Iteration 006（读 / 写路径）覆盖的**索引树页**面不属本条；承载建议为独立 change 并**按页型分组**（每组各自判定「损坏页在该页型的正确行为」），损坏注入手法可复用
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R60: ISS28 失败的 DDL 语句其目录面变更在后续刷盘落地
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS28-failed-ddl-catalog-change-flushes-later.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS28-failed-ddl-catalog-change-flushes-later.md`
 - **日期**: 2026-10-26
 - **用途**: DDL 语句边界落盘顺序语义的缺陷台账——承载 change Iteration 004 修复「刷盘失败保持脏标记」后，一条**失败**的 DDL 语句已发出的目录面变更（列行 + 表行列数）**在此后某次成功刷盘时落地** ⇒ 重开库后可见该失败 DDL 的目录面变更；实测形态（真实入口 `ALTER TABLE keep ADD COLUMN m INT` + 一次性写盘失败注入）：修复后重开读出 `[1, 10, Null]`（目录面变更落地），修复前重开报 `Column not found: m`（目录面变更被丢弃、且表行列数与列行自相矛盾）；与既有域 `ddl-catalog-transactional` R1「被放弃或失败的 DDL 不留目录面变更」**字面冲突**；承载 change 明确把该语义划为 Excluded scope（D9 / B-3）**不裁决** ⇒ 需产品决定（回滚目录变更 vs 修订既有域的表述与迁移指引）
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R61: ISS29 同表并发 DDL 与在途状态布尔量冲突（后发 DDL 清除先行 DDL 的读拒绝）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS29-same-table-concurrent-ddl-inflight-flag.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS29-same-table-concurrent-ddl-inflight-flag.md`
 - **日期**: 2026-10-26
 - **用途**: DDL 并发控制与在途状态建模的缺陷台账——在途状态是**单表一个布尔量**（`NarrowingState`：`table: String` + `in_flight: AtomicBool`）⇒ 两个交互缺陷：① **重叠清除**：同表上并发的第二个 DDL 若先完成并清除该布尔量，会让**第一个**仍在窗口内的读**失去拒绝** ⇒ 退回按位置取值（静默错读）；② **豁免读按旧 schema 解码**：第二个 DDL 的改写自身读（豁免路径）会把**已被第一个 DDL 窄化**的行按旧 schema 解码；该形态**不是**承载 change 引入的（同表并发 DDL 在此之前即不安全，两条改写争同一条数据链与目录），承载 change Iteration 003 明确不扩大该面、Iteration 004 再次划为范围外；闭合需要「**同表 DDL 串行化**」这一新的设计决定（拒绝同表并发 DDL / 语句级排队 / 在途状态改为可区分多改写的结构）
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R62: ISS30 并发驱逐 + 写盘失败 ⇒ 被驱逐页的内容既未落盘也不在缓冲池内
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS30-evicted-page-lost-on-write-failure.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS30-evicted-page-lost-on-write-failure.md`
 - **日期**: 2026-10-26
 - **用途**: 缓冲池驱逐与写盘失败交错的缺陷台账——页在**被驱逐**（内存内容丢弃）与**写盘**之间交错时，若随后的写盘失败，该页的新内容**既未落盘也不在池内** ⇒ 磁盘仍是旧内容、池内也没有新内容 ⇒ 后续读该页得到旧值且**无显式错误**暴露给用户；承载 change Iteration 004 修复的是「**释放**的持久化前置条件」（`last_failed_write` 使释放不被提升），未覆盖驱逐交错 ⇒ 划为范围外实质缺陷；需要的决定是「写盘失败时对**已驱逐**页的处置语义」（回写内存 / 保留在池内标记为脏并重试 / 提升为用户可见错误）；与 ISS31（`last_failed_write` 不复位）根因位置不同，**不合并**
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R63: ISS31 `last_failed_write` 永不复位 ⇒ 一次写盘失败后本会话内的释放都不再被提升
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS31-last-failed-write-never-resets.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS31-last-failed-write-never-resets.md`
 - **日期**: 2026-10-26
 - **用途**: 写盘失败状态生命周期的缺陷台账——`last_failed_write` 一旦置位就**永不复位**（标记只在失败时置位，无任何复位路径）⇒ 该库会话内的**所有后续释放**都不再被提升，即便失败早已被刷盘恢复；当前是**安全但有界**的退化（保守方向为「宁可不释放」⇒ 空闲页复用变慢，不产生数据错误）；标记是**库级**而失败实际只影响**单个页** ⇒ 页粒度细化留作后续决定；承载 change Iteration 004 明确划为 Excluded scope；与 ISS30（驱逐交错）根因不同，**不合并**
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R64: ISS32 多表 dump 中靠后语句被范围外拒绝时，靠前语句已生效
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS32-multi-table-dump-partial-restore.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS32-multi-table-dump-partial-restore.md`
 - **日期**: 2026-10-26
 - **用途**: restore 提交语义的范围外观察台账——`restore` **逐条执行并各自 auto-commit** ⇒ 一份**多表** dump 中若**靠后**语句被范围外拒绝，**靠前**语句**已提交**；既有合同（`cli-noninteractive-shell` 已把「逐条 auto-commit、失败即停、失败前语句已生效」写成合同），MS36 的 `design.md` D4 明确**不改动**该语义并把本条记为「已知边界（不在该 change 修复）」；与 `legacy-format-compat` 的「SHALL NOT 静默地部分恢复后报告成功」**不冲突**（当前行为是显式报错 + 非零退出码 + 说明「previous statement(s) were committed」）⇒ **不是规格违背、不是新缺陷**；若要原子化（或全量预检）属功能语义变更，需独立 change 与独立验收
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R65: ISS33 `dump` 对非整数 `UNIQUE` 列无条件渲染 ⇒ 该类旧表的 dump 不可恢复
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS33-dump-renders-non-integer-unique.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS33-dump-renders-non-integer-unique.md`
 - **日期**: 2026-10-26
 - **用途**: dump DDL 渲染规则的范围外观察台账——`dump` 对含**非整数 `UNIQUE` 列**的表**无条件渲染** `UNIQUE` ⇒ 「旧库 → dump → 新库 restore」在该类表上被**计划期拒绝**（`UNIQUE (INT columns only)`）；不对称点：`dump` 对 `PRIMARY KEY` **有**类型条件（仅主键列类型为 INTEGER 时输出），对 `UNIQUE` **没有**同型条件；MS36 的 `design.md` D9 已给出修复形态（按 `PRIMARY KEY` 的同型规则条件渲染 `UNIQUE`）并明确「**这不是缺陷**」（既有行为已在 README 记录）⇒ 作为可选改进登记；修复会改变 dump 的产物内容 ⇒ 属功能语义变更，须独立验收并复核与 `legacy-format-compat` 拒绝面的关系
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R66: ISS34 `index-read-bounded-read` 域的 Requirement 标题与 Scenario 标题措辞残余
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS34-irbr-spec-title-wording-residue.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS34-irbr-spec-title-wording-residue.md`
 - **日期**: 2026-10-26
 - **用途**: 规格标题层措辞残余的台账——`openspec/specs/index-read-bounded-read/spec.md` 的 Purpose 与 Requirement **正文**已收敛为「读取到**未通过页级判据**的索引树页时」（刻意收窄：叶页短条目不被页级判据捕获），但 Requirement **标题**与 **4 个 Scenario 的标题 / GIVEN** 仍写「损坏的索引页」⇒ 标题层与正文层的覆盖面表述不一致，引用该域时会把 ISS26 的形态误算为已覆盖；正文（规范性 SHALL 条款）正确 ⇒ 非阻塞、不改变任何行为要求；承载 change Iteration 007 的 Plan Review F14 判为不阻塞并建议合并时顺带对齐，登记复核确认合并后**措辞残余仍可见**；承载落点为 docs-maintainer 在规格维护时对齐（只改标题 / GIVEN 措辞，不改 SHALL 条款、不改 Scenario 数与 Requirement 数）
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R67: DML 墓碑的「放弃窗口」复现配方 Runbook
 
@@ -631,50 +631,50 @@
 ## R71: ISS35 页头槽数越界导致读路径 abort
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS35-slot-count-underflow-aborts-read-path.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS35-slot-count-underflow-aborts-read-path.md`
 - **日期**: 2026-10-26
 - **用途**: 页头槽数超出槽目录容量时读路径整数下溢并 abort 的台账。已由归档变更 `openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure` 的 Iteration 002 / T17、004 / T4、005 / T5 处置。
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R72: ISS37 写路径页头槽数下溢
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS37-write-path-slot-count-underflow.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS37-write-path-slot-count-underflow.md`
 - **日期**: 2026-10-26
 - **用途**: 写路径用页头槽数做减法时整数下溢的台账。已由同一归档变更 Iteration 003 / T18 处置。
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R73: ISS38 写路径槽负载偏移无界写
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS38-write-path-slot-payload-offset-unbounded.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS38-write-path-slot-payload-offset-unbounded.md`
 - **日期**: 2026-10-26
 - **用途**: 写路径按槽偏移写入时不检查边界的台账。已由同一归档变更 Iteration 003 / T19 处置。
-- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure）
+- **状态**: closed（2026-10-26 fixed → openspec/changes/archive/2026-10-25-ms37-defect-ledger-closure） [ARCHIVED 2026-10-30]
 
 ## R74: ISS39 ADD COLUMN 与在途窄化 DDL 并发
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS39-add-column-races-inflight-narrowing.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS39-add-column-races-inflight-narrowing.md`
 - **日期**: 2026-10-26
 - **用途**: 窄化发布与在途加列交错的台账。已由该归档变更 Iteration 001 / T2 处置。
-- **状态**: closed（2026-10-27 fixed → openspec/changes/archive/2026-10-26-ms40-add-column-catalog）
+- **状态**: closed（2026-10-27 fixed → openspec/changes/archive/2026-10-26-ms40-add-column-catalog） [ARCHIVED 2026-10-30]
 
 ## R75: ISS40 ADD COLUMN 在列数刷盘期间被放弃
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS40-add-column-abandoned-during-column-count-flush.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS40-add-column-abandoned-during-column-count-flush.md`
 - **日期**: 2026-10-26
 - **用途**: 列数刷盘期间放弃 ADD COLUMN 的台账。已由该归档变更 Iteration 000 / T1 处置。
-- **状态**: closed（2026-10-27 fixed → openspec/changes/archive/2026-10-26-ms40-add-column-catalog）
+- **状态**: closed（2026-10-27 fixed → openspec/changes/archive/2026-10-26-ms40-add-column-catalog） [ARCHIVED 2026-10-30]
 
 ## R76: ISS41 `Float(-0.0)` 与 `Float(0.0)` 的 `PartialEq` 相等、`Hash` 不同
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS41-value-float-signed-zero-hash-partialeq.md`
+- **路径**: `git show 26b35e6:.agents/issues/ISS41-value-float-signed-zero-hash-partialeq.md`
 - **日期**: 2026-10-26
 - **用途**: 负零与正零在哈希连接中漏匹配的台账。已由该归档变更 Iteration 002 处置。
-- **状态**: closed（2026-10-27 fixed → openspec/changes/archive/2026-10-26-ms40-join-smj-and-build-side）
+- **状态**: closed（2026-10-27 fixed → openspec/changes/archive/2026-10-26-ms40-join-smj-and-build-side） [ARCHIVED 2026-10-30]
 
 ## R77: 后续工作的优先级与依赖分析
 
@@ -687,18 +687,18 @@
 ## R78: ISS36 仓库既有的 fmt / clippy 门在当前工具链下不可满足
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS36-fmt-clippy-gates-unsatisfiable.md`
+- **路径**: `git show 694bfbe:.agents/issues/ISS36-fmt-clippy-gates-unsatisfiable.md`
 - **日期**: 2026-10-28
 - **用途**: 格式检查与 deny clippy 在当时工具链上不可满足的缺陷台账。已由归档变更 `openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline` 处置：Iteration 000 使两条命令退出码为 0，Iteration 002 收尾复测仍为 0。未新增 rust-toolchain.toml。
-- **状态**: closed（2026-10-28 fixed → openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline）
+- **状态**: closed（2026-10-28 fixed → openspec/changes/archive/2026-10-28-ms41-build-and-compat-baseline） [ARCHIVED 2026-10-30]
 
 ## R79: MS42 模块边界现状事实面分析
 
 - **类型**: analysis
-- **路径**: `.agents/analysis/ms42-module-boundary-current-state.md`
+- **路径**: `git show 40e9ee8:.agents/analysis/ms42-module-boundary-current-state.md`
 - **日期**: 2026-10-28（revision `1f7dd6e`，静态读码与 grep 统计，未运行测试）
 - **用途**: 当前 revision 的模块边界事实面——模块依赖图（更新 R25 的 11 模块/99 处 pub(crate) 至 12+1 模块/240 处 pub(crate)）、两条依赖环的精确现状、network/加密/CLI 可选化接缝、Database 共享状态归属清单、诊断出口与测试锚定分布；MS42 已于 2026-10-28 收尾归档，本条事实面已被 design §5/§6 的边界与诊断契约（现载于 project-model M21 / M22）及收尾核对按代码事实修正后的数字取代，plan 阶段直接引用的用途已了结
-- **状态**: active
+- **状态**: completed；[ARCHIVED 2026-10-30]（Artifact-Archive，原 `.agents/analysis/ms42-module-boundary-current-state.md`；事实面已被 `openspec/changes/archive/2026-10-28-ms42-module-boundaries/design.md` §5/§6 取代，现行约束见 project-model M21 / M22）
 
 ## R80: Cargo feature 门控下测试面锚定文件的枚举与施加流程 Runbook
 
@@ -719,9 +719,9 @@
 ## R82: ISS43 自动建表路径的注释与「未声明主键 → 首列隐式主键」既定语义相反
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS43-import-auto-create-comment-contradicts-implicit-primary-key.md`
+- **路径**: `git show a663360:.agents/issues/ISS43-import-auto-create-comment-contradicts-implicit-primary-key.md`
 - **日期**: 2026-10-30
 - **用途**: `src/cli/lifecycle.rs:825-827` 注释称自动建表「无主键——首列重复值合法，无键行语义」，与实现、规格与实测相反（INTEGER 首列重复值以 DuplicateKey fail-fast 拒绝，exit 3；FLOAT/STRING 首列重复合法）。行为侧经三个规格域与 README 判定为既定语义、非缺陷；本条只登记注释与规格/实现的矛盾及其误修风险（防止按注释改动隐式首列主键语义而违反三域 SHALL 条款）。修复已交付于主分支提交 `5035869`（只改注释文字，可观察行为未变）；已按用户指令于 2026-10-30 关闭。
-- **状态**: closed（2026-10-30 fixed → `5035869`）
+- **状态**: closed（2026-10-30 fixed → `5035869`） [ARCHIVED 2026-10-30]
 
 <!-- arc: ARC-202609092322 --> 1 条已归档 (2026-09-09) → openspec/changes/archive/2026-09-09-ARC-202609092322/proposal.md
