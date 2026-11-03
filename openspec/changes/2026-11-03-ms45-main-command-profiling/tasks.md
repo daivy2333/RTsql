@@ -8,7 +8,7 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 
 - 需求与规格增量：已写入。delta 已通过 `openspec validate --strict`（Gate 1 提交时）。
 - 000：已完成。`iterations/000-main-command-profiling/000-initial.md` 的 Review Result 为 `accepted`。
-- 001：T2 已完成。`iterations/001-full-suite/000-initial.md` 的 Act Response 为 `reported`，Review Result 仍为 `pending`。
+- 001：已完成。`iterations/001-full-suite/000-initial.md` 的 Review Result 为 `accepted`。
 - 跳过项：无。
 
 000 的任务级执行依据以 Cycle 里的 Task Definition 为准。本文件与它冲突时，以 Cycle 为准。
@@ -18,7 +18,7 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
 | T1 | 000 | 无 | 变量已设置时，主命令的索引扫描不再中止，进入执行阶段的语句输出旧三段表；未设置变量、未进入执行阶段、import 与统一诊断输出口径保持 | 完成（Review Result accepted） |
-| T2 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | 完成（全量通过，Review Result pending） |
+| T2 | 001 | 000 accepted | M19 分批串行跑一次全量，每批退出码 0 且 failed 为 0 | 完成（Review Result accepted；第 1 批多跑一次为非阻塞 Minor） |
 
 ## 1. 主命令三段表（Iteration 000）
 
@@ -75,7 +75,7 @@ cargo test --offline --test diagnostics_statement_test -- --test-threads=1
 
 - Tasks: T2
 - Depends on: 000 accepted
-- 状态：T2 已执行。`iterations/001-full-suite/000-initial.md` 的 Act Response 为 `reported`，Review Result 仍为 `pending`。
+- 状态：已完成。`iterations/001-full-suite/000-initial.md` 的 Review Result 为 `accepted`。
 - Stable result: 默认构建上按 M19 分批串行的一次全量，每批退出码 0 且 failed 为 0，目标对账无缺无重。
 - Verification boundary: 本节 T2 的分批方式。只此一次。失败批只整批复核一次。
 - Diagnostic boundary: 按失败测试所在的批和目标文件定位。不把全量失败当成修改分批规则的理由。
