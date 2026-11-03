@@ -712,9 +712,9 @@
 
 - **类型**: issue
 - **路径**: `.agents/issues/ISS42-cli-main-command-profiling-scope-absent.md`
-- **日期**: 2026-10-30
-- **用途**: CLI 主命令形态 `rtsql <db> "<sql>"` 在 `RTSQL_PROFILING` 存在时既无旧的三段计时表，又在计划含索引扫描时于 `src/profiling.rs:22` panic 退出（exit 101）的缺陷台账。根因是 profiling scope 只由 `pipeline::execute_with_params` 建立，主命令自建的执行分段不经该入口；缺陷为既有（非 MS44 change 引入）。当前状态：待用户裁定，未在任何变更内承载（Plan Review 判为变更范围外既有行为；与 MS44 已批准的 Preserve 项「`record_time` 在旧 scope 外仍 panic」冲突，需先裁定该 Preserve）。
-- **状态**: active
+- **日期**: 2026-11-03
+- **用途**: CLI 主命令 `rtsql <db> "<sql>"` 在 `RTSQL_PROFILING` 已设置时缺少 profiling scope 的缺陷台账。2026-11-03 关闭：该变量已设置时主命令不中止，进入执行阶段的语句输出旧三段表；未设置时不输出该表。预编译语句不在该次验收内。
+- **状态**: closed（2026-11-03 fixed → openspec/changes/archive/2026-11-03-ms45-main-command-profiling/）
 
 ## R82: ISS43 自动建表路径的注释与「未声明主键 → 首列隐式主键」既定语义相反
 
