@@ -12,6 +12,8 @@
 
 ## 路线图结构
 
+2026-11-10 用户指令按 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）把尚未做完的模块化、诊断、语义和性能条目写入路线，相近项并进同一里程碑。新增 MS48–MS55。MS48 模块边界与会话通道收口（I074 拆分余项、I012 通道余项）。MS49 诊断上报与比较指标（I096 余项）。MS50 结果消费与值类型（I065、I069）。MS51 查询代价与 JOIN 重排（I016 余项）。MS52 撕裂树与跨进程访问的去留（I031、I084）。MS53 复制、分配与行锁（I020、I066、I050）。MS54 脏页批量写与 I/O 后端（I026、I028，依赖 MS52）。MS55 索引页空间与锁（I025、I029、I030）。除 MS54 为 planned 外均为 ready。无开放缺陷可纳入。I077 余项与 I083 按 MS47 的稳定结果保持未排期。I049、I094、I057、I093、I095 以及已暂缓的交付与密钥便利层不在本批。本次只登记路线，不同步改进条目或 SNAPSHOT。
+
 2026-11-03 用户指令「规划这一批你推荐的条目到ms，刚好三个ms就好」，新增 MS45–MS47，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）在 MS41–MS44 完成后的下一批过滤结果。MS45 主命令 profiling 不再因索引扫描中止（completed，2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`；承接 ISS42）。MS46 无键行版本链进入 GC（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`；承接 I038）。MS47 类型化批量写入入口的去留（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`；承接 I021）。三者无硬前置，建议序 MS45 → MS46 → MS47。macOS 构建与运行不在本批。I077 余项、I083、I065、I069、I084、I016 的完整代价模型、I031 以及已暂缓的交付与密钥便利层留在改进台账。本次只登记路线，不同步改进条目、缺陷状态或 SNAPSHOT。
 
 2026-10-27 用户批准“架构边界与验证基础”批，新增 MS41–MS44，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）：MS41 构建与兼容验证基线为 completed（macOS 按 2026-10-28 用户决定不再等待）；MS42 可组合模块边界为 completed（2026-10-28 收尾归档，change `openspec/changes/archive/2026-10-28-ms42-module-boundaries/`）；MS43 异步服务状态协作为 completed（2026-10-28 收尾归档，change `openspec/changes/archive/2026-10-28-ms43-service-lifecycle/`）；MS44 统一诊断为 completed（2026-10-30 收尾归档，change `openspec/changes/archive/2026-10-28-ms44-unified-diagnostics/`）。本批覆盖 ISS36、I073、I093、I074、I095、I012、I096；I093 按平台与 feature 组合分别承接，I095 保留按需触发边界，不把未触发定制变成必做工作。
@@ -22,7 +24,7 @@
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
 ## Milestone Roadmap
 
-详细的已完成里程碑段已归档，见文件末墓碑。各里程碑的完成摘要见「路线图结构」段与「依赖关系图」的 ✓ 标记；MS22 已 superseded 退回 improvements，其候选见「D-candidates」段与改进台账。当前路线上没有尚未执行的里程碑。
+详细的已完成里程碑段已归档，见文件末墓碑。各里程碑的完成摘要见「路线图结构」段与「依赖关系图」的 ✓ 标记；MS22 已 superseded 退回 improvements，其候选见「D-candidates」段与改进台账。当前路线上尚未执行的里程碑是 MS48–MS55。MS54 依赖 MS52，状态为 planned；其余为 ready。
 
 ### MS45：主命令 profiling 不再因索引扫描中止
 
@@ -63,21 +65,129 @@
 - **Consumes**: I021
 - **Split signals**: 入口的失败语义若要改成部分成功，先回需求裁定。import 与 CSV 适配即使入口落地，也不并入本里程碑。
 
+### MS48：模块边界与会话通道收口
+
+- **Status**: ready
+- **Outcome**: 已裁定的模块边界要么形成可独立构建的组合，要么明确记录没有独立构建或裁剪收益因而不拆。会话里尚未替换的生产者与消费者队列改为已有的异步传递。WAL、提交和检查点的职责归属不变。
+- **Rationale**: I074 和 I012 是 MS42、MS43 留下的同一条结构线。拆包和通道若分开立项，会在同一批调用边上各改一次。
+- **Dependencies**: None
+- **Scope**: I074 的 crate 拆分只在有独立构建或替换收益时做。I012 只替换分析点名的剩余消息传递，不统一换掉全部锁。
+- **Non-goals**: 没有具体依赖对象时的依赖升级（I093）和按需定制（I095）；诊断上报；SQL 语义与性能改动。
+- **Stable result**: 后续工作可以按这次定下的构建单元和会话传递方式继续。
+- **Related changes**: None
+- **Consumes**: I074 的拆分余项、I012 的通道余项
+- **Split signals**: 拆 crate 与通道替换若不能用同一次构建和会话测试判断，分成两个 change，不新编号。若拆分必须改公开 SQL 行为，退回范围审议。
+
+### MS49：诊断上报与比较指标
+
+- **Status**: ready
+- **Outcome**: 各模块向已交付的诊断门面上报自身事件与资源统计。比较指标覆盖首行等待、吞吐、较慢请求耗时和内存峰值。诊断仍只观察，不改变 SQL 结果、错误和 SQLSTATE。
+- **Rationale**: 这是分析里和模块化衔接的诊断收口。门面已经存在，缺的是上报和可比口径。它和拆 crate 不是同一个故障域。
+- **Dependencies**: None。建议序在 MS48 之后。不把拆 crate 写成硬前置。
+- **Scope**: I096 尚未交付的两部分。复用现有门面和已有 profiling，不另建计时系统。
+- **Non-goals**: 替换 MS44 的门面；把诊断输出当作正确性判据；WAL 组提交或加密。
+- **Stable result**: 后续性能测量可以引用这组比较指标和模块上报。
+- **Related changes**: None
+- **Consumes**: I096 的余项
+- **Split signals**: 若比较指标必须改 SQL 输出或错误文本，退回范围审议。
+
+### MS50：结果消费与值类型
+
+- **Status**: ready
+- **Outcome**: 大结果可以增量消费，并有背压边界。DECIMAL 与 BLOB 可以声明、写入、比较和读回。旧库打开有明确结果。
+- **Rationale**: 两项都先定结果和值的接口，避免后面的性能工作反复改这两处。它们不是彼此的实现步骤。
+- **Dependencies**: None
+- **Scope**: I065 的最小结果接口，以及 I069 的两种类型。两种类型可以分 change。流式只做最小接口。
+- **Non-goals**: 代价模型与 JOIN 重排；导入攒批；为流式改诊断口径。
+- **Stable result**: 结果如何被消费，以及值类型集合，有后续性能工作可以依赖的边界。
+- **Related changes**: None
+- **Consumes**: I065、I069
+- **Split signals**: 流式接口与新类型若不能用同一组查询验收，分成两个 change，不新编号。新类型若要改页格式代际，先写明兼容，不夹进流式 change。
+
+### MS51：查询代价与 JOIN 重排
+
+- **Status**: ready
+- **Outcome**: 有可用的统计与估算。JOIN 重排要么按估算生效且结果与重排前一致，要么记录估算不足以支持重排并保持现有选择。
+- **Rationale**: 索引访问路径已经交付。完整代价模型与已做完的构建侧选择不是同一项。
+- **Dependencies**: None
+- **Scope**: I016 的余项。不重开已收尾的构建侧评估。
+- **Non-goals**: 节点锁、I/O 后端、新类型、流式结果。
+- **Stable result**: 后续查询改动可以知道 JOIN 顺序是估算决定的，还是仍由现有规则决定。
+- **Related changes**: None
+- **Consumes**: I016 的完整代价模型余项
+- **Split signals**: 若重排会改变结果语义而不只是计划选择，退回范围审议。
+
+### MS52：撕裂树与跨进程访问的去留
+
+- **Status**: ready
+- **Outcome**: 撕裂树的恢复代价有测量，并有刷盘、驱逐或维持现状的结论。跨进程一写多读有场景是否成立的结论。成立则快照、缓存失效和检查点协议被写明；不成立则保持现有文件锁。
+- **Rationale**: 两项都是先测量再决定是否改持久化或共享合同。真正的大改不放在结论之前。
+- **Dependencies**: None
+- **Scope**: I031、I084 的评估和去留。结论为维持现状则该项结束。结论要求改刷盘、驱逐或文件锁时，改动仍属本里程碑，并限在该结论点名的合同内。
+- **Non-goals**: 脏页批量写的实现、io_uring、索引页格式、节点锁。
+- **Stable result**: 后续页 I/O 可以依赖这里的刷盘与共享结论，不必再把撕裂树或跨进程访问当作未决前提。
+- **Related changes**: None
+- **Consumes**: I031、I084
+- **Split signals**: 若两项都要从评估进入实现，分成两个 change，不新编号。若改动超出结论点名的合同，退回范围审议。
+
+### MS53：复制、分配与行锁
+
+- **Status**: ready
+- **Outcome**: 复制、分配和行锁争用有测量。只有被测量证明值得改的那一处进入实现，且 SQL 结果不变。其余明确保留原实现。
+- **Rationale**: 三者都在执行路径的内存和争用上。先减少不必要复制，再看分配器，便于把收益归因到一处。
+- **Dependencies**: None。建议序在 MS49 之后，以便使用比较指标。已有诊断门面足够测量，新指标不是硬前置。
+- **Scope**: I020、I066、I050。行锁先测争用，再决定是否换成并发结构。
+- **Non-goals**: 节点锁、页 I/O、io_uring、导入攒批。
+- **Stable result**: 这三处要么已改且行为不变，要么明确保留原实现。后续 I/O 优化不把未证实的复制热点算进自己的收益。
+- **Related changes**: None
+- **Consumes**: I020、I066、I050
+- **Split signals**: 三处不能用同一次测量判断时，分成多个 change，不新编号。任一改动若改变可见性或锁等待的对外错误，退回范围审议。
+
+### MS54：脏页批量写与 I/O 后端
+
+- **Status**: planned
+- **Outcome**: 连续脏页写入有测量。批量写值得做则交付，并保留失败重试、释放耐久性和恢复约定。其后才比较 io_uring。不值得或平台不适合则保留现有后端。
+- **Rationale**: I028 需要 I026 先给出批量 I/O 基线。两者都在页写入路径上。撕裂树的去留会决定刷盘和驱逐，所以排在 MS52 之后。
+- **Dependencies**: MS52
+- **Scope**: I026、I028。先完成批量写的去留，再比较后端。
+- **Non-goals**: 索引页格式、节点锁、分配器、组提交评估。
+- **Stable result**: 页写入要么走已交付的批量路径，要么仍是逐页写。I/O 后端有采用或保留现状的结论。
+- **Related changes**: None
+- **Consumes**: I026、I028
+- **Split signals**: io_uring 若要替换默认跨平台后端，退回范围审议。批量写若要改恢复不变量，退回范围审议。
+
+### MS55：索引页空间与锁
+
+- **Status**: ready
+- **Outcome**: 索引页的空间和锁粒度有测量。瘦内部节点或 Tag 合并只有在空间收益盖过格式兼容成本时才改格式。节点锁只有在写争用被测量证实后才加，并保留写单元原子性、根发布、取消和回滚。未过门槛的保持原格式和现有锁。
+- **Rationale**: 三者都作用在已经稳定的定长键布局上。格式和锁要分开验收，但不值得各占一个里程碑。
+- **Dependencies**: None。建议在 MS52 之后，避免格式与驱逐策略同时变。不硬依赖 MS54。
+- **Scope**: I025、I029、I030。不沿用变长键假设。
+- **Non-goals**: 脏页批量写、io_uring、代价模型。
+- **Stable result**: 索引页格式和锁粒度有可依赖的结论。
+- **Related changes**: None
+- **Consumes**: I025、I029、I030
+- **Split signals**: 格式变更与节点锁若不能用同一次恢复和并发测试判断，分成两个 change，不新编号。格式变更若使旧库打不开且没有已写明的兼容路径，退回范围审议。
+
 ## D-candidates（不归入当前 MS，待后续决定）
 
-| 标题 | 不建议做的原因 | 何时重评 |
+2026-11-10 原表六行已进入路线：代价模型与 JOIN 重排归 MS51，clone 消除归 MS53，节点级锁、瘦内部节点和合并 Tag 归 MS55，io_uring 归 MS54。
+
+仍不归入当前里程碑：
+
+| 标题 | 不建议现在做的原因 | 何时重评 |
 |---|---|---|
-| 代价模型 + Join 重排 | 价值/复杂度不匹配 | 视后续 join 性能实测（MS09-T02 已完成） |
-| B+Tree 节点级锁 | ~500 行业务代码；460 tests 未证明有争用 | 视后续性能实测（MS08 已剥离至 improvements 域） |
-| clone 消除 Arc/Cow | 零拷贝 ValueRef 教训（K18）：先量化再优化 | 视后续 clone 频率 profiling |
-| io_uring | 高风险低收益 | 视后续整体性能实测 |
-| 瘦内部节点 | 依赖 Varint Key | I024 实施后单独评估 |
-| 合并 Tag byte | 改动序列化格式 | 暂搁 |
+| I049 组提交评估 | 分析写明串行单写者不提供前提 | 出现同实例并发提交且 fsync 是瓶颈 |
+| I094 CLI 运行时复评 | 负载或资源目标没有变化 | 目标变化之后 |
+| I057 加密性能基准 | 2026-09-23 裁剪退还仍有效 | 加密范围扩大时随该工作建立 |
+| I077 余项、I083 | MS47 规定批量入口不存在时保持未排期，不得另建写路径 | 用户明确改掉该稳定结果 |
+| I093、I095 | 没有具体依赖对象 | 某个依赖挡住已批准的需求 |
+| 交付与密钥便利层 | 用户暂缓或裁剪仍有效 | 用户改裁定 |
 
 ## 长期方向（未规划具体里程碑）
 
-- **io_uring 集成**（改进项 I028）：Linux 5.1+ tokio-uring 批量提交
-- **jemalloc/mimalloc 优化 (K37)**：已转入 improvements 台账 **I066**（2026-09-24 用户指令，权威位置移至 `.agents/memory/improvements.md`）
+- **io_uring**（I028）：已纳入 MS54，在脏页批量写的结论之后比较。不再作为未规划方向。
+- **jemalloc/mimalloc**（I066）：已纳入 MS53。权威说明仍在 `.agents/memory/improvements.md`。
 
 ## 依赖关系图
 
@@ -101,6 +211,14 @@ MS42 可组合模块边界 ✓ ──→ MS43 异步服务状态协作 ✓ ─�
 MS45 主命令 profiling 不再因索引扫描中止 ✓（无前置）
 MS46 无键行版本链进入 GC ✓（无前置）
 MS47 类型化批量写入入口的去留 ✓（无前置；建议序 MS45、MS46 之后）
+MS48 模块边界与会话通道收口（无前置）
+MS49 诊断上报与比较指标（无前置；建议序 MS48 后）
+MS50 结果消费与值类型（无前置）
+MS51 查询代价与 JOIN 重排（无前置）
+MS52 撕裂树与跨进程访问的去留（无前置）
+MS53 复制、分配与行锁（无前置；建议序 MS49 后）
+MS52 ──→ MS54 脏页批量写与 I/O 后端
+MS55 索引页空间与锁（无前置；建议序 MS52 后）
 ```
 
 建议执行序：**MS23 ✓ → MS24 ✓ → MS19 ✓ → MS18 ✓ → MS25 ✓ → MS20 一期 ✓ → MS21 ✓ → MS26 ✓ → MS28 ✓ → MS29 ✓ → MS20-T02 ✓ → MS27 ✓ → MS30 ✓ → MS31 ✓ → MS32 ✓ → MS33 ✓ → MS34 ✓**，同时 **MS33 ✓ → MS35 ✓**、**MS33 ✓ → MS36 ✓**（MS35 与 MS36 互不依赖）。截至 2026-10-26，MS37 及之前的执行序各项已完成。MS22 已 superseded，退回 improvements。MS35、MS36 于 2026-10-25 完成（2026-10-24 依赖 MS33 已满足后转 ready，2026-10-25 实施完成并归档）。MS37 于 2026-10-26 完成（change `2026-10-25-ms37-defect-ledger-closure` 归档）。2026-10-25 新批建议执行序：**MS37 ✓ → MS38 ✓ → MS39 ✓ → MS40 ✓**（MS40 无硬前置，可与 MS38/MS39 换位；2026-10-26 起 MS40 同时承载 ISS39、ISS40，与 Join 分 change。ADD COLUMN 与 Join 两条 change 均已归档，MS40 状态为 completed。ISS39、ISS40、ISS41 已关闭（2026-10-27 fixed：ISS39、ISS40 → `openspec/changes/archive/2026-10-26-ms40-add-column-catalog`，ISS41 → `openspec/changes/archive/2026-10-26-ms40-join-smj-and-build-side`）。MS38 硬依赖 MS37——编码变更改变索引条目格式，ISS26/ISS27 的页级判据与有界读面须先在现格式上收口。MS38 于 2026-10-27 完成，change `2026-10-27-ms38-index-key-encoding-and-string-index` 已归档。MS39 于 2026-10-27 完成，change `2026-10-27-ms39-composite-index-and-range-access` 已归档。2026-10-28 change `2026-10-28-ms41-build-and-compat-baseline` 已归档：Linux 本机质量检查、gnu 冒烟、musl 静态二进制冒烟和一次 M19 分批全量已有结果。macOS 未运行。同日用户原话：「那就不管那个，直接收尾吧，因为我买不起MacBook」，MS41 记为 completed。风险：macOS 没有实测。ISS36 已关闭）。
@@ -110,6 +228,8 @@ MS47 类型化批量写入入口的去留 ✓（无前置；建议序 MS45、MS4
 本批建议执行关系（2026-10-27 批准）：MS41 优先取得可通过的本机质量检查基线，目标平台验证可独立穿插；MS42 → MS43 → MS44 为结构与诊断主线。MS42 实施前须确认本机质量检查基线，但不等待 MS41 全部平台完成；未运行的平台分支不能计入 MS41 完成。现有 MS38、MS39 的范围、依赖及状态保持；结构改造建议在索引线形成稳定结果后启动，以减少格式与架构同时变化的返工，此为建议序，不新增硬依赖。每个里程碑可由一个或多个独立计划承载，不预定数量。本次只登记路线，不同步改进、缺陷台账或已有变更状态。
 
 2026-11-03 批：MS45 为 completed（2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`），MS46 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`）。MS47 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`）。依赖为 None，无环。建议执行序 MS45 → MS46 → MS47。MS45 先做，是为了旧 profiling 开关在主命令上不再中止进程；MS47 的测量不依赖这条修复也能用统一诊断和现有基准进行。MS46 与另外两项没有代码合同上的先后。每个里程碑可由一个或多个变更承载，不预定数量。I 条目与 ISS42 的状态不在本次改写。
+
+2026-11-10 批：新增 MS48–MS55，依据 R77，相近项并入同一里程碑。MS48、MS49、MS50、MS51、MS52、MS53、MS55 为 ready，依赖除建议序外均为 None。MS54 依赖 MS52，状态为 planned。建议执行序 MS48 → MS49 → MS50 → MS51 → MS52 → MS53 → MS54 → MS55。MS50、MS51、MS52、MS55 与这条顺序没有硬依赖，可以换位。无环。没有开放缺陷纳入本批。I 条目状态不在本次改写。
 
 ## 进行中
 

@@ -711,10 +711,10 @@
 ## R81: ISS42 CLI 主命令路径未建立 profiling scope（`RTSQL_PROFILING` 无三段计时表，索引扫描查询 panic）
 
 - **类型**: issue
-- **路径**: `.agents/issues/ISS42-cli-main-command-profiling-scope-absent.md`
+- **路径**: `git show f048317:.agents/issues/ISS42-cli-main-command-profiling-scope-absent.md`
 - **日期**: 2026-11-03
 - **用途**: CLI 主命令 `rtsql <db> "<sql>"` 在 `RTSQL_PROFILING` 已设置时缺少 profiling scope 的缺陷台账。2026-11-03 关闭：该变量已设置时主命令不中止，进入执行阶段的语句输出旧三段表；未设置时不输出该表。预编译语句不在该次验收内。
-- **状态**: closed（2026-11-03 fixed → openspec/changes/archive/2026-11-03-ms45-main-command-profiling/）
+- **状态**: closed（2026-11-03 fixed → openspec/changes/archive/2026-11-03-ms45-main-command-profiling/） [ARCHIVED 2026-11-10]
 
 ## R82: ISS43 自动建表路径的注释与「未声明主键 → 首列隐式主键」既定语义相反
 
