@@ -5,11 +5,16 @@
 //! - The latest version remains accessible after GC
 //! - GC returns the correct count of cleaned versions
 
+use rtsql::database::Database;
 use rtsql::executor::{Executor, InsertExecutor, UpdateExecutor, Value};
+use rtsql::storage::page_format::{overflow, ColumnType, Slot, SlottedPageRef};
 use rtsql::storage::{
-    data::TableManager, page_format::ColumnType, BufferPool, FileStorage, Result,
+    data::TableManager, BufferPool, FileStorage, Page, PageId, Result, RowId, StorageError,
+    HEADER_SIZE,
 };
-use rtsql::transaction::TransactionManager;
+use rtsql::transaction::{Transaction, TransactionManager, VersionHeader};
+use rtsql::SqlOutcome;
+use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -397,5 +402,432 @@ async fn test_gc_multiple_keys() -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+async fn must_sql(db: &Database, sql: &str) -> SqlOutcome {
+    db.execute_sql(sql)
+        .await
+        .unwrap_or_else(|err| panic!("{sql}: {err}"))
+}
+
+async fn must_sql_in_tx(db: &Database, sql: &str, tx: &Transaction) -> SqlOutcome {
+    db.execute_in_tx(sql, tx)
+        .await
+        .unwrap_or_else(|err| panic!("{sql}: {err}"))
+}
+
+fn affected(outcome: SqlOutcome) -> u64 {
+    match outcome {
+        SqlOutcome::AffectedRows(count) => count,
+        other => panic!("expected an affected-row count, got {other:?}"),
+    }
+}
+
+fn query_rows(outcome: SqlOutcome) -> Vec<Vec<Value>> {
+    match outcome {
+        SqlOutcome::Rows { rows, .. } => rows,
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+async fn open_db(dir: &tempfile::TempDir) -> Database {
+    Database::open(&dir.path().join("test.db")).await.unwrap()
+}
+
+fn page_file_offset(page: u32, in_page: usize) -> u64 {
+    (HEADER_SIZE + page as usize * Page::PAGE_SIZE + in_page) as u64
+}
+
+fn write_page_bytes(path: &Path, page: u32, in_page: usize, bytes: &[u8]) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(page_file_offset(page, in_page)))
+        .unwrap();
+    file.write_all(bytes).unwrap();
+    file.flush().unwrap();
+}
+
+async fn overflow_pages_of(pool: &BufferPool, row_id: RowId) -> Vec<u32> {
+    let locator = pool
+        .with_page_data(PageId(row_id.page_id as u64), |data| {
+            let slotted = SlottedPageRef::new(data);
+            let (slot, _) = slotted
+                .get_slot_by_logical_id(row_id.slot_id)
+                .expect("index head slot");
+            let slot_data = slotted.get_slot_data(&slot);
+            Ok(slot_data[VersionHeader::SIZE..].to_vec())
+        })
+        .await
+        .unwrap();
+    let (_total_len, first_page) =
+        overflow::decode_locator(&locator).expect("index head must carry an overflow locator");
+    overflow::collect_overflow_pages(pool, first_page)
+        .await
+        .unwrap()
+}
+
+/// S1：已提交的无键链头，其已提交祖先被回收，链头仍可由扫描读到。
+#[tokio::test]
+async fn gc_collects_committed_ancestors_of_keyless_head() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = open_db(&dir).await;
+    must_sql(&db, "CREATE TABLE t (id INT, v INT)").await;
+    must_sql(&db, "INSERT INTO t VALUES (1, 10)").await;
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET v = 11 WHERE id = 1").await),
+        1
+    );
+
+    let meta = db.get_table("t").await?;
+    let old = meta
+        .index_manager
+        .search(&1i64.to_be_bytes())
+        .await?
+        .expect("the keyed version must be indexed");
+
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET id = NULL, v = 12 WHERE id = 1").await),
+        1
+    );
+    let cleaned = meta.gc_table(&db.buffer_pool).await?;
+    assert_eq!(cleaned, 2);
+
+    let read = rtsql::storage::read_tuple_from_data_page(&db.buffer_pool, old, |_vh, bytes| {
+        Ok(bytes.len())
+    })
+    .await;
+    assert!(
+        matches!(read, Err(StorageError::SlotNotFound(_))),
+        "the keyed ancestor must be gone, got {read:?}"
+    );
+
+    let rows = query_rows(must_sql(&db, "SELECT id, v FROM t").await);
+    assert_eq!(rows, vec![vec![Value::Null, Value::Int(12)]]);
+    Ok(())
+}
+
+/// S2：只有一个无键版本时不回收，扫描仍返回该行。
+#[tokio::test]
+async fn gc_keeps_single_null_key_version() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = open_db(&dir).await;
+    must_sql(&db, "CREATE TABLE t (id INT, v INT)").await;
+    must_sql(&db, "INSERT INTO t VALUES (NULL, 1)").await;
+
+    let meta = db.get_table("t").await?;
+    let cleaned = meta.gc_table(&db.buffer_pool).await?;
+    assert_eq!(cleaned, 0);
+
+    let rows = query_rows(must_sql(&db, "SELECT id, v FROM t").await);
+    assert_eq!(rows, vec![vec![Value::Null, Value::Int(1)]]);
+    Ok(())
+}
+
+/// S3：非整数键的单次插入不回收，扫描仍返回该行。
+#[tokio::test]
+async fn gc_keeps_single_string_key_version() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = open_db(&dir).await;
+    must_sql(&db, "CREATE TABLE t (s STRING, n INT)").await;
+    must_sql(&db, "INSERT INTO t VALUES ('a', 1)").await;
+
+    let meta = db.get_table("t").await?;
+    let cleaned = meta.gc_table(&db.buffer_pool).await?;
+    assert_eq!(cleaned, 0);
+
+    let rows = query_rows(must_sql(&db, "SELECT s, n FROM t").await);
+    assert_eq!(
+        rows,
+        vec![vec![Value::String("a".to_string()), Value::Int(1)]]
+    );
+    Ok(())
+}
+
+/// S4：未提交的无键链头留下，已提交祖先被回收，同一事务只看见链头。
+#[tokio::test]
+async fn gc_keeps_uncommitted_keyless_head() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = open_db(&dir).await;
+    must_sql(&db, "CREATE TABLE t (id INT, v INT)").await;
+    must_sql(&db, "INSERT INTO t VALUES (1, 10)").await;
+
+    let meta = db.get_table("t").await?;
+    let old = meta
+        .index_manager
+        .search(&1i64.to_be_bytes())
+        .await?
+        .expect("the committed insert must be indexed");
+
+    let tx = db.begin().await?;
+    assert_eq!(
+        affected(must_sql_in_tx(&db, "UPDATE t SET id = NULL, v = 20 WHERE id = 1", &tx).await),
+        1
+    );
+
+    let cleaned = meta.gc_table(&db.buffer_pool).await?;
+    assert_eq!(cleaned, 1);
+
+    let read = rtsql::storage::read_tuple_from_data_page(&db.buffer_pool, old, |_vh, bytes| {
+        Ok(bytes.len())
+    })
+    .await;
+    assert!(
+        matches!(read, Err(StorageError::SlotNotFound(_))),
+        "the committed ancestor must be gone, got {read:?}"
+    );
+
+    let rows = query_rows(must_sql_in_tx(&db, "SELECT id, v FROM t", &tx).await);
+    assert_eq!(rows, vec![vec![Value::Null, Value::Int(20)]]);
+    Ok(())
+}
+
+/// S6：已提交的带键 DELETE 不进入无键回收，删除前的槽仍可读。
+#[tokio::test]
+async fn gc_does_not_collect_keyed_delete_chain() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = open_db(&dir).await;
+    must_sql(&db, "CREATE TABLE t (id INT, v INT)").await;
+    must_sql(&db, "INSERT INTO t VALUES (1, 10)").await;
+
+    let meta = db.get_table("t").await?;
+    let old = meta
+        .index_manager
+        .search(&1i64.to_be_bytes())
+        .await?
+        .expect("the inserted row must be indexed");
+
+    assert_eq!(
+        affected(must_sql(&db, "DELETE FROM t WHERE id = 1").await),
+        1
+    );
+    let cleaned = meta.gc_table(&db.buffer_pool).await?;
+    assert_eq!(cleaned, 0);
+
+    rtsql::storage::read_tuple_from_data_page(&db.buffer_pool, old, |_vh, bytes| Ok(bytes.len()))
+        .await?;
+    Ok(())
+}
+
+/// S7：同一张表上的带键链和无键链都回收旧版本，两边的当前值都还在。
+#[tokio::test]
+async fn gc_collects_keyed_and_keyless_chains_on_one_table() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = open_db(&dir).await;
+    must_sql(&db, "CREATE TABLE t (id INT, v INT)").await;
+    must_sql(&db, "INSERT INTO t VALUES (1, 10)").await;
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET v = 11 WHERE id = 1").await),
+        1
+    );
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET v = 12 WHERE id = 1").await),
+        1
+    );
+    must_sql(&db, "INSERT INTO t VALUES (2, 20)").await;
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET v = 21 WHERE id = 2").await),
+        1
+    );
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET id = NULL, v = 22 WHERE id = 2").await),
+        1
+    );
+
+    let meta = db.get_table("t").await?;
+    let cleaned = meta.gc_table(&db.buffer_pool).await?;
+    assert_eq!(cleaned, 4);
+
+    let current = meta
+        .index_manager
+        .search(&1i64.to_be_bytes())
+        .await?
+        .expect("the keyed head must stay indexed");
+    let (_header, bytes) =
+        rtsql::storage::read_tuple_from_data_page(&db.buffer_pool, current, |vh, bytes| {
+            Ok((vh, bytes.to_vec()))
+        })
+        .await?;
+    let values = rtsql::storage::page_format::deserialize_tuple(
+        &bytes,
+        &meta
+            .columns
+            .iter()
+            .map(|(_, column_type)| column_type.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    assert_eq!(values[0], Value::Int(1));
+    assert_eq!(values[1], Value::Int(12));
+
+    let rows = query_rows(must_sql(&db, "SELECT id, v FROM t").await);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.contains(&vec![Value::Int(1), Value::Int(12)]),
+        "{rows:?}"
+    );
+    assert!(
+        rows.contains(&vec![Value::Null, Value::Int(22)]),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !matches!(row[1], Value::Int(10 | 11 | 20 | 21))),
+        "{rows:?}"
+    );
+    Ok(())
+}
+
+/// S8：二级索引在无键链头回收祖先之后仍能找到当前值。
+#[tokio::test]
+async fn gc_secondary_index_finds_keyless_head() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = open_db(&dir).await;
+    must_sql(&db, "CREATE TABLE t (id INT, v INT)").await;
+    must_sql(&db, "INSERT INTO t VALUES (1, 10)").await;
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET v = 11 WHERE id = 1").await),
+        1
+    );
+    must_sql(&db, "CREATE INDEX iv ON t(v)").await;
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET id = NULL, v = 12 WHERE id = 1").await),
+        1
+    );
+
+    let meta = db.get_table("t").await?;
+    let cleaned = meta.gc_table(&db.buffer_pool).await?;
+    assert_eq!(cleaned, 2);
+
+    let rows = query_rows(must_sql(&db, "SELECT v FROM t WHERE v = 12").await);
+    assert_eq!(rows, vec![vec![Value::Int(12)]]);
+    Ok(())
+}
+
+/// S9：无键祖先的溢出页随槽删除进入待释放集合，提升后才能再分配到。
+#[tokio::test]
+async fn gc_frees_overflow_pages_of_keyless_ancestor() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let db = open_db(&dir).await;
+    must_sql(&db, "CREATE TABLE t (id INT, v STRING)").await;
+    let big = "x".repeat(10_000);
+    must_sql(&db, &format!("INSERT INTO t VALUES (1, '{big}')")).await;
+
+    let meta = db.get_table("t").await?;
+    let head = meta
+        .index_manager
+        .search(&1i64.to_be_bytes())
+        .await?
+        .expect("the oversized row must be indexed");
+    let chain = overflow_pages_of(&db.buffer_pool, head).await;
+    assert!(
+        !chain.is_empty(),
+        "the 10000-byte value must occupy overflow pages"
+    );
+
+    assert_eq!(
+        affected(must_sql(&db, "UPDATE t SET id = NULL, v = 'small' WHERE id = 1").await),
+        1
+    );
+    let cleaned = meta.gc_table(&db.buffer_pool).await?;
+    assert_eq!(cleaned, 1);
+
+    let rows = query_rows(must_sql(&db, "SELECT id, v FROM t").await);
+    assert_eq!(
+        rows,
+        vec![vec![Value::Null, Value::String("small".to_string())]]
+    );
+
+    let storage = db.buffer_pool.storage();
+    let mut fresh = Vec::new();
+    for _ in 0..chain.len() {
+        fresh.push(storage.allocate_page().await?.0 as u32);
+    }
+    assert!(
+        chain.iter().all(|page| !fresh.contains(page)),
+        "released chain pages must stay unallocatable before promotion: fresh={fresh:?} chain={chain:?}"
+    );
+
+    storage.promote_free_releases(storage.release_completion_limit());
+    let mut reclaimed = Vec::new();
+    for _ in 0..chain.len() {
+        reclaimed.push(storage.allocate_page().await?.0 as u32);
+    }
+    let mut expected = chain.clone();
+    expected.sort();
+    reclaimed.sort();
+    assert_eq!(reclaimed, expected);
+    Ok(())
+}
+
+/// S10：无键行所在数据页的页头槽数越界时，gc_table 返回点名错误。
+#[tokio::test]
+async fn gc_corrupt_slot_count_returns_named_error() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let page = {
+        let db = Database::open(&path).await?;
+        must_sql(&db, "CREATE TABLE t (id INT, v INT)").await;
+        must_sql(&db, "INSERT INTO t VALUES (NULL, 1)").await;
+        db.checkpoint().await?;
+        let meta = db.get_table("t").await?;
+        let page = meta.data_page_head.0 as u32;
+        db.close().await?;
+        drop(db);
+        page
+    };
+
+    write_page_bytes(&path, page, 1, &700u16.to_le_bytes());
+
+    let db = Database::open(&path)
+        .await
+        .expect("open must succeed when the data page header claims 700 slots");
+    let meta = db.get_table("t").await?;
+    let err = meta
+        .gc_table(&db.buffer_pool)
+        .await
+        .expect_err("a data page whose header claims 700 slots must make gc_table return an error");
+    let message = err.to_string();
+    assert!(
+        message.contains(&format!("corrupted data page {page}")),
+        "{message}"
+    );
+    assert!(message.contains("slot count 700"), "{message}");
+    Ok(())
+}
+
+/// S11：无键行所在数据页的槽 0 偏移越界时，gc_table 返回点名错误。
+#[tokio::test]
+async fn gc_corrupt_slot_offset_returns_named_error() -> Result<()> {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let page = {
+        let db = Database::open(&path).await?;
+        must_sql(&db, "CREATE TABLE t (id INT, v INT)").await;
+        must_sql(&db, "INSERT INTO t VALUES (NULL, 1)").await;
+        db.checkpoint().await?;
+        let meta = db.get_table("t").await?;
+        let page = meta.data_page_head.0 as u32;
+        db.close().await?;
+        drop(db);
+        page
+    };
+
+    let slot_offset_field = Page::PAGE_SIZE - Slot::SIZE + 2;
+    write_page_bytes(&path, page, slot_offset_field, &0xFFFFu16.to_le_bytes());
+
+    let db = Database::open(&path)
+        .await
+        .expect("open must succeed when slot 0 offset is 0xFFFF");
+    let meta = db.get_table("t").await?;
+    let err = meta
+        .gc_table(&db.buffer_pool)
+        .await
+        .expect_err("a data page with slot 0 offset 0xFFFF must make gc_table return an error");
+    let message = err.to_string();
+    assert!(
+        message.contains(&format!("corrupted data page {page}")),
+        "{message}"
+    );
+    assert!(message.contains("slot 0"), "{message}");
     Ok(())
 }

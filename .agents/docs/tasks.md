@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-2026-11-03 用户指令「规划这一批你推荐的条目到ms，刚好三个ms就好」，新增 MS45–MS47，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）在 MS41–MS44 完成后的下一批过滤结果。MS45 主命令 profiling 不再因索引扫描中止（completed，2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`；承接 ISS42）。MS46 无键行版本链进入 GC（ready，承接 I038）。MS47 类型化批量写入入口的去留（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`；承接 I021）。三者无硬前置，建议序 MS45 → MS46 → MS47。macOS 构建与运行不在本批。I077 余项、I083、I065、I069、I084、I016 的完整代价模型、I031 以及已暂缓的交付与密钥便利层留在改进台账。本次只登记路线，不同步改进条目、缺陷状态或 SNAPSHOT。
+2026-11-03 用户指令「规划这一批你推荐的条目到ms，刚好三个ms就好」，新增 MS45–MS47，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）在 MS41–MS44 完成后的下一批过滤结果。MS45 主命令 profiling 不再因索引扫描中止（completed，2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`；承接 ISS42）。MS46 无键行版本链进入 GC（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`；承接 I038）。MS47 类型化批量写入入口的去留（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`；承接 I021）。三者无硬前置，建议序 MS45 → MS46 → MS47。macOS 构建与运行不在本批。I077 余项、I083、I065、I069、I084、I016 的完整代价模型、I031 以及已暂缓的交付与密钥便利层留在改进台账。本次只登记路线，不同步改进条目、缺陷状态或 SNAPSHOT。
 
 2026-10-27 用户批准“架构边界与验证基础”批，新增 MS41–MS44，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）：MS41 构建与兼容验证基线为 completed（macOS 按 2026-10-28 用户决定不再等待）；MS42 可组合模块边界为 completed（2026-10-28 收尾归档，change `openspec/changes/archive/2026-10-28-ms42-module-boundaries/`）；MS43 异步服务状态协作为 completed（2026-10-28 收尾归档，change `openspec/changes/archive/2026-10-28-ms43-service-lifecycle/`）；MS44 统一诊断为 completed（2026-10-30 收尾归档，change `openspec/changes/archive/2026-10-28-ms44-unified-diagnostics/`）。本批覆盖 ISS36、I073、I093、I074、I095、I012、I096；I093 按平台与 feature 组合分别承接，I095 保留按需触发边界，不把未触发定制变成必做工作。
 
@@ -22,7 +22,7 @@
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
 ## Milestone Roadmap
 
-详细的已完成里程碑段已归档，见文件末墓碑。各里程碑的完成摘要见「路线图结构」段与「依赖关系图」的 ✓ 标记；MS22 已 superseded 退回 improvements，其候选见「D-candidates」段与改进台账。当前路线上尚未执行的里程碑是 MS46。
+详细的已完成里程碑段已归档，见文件末墓碑。各里程碑的完成摘要见「路线图结构」段与「依赖关系图」的 ✓ 标记；MS22 已 superseded 退回 improvements，其候选见「D-candidates」段与改进台账。当前路线上没有尚未执行的里程碑。
 
 ### MS45：主命令 profiling 不再因索引扫描中止
 
@@ -39,14 +39,14 @@
 
 ### MS46：无键行版本链进入 GC
 
-- **Status**: ready
+- **Status**: completed（2026-11-10。change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/` 已归档。Iteration 000 的 Review Result 为 accepted。`gc_table` 回收无键链上已提交且不是链头的旧版本，链头与未提交版本仍可读；带键行的既有 GC 合同不变。收尾全量按 Iteration Plan 跳过）
 - **Outcome**: 键位不可入索引的行，其旧版本链能被 GC 回收。可见性判断和释放规则与已有 GC 相同。带键行的既有 GC 合同不变。
 - **Rationale**: 这条链今天走不到 GC，长更新下旧版本空间不回收。补的是覆盖面。速度、锁和分配器不在同一验收里。
 - **Dependencies**: None
 - **Scope**: 让 GC 到达无键行的版本链，并按既有可见性判断与释放规则回收。仍可见的版本不回收。
 - **Non-goals**: 提高 GC 速度；改变 MVCC 可见性；改索引格式、空闲页生命周期或刷盘策略；节点级锁、分配器、clone 消除。
 - **Stable result**: 无键行的旧版本不再因为不在索引里而永远留在表上。后续空间和性能测量可以假定这条链会被 GC 看见。
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`
 - **Consumes**: I038
 - **Split signals**: 若回收必须改可见性语义或空闲页合同，退回范围审议。
 
@@ -99,7 +99,7 @@ MS40 Join 算法补全与 ADD COLUMN 目录面两条缺陷（无硬前置；Join
 MS41 构建与兼容验证基线 ✓（macOS 未运行，用户决定不再等待）
 MS42 可组合模块边界 ✓ ──→ MS43 异步服务状态协作 ✓ ──→ MS44 统一分级诊断 ✓
 MS45 主命令 profiling 不再因索引扫描中止 ✓（无前置）
-MS46 无键行版本链进入 GC（无前置）
+MS46 无键行版本链进入 GC ✓（无前置）
 MS47 类型化批量写入入口的去留 ✓（无前置；建议序 MS45、MS46 之后）
 ```
 
@@ -109,7 +109,7 @@ MS47 类型化批量写入入口的去留 ✓（无前置；建议序 MS45、MS4
 
 本批建议执行关系（2026-10-27 批准）：MS41 优先取得可通过的本机质量检查基线，目标平台验证可独立穿插；MS42 → MS43 → MS44 为结构与诊断主线。MS42 实施前须确认本机质量检查基线，但不等待 MS41 全部平台完成；未运行的平台分支不能计入 MS41 完成。现有 MS38、MS39 的范围、依赖及状态保持；结构改造建议在索引线形成稳定结果后启动，以减少格式与架构同时变化的返工，此为建议序，不新增硬依赖。每个里程碑可由一个或多个独立计划承载，不预定数量。本次只登记路线，不同步改进、缺陷台账或已有变更状态。
 
-2026-11-03 批：MS45 为 completed（2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`），MS46 仍为 ready。MS47 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`）。依赖为 None，无环。建议执行序 MS45 → MS46 → MS47。MS45 先做，是为了旧 profiling 开关在主命令上不再中止进程；MS47 的测量不依赖这条修复也能用统一诊断和现有基准进行。MS46 与另外两项没有代码合同上的先后。每个里程碑可由一个或多个变更承载，不预定数量。I 条目与 ISS42 的状态不在本次改写。
+2026-11-03 批：MS45 为 completed（2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`），MS46 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`）。MS47 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`）。依赖为 None，无环。建议执行序 MS45 → MS46 → MS47。MS45 先做，是为了旧 profiling 开关在主命令上不再中止进程；MS47 的测量不依赖这条修复也能用统一诊断和现有基准进行。MS46 与另外两项没有代码合同上的先后。每个里程碑可由一个或多个变更承载，不预定数量。I 条目与 ISS42 的状态不在本次改写。
 
 ## 进行中
 
