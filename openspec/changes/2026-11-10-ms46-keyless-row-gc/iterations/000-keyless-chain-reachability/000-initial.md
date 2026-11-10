@@ -197,6 +197,7 @@ PASS。审查项全部通过。BLOCKED: 无。SKIPPED: 无。
 
 - 读 `logical_id` 时先把目录下标复制到局部变量，再交给页闭包。否则闭包与 `self.buffer_pool` 会同时借用 `self`，无法编译。查找键仍是该槽的 `logical_id`。
 - 当前下标没有槽时（下标已越过槽数，或页头槽数越界因而未取槽），不再用目录下标合成 `RowId` 去查替代 map，直接进入原有闭包。越过槽数时由闭包结束本页；页头槽数越界时仍由闭包返回既有的槽数错误。未删槽的扫描结果由第三条验证覆盖。
+- `gc_frees_overflow_pages_of_keyless_ancestor` 在分配见证前断言溢出链非空。空链不能靠两边都是空集合通过页号相等。本次链非空：提升前分配到的页与链页无交集，提升后排序与链页相同。
 
 **自检**
 
@@ -207,18 +208,18 @@ PASS。审查项全部通过。BLOCKED: 无。SKIPPED: 无。
 
 **验证**
 
-改产品代码之前，在本工作目录执行 `cargo test --offline --test gc_test -- --test-threads=1`。退出码 101。`test result: FAILED. 6 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s`。失败的 7 个是规定的 RED：无键祖先计数为 0 而不是 2、未提交链为 0 而不是 1、同表为 2 而不是 4、二级索引为 0 而不是 2、溢出祖先为 0 而不是 1，两个损坏页用例得到 `Ok(0)`。通过的 6 个是既有三则、单行 NULL、单行 STRING、已提交带键 DELETE。这次失败不计入三次失败。
+改产品代码之前，在本工作目录执行 `cargo test --offline --test gc_test -- --test-threads=1`。退出码 101。`test result: FAILED. 6 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s`。失败的 7 个是规定的 RED：无键祖先计数为 0 而不是 2、未提交链为 0 而不是 1、同表为 2 而不是 4、二级索引为 0 而不是 2、溢出祖先为 0 而不是 1，两个损坏页用例得到 `Ok(0)`。未提交链的失败停在计数断言，旧槽断言这次没有执行到。通过的 6 个是既有三则、单行 NULL、单行 STRING、已提交带键 DELETE。这次失败不计入三次失败。
 
 改完后按顺序各执行一次，上一条退出后再执行下一条：
 
 1. `cargo test --offline --test gc_test -- --test-threads=1`  
-   退出码 0。`test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s`
+   退出码 0。`test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s`
 2. `cargo test --offline --test overflow_page_test gc_releases_oversized_version_chain -- --test-threads=1`  
-   退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.01s`
+   退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s`
 3. `cargo test --offline --test keyless_eq_routing_test -- --test-threads=1`  
-   退出码 0。`test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s`
+   退出码 0。`test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s`
 
-未跑全量。这不构成本 Cycle 的 Gate 失败。
+这三条是 rustfmt 之前的运行。之后只对这三个 Rust 文件做了 rustfmt，只改排版，没有重跑。未跑全量。这不构成本 Cycle 的 Gate 失败。
 
 **Persisted Evidence**
 
