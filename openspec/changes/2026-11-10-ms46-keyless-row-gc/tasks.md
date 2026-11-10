@@ -43,7 +43,7 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 - Depends on: None
 - 状态：已展开，等待 Act。
 - Stable result: 调用 `gc_table` 后，无键行的已提交旧版本被回收，链头和未提交版本仍可读；带键行的最新版本和已提交删除留下的墓碑链与改前相同；损坏数据页返回 `corrupted data page` 错误。
-- Verification boundary: T1 的三条定向命令，逐个执行，每条都带 `--offline -- --test-threads=1`。本 Iteration 不跑全量，本 change 也不另设收尾全量 Iteration。跳过本 change 收尾全量的理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。风险：本 change 收尾前没有全量；合回后那一次失败时，排查范围包含 MS46 与尚未开始的 MS47。合回主分支之后的那一次按 `.agents/runbooks/m19-batched-full-regression.md` 分批串行，不在本 change 的任务里。
+- Verification boundary: T1 的三条定向命令，逐个执行，每条都带 `--offline -- --test-threads=1`。本 Iteration 不跑全量，本 change 也不另设收尾全量 Iteration。跳过本 change 收尾全量的理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。风险：本 change 收尾前没有全量；合回后那一次失败时，排查范围包含 MS46 与 MS47。合回主分支之后的那一次按 `.agents/runbooks/m19-batched-full-regression.md` 分批串行，不在本 change 的任务里。
 - Diagnostic boundary: `TableMeta::gc_table` 的两段枚举，`DataScanExecutor::next` 用来查替代 map 的行身份，以及 `tests/gc_test.rs` 的新断言。带键三则失败时，先看第一段判定有没有被改写。没有删过槽的无键查询失败时，先看 `logical_id` 改动是否在未删槽的页上改变了结果。溢出页在提升前就能分配到，才去看 `delete_tuple_from_data_page`，那已经超出本 Iteration 的允许修改。
 - Non-goals: GC 速度、MVCC 可见性规则、索引格式、空闲页生命周期、刷盘、节点锁、分配器、clone 消除、SQL GC 语句、让 DELETE 找到无键行、全量回归。
 

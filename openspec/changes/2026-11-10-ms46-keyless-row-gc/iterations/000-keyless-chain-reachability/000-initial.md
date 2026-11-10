@@ -161,7 +161,7 @@
 
 两条都从本 change 的工作目录执行。通过条件是各自退出码 0，且 `test result:` 行的 `failed` 为 0。S1–S8 的写和读走 `execute_sql` / `execute_in_tx`，GC 走 `gc_table`。S9 的释放观察使用现有 `allocate_page` 与 `promote_free_releases`。S10、S11 直接看 `gc_table` 返回的错误文本。
 
-本 Iteration 和本 change 都不跑全量。理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。风险：本 change 收尾前没有全量；合回后那一次失败时，排查范围包含 MS46 与尚未开始的 MS47。
+本 Iteration 和本 change 都不跑全量。理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。风险：本 change 收尾前没有全量；合回后那一次失败时，排查范围包含 MS46 与 MS47。
 
 **Gate 2 Readiness**
 
