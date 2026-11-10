@@ -85,7 +85,17 @@ sequenceDiagram
     Gc-->>Caller: 两段删除个数之和
 ```
 
-### 3. 溢出页和损坏页不另做生命周期
+### 3. 删槽之后扫描仍按逻辑 id 识别版本
+
+`delete_slot` 会把被删槽后面的目录项前移，槽里的 `logical_id` 跟着目录项走，不会改成新的下标。`DataScanExecutor::next`（`data_scan.rs` 约 418–423 行）在读槽之前用 `current_slot_index` 拼 `RowId`，再查 `build_superseded_map`。该 map 的键是 `slot.logical_id`（约 278 行）。页上还没有删过槽时，逻辑 id 与下标相同，两套身份重合。
+
+`gc_table` 一旦删掉旧槽，幸存链头会滑到更小的下标，逻辑 id 不变。下标若碰巧等于某个已被 `next_version` 指向的旧逻辑 id，而指向者已提交，扫描会把链头当成旧版本跳过。无键行没有主键索引，`SELECT` 走这条扫描。不改这一点，规格里的 `SELECT` 会看不到仍然在页上的链头。
+
+修正只发生在这次身份比较：读出该下标上的槽，用它的 `logical_id` 组成 `RowId` 再查 map。`build_superseded_map` 的键、`superseder_suppresses` 的提交号和墓碑规则不动。没有删过槽的页上，逻辑 id 仍等于下标，现有扫描结果不变。
+
+这不改变可见性规则。规则仍然是「已提交的更新版本抑制它指向的旧版本」。变的是删槽之后「这个目录项是哪一个版本」。
+
+### 4. 溢出页和损坏页不另做生命周期
 
 无键旧版本的溢出链只通过现有的 `delete_tuple_from_data_page` 释放。测试观察复制 `gc_releases_oversized_version_chain`：GC 之后、`promote_free_releases` 之前分配不到这些页，提升后可以。不在这条测试里调用 `checkpoint`。
 
@@ -95,12 +105,12 @@ sequenceDiagram
 
 - 每次 `gc_table` 都走完整数据页链。调用者只有测试和维护入口，接受这次遍历。
 - 第一段已经删除了一些版本之后，第二段才返回错误时，已删版本不补回。这与第一段循环中途失败的现有行为相同。
-- 数据页链成环时，本函数与 `build_superseded_map` 一样没有环检测。不在本次加环检测。
+- 数据页链成环时与 `build_superseded_map` 一样没有环检测。本次不加。`next_version` 成环也不另加与第一段不同的检测。
 - 并发的两次 `gc_table` 仍无额外互斥。本次不加锁。
 
 ## Migration Plan
 
-没有磁盘迁移。部署就是替换 `gc_table`。回滚是去掉第二段，第一段恢复为现在的循环。已回收的槽不会因为回滚代码而重新出现。
+没有磁盘迁移。回滚是去掉 `gc_table` 的第二段，并把 `DataScanExecutor::next` 的查找恢复为目录下标。已回收的槽不会因为回滚代码而重新出现。
 
 ## Open Questions
 

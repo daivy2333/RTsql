@@ -32,7 +32,7 @@ MS46 补的是这条链的覆盖面。可见性判断和释放规则保持现有
 
 ## Impact
 
-- 代码：`src/storage/data/table_manager.rs` 的 `TableMeta::gc_table`。
+- 代码：`src/storage/data/table_manager.rs` 的 `TableMeta::gc_table`。`src/executor/data_scan.rs` 只改替代判断使用的行身份：删槽之后按槽的 `logical_id`，不再用目录下标。`superseder_suppresses` 的可见性规则不改。
 - 测试：`tests/gc_test.rs` 增加无键链、带键删除链、二级索引和损坏页用例。既有三则带键用例和 `tests/overflow_page_test.rs` 的 `gc_releases_oversized_version_chain` 不改断言。
 - 不改：`delete_tuple_from_data_page`、空闲页生命周期、版本头格式、索引格式、Scan / Insert / Update / Delete 的定位方式、checkpoint、恢复。
 - 关联：MS46；I038；M10；M19。全量不在本 change 的 Iteration 里。

@@ -29,8 +29,9 @@
   - 因此现有 SQL 能造出的无键旧版本链是：整数键行已提交，再把 `id` 更新为 NULL。非整数键列的单次插入没有旧版本。已经无键的行不能再被 `UPDATE` / `DELETE` 找到。
   - 链尾定义在 `src/executor/create_index.rs::backfill_tree`（约 119–174 行）：`create_tx_id != 0` 的 `next_version` 才把目标放入被指向集合。`DataScanExecutor::build_superseded_map`（`data_scan.rs` 约 241–306 行）给出数据页遍历的错误处理：槽数越界和槽负载越界返回错误，短于版本头的槽跳过，`next_page_id == 0` 结束。
   - `delete_tuple_from_data_page`（`data_page.rs` 约 351–414 行）先删槽，再 `free_overflow_chain`。不在该函数里提升空闲页。溢出见证已在 `gc_releases_oversized_version_chain`：提升前分配不到链页，`promote_free_releases(release_completion_limit())` 之后可以。
-  - `deserialize_row` 在 `src/storage/page_format/tuple.rs`。`TableMeta` 有 `columns`、`defaults`、`pk_index`、`data_page_head`。`Database::get_table`、`execute_sql`、`begin`、`execute_in_tx`、`checkpoint`、`close` 均为公开方法。`execute_sql` 自动提交；显式事务内的语句走 `execute_in_tx`。
-  - 无快照的 `DataScan` 会产出未被抑制的未删除槽。未提交新版本的 `commit_tx_id()` 为 `None`，`superseder_suppresses` 对它返回 false，所以提交前的 `SELECT` 能同时看见旧版本和新版本。GC 删掉旧槽之后，`SELECT` 只剩新版本。
+  - `deserialize_row` 在 `src/storage/page_format/tuple.rs`。`TableMeta` 有 `columns`、`defaults`、`pk_index`、`data_page_head`。`Database::get_table`、`execute_sql`、`begin`、`execute_in_tx`、`checkpoint`、`close` 均为公开方法。`execute_sql` 自动提交；显式事务内的语句走 `execute_in_tx`。`Database::open` 默认 Repeatable Read。`statement_snapshot`（`database.rs` 约 508–510 行）对 Repeatable Read 返回 `None`。`execute_stage_in_tx_routed` 把这个值传给扫描，所以 S4 的事务内 `SELECT` 仍是无快照扫描。不要改用 Read Committed。
+  - 无快照的 `DataScan` 会产出未被抑制的未删除槽。未提交新版本的 `commit_tx_id()` 为 `None`，`superseder_suppresses` 对它返回 false，所以提交前的 `SELECT` 能同时看见旧版本和新版本。旧槽被删掉之后，扫描只应剩新版本。
+  - `SlottedPage::delete_slot`（`slotted_page.rs` 约 444–461 行）把后面的目录项前移，`logical_id` 保存在目录项里，不改写成新下标。`DataScanExecutor::next`（`data_scan.rs` 约 418–423 行）用 `current_slot_index` 拼 `RowId` 去查替代 map。`build_superseded_map` 的键是 `slot.logical_id`（约 278 行）。未删槽时两者相同。删槽后链头的下标会落到某个旧逻辑 id 上；若该 id 仍是某个已提交版本的 `next_version` 目标，扫描会跳过实际上的链头。无键行的 `SELECT` 走这条扫描。因此本 Cycle 必须把这次查找改成该槽的 `logical_id`，否则 S7、S9 的 `SELECT` 会看不到仍在页上的链头。`superseder_suppresses` 本身不用改。
 - Code and Critical Path:
   - 入口：测试或维护代码调用 `TableMeta::gc_table(&self, buffer_pool)`。
   - 数据：索引头 `row_id` → `next_version` 链；无键链头在数据页上，不在主键索引里。
@@ -40,7 +41,7 @@
 
 **Implementation Guidance**
 
-先写 `tests/gc_test.rs` 的新用例并跑出规定的 RED，再改 `gc_table`。第一段循环的判定文本保持 `commit_tx_id().is_some() && current_id != row_id`。第二段只追加无键链头。两段可以共用一个本地异步函数，第一段不得改成数据页扫描。
+先写 `tests/gc_test.rs` 的新用例并跑出规定的 RED，再改产品代码。第一段循环的判定文本保持 `commit_tx_id().is_some() && current_id != row_id`。第二段只追加无键链头。两段可以共用一个本地异步函数，第一段不得改成数据页扫描。`DataScanExecutor::next` 只把替代 map 的查询键从目录下标改成该槽的 `logical_id`。
 
 选用数据页链全扫，不建无键链登记结构。理由在 `design.md` 的 Decision 1，这里不重复取舍过程。
 
@@ -52,6 +53,7 @@
 - Depends on: None
 - Targets:
   - `src/storage/data/table_manager.rs::TableMeta::gc_table`
+  - `src/executor/data_scan.rs::DataScanExecutor::next`
   - `tests/gc_test.rs` 的新用例
 - Current behavior:
   - 只有主键索引 `scan_all` 能到达的链会被回收。无键链头不在索引里，`gc_table` 对它返回的清理计数不包含它的旧版本，旧槽仍能读到。
@@ -62,6 +64,7 @@
 - Required behavior:
   - 保留第一段：`scan_all` 的每个 `row_id` 仍按 `commit_tx_id().is_some() && current_id != 该 row_id` 调用 `delete_tuple_from_data_page`。记下这些索引头。
   - 第二段从 `self.data_page_head` 沿页头 `next_page_id` 走到 0。被 `create_tx_id != 0` 的 `next_version` 指向的 `row_id` 不是链头。额外链头同时满足：不在被指向集合、不在索引头集合、`create_tx_id != 0`、`is_deleted()` 为假、解码后 `values[self.pk_index].to_key()` 为 `None`。解码用 `read_tuple_from_data_page` 和 `deserialize_row(&bytes, schema, &self.defaults)`，schema 来自 `self.columns`。
+  - `DataScanExecutor::next` 在查替代 map 之前，读出当前下标上的槽，用该槽的 `logical_id` 组成 `RowId`。`build_superseded_map` 已经用 `logical_id` 做键（`data_scan.rs` 约 278 行）。现在的 `next` 用 `current_slot_index`（约 422 行）。`delete_slot` 会把后面的目录项前移并保留原来的 `logical_id`，删槽之后下标不再等于逻辑 id。不改这里，无键链头在 `SELECT` 里会被当成旧版本跳过。`superseder_suppresses` 和 map 的键不改。没有删过槽时，逻辑 id 仍等于下标，现有扫描结果不变。
   - 对每个无键链头使用与第一段相同的判定和 `delete_tuple_from_data_page`。走到索引头 `row_id` 时不删除，并停止这条链继续向下删除。
   - 页头槽数越界返回 `corrupted_data_page_slot_count_error`。槽负载越界返回 `corrupted_data_page_slot_error`。短于版本头或版本头解析失败的槽跳过。`read_tuple_from_data_page` 或 `deserialize_row` 的错误原样返回。
   - 返回值是两段删除个数之和。
@@ -83,10 +86,12 @@
   - 带键最新槽仍在索引里。
   - 已提交带键 `DELETE` 的旧槽不被删除。
   - `delete_tuple_from_data_page` 的释放顺序和提升时机。
-  - 读路径、UPDATE/INSERT/DELETE 的索引维护、页格式。
+  - `superseder_suppresses` 的可见性规则，以及未删槽页上的扫描结果。
+  - UPDATE/INSERT/DELETE 的索引维护、页格式。
 - Forbidden:
   - 用数据页扫描替换第一段 `scan_all`。
-  - 修改 `delete_tuple_from_data_page`、`DataScanExecutor`、`InsertExecutor`、`UpdateExecutor`、`DeleteExecutor`、`VersionHeader`。
+  - 修改 `delete_tuple_from_data_page`、`InsertExecutor`、`UpdateExecutor`、`DeleteExecutor`、`VersionHeader`。
+  - 修改 `superseder_suppresses`、`build_superseded_map` 的键，或 `DataScanExecutor` 里除「用 `logical_id` 查替代 map」以外的行为。
   - 改索引格式、空闲页提升、刷盘、MVCC 的 `is_visible`。
   - 新增 SQL 或 CLI。
   - 吞掉 `SlotNotFound` 或解码错误来凑清理计数。
@@ -98,18 +103,23 @@
   - RED：`gc_collects_committed_ancestors_of_keyless_head` 得到 0 而不是 2；`gc_keeps_uncommitted_keyless_head` 得到 0 而不是 1，且旧槽仍在；`gc_collects_keyed_and_keyless_chains_on_one_table` 得到 2 而不是 4；`gc_secondary_index_finds_keyless_head` 的清理计数不是 2；`gc_frees_overflow_pages_of_keyless_ancestor` 的清理计数不是 1 或链页在提升后取不回；两个损坏页用例得到 `Ok` 而不是点名错误。
   - 命令：`cargo test --offline --test gc_test -- --test-threads=1`
   - 改 `gc_table` 之前先跑这条命令。RED 用例失败、保留用例通过，才改产品代码。只为确认 RED 的那一次失败不计入三次失败。
-- GREEN condition: 同一条 `gc_test` 命令退出码 0，`failed` 为 0。随后单独执行 `cargo test --offline --test overflow_page_test gc_releases_oversized_version_chain -- --test-threads=1`，退出码 0，`failed` 为 0。
+- GREEN condition: 下面三条命令都退出码 0，且各自 `failed` 为 0。改产品代码之前，`keyless_eq_routing_test` 已经是 GREEN；改完仍是 GREEN。
 - Verification:
-  - 上面两条命令按这个顺序各执行一次，第二条等第一条结束。每条都带 `--test-threads=1`。通过条件是该命令退出码 0 且输出里的 `failed` 为 0。
-  - `gc_test` 失败表示 S1–S8、S10、S11 或带键三则里有断言未成立。溢出命令失败表示带键超页版本的现有释放被碰到了。
-  - 不跑 `cargo test` 无过滤全量，不跑 `--lib` 全库，不把多个集成测试目标放进同一条命令。
+  - 按这个顺序各执行一次，上一条退出后再执行下一条。每条都带 `--test-threads=1`。通过条件是该命令退出码 0 且输出里的 `failed` 为 0。
+    1. `cargo test --offline --test gc_test -- --test-threads=1`
+    2. `cargo test --offline --test overflow_page_test gc_releases_oversized_version_chain -- --test-threads=1`
+    3. `cargo test --offline --test keyless_eq_routing_test -- --test-threads=1`
+  - `gc_test` 失败表示 S1–S8、S10、S11 或带键三则里有断言未成立。溢出命令失败表示带键超页版本的现有释放被碰到了。第三条失败表示未删槽的无键扫描结果变了。
+  - 不跑 `cargo test` 无过滤全量，不跑不带过滤的 `--lib`，不把多个集成测试目标放进同一条命令。
 - Stop when:
   - 要让无键旧版本被回收，必须改 `Snapshot::is_visible`、第一段判定、`delete_tuple_from_data_page` 的释放顺序，或空闲页提升条件。停止并回报，不改这些。
   - 第二段对应当只删除一次的槽得到 `SlotNotFound`。停止并回报，不把这个错误改成跳过。
   - 无键链头或带键索引头被删除。停止并回报。
+  - `SELECT` 在旧槽已删除后看不见链头，而且链头槽的 `logical_id` 已经用于查替代 map 仍然看不见。这时才停止。只因下标被当成逻辑 id 而看不见，按 Required behavior 改 `next`，不要改可见性规则。
   - 已提交带键 `DELETE` 的旧槽被删除。停止并回报。
   - `open` 在槽数 700 或槽 offset `0xFFFF` 的夹具上失败。这与 `data_page_bounded_read_test` 的打开结果不一致，停止并回报，不要改成「打开失败也算 GC 报错通过」。
   - 未提交夹具里，`SELECT` 在旧槽已删除后仍看不见 `[NULL, 20]`，或还看见旧值。停止并回报。
+  - 要把链头留在 `SELECT` 结果里，就必须改 `superseder_suppresses` 的规则。停止并回报。允许的只有改用 `logical_id` 做查找。
 
 **Invariants**
 
@@ -141,12 +151,13 @@
 - S9：`gc_frees_overflow_pages_of_keyless_ancestor` 计数为 1，提升前链页分不回，提升后能分回。
 - S10、S11：两个损坏页用例的错误文本含页号和对应的 `slot count 700` 或 `slot 0`，进程不中止，打开成功。
 - `gc_releases_oversized_version_chain` 仍通过。
-- 代码范围只有 `gc_table` 及其完成本判定所需的本文件私有辅助，加上 `tests/gc_test.rs` 的新用例。
+- 代码范围只有 `gc_table` 及其完成本判定所需的本文件私有辅助、`DataScanExecutor::next` 的行身份查找，加上 `tests/gc_test.rs` 的新用例。
 
 **Verification**
 
 1. `cargo test --offline --test gc_test -- --test-threads=1`
 2. 上一条退出后再执行 `cargo test --offline --test overflow_page_test gc_releases_oversized_version_chain -- --test-threads=1`
+3. 上一条退出后再执行 `cargo test --offline --test keyless_eq_routing_test -- --test-threads=1`
 
 两条都从本 change 的工作目录执行。通过条件是各自退出码 0，且 `test result:` 行的 `failed` 为 0。S1–S8 的写和读走 `execute_sql` / `execute_in_tx`，GC 走 `gc_table`。S9 的释放观察使用现有 `allocate_page` 与 `promote_free_releases`。S10、S11 直接看 `gc_table` 返回的错误文本。
 
@@ -163,6 +174,7 @@ PASS。审查项全部通过。BLOCKED: 无。SKIPPED: 无。
 **Risks and Notes**
 
 - 数据页链成环时与 `build_superseded_map` 一样没有环检测。本次不加。
+- 删槽后若仍用目录下标查替代 map，`SELECT` 会漏掉未回收的链头。本 Cycle 用 `logical_id` 修正查找，不改抑制规则。这是 S7、S9 成立的必要条件，不是额外功能。
 - 第一段已经删除版本之后第二段才报错，已删槽不补回。这与第一段中途失败的现有行为相同。
 - 两次并发 `gc_table` 仍没有额外互斥。本次不加锁。
 - 定向测试的 `--test-threads=1` 高于工作区里已提交的 M19「单次目标验证可用默认并行度」那一句。以本次 goal 为准。
