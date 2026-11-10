@@ -63,8 +63,8 @@
 | 序 | 条目 | 内容 | 状态 |
 |---|---|---|---|
 | 4 | I016 | 代价模型 + Join 重排（降范围起步：选较小 Hash 构建侧） | promoted（降范围起步纳入 MS40，尚未开始；完整代价模型仍留本条） |
-| 5 | I012 | 消息传递重构（Arc<Mutex> → mpsc/oneshot/Notify/watch） | promoted（会话刷盘、提交等待、checkpoint 与 close 的状态归属已随 MS43 交付；原文 mpsc/oneshot/watch 通道替换未执行，仍留本条） |
-| 6 | I074 | 数据库模块化——依据必要 SQL 实现形成的边界，先评估 feature，再按接口拆分 crate | promoted（feature 边界与接口归属已随 MS42 交付；拆 crate 部分仍留本条） |
+| 5 | I012 | 消息传递重构（Arc<Mutex> → mpsc/oneshot/Notify/watch） | promoted（会话刷盘、提交等待、checkpoint 与 close 的状态归属已随 MS43 交付；通道余项已随 MS48 消耗：记录与待提交事务号走无界通道） |
+| 6 | I074 | 数据库模块化——依据必要 SQL 实现形成的边界，先评估 feature，再按接口拆分 crate | promoted（feature 边界与接口归属已随 MS42 交付；拆分余项已随 MS48 消耗：没有独立构建或裁剪收益，包保持一个） |
 | 10 | I065 | 扫描结果流式化（Response 物化架构重构） | long-term，未排期 |
 
 ### 梯队一 B：存储、并发与表示底层
@@ -125,7 +125,7 @@
 - **问题**: 多个模块用 `Arc<Mutex<_>>` 共享状态，实为生产者-消费者模式
 - **方案**: WAL→mpsc，提交→oneshot，Checkpoint→Notify，BufferPool→watch
 - **依赖**: M32（I011）
-- **状态**: promoted（2026-10-28 随 MS43 交付读写会话上 WAL 刷盘循环、提交等待、checkpoint 与 `close` 的状态归属和任务退出，change `openspec/changes/archive/2026-10-28-ms43-service-lifecycle/`。原文把 Mutex 队列换成 mpsc、提交通知换成 oneshot、缓冲池加 watch 的方案未执行，仍留本条，未排期）
+- **状态**: promoted（2026-10-28 随 MS43 交付读写会话上 WAL 刷盘循环、提交等待、checkpoint 与 `close` 的状态归属和任务退出，change `openspec/changes/archive/2026-10-28-ms43-service-lifecycle/`。2026-11-10 随 MS48 消耗通道余项：WAL 记录和待提交事务号改为无界通道，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`。提交完成仍用 Notify。检查点与缓冲池没有待传递队列，不加通道。该余项不再作为未排期工作）
 - **Legacy**: O012
 
 ## I016: M26 代价模型 + Join 重排
@@ -343,7 +343,7 @@
 - **证据**: R25 分析与四刀迁移草图（词表下沉→存储域→语言域→组装层+可选件）；2026-09-24 用户接受路线 B；2026-10-23 用户确认依据底层引擎扩展必要 SQL 后进行模块化。I088 的实现与验收依据见对应变更的类型化结果轮次。
 - **影响**: 纯结构重构，无行为收益；断环可能重塑执行器装配协议，返工成本以「周」计（R25 边界段）
 - **方案**: 先在现有 crate 中评估 net/crypto/CLI 的可选依赖与 feature 边界，再依据实际调用关系确定存储、事务、规划、执行及入口层的公共接口和状态归属；有独立构建、替换或依赖治理收益时再拆 crate。R25 四刀保留为候选设计，后续调查更新拆分顺序；`PhysicalPlan` 的表示与装配边界需专项设计。每步保持磁盘格式和行为不变，保留 CI 或等价本地 feature 组合验证的前提，可停留在已满足需求的拆分程度。
-- **状态**: promoted（2026-10-28 随 MS42 交付 feature 边界评估与六层公共接口 / 状态归属裁定，change `openspec/changes/archive/2026-10-28-ms42-module-boundaries/`；按独立构建、裁剪或替换收益拆分 workspace crate 的部分仍留本条，未排期）
+- **状态**: promoted（2026-10-28 随 MS42 交付 feature 边界评估与六层公共接口 / 状态归属裁定，change `openspec/changes/archive/2026-10-28-ms42-module-boundaries/`。2026-11-10 随 MS48 消耗拆分余项：没有独立构建或裁剪收益，不拆 crate，包保持一个，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`。该余项不再作为未排期工作）
 - **关联**: 阶段定位见「后续发展方向」；I088 负责类型化结果，I095 负责依赖定制，I093 负责升级兼容与构建组合。各模块向已交付的统一诊断门面上报自身事件与资源统计见 I096。不要求整体拆 crate 后才能开展局部功能或依赖定制。
 
 ## I076: DETACH 注销附加库语句
