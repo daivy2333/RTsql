@@ -1,13 +1,13 @@
-# 无键行版本链进入现有表 GC
+# MS46 无键行版本链进入 GC
 
-来源：MS46，承接 I038。约束：M10、M19。需求与场景在 `proposal.md`，做法在 `design.md`，规格增量在 `specs/keyless-row-gc/spec.md`。
+来源：MS46，承接 I038。约束：M10、M19。需求与场景在 `proposal.md`，做法在 `design.md`，规格增量在 `specs/row-version-gc/spec.md`。
 
 Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `iterations/000-keyless-chain-reachability/000-initial.md` 的 Plan Context。本文件不更新全局里程碑状态。
 
 ## 当前批次状态
 
 - 需求与规格增量：已写入。
-- 000：已展开。`iterations/000-keyless-chain-reachability/000-initial.md` 的 Plan Context 为本次规划的当前 Cycle。Review Result 为 `pending`。
+- 000：已展开。`iterations/000-keyless-chain-reachability/000-initial.md` 的 Plan Context 状态以该文件为准。Review Result 为 `pending`。
 - 后续 Iteration：无。
 - 跳过项：无。
 
@@ -17,41 +17,58 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 无键行旧版本按既有判定回收，当前版本和未提交链头留下；带键行合同、释放顺序和损坏数据页的现有错误保持 | 未开始 |
+| T1 | 000 | 无 | 无键链的已提交旧版本被 `gc_table` 回收，链头与未提交版本留下；带键回收结果和带键墓碑链保持；损坏页返回现有错误 | 未开始 |
 
-## 1. 无键行版本链进入 GC（Iteration 000）
+## 1. 无键链进入 gc_table（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-keyless-chain-reachability/000-initial.md` 的 T1 Task Definition 执行。先写该定义里的新测试并看到规定的 RED 与既有 GREEN，再只改 `TableMeta::gc_table`。规格 delta 已在本变更里，实施时不改 `openspec/specs/` 的权威正文。
+- [ ] 1.1 T1：按 `iterations/000-keyless-chain-reachability/000-initial.md` 的 T1 Task Definition 执行。先在 `tests/gc_test.rs` 写新用例并看到规定的 RED，再改 `src/storage/data/table_manager.rs` 的 `TableMeta::gc_table`。规格 delta 已在本变更里，实施时不改 `openspec/specs/` 的权威正文。
 
-完成后：`specs/keyless-row-gc/spec.md` 的场景都有对应断言。带键行三个既有用例仍通过。
+当前行为：`gc_table` 只遍历主键索引。无键链的清理计数是 0，旧槽还在。带键三则用例已在基点通过。
 
-必须保持：索引循环的判定、`delete_tuple_from_data_page`、写路径、查询可见性、空闲页提升。
+完成后：proposal 场景 S1–S11 的可观察结果成立。既有三则带键用例的源码断言不改。`gc_releases_oversized_version_chain` 的源码不改。
 
-禁止：新增 GC 调用点、落盘登记、快照水位、身份证明机制或判定层；在本轮跑全量；并行执行多个测试目标；去掉 `--test-threads=1`。
+必须保持：第一段 `scan_all` 的判定和 `delete_tuple_from_data_page`；带键墓碑链不回收；空闲页提升时机；读路径可见性。
 
-Verification：下面两条逐个执行，每条都带 `--test-threads=1`。先整份 `gc_test`，结束后再跑溢出文件里名字含 `gc_releases` 的用例。
+禁止：用数据页扫描取代第一段；改 `delete_tuple_from_data_page`；新增 SQL GC；改索引格式或空闲页合同；在本轮跑全量；用默认并行度跑测试。
 
-```text
-cargo test --offline --test gc_test -- --test-threads=1
-cargo test --offline --test overflow_page_test gc_releases -- --test-threads=1
-```
-
-两条都不是全量。本变更没有收尾全量任务。
+先行测试与验证命令见 Cycle 的 T1。两条命令逐个执行，都带 `--test-threads=1`。
 
 停止条件：见 Cycle 的 T1 `Stop when`。
 
 ## Iteration Plan
 
-### Iteration 000: 无键行旧版本按既有 GC 规则回收
+### Iteration 000: 无键链按现有判定被 GC 看见
 
 - Tasks: T1
 - Depends on: None
-- 状态：已展开。Cycle 为 `iterations/000-keyless-chain-reachability/000-initial.md`。
-- Stable result: 调用 `gc_table` 后，无键行的已提交旧版本按带键行同一判定回收，当前无键版本仍可查询；带键行的回收结果和溢出页释放顺序与现在相同。
-- Verification boundary: 上面两条定向命令，逐个执行，每条 `--test-threads=1`。不跑全量，也不把全量排进后续 Iteration。跳过本变更收尾全量的理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。全量留到 MS46 与 MS47 都收尾合回主分支之后，按 `.agents/runbooks/m19-batched-full-regression.md` 分批串行，只跑一次。风险：本变更收尾前没有全量；合回后那一次失败时，排查范围包含 MS46 与尚未开始的 MS47。
-- Diagnostic boundary: `TableMeta::gc_table` 的索引一遍、无键起点选择和同一删除判定。带键三个旧用例失败时，先看索引循环是否被改写。无键当前行消失时，先看起点有没有被删。已删除带键行或回滚后的带键行消失时，先看无键起点是否把墓碑或 `create_tx_id == 0` 的槽算了进去。溢出页在提升前就能分配到时，先看是否绕过了 `delete_tuple_from_data_page`。
-- Non-goals: 提高 GC 速度；改变查询的 MVCC 可见性；索引格式、空闲页生命周期、刷盘；节点级锁、分配器、clone 消除；新增 GC 调用点；让 `UPDATE` 能定位已有无键行；MS47；本变更内的全量。
+- 状态：已展开，等待 Act。
+- Stable result: 调用 `gc_table` 后，无键行的已提交旧版本被回收，链头和未提交版本仍可读；带键行的最新版本和已提交删除留下的墓碑链与改前相同；损坏数据页返回 `corrupted data page` 错误。
+- Verification boundary: T1 的两条定向命令，逐个执行，每条都带 `--offline -- --test-threads=1`。本 Iteration 不跑全量，本 change 也不另设收尾全量 Iteration。跳过本 change 收尾全量的理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。风险：本 change 收尾前没有全量；合回后那一次失败时，排查范围包含 MS46 与尚未开始的 MS47。合回主分支之后的那一次按 `.agents/runbooks/m19-batched-full-regression.md` 分批串行，不在本 change 的任务里。
+- Diagnostic boundary: `TableMeta::gc_table` 的两段枚举，以及 `tests/gc_test.rs` 的新断言。带键三则失败时，先看第一段判定有没有被改写。溢出页在提升前就能分配到，才去看 `delete_tuple_from_data_page`，那已经超出本 Iteration 的允许修改。
+- Non-goals: GC 速度、MVCC 可见性规则、索引格式、空闲页生命周期、刷盘、节点锁、分配器、clone 消除、SQL GC 语句、让 DELETE 找到无键行、全量回归。
 
 ## 平衡审计
 
-只有这一轮。回收覆盖、带键合同和释放顺序是同一次 `gc_table` 改动的同一验收，拆开后前一轮不能单独声称带键结果未变。没有第二个可独立交付的结果，所以不再拆 Iteration，也不把全量做成后一轮。这一轮不是单项观察：它同时交付无键链可达、链头保留、带键链不扩大，以及损坏页的既有错误。
+000 只有一个可交付结果：`gc_table` 看见无键链，并用现有判定回收。链头保留、未提交版本、带键墓碑、混表、二级索引、溢出释放和损坏页都靠同一次函数改动成立。拆成「先扫描链头」和「再删除」两轮，中间没有可以单独验收的稳定结果。带键回归与无键回收是同一个函数的两侧，分开会让第二轮只剩测试、没有新的行为边界。
+
+不设收尾全量 Iteration。全量被用户明确放到 MS46 与 MS47 都合回主分支之后，只跑一次。把它写成 001 会在本 change 收尾时多跑一轮，直接违反这条限制。
+
+没有预建「修复尚未发现的缺陷」的 Iteration。
+
+## Requirements Traceability Matrix
+
+| Requirement | Task | First Test | Status |
+|---|---|---|---|
+| 无键链的已提交旧版本被回收（整数键改为 NULL） | T1 | `gc_collects_committed_ancestors_of_keyless_head` | Covered |
+| 无键链的已提交旧版本被回收（与带键链同表） | T1 | `gc_collects_keyed_and_keyless_chains_on_one_table` | Covered |
+| 无键链的已提交旧版本被回收（超页前驱的释放时机） | T1 | `gc_frees_overflow_pages_of_keyless_ancestor` | Covered |
+| 链头与未提交版本不回收（只有 NULL 键一行） | T1 | `gc_keeps_single_null_key_version` | Covered |
+| 链头与未提交版本不回收（非整数键列一行） | T1 | `gc_keeps_single_string_key_version` | Covered |
+| 链头与未提交版本不回收（未提交链头） | T1 | `gc_keeps_uncommitted_keyless_head` | Covered |
+| 链头与未提交版本不回收（二级索引仍找到链头） | T1 | `gc_secondary_index_finds_keyless_head` | Covered |
+| 带键行的回收结果不变（三次已提交版本） | T1 | `test_gc_removes_old_versions` | Covered |
+| 带键行的回收结果不变（未提交带键更新） | T1 | `test_gc_preserves_uncommitted_versions` | Covered |
+| 带键行的回收结果不变（三条带键链） | T1 | `test_gc_multiple_keys` | Covered |
+| 带键行的回收结果不变（已提交删除） | T1 | `gc_does_not_collect_keyed_delete_chain` | Covered |
+| 损坏数据页按现有读路径报错（页头槽数） | T1 | `gc_corrupt_slot_count_returns_named_error` | Covered |
+| 损坏数据页按现有读路径报错（槽偏移） | T1 | `gc_corrupt_slot_offset_returns_named_error` | Covered |
