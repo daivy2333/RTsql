@@ -235,15 +235,42 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-Act 尚未执行。
+独立阅读 `8989fc4..HEAD` 的 diff，以及 HEAD 上的 `TableMeta::gc_table`、`TableMeta::keyless_chain_heads`、`delete_committed_old_versions`、`DataScanExecutor::next` 和 `tests/gc_test.rs`。Act Response 与这些代码一致。相对计划提交，产品文件只有 `src/storage/data/table_manager.rs`、`src/executor/data_scan.rs`、`tests/gc_test.rs`。既有三则用例的函数体不在 diff 中。`tests/overflow_page_test.rs` 相对基点 `937463c` 无改动。
+
+T1 的既有 Acceptance 已满足：
+
+- 第一段仍是 `index_manager.scan_all`。删除条件仍是 `commit_tx_id().is_some() && current_id != row_id`，删除函数仍是 `delete_tuple_from_data_page`。两段共用 `delete_committed_old_versions`。无键链走到索引头时 `break`，不删除该槽，也不再向下删除。
+- 第二段从 `data_page_head` 沿 `next_page_id` 走到 0。`create_tx_id != 0` 的 `next_version` 进入被指向集合。额外链头同时排除被指向槽、索引头、`create_tx_id == 0` 和 `is_deleted()`，再经 `read_tuple_from_data_page` 与 `deserialize_row` 确认 `values[pk_index].to_key()` 为 `None`。页头槽数越界返回 `corrupted_data_page_slot_count_error`，槽负载越界返回 `corrupted_data_page_slot_error`。短于版本头或版本头解析失败的槽跳过。这两次读的错误原样返回。`StorageError::CorruptedDataPage` 的 Display 是 `corrupted data page {page_id}: {detail}`，能对上页号、`slot count 700` 和 `slot 0`。
+- `DataScanExecutor::next` 用当前目录项的 `logical_id` 查替代 map。`superseder_suppresses` 与 `build_superseded_map` 的键未改。
+- 十个新用例的夹具和断言覆盖 S1–S4、S6–S11。S5 由未改的三则用例承担。S9 不调用 `checkpoint`；提升前链页与新分配无交集，提升后排序相等。
+
+非阻塞 Minor finding，分类为 Act 偏离，不要求修复：
+
+- 读 `logical_id` 时把目录下标复制到局部变量再交给页闭包。查找键仍是该槽的 `logical_id`。
+- 当前下标没有槽时不再用目录下标合成 `RowId`，直接进入原闭包。下标越过槽数时由闭包结束本页；页头槽数越界时由闭包返回既有的槽数错误。未删槽时逻辑 id 等于下标。
+- `gc_frees_overflow_pages_of_keyless_ancestor` 在分配见证前断言溢出链非空。S9 的提升前后断言仍在。
+
+无阻塞 finding。无当前 change 范围外的实质缺陷。
+
+**Evidence**
+
+代码与 diff 为本轮独立阅读，范围是计划提交 `8989fc4` 到 HEAD `7512c71`。`7512c71` 只改本 Cycle 的验证记录，不改 Rust。
+
+三条定向测试沿用本 Cycle Act Response 的「验证」节。产品代码在那次运行之后只经过 rustfmt，HEAD 上的逻辑与该节描述的实现一致，覆盖未变，未重跑。
+
+- 改产品代码前：`cargo test --offline --test gc_test -- --test-threads=1`，退出码 101，`6 passed; 7 failed`，`finished in 0.10s`。失败的 7 个是规定的 RED。未提交链停在计数断言，旧槽断言未执行到；GREEN 用例包含该断言。
+- GREEN 按序各一次：`gc_test` 退出码 0，`13 passed; 0 failed`，`0.39s`；`overflow_page_test gc_releases_oversized_version_chain` 退出码 0，`1 passed; 0 failed`，`26 filtered out`，`0.00s`；`keyless_eq_routing_test` 退出码 0，`14 passed; 0 failed`，`0.06s`。
+- 未跑全量。本 Iteration 和本 change 的验证边界不包含全量，不构成 Acceptance 缺口。
+
+Persisted Evidence 为 `none`。没有 Evidence 目录，不作为问题。
 
 **Follow-up Decision**
 
-等待 Act。
+接受。既有 Acceptance 已满足。上述偏差不需要新的执行依据，也不留在当前 Cycle 修复。Iteration Plan 只有 000，不展开后续 Iteration，不新增全量 Iteration。
 
 **Next Cycle**
 

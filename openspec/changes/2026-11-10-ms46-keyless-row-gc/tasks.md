@@ -7,7 +7,7 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 ## 当前批次状态
 
 - 需求与规格增量：已写入。
-- 000：已展开。`iterations/000-keyless-chain-reachability/000-initial.md` 的 Plan Context 状态以该文件为准。Act Response 为 `reported`。Review Result 为 `pending`。
+- 000：已完成。`iterations/000-keyless-chain-reachability/000-initial.md` 的 Plan Context 状态以该文件为准。Act Response 为 `reported`。Review Result 为 `accepted`。
 - 后续 Iteration：无。
 - 跳过项：无。
 
@@ -17,7 +17,7 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 无键链的已提交旧版本被 `gc_table` 回收，链头与未提交版本留下，`SELECT` 仍读到链头；带键回收结果和带键墓碑链保持；损坏页返回现有错误 | 已实施，待 Review |
+| T1 | 000 | 无 | 无键链的已提交旧版本被 `gc_table` 回收，链头与未提交版本留下，`SELECT` 仍读到链头；带键回收结果和带键墓碑链保持；损坏页返回现有错误 | 已完成 |
 
 ## 1. 无键链进入 gc_table（Iteration 000）
 
@@ -41,7 +41,7 @@ Gate 1 为 PASS，来自本次 goal 的需求批准。Gate 2 的结论写在 `it
 
 - Tasks: T1
 - Depends on: None
-- 状态：Act Response 为 reported，Review Result 仍为 pending。
+- 状态：Act Response 为 reported，Review Result 为 accepted。
 - Stable result: 调用 `gc_table` 后，无键行的已提交旧版本被回收，链头和未提交版本仍可读；带键行的最新版本和已提交删除留下的墓碑链与改前相同；损坏数据页返回 `corrupted data page` 错误。
 - Verification boundary: T1 的三条定向命令，逐个执行，每条都带 `--offline -- --test-threads=1`。本 Iteration 不跑全量，本 change 也不另设收尾全量 Iteration。跳过本 change 收尾全量的理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。风险：本 change 收尾前没有全量；合回后那一次失败时，排查范围包含 MS46 与 MS47。合回主分支之后的那一次按 `.agents/runbooks/m19-batched-full-regression.md` 分批串行，不在本 change 的任务里。
 - Diagnostic boundary: `TableMeta::gc_table` 的两段枚举，`DataScanExecutor::next` 用来查替代 map 的行身份，以及 `tests/gc_test.rs` 的新断言。带键三则失败时，先看第一段判定有没有被改写。没有删过槽的无键查询失败时，先看 `logical_id` 改动是否在未删槽的页上改变了结果。溢出页在提升前就能分配到，才去看 `delete_tuple_from_data_page`，那已经超出本 Iteration 的允许修改。
