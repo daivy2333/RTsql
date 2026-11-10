@@ -16,7 +16,9 @@ use crate::storage::data_page::{
 };
 use crate::storage::free_page_rebuild::take_free_page_rebuild_fault;
 use crate::storage::integrity::{check_data_page, check_tree_page, violation_summary};
-use crate::storage::page_format::{overflow, ColumnType, Key, SlottedPage, SlottedPageRef};
+use crate::storage::page_format::{
+    deserialize_row, overflow, ColumnType, Key, SlottedPage, SlottedPageRef,
+};
 use crate::storage::page_id::PageId;
 use crate::storage::{
     read_tuple_from_data_page, AsyncStorage, BufferPool, Result, RowId, StorageError,
@@ -465,42 +467,167 @@ impl PendingColumnDrop {
 }
 
 impl TableMeta {
-    /// Garbage collect old committed versions from the version chain (M10 GC)
+    /// Garbage collect old committed versions (M10 GC).
     ///
-    /// This is an optional maintenance operation that removes old committed
-    /// versions that are no longer the latest version for a key.
+    /// The primary-key index still supplies one chain per indexed head. A
+    /// second pass finds chain heads that are not indexed because their
+    /// primary-key value has no key, and collects those chains with the same
+    /// committed-and-not-head rule. An indexed head reached from a keyless
+    /// chain is left in place and ends that chain.
     ///
     /// Returns the number of versions cleaned up.
     pub async fn gc_table(&self, buffer_pool: &BufferPool) -> Result<usize> {
         let mut cleaned_count = 0;
 
         let all_entries = self.index_manager.scan_all().await?;
+        let index_heads: HashSet<RowId> = all_entries.iter().map(|(_, row_id)| *row_id).collect();
 
         for (_key, row_id) in all_entries {
-            let mut current = Some(row_id);
-            let mut old_versions = Vec::new();
+            cleaned_count += delete_committed_old_versions(buffer_pool, row_id, None).await?;
+        }
 
-            // Traverse version chain, collect old committed versions
-            while let Some(current_id) = current {
-                let header = buffer_pool.read_version_header(current_id).await?;
-
-                // Collect committed old versions (not the latest)
-                if header.commit_tx_id().is_some() && current_id != row_id {
-                    old_versions.push(current_id);
-                }
-
-                current = header.next_version();
-            }
-
-            // Delete old versions
-            for old_id in old_versions {
-                crate::storage::delete_tuple_from_data_page(buffer_pool, old_id).await?;
-                cleaned_count += 1;
-            }
+        for head in self.keyless_chain_heads(buffer_pool, &index_heads).await? {
+            cleaned_count +=
+                delete_committed_old_versions(buffer_pool, head, Some(&index_heads)).await?;
         }
 
         Ok(cleaned_count)
     }
+
+    /// Chain heads on the data-page list whose primary-key value has no index
+    /// key. A slot pointed to by a live `next_version`, an index head, an
+    /// aborted version, or a tombstone is not a head.
+    async fn keyless_chain_heads(
+        &self,
+        buffer_pool: &BufferPool,
+        index_heads: &HashSet<RowId>,
+    ) -> Result<Vec<RowId>> {
+        let schema: Vec<ColumnType> = self
+            .columns
+            .iter()
+            .map(|(_, column_type)| column_type.clone())
+            .collect();
+
+        struct SeenSlot {
+            row_id: RowId,
+            create_tx_id: u64,
+            deleted: bool,
+            pointed_target: Option<RowId>,
+        }
+
+        let mut seen = Vec::new();
+        let mut page_id = Some(self.data_page_head);
+        while let Some(pid) = page_id {
+            let (next_page, page_slots) = buffer_pool
+                .with_page_data(pid, |data| -> Result<(u32, Vec<SeenSlot>)> {
+                    let slotted = SlottedPageRef::new(data);
+                    if slotted.slot_count_exceeds_capacity() {
+                        return Err(corrupted_data_page_slot_count_error(
+                            pid.0,
+                            slotted.slot_count(),
+                        ));
+                    }
+                    let mut page_slots = Vec::new();
+                    for index in 0..slotted.slot_count() {
+                        let Some(slot) = slotted.get_slot(index) else {
+                            continue;
+                        };
+                        let slot_data = slotted
+                            .get_slot_data_checked(&slot)
+                            .ok_or_else(|| corrupted_data_page_slot_error(pid.0, index, &slot))?;
+                        if slot_data.len() < VersionHeader::SIZE {
+                            continue;
+                        }
+                        let Some(header) =
+                            VersionHeader::from_bytes(&slot_data[..VersionHeader::SIZE])
+                        else {
+                            continue;
+                        };
+                        let pointed_target = if header.create_tx_id() != 0 {
+                            header.next_version()
+                        } else {
+                            None
+                        };
+                        page_slots.push(SeenSlot {
+                            row_id: RowId::new(pid.0 as u32, slot.logical_id),
+                            create_tx_id: header.create_tx_id(),
+                            deleted: header.is_deleted(),
+                            pointed_target,
+                        });
+                    }
+                    Ok((slotted.header().next_page_id, page_slots))
+                })
+                .await?;
+            seen.extend(page_slots);
+            page_id = if next_page == 0 {
+                None
+            } else {
+                Some(PageId(next_page as u64))
+            };
+        }
+
+        let mut pointed = HashSet::new();
+        for slot in &seen {
+            if let Some(target) = slot.pointed_target {
+                pointed.insert(target);
+            }
+        }
+
+        let mut heads = Vec::new();
+        for slot in &seen {
+            if pointed.contains(&slot.row_id)
+                || index_heads.contains(&slot.row_id)
+                || slot.create_tx_id == 0
+                || slot.deleted
+            {
+                continue;
+            }
+            let bytes = read_tuple_from_data_page(buffer_pool, slot.row_id, |_header, bytes| {
+                Ok(bytes.to_vec())
+            })
+            .await?;
+            let values = deserialize_row(&bytes, &schema, &self.defaults)?;
+            if values[self.pk_index].to_key().is_none() {
+                heads.push(slot.row_id);
+            }
+        }
+        Ok(heads)
+    }
+}
+
+/// Delete committed versions on the chain that starts at `row_id`, excluding
+/// `row_id` itself. `stop_at_index_heads` ends a keyless chain when it reaches
+/// a primary-key index head: that slot is not deleted, and neither is anything
+/// further down the chain. The indexed pass passes `None` and keeps the
+/// original rule `commit_tx_id().is_some() && current_id != row_id`.
+async fn delete_committed_old_versions(
+    buffer_pool: &BufferPool,
+    row_id: RowId,
+    stop_at_index_heads: Option<&HashSet<RowId>>,
+) -> Result<usize> {
+    let mut current = Some(row_id);
+    let mut old_versions = Vec::new();
+
+    while let Some(current_id) = current {
+        if current_id != row_id
+            && stop_at_index_heads.is_some_and(|heads| heads.contains(&current_id))
+        {
+            break;
+        }
+
+        let header = buffer_pool.read_version_header(current_id).await?;
+        if header.commit_tx_id().is_some() && current_id != row_id {
+            old_versions.push(current_id);
+        }
+        current = header.next_version();
+    }
+
+    let mut cleaned_count = 0;
+    for old_id in old_versions {
+        crate::storage::delete_tuple_from_data_page(buffer_pool, old_id).await?;
+        cleaned_count += 1;
+    }
+    Ok(cleaned_count)
 }
 
 /// Manages table schemas and per-table metadata.

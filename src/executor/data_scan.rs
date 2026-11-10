@@ -415,14 +415,30 @@ impl Executor for DataScanExecutor {
             };
 
             // R-T0b-R6 (G5): a slot superseded by a suppressing newer version
-            // is skipped before any page access. Data pages are append-only
-            // (dense logical ids), so (page, slot index) identifies the same
-            // version the map builder tagged. A miss past the page's slot
-            // count falls through to the closure's exhaustion handling.
-            let candidate_rid = RowId::new(page_id.0 as u32, self.current_slot_index as u16);
-            if self.slot_is_superseded(candidate_rid).await? {
-                self.current_slot_index += 1;
-                continue;
+            // is skipped. The map is keyed by the slot's logical_id.
+            // `delete_slot` keeps that id and shifts later directory entries,
+            // so the directory index is not the map key after a removal.
+            // A missing slot, including one past the page's slot count,
+            // falls through to the closure's exhaustion handling.
+            let directory_index = self.current_slot_index;
+            let logical_id = self
+                .buffer_pool
+                .with_page_data(page_id, |data| -> Result<Option<u16>> {
+                    let slotted = SlottedPageRef::new(data);
+                    if slotted.slot_count_exceeds_capacity() {
+                        return Ok(None);
+                    }
+                    Ok(slotted
+                        .get_slot(directory_index)
+                        .map(|slot| slot.logical_id))
+                })
+                .await?;
+            if let Some(logical_id) = logical_id {
+                let candidate_rid = RowId::new(page_id.0 as u32, logical_id);
+                if self.slot_is_superseded(candidate_rid).await? {
+                    self.current_slot_index += 1;
+                    continue;
+                }
             }
 
             // Snapshot schema and slot index into locals for the closure.

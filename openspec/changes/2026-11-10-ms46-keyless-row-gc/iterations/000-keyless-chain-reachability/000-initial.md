@@ -182,7 +182,55 @@ PASS。审查项全部通过。BLOCKED: 无。SKIPPED: 无。
 
 ## Act Response
 
-- Status: 未执行
+- Status: reported
+
+**实际改动**
+
+- `src/storage/data/table_manager.rs`
+  - `TableMeta::gc_table` 仍先 `scan_all`。记下索引头后，对每个索引头调用 `delete_committed_old_versions`，停止集合为 `None`。
+  - `TableMeta::keyless_chain_heads` 从 `data_page_head` 沿 `next_page_id` 走到 0。`create_tx_id != 0` 的 `next_version` 目标进入被指向集合。额外链头须同时不在该集合、不在索引头集合、`create_tx_id != 0`、`is_deleted()` 为假，并且 `deserialize_row` 后 `values[pk_index].to_key()` 为 `None`。页头槽数越界返回 `corrupted_data_page_slot_count_error`。槽负载越界返回 `corrupted_data_page_slot_error`。短于版本头或版本头解析失败的槽跳过。`read_tuple_from_data_page` 与 `deserialize_row` 的错误原样返回。
+  - `delete_committed_old_versions` 的删除条件是 `commit_tx_id().is_some() && current_id != row_id`，删除函数是 `delete_tuple_from_data_page`。无键链走到索引头时不删除该槽，并停止继续向下删除。返回值是两段删除数之和。
+- `src/executor/data_scan.rs`：`DataScanExecutor::next` 在查替代 map 之前读当前目录项，用该槽的 `logical_id` 组成 `RowId`。`superseder_suppresses` 与 `build_superseded_map` 的键未改。
+- `tests/gc_test.rs`：新增 T1 点名的 10 个用例。既有三则用例的函数体和断言未改。
+
+**与计划的偏差**
+
+- 读 `logical_id` 时先把目录下标复制到局部变量，再交给页闭包。否则闭包与 `self.buffer_pool` 会同时借用 `self`，无法编译。查找键仍是该槽的 `logical_id`。
+- 当前下标没有槽时（下标已越过槽数，或页头槽数越界因而未取槽），不再用目录下标合成 `RowId` 去查替代 map，直接进入原有闭包。越过槽数时由闭包结束本页；页头槽数越界时仍由闭包返回既有的槽数错误。未删槽的扫描结果由第三条验证覆盖。
+
+**自检**
+
+- Gate 3 通过。第一段仍是 `scan_all`，判定文本仍是 `commit_tx_id().is_some() && current_id != row_id`。删除只走 `delete_tuple_from_data_page`。损坏页返回点名错误，不吞 `SlotNotFound` 或解码错误。可见性规则和 map 的键未改。diff 没有计划外的产品文件。编译输出没有新增警告。测试断言的是清理计数、槽是否仍在、`SELECT` 行和错误文本。
+- Gate 4 通过。下面三条命令各自退出码 0，且 `failed` 为 0。
+- Gate 5 未进入。
+- 遗留 Minor：无。
+
+**验证**
+
+改产品代码之前，在本工作目录执行 `cargo test --offline --test gc_test -- --test-threads=1`。退出码 101。`test result: FAILED. 6 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s`。失败的 7 个是规定的 RED：无键祖先计数为 0 而不是 2、未提交链为 0 而不是 1、同表为 2 而不是 4、二级索引为 0 而不是 2、溢出祖先为 0 而不是 1，两个损坏页用例得到 `Ok(0)`。通过的 6 个是既有三则、单行 NULL、单行 STRING、已提交带键 DELETE。这次失败不计入三次失败。
+
+改完后按顺序各执行一次，上一条退出后再执行下一条：
+
+1. `cargo test --offline --test gc_test -- --test-threads=1`  
+   退出码 0。`test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s`
+2. `cargo test --offline --test overflow_page_test gc_releases_oversized_version_chain -- --test-threads=1`  
+   退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.01s`
+3. `cargo test --offline --test keyless_eq_routing_test -- --test-threads=1`  
+   退出码 0。`test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s`
+
+未跑全量。这不构成本 Cycle 的 Gate 失败。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None
+
+**未解决问题**
+
+无。
 
 ## Plan Review
 
