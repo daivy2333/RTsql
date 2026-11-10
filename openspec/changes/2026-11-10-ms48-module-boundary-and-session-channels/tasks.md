@@ -6,7 +6,7 @@
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。无行为规格增量，`.openspec.yaml` 为 `skip_specs: true`。
 - 000：执行依据是 `iterations/000-session-channels/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。
-- 001：目录已展开。执行依据是 `iterations/001-full-suite/000-initial.md`。Plan Context 为 ready。Act 尚未开始。
+- 001：目录已展开。执行依据是 `iterations/001-full-suite/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -17,7 +17,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
 | T1 | 000 | 无 | 两条队列改为无界通道；既有 WAL、会话和诊断结果保持；`Cargo.toml` 仍是单 package | 完成 |
-| T2 | 001 | 000 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始。目录已展开 |
+| T2 | 001 | 000 accepted | M19 分批全量一次，每批 failed 为 0 | 完成 |
 
 ## 1. 会话队列（Iteration 000）
 
@@ -25,7 +25,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 ## 2. 收尾全量（Iteration 001）
 
-- [ ] 2.1 T2：T1 已被接受。按下面的分批方式跑一次全量。这是整个变更的唯一一次全量。本轮不改产品代码。执行依据是 `iterations/001-full-suite/000-initial.md`。
+- [x] 2.1 T2：T1 已被接受。按下面的分批方式跑一次全量。这是整个变更的唯一一次全量。本轮不改产品代码。执行依据是 `iterations/001-full-suite/000-initial.md`。
 
 分批是通过条件的一部分：
 
@@ -56,7 +56,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 - Tasks: T2
 - Depends on: Iteration 000 accepted
-- 状态：未执行。目录已展开。执行依据是 `iterations/001-full-suite/000-initial.md`。Plan Context 为 ready。
+- 状态：Act Response 为 reported。Review Result 为 pending。目录已展开。执行依据是 `iterations/001-full-suite/000-initial.md`。Plan Context 为 ready。
 - Stable result: 默认构建上按 M19 分批串行的一次全量，每批退出码 0 且 failed 为 0，目标对账无缺无重。
 - Verification boundary: 本节 T2 的分批方式。只此一次。失败批只整批复核一次。不写「通过后再跑一次全量」。
 - Diagnostic boundary: 按失败测试所在的批和目标文件定位。不把全量失败当成修改分批规则的理由。
