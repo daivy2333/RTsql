@@ -166,19 +166,47 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未 Review。
+没有阻塞本轮 Acceptance 的发现。
+
+`append_enqueues_on_the_record_channel` 用 `matches!(&queued, ...)` 判断 `BeginTxn { tx_id: 7 }`。Act 已记录这个写法。判定仍是取出 tx 7，接收端锁在 `try_recv` 之后放开。这不改变可观察结果。
+
+没有构成实质偏差的 Plan 遗漏、Plan 错误、Act 偏离、现状变化或新证据。当前 change 范围外没有要报告的缺陷。
 
 **Evidence**
 
-尚未 Review。
+独立阅读的 diff 边界是 merge-base `56da53b43c56b3be4d84d3442661837479bc6115` 到 HEAD `01fd5f4f4142fb77a0b52a8ea5df1932652d8e51`。当时工作区干净。`git diff --name-status 56da53b...HEAD` 里，产品文件只有 `src/wal/buffer.rs`。其余是本 change 的文档。
+
+`src/wal/buffer.rs` 与 Task Definition 一致：
+
+- `WALBuffer` 的记录队列和待提交事务号队列是两条 `tokio::sync::mpsc` 无界通道。接收端放在 `std::sync::Mutex` 里。
+- `append` 先 `fetch_add` 分配 LSN，再 `records_tx.send`，`Err` 时 `unwrap` panic。随后在接收端锁内读 `len()`。锁在 `flush_after_pause` 之前放开。
+- `append_commit_and_wait` 先取得 `flush_gate`，登记 `CommitWaiter`，再 `pending_tx.send`。已 `shutdown` 时在这把闸门内调用 `flush_locked`。未停止时 `flush_notify.notify_one()`，然后 `notified().await`，返回 `Ok(())`。Lock 与 Queue 的记时仍在取得闸门和 `notified().await`。Io 与 Schedule 仍在 `flush_locked` 回写。
+- `flush_locked` 先取空记录通道，再取空待提交通道，放开接收端锁之后才有 `.await`。`write_batch` 返回 `Err` 的分支是空的，后面仍执行到 `notify_one`。没有记录但取到事务号时也唤醒。没有新增注入器。
+- `flush_loop` 仍 `select` `flush_notify`、`state_notify` 和定时器，然后持有 `flush_gate` 调用 `flush_locked`。它不调用 `recv`。diff 没有改这个函数。
+- `open_buffer` 不启动刷盘循环。`append_enqueues_on_the_record_channel` 取出记录后放开锁，再断言 WAL 里没有 tx 7。`commit_id_is_queued_on_the_channel` 只读 `pending_rx.len()`，不 `try_recv`；`do_flush` 前等待尚未结束，之后 2 秒内结果是 `Ok(())`。
+- 原有 7 个 `wal::buffer::tests` 仍在，加上这两个新测试是 9 个。diff 没有改旧测试的断言。
+
+`Cargo.toml` 仍是一个 `[package]`，没有 `[workspace]`，feature 仍是 `cli`、`network`、`crypto`。该文件不在上述 diff 里。
+
+下面五条 GREEN 和两条 diff 沿用 Act Response 的「验证」节。HEAD 仍是该 Act 提交，工作区当时干净，产品 diff 只有 `src/wal/buffer.rs`，覆盖范围没有变。这次 Review 没有重跑。
+
+1. `cargo test --offline --lib wal::buffer::tests -- --test-threads=1`：退出码 0，`9 passed; 0 failed`。
+2. `cargo test --offline --test wal_buffer_test -- --test-threads=1`：退出码 0，`5 passed; 0 failed`。
+3. `cargo test --offline --test session_lifecycle_test -- --test-threads=1`：退出码 0，`7 passed; 0 failed`。
+4. `cargo test --offline --test diagnostics_wait_test commit_wait_classes_present -- --test-threads=1`：退出码 0，`1 passed; 0 failed`。
+5. `cargo test --offline --test statement_cancellation_test cancel_leaves_flush_loop_running -- --test-threads=1`：退出码 0，`1 passed; 0 failed`。
+
+同节的两条结论：`git diff -- Cargo.toml` 无输出；`git diff -- src/database.rs src/transaction/manager.rs src/wal/checkpoint.rs src/wal/writer.rs src/storage/buffer_pool.rs` 无输出。文件清单与这两条一致。
+
+S11 由上面的 `flush_locked` 和 `append_commit_and_wait` 核对。Persisted Evidence 为 none，不因没有 evidence 目录记问题。
 
 **Follow-up Decision**
 
-尚未 Review。
+T1 的既有 Acceptance 已经满足。`&queued` 的匹配写法不构成缺口。不需要当前 Cycle 修复，也不需要 rework 或 replan。Iteration Plan 保持不变。展开 Iteration 001，只执行 tasks.md 里已经写下的一次分批全量。
 
 **Next Cycle**
 
@@ -186,4 +214,4 @@ None
 
 **Next Iteration**
 
-None
+`openspec/changes/2026-11-10-ms48-module-boundary-and-session-channels/iterations/001-full-suite/000-initial.md`
