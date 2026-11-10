@@ -7,8 +7,8 @@ Gate 1：PASS。需求、场景和范围来自 MS47 与本次目标里写死的 
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/typed-batch-write/spec.md`。
-- 000：当前轮。目录 `iterations/000-measure-and-decide/`，Cycle `000-initial.md`。只测量并裁定。
-- 001：未展开。仅当 000 的裁定为达到 10% 时才建目录。低于 10% 时不展开，变更以「不建入口」收束。
+- 000：已完成。`iterations/000-measure-and-decide/000-initial.md` 的 Review Result 为 `accepted`。裁定不建入口：`execute_exclusive_ns = 9804119`，`total_ns = 332234286`，`9804119 * 10 < 332234286`。
+- 001：不展开。展开条件是 `execute_exclusive_ns * 10 >= total_ns`，本次比较不满足。变更以不建入口收束。
 - Persisted Evidence：none。
 - 跳过项：无。全量不在本变更预算内，理由写在每个 Iteration 的 Verification boundary，不记成 Gate 跳过。
 
@@ -16,9 +16,9 @@ Gate 1：PASS。需求、场景和范围来自 MS47 与本次目标里写死的 
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 100 条插入的诊断时间可打印，行可见，产品代码不变 | completed |
-| T2 | 000 | T1 | 用 T1 的整数裁定建入口或不建入口，并写入执行记录 | completed |
-| T3 | 001 | T2 的裁定为达到 10% | `insert_batch` 与逐行插入的检查、索引和整批回滚一致 | 未展开 |
+| T1 | 000 | 无 | 100 条插入的诊断时间可打印，行可见，产品代码不变 | 完成（Review Result accepted） |
+| T2 | 000 | T1 | 用 T1 的整数裁定建入口或不建入口，并写入执行记录 | 完成（Review Result accepted）。裁定不建入口 |
+| T3 | 001 | T2 的裁定为达到 10% | `insert_batch` 与逐行插入的检查、索引和整批回滚一致 | 不展开。000 低于 10% |
 
 ## Iteration Plan
 
@@ -26,6 +26,7 @@ Gate 1：PASS。需求、场景和范围来自 MS47 与本次目标里写死的 
 
 - Tasks: T1, T2
 - Depends on: None
+- 状态：已完成。Review Result 为 `accepted`。稳定结果是不新增入口。
 - Stable result: 两个纳秒数和一次裁定。达到 10% 时，下一轮可以依赖「需要入口」这个结论。低于 10% 时，变更的稳定结果是不新增入口。
 - Verification boundary: 本轮只跑 `tests/typed_batch_write_test.rs` 里的测量测试，一次，release，`--test-threads=1`。不跑全量。跳过本变更收尾全量的理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。风险：本变更收尾前没有全量；合回主分支后那一次失败时，排查范围包含 MS46 与 MS47。
 - Diagnostic boundary: 这一轮的失败只看这条测试的摘要阶段、打印的整数和 100 行是否可见。不把导入、CSV、索引格式或另一个变更的改动纳入排查。
@@ -37,12 +38,13 @@ Gate 1：PASS。需求、场景和范围来自 MS47 与本次目标里写死的 
 
 - Tasks: T3
 - Depends on: Iteration 000 的裁定为 `execute_exclusive_ns * 10 >= total_ns`
+- 状态：不展开。000 的比较是 `9804119 * 10 < 332234286`。
 - Stable result: `Database::insert_batch` 可用。类型检查、约束、索引维护和失败回滚与逐行插入一致。整批失败则整批回滚。`execute_sql` 插入保持原行为。
 - Verification boundary: 顺序执行下面两条，都带 `--test-threads=1`，不并行。第一条是本变更的测试文件，第二条是已有的单条插入诊断测试。不跑全量。跳过本变更收尾全量的理由是用户原话：「这次自动化把全量测试放到最后来限制全量的次数」。风险：本变更收尾前没有全量；合回主分支后那一次失败时，排查范围包含 MS46 与 MS47。
 - Diagnostic boundary: `insert_batch`、`execute_stage` 的插入臂、`InsertExecutor`。导入循环、CSV 读取、分配器和刷盘策略不在排查范围。
 - Non-goals: 不改 `src/cli/lifecycle.rs`。不把 import 或 CSV 接到入口上。不增加部分成功、列清单、`ON CONFLICT` 或显式事务参数。不新增诊断阶段。不新增放弃 future 的暂停夹具。
 
-平衡：入口的成功、拒绝和回滚是同一个写路径上的一个可验证结果。拆成多轮会把同一次 `execute_stage` 调用切到不同的排查范围里。本轮未展开；000 未达标时保持不展开。
+平衡：入口的成功、拒绝和回滚是同一个写路径上的一个可验证结果。拆成多轮会把同一次 `execute_stage` 调用切到不同的排查范围里。本轮不展开。000 的裁定是 `9804119 * 10 < 332234286`。
 
 ## Requirements Traceability Matrix
 

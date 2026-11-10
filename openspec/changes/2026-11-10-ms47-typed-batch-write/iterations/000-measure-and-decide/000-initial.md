@@ -139,19 +139,38 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未 Review。
+无阻塞项。
+
+Act 记下的第一次测量命令把 `PathBuf` 传给 `Database::open`，编译失败，没有打出纳秒行。当前 `tests/typed_batch_write_test.rs` 传入 `&dir.path().join("bench.db")`，与 `src/database.rs` 的 `open(path: &Path)` 一致。这次编译失败发生在测量行出现之前；打出 `ms47_insert_share` 的那一次命令才用于裁定，之后没有重跑。偏差原因是 Act 偏离，已在同一提交里回到计划要求的参数类型。不构成 Acceptance 缺口，不要求修复。
+
+`937463c7dfa8ab6bec400e2573b11bdd4b72103b...HEAD` 的路径是本变更文档和 `tests/typed_batch_write_test.rs`。没有 `src/`。Rust 源码没有 `insert_batch`。`iterations/` 下只有本 Cycle 文件。
+
+**Acceptance Gaps**
+
+无。
+
+T1 与 Task Definition 一致。`row_insert_share_of_hundred_inserts` 使用文件库，建表后再打开统计：`collect.stats = true`，`events` 与 `trace` 为 false，`modules` 为 `ModuleSet::All`，`summary_limit` 为 100。`i` 从 0 到 99 的插入文本与 `benches/common/mod.rs` 的 `insert_rows` 相同。断言覆盖 100 条摘要、`Severity::Info`、插入 SQL、`total > 0`、parse、plan、execute、commit，以及 `execute.exclusive_total + commit.inclusive_total == execute.inclusive_total`。`total_ns` 与 `execute_exclusive_ns` 是这两个 `u128` 和。打印恰好一行后，`SELECT COUNT(*) FROM bench` 的唯一单元格是 `Value::Int(100)`。测试不比较两个整数。
+
+T2 的 Act Response 写明「不建入口」。`total_ns = 332234286`，`execute_exclusive_ns = 9804119`。`9804119 * 10 = 98041190`，`98041190 < 332234286`，乘法未溢出，`total_ns` 不是 0。低于 10% 的记录要求已满足。本 Cycle 没有添加 `insert_batch`。
+
+全量不在本变更预算内。未跑全量不构成缺口。Iteration Plan 保持不变。
 
 **Evidence**
 
-尚未 Review。
+- 测量结论沿用本 Cycle 的 Act Response。HEAD `47afce9c1783f30f32331f1c6d80b94c7e77de7b` 就是写入该 Response 和测试的提交，工作区在 Review 开始时干净，测试文件之后没有再改。覆盖范围未变，本 Review 未重跑该命令。
+- 命令：`cargo test --offline --release --test typed_batch_write_test row_insert_share_of_hundred_inserts -- --test-threads=1 --nocapture`。Act Response 记录退出码 0，`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s`，以及 `ms47_insert_share statements=100 total_ns=332234286 execute_exclusive_ns=9804119`。
+- 本 Review 重算比较式：`9804119 * 10 = 98041190`，小于 `332234286`。
+- `git diff --name-status 937463c7dfa8ab6bec400e2573b11bdd4b72103b...HEAD` 只有变更文档和 `tests/typed_batch_write_test.rs`。
+- `src/` 中没有 `fn insert_batch`。`Database::open` 的参数类型是 `&Path`。
+- Persisted Evidence 为 none。未因缺少 evidence 目录提出问题。
 
 **Follow-up Decision**
 
-尚未 Review。
+不要求当前 Cycle 修复。不创建后继 Cycle。裁定低于 10%，不展开 Iteration 001，不实现 `insert_batch`。当前 Iteration 完成，没有剩余可展开的 Iteration。
 
 **Next Cycle**
 
@@ -160,3 +179,7 @@ None
 **Next Iteration**
 
 None
+
+**Issue 候选**
+
+无。
