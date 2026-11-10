@@ -97,7 +97,67 @@ Gate 2：PASS。审查项全部通过，无 BLOCKED，无 SKIPPED。
 
 ## Act Response
 
-- Status: 尚未执行
+- Status: reported
+
+**实际改动**
+
+没有修改产品符号。`src/`、`tests/`、`Cargo.toml` 相对本 Cycle 起点没有 diff。本 Cycle 只更新本 Act Response，以及 change `tasks.md` 里 T2 的状态。
+
+**与计划的偏差**
+
+无。
+
+**自检**
+
+Gate 3：通过。需求 5 和 S10 由这一次分批结果覆盖。diff 没有计划外的产品修改，没有新增判定脚本，没有去掉过滤，没有使用默认并行度。
+
+Gate 4：通过。15 条命令的退出码都是 0，每条输出里的 failed 都是 0。对账通过。
+
+Gate 5：未触发。
+
+没有需要修复的发现。没有遗留 Minor。
+
+跳过项：无。Iteration 000 的五条定向测试按执行依据沿用，没有重跑。
+
+**验证**
+
+执行时 `ls tests/*.rs | sort` 得到 N=164。B=14，K=4。K 小于 B。前 4 个集成测试批各 11 个文件，后 10 个各 12 个，都在 8 到 12 之间。停止条件不成立。总批数 15。批与批之间上一条进程结束后才开始下一条。没有批次复核。
+
+1. `cargo test --offline --lib --bins -- --test-threads=1`。退出码 0，failed 0。摘要两行：`445 passed; 0 failed`，`0 passed; 0 failed`。
+2. `cargo test --offline --test aggregate_extension_test --test aggregate_output_shape_test --test aggregate_test --test alter_table_test --test attach_session_test --test btree_merge_test --test btree_scale_test --test btree_split_test --test btree_test --test busy_timeout_test --test cache_perf_test -- --test-threads=1`。退出码 0，failed 0。11 条摘要，每条 failed 为 0。
+3. `cargo test --offline --test catalog_bounded_read_test --test catalog_durability_test --test chain_join_test --test check_command_test --test checkpoint_command_test --test checkpoint_redo_reduction_test --test checkpoint_skip_test --test checkpoint_test --test cli_main_profiling_test --test cli_test --test composite_index_lifecycle_test -- --test-threads=1`。退出码 0，failed 0。11 条摘要，每条 failed 为 0。
+4. `cargo test --offline --test composite_index_runtime_test --test concurrent_test --test connection_limit_test --test constraint_enforcement_test --test cross_db_dml_test --test cross_db_query_test --test crypto_off_build_test --test ctas_test --test cte_test --test data_page_bounded_read_test --test database_file_lock_test -- --test-threads=1`。退出码 0，failed 0。11 条摘要，每条 failed 为 0。
+5. `cargo test --offline --test datetime_function_test --test datetime_type_test --test ddl_catalog_transactional_test --test ddl_crash_recovery_test --test ddl_layout_publication_test --test ddl_rewrite_consistency_test --test default_declaration_test --test default_precheck_test --test derived_scan_alias_test --test diagnostics_facade_test --test diagnostics_statement_test -- --test-threads=1`。退出码 0，failed 0。11 条摘要，每条 failed 为 0。
+6. `cargo test --offline --test diagnostics_wait_test --test dml_tombstone_abandon_window_test --test dml_tx_id_test --test drop_persistence_test --test drop_table_free_test --test e2e_test --test encryption_test --test executor_test --test explain_test --test explicit_tx_test --test expression_e2e_test --test file_header_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+7. `cargo test --offline --test file_storage_io_test --test free_page_lifecycle_test --test full_table_dml_test --test gc_test --test group_by_expr_test --test hash_join_build_side_test --test import_input_surface_test --test index_key_encoding_evaluation_test --test index_manager_test --test index_page_ownership_stack_overflow_test --test index_page_ownership_test --test index_range_routing_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+8. `cargo test --offline --test index_read_bounded_read_test --test index_write_atomicity_test --test insert_column_list_test --test insert_select_test --test isolation_level_test --test join_output_resolution_test --test join_test --test key_type_conformance_test --test keyless_eq_routing_test --test keyless_row_test --test legacy_compat_test --test limit_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+9. `cargo test --offline --test memory_db_test --test mvcc_abort_test --test mvcc_commit_test --test mvcc_record_test --test mvcc_tombstone_visibility_test --test nested_loop_join_test --test network_protocol_test --test network_server_test --test no_from_select_test --test order_by_alias_sort_test --test outer_join_test --test overflow_page_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+10. `cargo test --offline --test param_binding_test --test parser_test --test pg_integration_test --test pg_messages_test --test pg_protocol_test --test pipeline_test --test plan_cache_test --test plan_exec_test --test planner_test --test predicate_test --test prefetch_test --test prepared_statement_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+11. `cargo test --offline --test projection_expression_test --test projection_test --test pushdown_test --test query_memory_test --test readonly_session_test --test recovery_bounded_read_test --test recovery_e2e_test --test recovery_error_surface_test --test recovery_replay_convergence_test --test recovery_tail_persistence_test --test recovery_test --test recovery_wal_convergence_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+12. `cargo test --offline --test release_durability_precondition_test --test release_path_bounded_read_test --test runtime_test --test scalar_function_test --test scalar_subquery_comparison_test --test schema_persistence_test --test secondary_index_equality_test --test secondary_index_test --test select_distinct_test --test self_join_test --test session_lifecycle_test --test set_operations_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+13. `cargo test --offline --test sort_merge_join_test --test sort_test --test sql_differential_test --test statement_cancellation_test --test storage_test --test string_index_runtime_test --test string_index_sql_test --test string_secondary_index_test --test structural_property_test --test subquery_alias_binding_test --test subquery_test --test subset_insert_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+14. `cargo test --offline --test sync_loader_test --test table_alias_resolution_test --test table_manager_test --test truncate_test --test tx_statement_test --test typed_api_test --test typed_batch_write_test --test update_expression_test --test update_index_maintenance_test --test upsert_test --test value_test --test version_chain_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+15. `cargo test --offline --test view_test --test visibility_test --test wal_auto_checkpoint_test --test wal_buffer_test --test wal_handle_test --test wal_integration_test --test wal_record_test --test wal_recovery_large_test --test wal_writer_test --test write_failure_state_test --test write_path_slot_bounds_test --test write_type_conformance_test -- --test-threads=1`。退出码 0，failed 0。12 条摘要，每条 failed 为 0。
+
+**对账**
+
+用同一次枚举，文件名去掉末尾 `.rs`，与上面 14 条集成测试命令的 `--test` 名字按原顺序比较。164 个名字一致，无缺失、无多余、无重复。`--lib` 和 `--bins` 只出现在第 1 批。
+
+**产品文件 diff**
+
+`git diff --stat -- src tests Cargo.toml` 无输出。为空。
+
+**Persisted Evidence**
+
+None required
+
+**Experience Candidates**
+
+None
+
+**未解决问题**
+
+无。
 
 ## Plan Review
 
