@@ -107,9 +107,9 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: dec1f318515398ccc314d955c28879cbc7638478
-- **ahead of origin**: 17
-- **工作区**: 未提交修改为 `AGENTS.md` 与 `.agents/memory/project-model.md`。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`。
+- **提交基线**: 876d2200387b8369a30e27a069b24069e17c9517
+- **ahead of origin**: 8
+- **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 92 个域。
 
@@ -121,7 +121,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - 参考: `.agents/memory/references.md` (Rxx)
 - 改进: `.agents/memory/improvements.md` (Ixx)
 - 任务与路线: `.agents/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-11-10-ms46-keyless-row-gc/`）
+- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-11-10-ms48-module-boundary-and-session-channels/`）
 - Legacy migration carrier: `.agents/legacy/2026-08-25-openspec-init-migration/`
 
 ## 行为规格语料（92 域，权威以 `openspec/specs/` 为准）
