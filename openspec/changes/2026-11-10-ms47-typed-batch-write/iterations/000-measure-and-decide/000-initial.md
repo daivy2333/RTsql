@@ -101,15 +101,29 @@ PASS。无 BLOCKED。无 SKIPPED。
 
 ## Act Response
 
-- Status: 尚未填写
+- Status: reported
 
 **Implemented**
 
-尚未执行。
+`tests/typed_batch_write_test.rs` 新增 `row_insert_share_of_hundred_inserts`。它打开文件库，建表后再打开统计，对 0 到 99 各执行一条整数字面量插入，在后续 SQL 之前打印两个 `u128` 和，再断言 `bench` 有 100 行。`src/` 无改动，产品代码没有 `insert_batch`。
+
+裁定：不建入口。`total_ns = 332234286`，`execute_exclusive_ns = 9804119`，`9804119 * 10 < 332234286`。`9804119 * 10 = 98041190`，未溢出；`total_ns` 不是 0。
+
+**Deviations from Plan**
+
+第一次调用测量命令时，测试把 `PathBuf` 传给 `Database::open`，编译失败，没有打出纳秒行。测试改为传入 `&Path` 后，下面记录的这一次命令才是测量。没有在打出该行之后重跑。
 
 **Verification Evidence**
 
-尚未执行。
+命令：
+
+```text
+cargo test --offline --release --test typed_batch_write_test row_insert_share_of_hundred_inserts -- --test-threads=1 --nocapture
+```
+
+退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s`。
+
+`ms47_insert_share statements=100 total_ns=332234286 execute_exclusive_ns=9804119`
 
 **Persisted Evidence**
 
@@ -117,7 +131,11 @@ None required。
 
 **Experience Candidates**
 
-尚未执行。
+None
+
+**Open issues**
+
+无。本 Cycle 不添加入口代码，不展开下一轮。
 
 ## Plan Review
 
