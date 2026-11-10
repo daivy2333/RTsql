@@ -5,7 +5,7 @@
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。无行为规格增量，`.openspec.yaml` 为 `skip_specs: true`。
-- 000：执行依据是 `iterations/000-session-channels/000-initial.md`。Plan Context 为 ready。Act 尚未开始。Review Result 为 pending。
+- 000：执行依据是 `iterations/000-session-channels/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。
 - 001：只写在下面的 Iteration Plan 里，目录未展开。
 - Persisted Evidence：none。
 - 跳过项：无。
@@ -16,12 +16,12 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 两条队列改为无界通道；既有 WAL、会话和诊断结果保持；`Cargo.toml` 仍是单 package | 未开始 |
+| T1 | 000 | 无 | 两条队列改为无界通道；既有 WAL、会话和诊断结果保持；`Cargo.toml` 仍是单 package | 完成 |
 | T2 | 001 | 000 accepted | M19 分批全量一次，每批 failed 为 0 | 未开始。目录未展开 |
 
 ## 1. 会话队列（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-session-channels/000-initial.md` 的 Task Definition 执行。先加两个通道测试并看到编译失败，再改 `src/wal/buffer.rs`。通过条件是该文件列出的 GREEN 命令。不改 `Cargo.toml`，不新增 crate。
+- [x] 1.1 T1：按 `iterations/000-session-channels/000-initial.md` 的 Task Definition 执行。先加两个通道测试并看到编译失败，再改 `src/wal/buffer.rs`。通过条件是该文件列出的 GREEN 命令。不改 `Cargo.toml`，不新增 crate。
 
 ## 2. 收尾全量（Iteration 001）
 
@@ -44,7 +44,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 - Tasks: T1
 - Depends on: None
-- 状态：未执行。目录已展开。执行依据是 `iterations/000-session-channels/000-initial.md`。
+- 状态：Act 已报告。Review Result 为 pending。目录已展开。执行依据是 `iterations/000-session-channels/000-initial.md`。
 - Stable result: WAL 记录和待提交事务号经无界通道传递；容量、关闭、停止后等待、checkpoint 与 close 的现有结果保持；包仍然只有一个。
 - Verification boundary: 本轮只跑 Cycle 文件里的定向命令，每条都带 `--test-threads=1`，顺序执行。不跑全量。全量预算在 Iteration 001，整个变更一次。
 - Diagnostic boundary: `src/wal/buffer.rs` 的发送、接收端长度和 `flush_locked` 取走。`database.rs`、`transaction/manager.rs`、`checkpoint.rs`、`buffer_pool.rs` 不在本轮的修改范围。这些文件上的测试失败时，先看 `flush_locked` 的结果是否偏离现有合同；要改它们才能通过时回到计划。
