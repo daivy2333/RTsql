@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -38,16 +39,20 @@ struct CommitWaiter {
 
 /// WAL 内存缓冲 + Group Commit
 pub struct WALBuffer {
-    /// (lsn, record) 缓冲队列
-    buffer: Mutex<Vec<(u64, WalRecord)>>,
+    /// (lsn, record) 无界通道的发送端
+    records_tx: UnboundedSender<(u64, WalRecord)>,
+    /// (lsn, record) 无界通道的接收端。锁只包住 `len` 或 `try_recv`。
+    records_rx: std::sync::Mutex<UnboundedReceiver<(u64, WalRecord)>>,
     /// LSN 分配器（单调递增）
     current_lsn: AtomicU64,
     /// 持久化写入器
     wal_writer: Arc<WalWriter>,
     /// 通知后台 task 刷盘
     flush_notify: Notify,
-    /// 等待 flush 确认的 tx_id 列表
-    pending_commits: Mutex<Vec<u64>>,
+    /// 待提交事务号的发送端
+    pending_tx: UnboundedSender<u64>,
+    /// 待提交事务号的接收端。锁只包住 `len` 或 `try_recv`。
+    pending_rx: std::sync::Mutex<UnboundedReceiver<u64>>,
     /// tx_id -> 等待者（通知句柄 + 诊断归属）
     commit_waiters: Mutex<HashMap<u64, CommitWaiter>>,
     /// 关闭标志。为真后后台循环退出，且不再 spawn。
@@ -75,12 +80,16 @@ pub struct WALBuffer {
 impl WALBuffer {
     /// 创建 WALBuffer
     pub fn new(wal_writer: Arc<WalWriter>, capacity: usize, flush_interval_ms: u64) -> Self {
+        let (records_tx, records_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (pending_tx, pending_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
-            buffer: Mutex::new(Vec::new()),
+            records_tx,
+            records_rx: std::sync::Mutex::new(records_rx),
             current_lsn: AtomicU64::new(1),
             wal_writer,
             flush_notify: Notify::new(),
-            pending_commits: Mutex::new(Vec::new()),
+            pending_tx,
+            pending_rx: std::sync::Mutex::new(pending_rx),
             commit_waiters: Mutex::new(HashMap::new()),
             shutdown: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -106,11 +115,11 @@ impl WALBuffer {
     /// 如果缓冲区满（达到 capacity），在暂停结束后刷盘。暂停期间不持有刷盘闸门。
     pub async fn append(&self, record: WalRecord) -> u64 {
         let lsn = self.current_lsn.fetch_add(1, Ordering::SeqCst);
+        self.records_tx.send((lsn, record)).unwrap();
 
         let should_flush = {
-            let mut buf = self.buffer.lock().await;
-            buf.push((lsn, record));
-            buf.len() >= self.capacity
+            let rx = self.records_rx.lock().unwrap();
+            rx.len() >= self.capacity
         };
 
         if should_flush {
@@ -158,10 +167,7 @@ impl WALBuffer {
                     },
                 );
             }
-            {
-                let mut pending = self.pending_commits.lock().await;
-                pending.push(tx_id);
-            }
+            self.pending_tx.send(tx_id).unwrap();
             if self.shutdown.load(Ordering::SeqCst) {
                 self.flush_locked().await;
             }
@@ -334,11 +340,22 @@ impl WALBuffer {
         let batch_start = Instant::now();
 
         {
-            let mut buf = self.buffer.lock().await;
-            records = std::mem::take(&mut *buf);
-
-            let mut pending = self.pending_commits.lock().await;
-            committed_tx_ids = std::mem::take(&mut *pending);
+            records = {
+                let mut rx = self.records_rx.lock().unwrap();
+                let mut taken = Vec::new();
+                while let Ok(item) = rx.try_recv() {
+                    taken.push(item);
+                }
+                taken
+            };
+            committed_tx_ids = {
+                let mut rx = self.pending_rx.lock().unwrap();
+                let mut taken = Vec::new();
+                while let Ok(tx_id) = rx.try_recv() {
+                    taken.push(tx_id);
+                }
+                taken
+            };
         }
 
         // 本批等待者（含诊断归属）：先取走，写盘后再回写并唤醒。
@@ -575,6 +592,71 @@ mod tests {
             records.len(),
             count as usize,
             "concurrent do_flush should leave each record readable once, got {records:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_enqueues_on_the_record_channel() {
+        let (file, buffer) = open_buffer(100, 10_000);
+
+        buffer.append(WalRecord::BeginTxn { tx_id: 7 }).await;
+
+        let queued = {
+            let mut rx = buffer.records_rx.lock().unwrap();
+            rx.try_recv()
+                .expect("appended record should be waiting on records_rx")
+        };
+        assert!(
+            matches!(&queued, (_lsn, WalRecord::BeginTxn { tx_id: 7 })),
+            "records_rx should yield the appended BeginTxn before flush, got {queued:?}"
+        );
+
+        let records = read_records(file.path());
+        assert!(
+            !contains_begin(&records, 7),
+            "record must stay out of the WAL until flush, got {records:?}"
+        );
+
+        buffer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn commit_id_is_queued_on_the_channel() {
+        let (_file, buffer) = open_buffer(100, 10_000);
+
+        let waiting = buffer.clone();
+        let handle = tokio::spawn(async move { waiting.append_commit_and_wait(7).await });
+
+        let queued = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let len = {
+                    let rx = buffer.pending_rx.lock().unwrap();
+                    rx.len()
+                };
+                if len == 1 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            queued.is_ok(),
+            "pending_rx should hold one transaction id within 2 seconds"
+        );
+        assert!(
+            !handle.is_finished(),
+            "append_commit_and_wait must still be waiting before do_flush"
+        );
+
+        buffer.do_flush().await;
+
+        let joined = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("append_commit_and_wait should finish within 2 seconds after do_flush");
+        assert_eq!(
+            joined.expect("commit task should not panic"),
+            Ok(())
         );
     }
 }

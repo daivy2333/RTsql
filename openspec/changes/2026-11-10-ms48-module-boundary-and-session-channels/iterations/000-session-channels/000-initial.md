@@ -104,7 +104,65 @@ Gate 2：PASS。审查项全部通过，无 BLOCKED，无 SKIPPED。
 
 ## Act Response
 
-（本 Cycle 尚未执行。）
+- Status: reported
+
+**实际改动**
+
+- `src/wal/buffer.rs`
+  - `WALBuffer` 的 `buffer`、`pending_commits` 换成 `records_tx`、`records_rx`、`pending_tx`、`pending_rx`。两条都是 `tokio::sync::mpsc` 无界通道，接收端放在 `std::sync::Mutex` 中。
+  - `append`：先 `fetch_add` 分配 LSN，再 `records_tx.send`，`Err` 时 panic。然后在接收端锁内读 `len()`；长度大于等于 `capacity` 时放开锁，调用 `flush_after_pause`。
+  - `append_commit_and_wait`：仍先取得 `flush_gate`，仍先登记 `CommitWaiter`，再 `pending_tx.send`（失败 panic）。已 `shutdown` 时仍在这把闸门内调用 `flush_locked`。未停止时仍 `flush_notify.notify_one()`，然后 `notified().await`，返回 `Ok(())`。Lock、Queue、Io、Schedule 的记时语句留在原处。
+  - `flush_locked`：先取空记录通道，再取空待提交通道，放开接收端锁，然后沿用文件偏移、`write_batch`、诊断回写和 `notify_one`。`write_batch` 返回 `Err` 时分支仍为空，并执行到 `notify_one`。没有记录但取到事务号时也唤醒。
+  - `flush_loop` 未改。它仍 `select` 三个等待，然后拿闸门并调用 `flush_locked`，不从通道 `recv`。
+  - `mod tests` 新增 `append_enqueues_on_the_record_channel` 与 `commit_id_is_queued_on_the_channel`。
+- `openspec/changes/2026-11-10-ms48-module-boundary-and-session-channels/tasks.md`：T1 标为完成。Iteration 000 仍待 Review。
+
+**与计划的偏差**
+
+无实质偏差。`append_enqueues_on_the_record_channel` 用 `&queued` 匹配取出的记录，失败信息仍能打印该值。判定仍是 `BeginTxn { tx_id: 7 }`，接收端锁在 `try_recv` 后放开。
+
+**自检**
+
+Gate 3 未发现 Critical 或 Important。diff 没有计划外的产品修改。接收端锁不跨越 `.await`。这次编译没有新增本文件警告。遗留 Minor：无。
+
+**验证**
+
+RED：`cargo test --offline --lib append_enqueues_on_the_record_channel -- --test-threads=1`，退出码 101。队列实现尚未修改。编译错误：
+
+```
+error[E0609]: no field `records_rx` on type `std::sync::Arc<WALBuffer>`
+   --> src/wal/buffer.rs:588:33
+error[E0609]: no field `pending_rx` on type `std::sync::Arc<WALBuffer>`
+   --> src/wal/buffer.rs:616:37
+error: could not compile `rtsql` (lib test) due to 2 previous errors
+```
+
+GREEN 按顺序各一次。退出码都是 0，failed 都是 0。
+
+1. `cargo test --offline --lib wal::buffer::tests -- --test-threads=1`：退出码 0。`9 passed; 0 failed`。
+2. `cargo test --offline --test wal_buffer_test -- --test-threads=1`：退出码 0。`5 passed; 0 failed`。
+3. `cargo test --offline --test session_lifecycle_test -- --test-threads=1`：退出码 0。`7 passed; 0 failed`。
+4. `cargo test --offline --test diagnostics_wait_test commit_wait_classes_present -- --test-threads=1`：退出码 0。`1 passed; 0 failed`。
+5. `cargo test --offline --test statement_cancellation_test cancel_leaves_flush_loop_running -- --test-threads=1`：退出码 0。`1 passed; 0 failed`。
+
+`git diff -- Cargo.toml`：无输出。
+`git diff -- src/database.rs src/transaction/manager.rs src/wal/checkpoint.rs src/wal/writer.rs src/storage/buffer_pool.rs`：无输出。
+
+S11 由 diff 核对：`flush_locked` 里 `write_batch` 的 `Err` 分支仍为空，随后 `notify_one`。`append_commit_and_wait` 仍返回 `Ok(())`。未新增注入器。
+
+Gate 3：PASS。Gate 4：PASS。Gate 5：未命中。
+
+**Persisted Evidence**
+
+None required
+
+**Experience Candidates**
+
+None
+
+**未解决问题**
+
+无。T2 全量不在本 Cycle。
 
 ## Plan Review
 
