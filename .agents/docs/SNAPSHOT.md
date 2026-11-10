@@ -107,8 +107,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: cc54aeaaee59cdc1c9b022e939931d2968e27107
-- **ahead of origin**: 6
+- **提交基线**: dec1f318515398ccc314d955c28879cbc7638478
+- **ahead of origin**: 17
 - **工作区**: 未提交修改为 `AGENTS.md` 与 `.agents/memory/project-model.md`。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 92 个域。
