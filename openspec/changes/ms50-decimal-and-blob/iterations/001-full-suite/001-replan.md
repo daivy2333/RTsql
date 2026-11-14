@@ -143,3 +143,50 @@ None
 **未解决**
 
 本 Cycle 的 Acceptance 没有剩余项。父 Cycle 的 T4 仍是 blocked：这一次全量不声明通过，B08 未运行的 10 个目标不算通过。本 Cycle 不处理这两项。
+
+## Plan Review
+
+- Review Result: accepted
+
+**Findings**
+
+本 Cycle 的 Acceptance 已满足。无阻塞项。范围外实质缺陷：None。Issue 候选：None。
+
+已满足：
+
+- `tests/mvcc_abort_test.rs` 的 `tuple_bytes_v1` 是 `[0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]`。同行注释写明首字节不是值标签，前版本因此不可解码。断言仍是 `search` 结果等于 `Some(row_id_v1)`，文本仍是 `v1 should still be visible after tx2 abort - index should point back to v1`。v2 仍是 `0x14`。同文件另两个测试的负载仍是 `0x01`。
+- `0x01` 到 `0x0B` 仍是已分配值标签。`TAG_BLOB` 仍是 `0x0A`。`0x0C` 进入 `deserialize_tuple_width` 的未知标签臂并返回错误。`read_prev_index_keys` 在该错误上返回 `Ok(None)`。`abort_cleanup_versions` 的 `(None, Some(prev))` 仍调用 `index_manager.update(&key, prev)`。`(Some(None), Some(_))` 仍只删除。这些分支所在的 `src/` 没有改动。
+- 定向命令沿用本文件 Act Response，没有重跑。退出码 0。汇总行是 `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out`。failed 是 0。该观察之后没有新的产品代码或测试改动。
+- 父 Cycle `iterations/001-full-suite/000-initial.md` 的 Review Result 仍是 `replan-required`。T4 仍未勾选。B08 两次退出码 101，failed 为 1。`mvcc_commit_test`、`mvcc_record_test`、`mvcc_tombstone_visibility_test`、`nested_loop_join_test`、`network_protocol_test`、`network_server_test`、`no_from_select_test`、`order_by_alias_sort_test`、`outer_join_test`、`overflow_page_test` 两次都没有运行，不算通过。
+
+偏差：无。`e4cfff7..HEAD` 的代码 diff 只有 v1 首字节和同行注释。`tasks.md` 只改了本轮状态。
+
+不阻塞：函数上方的说明仍写 `value=10`。执行依据只允许改相邻那句注释，所以这里不改。
+
+这一次全量不能记成通过。收尾时必须把这个事实交给文档维护，不能改写成全量通过。本 Cycle 不安排第二次全量，也不补跑那 10 个目标。
+
+**Acceptance Gaps**
+
+None
+
+**Evidence**
+
+审查时 HEAD `b96e4149783eb1c90b48bca7d52e05a601c89f45`，分支 `changes/ms50-decimal-and-blob`，工作区干净。diff 边界是 merge-base `f323d58a452ce34467d2e33fd6dda5cebe798b56` 到该 HEAD。本 Cycle 的实施范围是 `e4cfff767fdd01f48465ea1ed92ac3838e2d949c..HEAD`。相对全量开跑时的 `354aed6d997a6a1333665ea8d281d9a165a31c13`，`src/` 没有 diff，`tests/` 只有 `tests/mvcc_abort_test.rs` 的这一行。
+
+沿用本文件 Act Response 的 GREEN。本审查没有运行 `cargo test --test mvcc_abort_test test_abort_update_reverts_to_previous_version -- --test-threads=1`，也没有跑全量。
+
+代码位置：`tests/mvcc_abort_test.rs` 的 `tuple_bytes_v1` 与中止后断言；`tuple.rs` 的 `TAG_BLOB` 和 `deserialize_tuple_width` 的未知标签臂；`manager.rs` 的 `read_prev_index_keys` 与 `abort_cleanup_versions` 中 `(None, Some(prev))`、`(Some(None), Some(_))`。Persisted Evidence 为 none。没有 evidence 目录不构成问题。
+
+**Follow-up Decision**
+
+当前 Cycle 的 Acceptance 已满足。不需要当前 Cycle 修复，也不需要新的执行依据。这是这条缺口的第一次 replan，缺口已经关闭。Iteration Plan 保持不变。Map 里没有下一轮。
+
+变更还不能把全量记成通过。父 Cycle 的 B08 两次失败，其后 10 个目标未运行。收尾时必须把这个事实交给文档维护，不能改写成全量通过。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
