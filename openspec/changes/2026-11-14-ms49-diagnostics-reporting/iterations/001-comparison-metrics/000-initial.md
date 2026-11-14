@@ -201,4 +201,46 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+无阻塞 Acceptance 的发现。范围外实质缺陷：None。
+
+独立阅读 `549bd71..2b9ff96` 的 diff 与当前代码。`Summary` 增加 `started_at`、`first_row`、`rows_delivered`。`enter_statement` 把同一个 `Instant` 写入 `ScopeInner.start` 和阶段绑定的 `started_at`。`Diagnostics::statement` 不接阶段绑定。`with_statement_stages` 为每次 `execute_inner` 建立一份默认 `StageStack`。
+
+`execute_executor` 在第一行 `ExecResult::Row` 进入将返回的 `rows` 时调用 `note_first_delivered_row`，时长是绑定上 `started_at` 到此刻的 `elapsed()`。非空 `SqlOutcome::Rows` 以 `rows.len()` 落定交回行数并保留该时长。空 `Rows`、`AffectedRows` 和 `Err` 调用 `finish_delivered_rows(0)`，清掉时长，交回行数为 0。`StatementScope::record` 只在 `ScopeEnd::Success` 抄写这两项；失败和放弃写成 `None` 和 0。`record_pre_measured` 用记录时刻减去根包含耗时得到 `started_at`，`checked_sub` 为 `None` 时用记录时刻，交付记录是 `None` 和 0。
+
+`materialize_insert_select_source`、`execute_ctas_routed` 的源循环、`create_executor_from_plan` 的 `DerivedScan` 臂都直接消费执行器的 `next`，不调用上述两个记录函数。CTAS 最后返回 `AffectedRows`。
+
+`segment_metrics` 对空切片返回吞吐 `None` 和 P95 `None`。否则 `t0` 是最早的 `started_at`，`t1` 是最晚的 `started_at + total`，墙钟是 `t1.saturating_duration_since(t0)`。墙钟为 0 时吞吐是 `None`；否则吞吐是交回行数之和除以 `wall.as_secs_f64()`，行数之和为 0 时得到 `0.0`。P95 将总耗时升序，秩 `r = (95 × N + 99) / 100`，取第 `r` 条。`N = 1` 时秩为 1，`N = 2` 时秩为 2，`N = 20` 时秩为 19。
+
+`process_memory_peak_bytes` 在 Linux 上调用 `getrusage`，`RUSAGE_SELF` 为 0。返回值不是 0 或 `ru_maxrss < 0` 时得到 `None`，否则返回该非负值乘以 1024。其他操作系统返回 `None`。`Cargo.toml` 里的 `libc` 只在 dev-dependencies，库代码用本地 `Rusage` 调用平台函数。同一次测试用 `libc::getrusage` 比较，GREEN 已通过。这是 Act 已记录的实现选择，返回值口径与 T3 一致。
+
+`render` 的格式串仍是 `diagnostics sql={} severity={:?} total={:?}`。阶段行仍走原循环。`Detail::Off` 仍返回空字符串。`src/result.rs` 的 `SqlOutcome` 仍是 `Rows` 与 `AffectedRows`。本轮 diff 没有 `QueryBudget::charge`；`limit == 0` 或 `bytes == 0` 时仍立即 `Ok(())`，不加 `used`。代码没有读取 `VmHWM` 或 `/proc/self/status`。
+
+**Evidence**
+
+代码：`src/diagnostics.rs` 的 `Summary`、`render`、`segment_metrics`、`process_memory_peak_bytes`、`linux_ru_maxrss_bytes`、`record_pre_measured`、`record_statement`、`enter_statement`、`note_first_delivered_row`、`finish_delivered_rows`、`StatementScope::record`；`src/pipeline.rs` 的 `execute_executor`、`materialize_insert_select_source`、`execute_ctas_routed` 源循环、`DerivedScan` 物化；`src/result.rs` 的 `SqlOutcome`；`src/executor/query_budget.rs` 的 `QueryBudget::charge`。
+
+测试与 Acceptance 对应：`nonempty_query_records_first_row` 检查非空查询的首行等待和交回行数，入口是 `Database::execute_sql`。`insert_empty_and_error_omit_first_row` 检查插入、空结果和解析错误。`abandoned_future_summary_is_cancelled` 在原有 Warn、再次插入和 `t2` 只含已完成行之外，断言被放弃摘要的 `first_row` 为 `None`、`rows_delivered` 为 0。`segment_metrics_uses_only_retained_summaries` 与 `p95_uses_nearest_rank_upper_bound` 检查保留摘要上的吞吐和 P95。`throughput_handles_zero_wall_and_zero_rows` 检查墙钟为 0、行数为 0 和整秒重叠区间。`pre_measured_summary_has_no_delivery` 检查预量摘要的空交付和回推结束时刻。`linux_memory_peak_matches_ru_maxrss` 检查 Linux 峰值和上限 0 的原行。`comparison_metrics_absent_from_sql_rows` 用现有格式串比对 `render(summary, Detail::Summary)`，并要求结果行与诊断关闭时相同。
+
+验证沿用本 Cycle Act Response 的 GREEN。来源是该 Response 的验证节。HEAD `2b9ff96`，工作区干净，结论产生后被覆盖的代码没有再改。不重跑。
+
+- `cargo test --offline --test diagnostics_comparison_test -- --test-threads=1`：退出码 0。8 passed；0 failed。
+- `cargo test --offline --test diagnostics_statement_test abandoned_future_summary_is_cancelled -- --test-threads=1`：退出码 0。1 passed；0 failed。
+- `cargo test --offline --test diagnostics_facade_test -- --test-threads=1`：退出码 0。10 passed；0 failed。
+
+Persisted Evidence 为 none。未因缺少 Evidence 目录提出问题。全量留在 Iteration 002。
+
+**Follow-up Decision**
+
+当前 Cycle 的 Acceptance 已满足。首行等待、交回行数、`segment_metrics`、`process_memory_peak_bytes` 和 `render` 格式串与 T3 一致。这些读出不在 `SqlOutcome` 里。不需要当前 Cycle 修复，也不需要新的执行依据。Iteration Plan 保持不变。按 `tasks.md` 已写的 T4 展开 Iteration 002。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`openspec/changes/2026-11-14-ms49-diagnostics-reporting/iterations/002-full-suite/000-initial.md`
