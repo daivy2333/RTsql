@@ -65,11 +65,16 @@ async fn row_insert_share_of_hundred_inserts() {
         stage_stat(summary, Module::Pipeline, "parse");
         stage_stat(summary, Module::Pipeline, "plan");
         let execute = stage_stat(summary, Module::Pipeline, "execute");
+        let creation = stage_stat(summary, Module::Pipeline, "executor_creation");
+        let execution = stage_stat(summary, Module::Pipeline, "executor_execution");
         let commit = stage_stat(summary, Module::Wal, "commit");
         assert_eq!(
-            execute.exclusive_total + commit.inclusive_total,
+            execute.exclusive_total
+                + creation.inclusive_total
+                + execution.inclusive_total
+                + commit.inclusive_total,
             execute.inclusive_total,
-            "execute exclusive + commit inclusive == execute inclusive"
+            "execute exclusive + creation + execution + commit == execute inclusive"
         );
 
         total_ns += summary.total.as_nanos();

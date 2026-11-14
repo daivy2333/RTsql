@@ -1,5 +1,6 @@
 //! Index scan executor for non-unique indexes - returns all matching rows
 
+use crate::diagnostics::{record_stage, stage_instant, Module};
 use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor};
 use crate::profiling::{is_profiling_enabled, record_time};
@@ -84,12 +85,18 @@ impl Executor for IndexScanAllExecutor {
                 .as_ref()
                 .unwrap_or(&self.table_meta.index_manager);
             let profiling = is_profiling_enabled();
-            if profiling {
-                let t0 = Instant::now();
-                self.row_ids = search_tree.search_all(&self.key).await?;
-                record_time("index_manager_search_all", t0.elapsed());
+            let start = if profiling {
+                Some(Instant::now())
             } else {
-                self.row_ids = search_tree.search_all(&self.key).await?;
+                stage_instant()
+            };
+            self.row_ids = search_tree.search_all(&self.key).await?;
+            if let Some(start) = start {
+                let elapsed = start.elapsed();
+                if profiling {
+                    record_time("index_manager_search_all", elapsed);
+                }
+                record_stage(Module::Index, "index_manager_search_all", elapsed);
             }
             self.initialized = true;
         }
