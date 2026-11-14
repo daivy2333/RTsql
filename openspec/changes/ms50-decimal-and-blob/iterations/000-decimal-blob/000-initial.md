@@ -128,7 +128,69 @@ Iteration 001 才跑本里程碑唯一一次全量，目录现在不创建。另
 
 ## Act Response
 
-由 openspec-act 填写。
+- Status: reported
+
+**实际改动**
+
+- `Value::Decimal([u8; 17])` 与 `Value::Blob`。负载是 `u8 scale` 加小端 `i128`。`Value::decimal` / `decimal_parts` 读写系数和 scale。相等和哈希使用去掉末尾 0 的规范形，所以 1.50 与 1.5 相等且哈希相同。`to_key` 对这两种值返回 `None`。
+- `ValueRef::Decimal` / `Blob` 借用字节，不把 `i128` 放进枚举。比较与哈希和 `Value` 使用同一规范形。
+- tuple 标签：DECIMAL `0x09`，短 BLOB `0x0A` 加 `u16` 长度，长 BLOB `0x0B` 加 `u32` 长度。`0xFF` 仍不是值标签。
+- catalog 列标签：DECIMAL `0x07`，后接 precision 与 scale 各一字节；BLOB `0x08`，无额外字节。旧列行不追加尾段。
+- 执行层与存储层 `ColumnType` 增加 `Decimal { precision, scale }` 和 `Blob`。`to_schema_column` 与 `ALTER TABLE` 按这两个字段映射。
+- `convert_data_type` 接受 `DECIMAL(p)` 与 `DECIMAL(p,s)`，拒绝缺精度、精度不在 1..=38、scale 大于精度，以及 `BLOB(n)`。`column_type_sql` 改为返回 `String`，写出 `DECIMAL(10,2)` 和 `BLOB`。
+- `value_from_sqlparser` 仍把带小数点的数字解析成 Float。目标列或比较对侧是 DECIMAL 时，计划期用原文解析。BLOB 列的 `X'...'` 在计划期解析成字节。写入门把整数、十进制文本和已有 DECIMAL 缩放到列的 scale；不能精确放下或 Float 输入返回 `column '...' expects ...`。失败发生在写页之前。
+- 比较对 DECIMAL 与 BLOB 要求同变体，否则 `Type mismatch`。同变体 DECIMAL 按数值序。`d + 1` 仍走原有非数值算术拒绝。
+- 显式 `DECIMAL` 主键可以建表。其它非整数显式主键仍拒绝。
+- JSON 与显示：DECIMAL 为 `1.50` 这种字符串，BLOB 为小写十六进制。dump 的 BLOB 字面量写成 `X'...'`，恢复后两代文本相同。
+- 驻留计费：DECIMAL 16 字节，BLOB 为 16 加字节长度。OID：DECIMAL 1700，BLOB 17，长度 -1。已有类型的 OID 和计费分支未改。
+- `tests/decimal_blob_test.rs`：声明、写入、比较、主键、重开、超页、dump 和 G1 样本。
+
+**偏差**
+
+- `Value` 保存 17 字节线格式，`ValueRef` 借用这段字节。这样现有 `ValueRef` 大小上限仍然成立，往返仍保留写入时的 scale。
+- 只把 `DECIMAL` 映射为新类型。`NUMERIC` 与 `DEC` 继续落入原来的 String 兜底。任务点名的是 `DECIMAL`。
+- `CREATE TABLE AS SELECT` 从 DECIMAL 值推导列时，precision 取 `max(scale, 38)`。任务没有单独的推导场景。
+- 全局最优里，显式主键只对 DECIMAL 放开。BLOB 主键仍走原有非整数拒绝。任务要求的是 DECIMAL 主键等值可达，并且 `to_key` 仍为 `None`。
+
+**自检**
+
+Gate 3：T1 的标签、往返、旧标签和规范形相等已由 `decimal_and_blob_round_trip` 覆盖。T2 的声明、精确写入、拒绝、数值比较、跨类型错误、主键、重开、超页、dump 和算术拒绝已由 `decimal_blob_test` 覆盖。T3 的 G1 打开、alice 行和 dave 写入已由同文件的 `legacy_g1_opens_queries_and_writes` 覆盖。样本文件字节未改。`FORMAT_VERSION` 未改。
+
+参数表达式的零拷贝 `evaluate_ref` 对 DECIMAL 和 BLOB 返回 Null，与既有 String 臂相同。`execute_with_params` 走拥有值通道，空 BLOB 写入已在测试中通过。
+
+无未修复的 Critical 或 Important。遗留 Minor：零拷贝参数通道不借出 DECIMAL 和 BLOB。
+
+Gate 4：T1、T2、T3 的 Verification 满足。Gate 5：未命中。
+
+T4 全量：`SKIPPED: 本 Cycle 排除全量，Iteration 001 尚未展开`。
+
+**验证**
+
+RED：
+
+- `cargo test --lib decimal_and_blob_round_trip -- --test-threads=1`：退出码 101。类型尚不存在，17 个编译错误。没有运行测试。
+- `cargo test --test decimal_blob_test schema_shows_decimal_and_blob -- --test-threads=1`：退出码 101。schema 文本是 `CREATE TABLE "t" ("d" TEXT, "b" TEXT);`。`0 passed; 1 failed`。
+
+GREEN：
+
+- `cargo test --lib decimal_and_blob_round_trip -- --test-threads=1`：退出码 0。`1 passed; 0 failed`。首次实现后曾因列名长度不同使目录行长度断言失败；断言改为同名列后通过。
+- `cargo test --lib serialize_int_roundtrip -- --test-threads=1`：退出码 0。`1 passed; 0 failed`。
+- `cargo test --test decimal_blob_test -- --test-threads=1`：退出码 0。`5 passed; 0 failed`。第一次整文件运行在重开库时失败，原因是前一个 `Database` 句柄仍持有锁；`drop` 后再运行通过。
+- `cargo test --lib value_bytes_uses_fixed_measure -- --test-threads=1`：退出码 0。`1 passed; 0 failed`。DECIMAL 为 16，3 字节 BLOB 为 19。
+
+全量未跑。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None
+
+**未解决**
+
+无。
 
 ## Plan Review
 

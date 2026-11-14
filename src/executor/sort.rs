@@ -277,6 +277,12 @@ fn compare_values(a: &Value, b: &Value) -> Ordering {
         // MS13: 日期族同类型时间序（跨类型由兜底 Equal 保持稳定序）
         (Value::Date(x), Value::Date(y)) => x.cmp(y),
         (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
+        (Value::Decimal(x), Value::Decimal(y)) => {
+            let (cx, sx) = super::value::unpack_decimal(x);
+            let (cy, sy) = super::value::unpack_decimal(y);
+            super::value::cmp_decimal(cx, sx, cy, sy)
+        }
+        (Value::Blob(x), Value::Blob(y)) => x.cmp(y),
 
         // Incompatible types - maintain stable order
         _ => Ordering::Equal,

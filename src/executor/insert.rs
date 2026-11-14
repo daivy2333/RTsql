@@ -23,6 +23,8 @@ fn key_value_type_name(v: &Value) -> &'static str {
         Value::Bool(_) => "Bool",
         Value::Date(_) => "Date",
         Value::Timestamp(_) => "Timestamp",
+        Value::Decimal(_) => "Decimal",
+        Value::Blob(_) => "Blob",
     }
 }
 
@@ -36,6 +38,8 @@ fn column_type_name(ct: &ColumnType) -> &'static str {
         ColumnType::Bool => "BOOL",
         ColumnType::Date => "DATE",
         ColumnType::Timestamp => "TIMESTAMP",
+        ColumnType::Decimal { .. } => "DECIMAL",
+        ColumnType::Blob => "BLOB",
     }
 }
 
@@ -141,6 +145,13 @@ impl Executor for InsertExecutor {
                     }
                 }
             }
+            for (i, v) in coerced.iter_mut().enumerate() {
+                *v = super::value::coerce_decimal_blob_write(
+                    v,
+                    &self.schema[i],
+                    &self.table_meta.columns[i].0,
+                )?;
+            }
 
             // MS23-T02: NOT NULL 强制——coerce 之后、键位预检/索引访问/任何
             // 写入之前逐列校验，违反零副作用拒绝。
@@ -225,6 +236,8 @@ impl Executor for InsertExecutor {
                         | (Value::Bool(_), ColumnType::Bool)
                         | (Value::Date(_), ColumnType::Date)
                         | (Value::Timestamp(_), ColumnType::Timestamp)
+                        | (Value::Decimal(_), ColumnType::Decimal { .. })
+                        | (Value::Blob(_), ColumnType::Blob)
                 );
                 if !ok {
                     return Err(StorageError::ColumnTypeMismatch {

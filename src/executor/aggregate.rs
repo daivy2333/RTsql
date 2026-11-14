@@ -327,6 +327,7 @@ fn concat_text(value: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Date(d) => crate::executor::datetime::format_date(*d),
         Value::Timestamp(t) => crate::executor::datetime::format_timestamp(*t),
+        Value::Decimal(_) | Value::Blob(_) => value.to_string(),
         Value::Null => String::new(),
     }
 }

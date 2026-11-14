@@ -453,6 +453,7 @@ pub(super) async fn dump(db: &str, key: Option<&str>, lock_wait: Option<Duration
                                 ColumnType::Date | ColumnType::Timestamp => {
                                     typed_datetime_literal(v, &col.column_type)
                                 }
+                                ColumnType::Blob => blob_sql_literal(v),
                                 _ => sql_literal(v),
                             })
                             .collect();
@@ -953,7 +954,9 @@ fn csv_value(field: &str, col_type: &ColumnType) -> Result<serde_json::Value, St
         ColumnType::Date | ColumnType::Timestamp => {
             Ok(serde_json::Value::String(field.to_string()))
         }
-        ColumnType::String(_) => Ok(serde_json::Value::String(field.to_string())),
+        ColumnType::String(_) | ColumnType::Decimal { .. } | ColumnType::Blob => {
+            Ok(serde_json::Value::String(field.to_string()))
+        }
     }
 }
 
@@ -1035,14 +1038,26 @@ fn quote_ident(name: &str) -> String {
 /// schema/dump DDL 与 stats/profile 输出的列类型渲染——SQL 标准长名
 /// （ISS12：INT→INTEGER、STRING→TEXT、BOOL→BOOLEAN；FLOAT/DATE/TIMESTAMP
 /// 不变）。解析器接受长名，dump→restore 往返与多代幂等保持。
-fn column_type_sql(column_type: &ColumnType) -> &'static str {
+fn column_type_sql(column_type: &ColumnType) -> String {
     match column_type {
-        ColumnType::Int => "INTEGER",
-        ColumnType::Float => "FLOAT",
-        ColumnType::Bool => "BOOLEAN",
-        ColumnType::Date => "DATE",
-        ColumnType::Timestamp => "TIMESTAMP",
-        ColumnType::String(_) => "TEXT",
+        ColumnType::Int => "INTEGER".to_string(),
+        ColumnType::Float => "FLOAT".to_string(),
+        ColumnType::Bool => "BOOLEAN".to_string(),
+        ColumnType::Date => "DATE".to_string(),
+        ColumnType::Timestamp => "TIMESTAMP".to_string(),
+        ColumnType::String(_) => "TEXT".to_string(),
+        ColumnType::Decimal { precision, scale } => {
+            format!("DECIMAL({precision},{scale})")
+        }
+        ColumnType::Blob => "BLOB".to_string(),
+    }
+}
+
+fn blob_sql_literal(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::String(hex) => format!("X'{hex}'"),
+        other => sql_literal(other),
     }
 }
 
@@ -1271,6 +1286,7 @@ fn column_min_max<'a>(
             ColumnType::String(_) | ColumnType::Date | ColumnType::Timestamp => {
                 v.as_str().map(|s| serde_json::Value::String(s.to_string()))
             }
+            ColumnType::Decimal { .. } | ColumnType::Blob => None,
         };
         let Some(c) = comparable else { continue };
         min = Some(match &min {
