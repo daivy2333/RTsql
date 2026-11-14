@@ -55,6 +55,14 @@ tuple 值标签到 `TAG_LONG_STRING = 0x08`。溢出定位字节是 `0xFF`，`ov
 
 旧构建读到新标签时，仍是现有的 `unknown tag` / `unknown column type tag` 错误。这和 Date 标签相同，不单独立项迁移。
 
+### 中止夹具不占用值标签
+
+`tests/mvcc_abort_test.rs` 的 `test_abort_update_reverts_to_previous_version` 把前版本写成没有值标签的 8 字节，首字节原来是 `0x0A`。`read_prev_index_keys` 在 tuple 不能按表解码时返回 `Ok(None)`，中止清理沿手写键把索引指回前版本。`0x0A` 成为 `TAG_BLOB` 之后，这 8 字节能解成空 BLOB。BLOB 的 `to_key` 是 `None`，清理改成删除索引项。查找结果从 v1 的 `RowId` 变成 `None`。
+
+标签保持上表。不改 `deserialize_tuple_width`，也不改 `abort_cleanup_versions`。该夹具的首字节改为 `0x0C`，前版本继续不可解码。真实的 DECIMAL 与 BLOB 行仍由 `serialize_tuple` 写入 `0x09`、`0x0A` 或 `0x0B`。
+
+被替代的方案：把 `TAG_BLOB` 改到别的字节。标签已经按 `0x08` 之后的空位排定。被替代的方案：按列类型拒绝不匹配的标签，或让不可键控的前版本走回退更新。前者改掉自描述 tuple。后者改掉 NULL 与不可键控前版本只删除、不回插的中止语义。
+
 ### 数值
 
 执行层和存储层的 DECIMAL 都带 `precision` 和 `scale`，经 `to_schema_column` 原样传递。BLOB 两侧都没有长度。
