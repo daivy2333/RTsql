@@ -383,6 +383,11 @@ async fn abandoned_future_summary_is_cancelled() {
         Severity::Warn,
         "an abandoned statement ends its record as Warn (Dropped)"
     );
+    assert_eq!(
+        summaries[0].first_row, None,
+        "an abandoned statement has no first-row wait"
+    );
+    assert_eq!(summaries[0].rows_delivered, 0);
     assert!(summaries[0].sql.contains("INSERT INTO t2 SELECT"));
     assert_eq!(summaries[1].severity, Severity::Info);
 

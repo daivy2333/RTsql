@@ -152,7 +152,52 @@ Gate 2：PASS。无 BLOCKED。无 SKIPPED。
 
 ## Act Response
 
-Act 填写。本段在实施前没有结果。
+- Status: reported
+
+**实际改动**
+
+- `src/diagnostics.rs`：`Summary` 增加 `started_at`、`first_row`、`rows_delivered`。`record_statement` 写入这三项。`record_pre_measured` 用记录时刻减去根包含耗时得到 `started_at`（`checked_sub` 为 `None` 时用记录时刻），`first_row` 为 `None`，`rows_delivered` 为 0。阶段绑定 `StageStack` 增加同名交付字段。`enter_statement` 把同一个 `ScopeInner.start` 写入绑定。`note_first_delivered_row` 与 `finish_delivered_rows` 供执行器写下交付记录。`StatementScope::record` 始终使用作用域开始时刻；只有 `ScopeEnd::Success` 抄写交付记录，失败和放弃的 `first_row` 为 `None`、`rows_delivered` 为 0。新增 `SegmentMetrics`、`segment_metrics`、`process_memory_peak_bytes`。`render` 未改。
+- `src/pipeline.rs`：`execute_executor` 在第一行 `ExecResult::Row` 进入将返回的 `rows` 时记下首行等待；非空 `SqlOutcome::Rows` 保留该时长且 `rows_delivered` 等于 `rows.len()`；空 `Rows`、`AffectedRows` 和 `Err` 清掉时长，交回行数为 0。错误文本和 SQLSTATE 未改。
+- `tests/diagnostics_comparison_test.rs`：比较指标读出测试。
+- `tests/diagnostics_statement_test.rs`：`abandoned_future_summary_is_cancelled` 追加被放弃摘要的 `first_row` 为 `None`、`rows_delivered` 为 0。
+- `openspec/changes/2026-11-14-ms49-diagnostics-reporting/tasks.md`：T3 标为完成。
+
+**与计划的偏差**
+
+阶段绑定上的字段名用 `started_at`、`first_row`、`rows_delivered`。计划把该命名留给实施。
+
+`process_memory_peak_bytes` 直接调用平台 `getrusage(RUSAGE_SELF)`，没有把 `libc` 升成库依赖。`Cargo.toml` 里的 `libc` 只在 dev-dependencies，库代码不能引用。返回值仍是非负 `ru_maxrss` 乘以 1024。Linux 测试里同一次比较一致。
+
+**自检**
+
+`rustfmt` 曾把 `record_measured_submetric` 和语句测试里原有断言重新折行。这些折行已改回。产品行为与下面三条命令运行时相同。无遗留 Minor。Gate 3：PASS。Gate 4：PASS。Gate 5 未触发。
+
+全量：SKIPPED。全量属于尚未展开的 Iteration 002，本批只执行 T3。
+
+**验证**
+
+先行测试（改产品代码前）：
+
+- `cargo test --offline --test diagnostics_comparison_test -- --test-threads=1 nonempty_query_records_first_row p95_uses_nearest_rank_upper_bound`：退出码 101。编译失败，`segment_metrics` 与 `process_memory_peak_bytes` 不存在，`Summary` 没有 `started_at`、`first_row`、`rows_delivered`。18 个错误。
+- `cargo test --offline --test diagnostics_statement_test abandoned_future_summary_is_cancelled -- --test-threads=1`：退出码 101。编译失败，`Summary` 没有 `first_row` 和 `rows_delivered`。2 个错误。
+
+GREEN，各跑一次：
+
+- `cargo test --offline --test diagnostics_comparison_test -- --test-threads=1`：退出码 0。8 passed；0 failed。
+- `cargo test --offline --test diagnostics_statement_test abandoned_future_summary_is_cancelled -- --test-threads=1`：退出码 0。1 passed；0 failed。
+- `cargo test --offline --test diagnostics_facade_test -- --test-threads=1`：退出码 0。10 passed；0 failed。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None
+
+**未解决问题**
+
+无。
 
 ## Plan Review
 

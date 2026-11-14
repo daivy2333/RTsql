@@ -1,5 +1,8 @@
 use crate::database::Database;
-use crate::diagnostics::{close_stage, open_stage, record_stage, stage_instant, Module};
+use crate::diagnostics::{
+    close_stage, finish_delivered_rows, note_first_delivered_row, open_stage, record_stage,
+    stage_instant, Module,
+};
 use crate::executor::query_budget::{row_bytes, QueryBudget, SharedBudget};
 use crate::executor::{
     inject_correlated_values, AggregateExecutor, AggregateNode, AlterTableExecutor,
@@ -1842,6 +1845,9 @@ async fn execute_executor(
     loop {
         match executor.next().await {
             Ok(Some(ExecResult::Row(values))) => {
+                if rows.is_empty() {
+                    note_first_delivered_row();
+                }
                 rows.push(values);
             }
             Ok(Some(ExecResult::AffectedRows(count))) => {
@@ -1850,6 +1856,7 @@ async fn execute_executor(
             Ok(Some(ExecResult::RowId(_))) => {}
             Ok(None) => break,
             Err(e) => {
+                finish_delivered_rows(0);
                 return Err(SqlError {
                     message: format!("Execution error: {}", e),
                     sqlstate: storage_error_sqlstate(&e),
@@ -1859,8 +1866,16 @@ async fn execute_executor(
     }
 
     if let Some(count) = affected_rows {
+        finish_delivered_rows(0);
         Ok(SqlOutcome::AffectedRows(count))
+    } else if rows.is_empty() {
+        finish_delivered_rows(0);
+        Ok(SqlOutcome::Rows {
+            columns: Vec::new(),
+            rows,
+        })
     } else {
+        finish_delivered_rows(rows.len() as u64);
         Ok(SqlOutcome::Rows {
             columns: Vec::new(),
             rows,
