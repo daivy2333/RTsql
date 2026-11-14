@@ -1,5 +1,8 @@
 use crate::database::Database;
-use crate::diagnostics::{close_stage, open_stage, record_stage, Module};
+use crate::diagnostics::{
+    close_stage, finish_delivered_rows, note_first_delivered_row, open_stage, record_stage,
+    stage_instant, Module,
+};
 use crate::executor::query_budget::{row_bytes, QueryBudget, SharedBudget};
 use crate::executor::{
     inject_correlated_values, AggregateExecutor, AggregateNode, AlterTableExecutor,
@@ -197,7 +200,8 @@ impl From<PlanError> for PlanFailure {
 /// DDL 变体走 `PlanBuilder::new().build_plan`（不注册表，不做 table_metadata_lookup）。
 /// 其余变体走 `register_table` → `build_plan` → 对可缓存语句（仅 SELECT）`put`。
 ///
-/// `profiling: true` 时，`table_metadata_lookup` 子指标在该阶段内记录。
+/// 旧开关或语句阶段绑定存在时，`table_metadata_lookup` 用同一次测量记录：
+/// 仅旧开关调用 `record_time`，并 `record_stage`。
 pub async fn plan_stage(
     database: &Database,
     sql: &str,
@@ -257,6 +261,30 @@ pub async fn plan_stage_routed(
     plan_stage_impl(database, sql, stmt, profiling, route, routed, true).await
 }
 
+/// 子指标的唯一起点。旧开关打开时取 `Instant::now()`，否则用阶段绑定的
+/// 起点；两者都不在时为 `None`，调用点不记录。
+fn submetric_start(profiling: bool) -> Option<Instant> {
+    if profiling {
+        Some(Instant::now())
+    } else {
+        stage_instant()
+    }
+}
+
+/// 把已经取到的时长写入旧表和当前语句阶段树。不再另取 `Instant`。
+fn record_measured_submetric(
+    profiling: bool,
+    module: Module,
+    name: &'static str,
+    start: Instant,
+) {
+    let elapsed = start.elapsed();
+    if profiling {
+        record_time(name, elapsed);
+    }
+    record_stage(module, name, elapsed);
+}
+
 /// 计划构建实现——`cache_put` 决定本次计划是否写入 plan cache（既有路径恒
 /// `true`；预编译语句面为 `false`）。
 async fn plan_stage_impl(
@@ -273,18 +301,19 @@ async fn plan_stage_impl(
         // 拒绝），物化源经 `register_table` 走跨库路由（可读附加库）。`CTAS`
         // 不是 `Statement::Query`，不进 plan cache（DDL/DML 既有纪律）。
         Statement::CreateTable { query: Some(_), .. } => {
-            let table_lookup_start = if profiling {
-                Some(Instant::now())
-            } else {
-                None
-            };
+            let table_lookup_start = submetric_start(profiling);
             let mut plan_builder = PlanBuilder::new();
             if let Some(route) = route {
                 mark_attached_ddl_targets(&mut plan_builder, stmt, route);
             }
             register_table(database, &mut plan_builder, stmt, route, routed).await?;
             if let Some(start) = table_lookup_start {
-                record_time("table_metadata_lookup", start.elapsed());
+                record_measured_submetric(
+                    profiling,
+                    Module::Pipeline,
+                    "table_metadata_lookup",
+                    start,
+                );
             }
             plan_builder.build_plan(stmt).map_err(PlanFailure::from)
         }
@@ -308,25 +337,22 @@ async fn plan_stage_impl(
         // 检查与 T5-c 展开钩子消费）+ 定义表名视图感知注册（附加库引用点名
         // 拒绝、既有视图引用合法）。DDL 不进 plan cache。
         Statement::CreateView { .. } => {
-            let table_lookup_start = if profiling {
-                Some(Instant::now())
-            } else {
-                None
-            };
+            let table_lookup_start = submetric_start(profiling);
             let mut plan_builder = PlanBuilder::new();
             plan_builder.set_views(current_view_defs(database).await);
             register_view_definition_tables(database, &mut plan_builder, stmt, route).await?;
             if let Some(start) = table_lookup_start {
-                record_time("table_metadata_lookup", start.elapsed());
+                record_measured_submetric(
+                    profiling,
+                    Module::Pipeline,
+                    "table_metadata_lookup",
+                    start,
+                );
             }
             plan_builder.build_plan(stmt).map_err(PlanFailure::from)
         }
         _ => {
-            let table_lookup_start = if profiling {
-                Some(Instant::now())
-            } else {
-                None
-            };
+            let table_lookup_start = submetric_start(profiling);
             let mut plan_builder = PlanBuilder::new();
             // MS21 Iter005 (T5-c/D12)：语句级视图通道注入——FROM/JOIN 展开钩子
             // 与 register_table 视图豁免的共同消费面（`Database.views` 快照；
@@ -369,7 +395,12 @@ async fn plan_stage_impl(
             }
             register_table(database, &mut plan_builder, stmt, route, routed).await?;
             if let Some(start) = table_lookup_start {
-                record_time("table_metadata_lookup", start.elapsed());
+                record_measured_submetric(
+                    profiling,
+                    Module::Pipeline,
+                    "table_metadata_lookup",
+                    start,
+                );
             }
             let plan = plan_builder.build_plan(stmt).map_err(PlanFailure::from)?;
             // MS20 T2: attach 身份不在 cache key 内——含附加库引用的语句不得
@@ -408,7 +439,8 @@ pub(crate) fn bump_schema_version(database: &Database) {
 /// - DML（Insert / Update / Delete）：`begin → prefetch abort meta → create_executor(tx_id) → execute → commit/abort`
 /// - 其余（Query 路径）：`create_executor(None) → execute`
 ///
-/// `profiling: true` 时，`executor_creation` 与 `executor_execution` 子指标在该阶段内记录。
+/// 旧开关或语句阶段绑定存在时，`executor_creation` 与 `executor_execution`
+/// 各用同一次测量记录：仅旧开关调用 `record_time`，并 `record_stage`。
 pub async fn execute_stage(
     database: &Database,
     plan: PhysicalPlan,
@@ -609,11 +641,7 @@ pub async fn execute_stage_routed(
                 .ok()
                 .map(|tm| HashMap::from([(local_name.to_string(), tm)]));
 
-            let executor_creation_start = if profiling {
-                Some(Instant::now())
-            } else {
-                None
-            };
+            let executor_creation_start = submetric_start(profiling);
             let executor =
                 match create_executor_from_plan(plan, database, Some(tx_id), None, routed, &budget)
                     .await
@@ -636,17 +664,23 @@ pub async fn execute_stage_routed(
                     }
                 };
             if let Some(start) = executor_creation_start {
-                record_time("executor_creation", start.elapsed());
+                record_measured_submetric(
+                    profiling,
+                    Module::Pipeline,
+                    "executor_creation",
+                    start,
+                );
             }
 
-            let exec_start = if profiling {
-                Some(Instant::now())
-            } else {
-                None
-            };
+            let exec_start = submetric_start(profiling);
             let response = execute_executor(executor).await;
             if let Some(start) = exec_start {
-                record_time("executor_execution", start.elapsed());
+                record_measured_submetric(
+                    profiling,
+                    Module::Pipeline,
+                    "executor_execution",
+                    start,
+                );
             }
 
             match &response {
@@ -689,11 +723,7 @@ pub async fn execute_stage_routed(
             // default RepeatableRead path stays `None` (byte-for-byte
             // unchanged).
             let statement_snapshot = database.statement_snapshot(None).await;
-            let executor_creation_start = if profiling {
-                Some(Instant::now())
-            } else {
-                None
-            };
+            let executor_creation_start = submetric_start(profiling);
             let executor = match create_executor_from_plan(
                 plan,
                 database,
@@ -708,17 +738,23 @@ pub async fn execute_stage_routed(
                 Err(e) => return Err(executor_creation_error(e)),
             };
             if let Some(start) = executor_creation_start {
-                record_time("executor_creation", start.elapsed());
+                record_measured_submetric(
+                    profiling,
+                    Module::Pipeline,
+                    "executor_creation",
+                    start,
+                );
             }
 
-            let exec_start = if profiling {
-                Some(Instant::now())
-            } else {
-                None
-            };
+            let exec_start = submetric_start(profiling);
             let response = execute_executor(executor).await;
             if let Some(start) = exec_start {
-                record_time("executor_execution", start.elapsed());
+                record_measured_submetric(
+                    profiling,
+                    Module::Pipeline,
+                    "executor_execution",
+                    start,
+                );
             }
             // MS31-T01：查询臂装配列元数据（列名单源同 CLI 表头）。
             Ok(attach_column_metadata(
@@ -928,11 +964,7 @@ async fn execute_ctas_routed(
 
     // 1. 物化源 SELECT（语句级快照，与查询路径同款；源可指向附加库）。
     let statement_snapshot = database.statement_snapshot(None).await;
-    let create_start = if profiling {
-        Some(Instant::now())
-    } else {
-        None
-    };
+    let create_start = submetric_start(profiling);
     let mut select = match create_executor_from_plan(
         *node.select.clone(),
         database,
@@ -947,14 +979,10 @@ async fn execute_ctas_routed(
         Err(e) => return Err(executor_creation_error(e)),
     };
     if let Some(start) = create_start {
-        record_time("executor_creation", start.elapsed());
+        record_measured_submetric(profiling, Module::Pipeline, "executor_creation", start);
     }
 
-    let exec_start = if profiling {
-        Some(Instant::now())
-    } else {
-        None
-    };
+    let exec_start = submetric_start(profiling);
     let mut rows: Vec<Vec<Value>> = Vec::new();
     // MS32 Iter003（design D5）：CTAS 源行在写入前整段驻留——逐行入账，
     // 物化完成后整段出账（与 `materialize_insert_select_source` 同型）。
@@ -982,7 +1010,7 @@ async fn execute_ctas_routed(
     }
     budget.release(charged);
     if let Some(start) = exec_start {
-        record_time("executor_execution", start.elapsed());
+        record_measured_submetric(profiling, Module::Pipeline, "executor_execution", start);
     }
 
     // 2. 类型推导（数据依赖）——不可行混合在此点名拒绝，catalog 仍零副作用。
@@ -1817,6 +1845,9 @@ async fn execute_executor(
     loop {
         match executor.next().await {
             Ok(Some(ExecResult::Row(values))) => {
+                if rows.is_empty() {
+                    note_first_delivered_row();
+                }
                 rows.push(values);
             }
             Ok(Some(ExecResult::AffectedRows(count))) => {
@@ -1825,6 +1856,7 @@ async fn execute_executor(
             Ok(Some(ExecResult::RowId(_))) => {}
             Ok(None) => break,
             Err(e) => {
+                finish_delivered_rows(0);
                 return Err(SqlError {
                     message: format!("Execution error: {}", e),
                     sqlstate: storage_error_sqlstate(&e),
@@ -1834,8 +1866,16 @@ async fn execute_executor(
     }
 
     if let Some(count) = affected_rows {
+        finish_delivered_rows(0);
         Ok(SqlOutcome::AffectedRows(count))
+    } else if rows.is_empty() {
+        finish_delivered_rows(0);
+        Ok(SqlOutcome::Rows {
+            columns: Vec::new(),
+            rows,
+        })
     } else {
+        finish_delivered_rows(rows.len() as u64);
         Ok(SqlOutcome::Rows {
             columns: Vec::new(),
             rows,
