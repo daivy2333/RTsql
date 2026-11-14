@@ -2,15 +2,16 @@
 
 对应路线：MS49。Gate 1：PASS，结论在 `proposal.md` 的 Gate 1 节。批准原文是「很好，按你推荐的来就行，默认全局最优」，加上提案里已锁定的六项口径。不是跳过。本文件不更新全局里程碑状态。
 
-Gate 2：PASS。无 BLOCKED，无 SKIPPED。结论在 `iterations/000-stage-reporting/000-initial.md` 的 Gate 2 Readiness。该 Cycle 的 Plan Context 为 ready。
+Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-stage-reporting/000-initial.md`。Iteration 001 的结论在 `iterations/001-comparison-metrics/000-initial.md`。这两个 Cycle 的 Plan Context 都为 ready。
 
 M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/unified-diagnostics/spec.md`。
-- 000：执行依据是 `iterations/000-stage-reporting/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。只展开这一轮。
-- 001、002：只列在下面的 Iteration Plan 里，不建目录。
+- 000：执行依据是 `iterations/000-stage-reporting/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。
+- 001：执行依据是 `iterations/001-comparison-metrics/000-initial.md`。Plan Context 为 ready。尚未实施。
+- 002：只列在下面的 Iteration Plan 里，不建目录。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -85,7 +86,7 @@ cargo test --offline --test diagnostics_facade_test -- --test-threads=1
 
 - Tasks: T1, T2
 - Depends on: None
-- 状态：Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。目录已展开。执行依据是 `iterations/000-stage-reporting/000-initial.md`。
+- 状态：Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。目录已展开。执行依据是 `iterations/000-stage-reporting/000-initial.md`。
 - Stable result: 性能统计打开时，五段旧耗时出现在当前语句摘要里；普通插入的执行独占加上 creation、execution、commit 等于执行包含耗时；页读和提交等待仍归当时开着的阶段；旧表仍打印这些名字；SQL 结果、错误文本和 SQLSTATE 不变。
 - Verification boundary: 只跑本轮 Cycle 里的定向命令，每条都带 `--test-threads=1`，按任务顺序执行。不跑全量。全量预算在 Iteration 002，整个变更一次。
 - Diagnostic boundary: T1 看 `plan_stage_impl`、`execute_stage_routed`、`execute_ctas_routed` 的现有测量点，以及两条独占等式测试。T2 看两个索引扫描执行器、`file_page_read_records_io` 和 `cli_main_profiling_test`。`diagnostics.rs` 的独占公式、`profiling.rs` 的打印、`execute_stage_in_tx_routed` 不在本轮修改范围。
@@ -97,7 +98,7 @@ cargo test --offline --test diagnostics_facade_test -- --test-threads=1
 
 - Tasks: T3
 - Depends on: Iteration 000 accepted
-- 状态：未展开。
+- 状态：已展开。Plan Context 为 ready。执行依据是 `iterations/001-comparison-metrics/000-initial.md`。尚未实施。
 - Stable result: 调用方从 `diagnostic_summaries` 和 `segment_metrics` / `process_memory_peak_bytes` 读到首行等待、吞吐、P95 和 Linux 进程峰值。上限为 0 的查询仍返回原行。指标不在结果列里。
 - Verification boundary: 本节 T3 的三条定向命令，均带 `--test-threads=1`。不跑全量。
 - Diagnostic boundary: `Summary` 的三个新字段、`execute_executor` 的行收集、`segment_metrics` 与 `process_memory_peak_bytes`。五段 `record_stage` 接线不在本轮重做。
