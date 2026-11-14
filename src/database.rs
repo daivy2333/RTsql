@@ -5,7 +5,7 @@
 
 use crate::executor::{PhysicalPlan, Value};
 use crate::plan_cache::PlanCache;
-use crate::result::{SqlError, SqlOutcome};
+use crate::result::{RowCursor, SqlError, SqlOutcome};
 use crate::storage::{
     BufferPool, CatalogKind, ColumnType, FileStorage, IoFailPoint, IoFailPointSlot, MemoryStorage,
     Result, StorageError, TableManager, TableMeta,
@@ -555,6 +555,39 @@ impl Database {
         params: &[Value],
     ) -> std::result::Result<SqlOutcome, SqlError> {
         crate::pipeline::execute_with_params(self, sql, params).await
+    }
+
+    /// 打开查询行游标。非行语句在副作用之前拒绝。
+    pub async fn open_rows(&self, sql: &str) -> std::result::Result<RowCursor, SqlError> {
+        crate::pipeline::open_rows(self, sql, &[], None).await
+    }
+
+    /// 带参打开查询行游标。参数错误文本与 [`Database::execute_with_params`] 相同。
+    pub async fn open_rows_with_params(
+        &self,
+        sql: &str,
+        params: &[Value],
+    ) -> std::result::Result<RowCursor, SqlError> {
+        crate::pipeline::open_rows(self, sql, params, None).await
+    }
+
+    /// 在调用方事务内打开查询行游标。丢弃游标不提交也不回滚该事务。
+    pub async fn open_rows_in_tx(
+        &self,
+        sql: &str,
+        tx: &Transaction,
+    ) -> std::result::Result<RowCursor, SqlError> {
+        crate::pipeline::open_rows(self, sql, &[], Some(tx.id())).await
+    }
+
+    /// 在调用方事务内带参打开查询行游标。
+    pub async fn open_rows_in_tx_with_params(
+        &self,
+        sql: &str,
+        params: &[Value],
+        tx: &Transaction,
+    ) -> std::result::Result<RowCursor, SqlError> {
+        crate::pipeline::open_rows(self, sql, params, Some(tx.id())).await
     }
 
     /// Begin a new explicit transaction (MS07-T04).

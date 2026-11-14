@@ -124,7 +124,58 @@ PASS。无 BLOCKED，无 SKIPPED。审查项均已通过：无 TBD；无未批�
 
 ## Act Response
 
-由 openspec-act 填写。
+- Status: reported
+
+四个入口共用 `pipeline::open_rows`。差别只有参数切片和可选 `tx_id`。计划成功后先 `readonly_rejection`，非查询臂在创建执行器之前拒绝。拉取对根执行器调用一次 `next_batch(max)`。列元数据只保留声明类型。`execute_executor` 仍一次收齐整段结果，并保留原来的诊断计点。
+
+被替代的做法有两件。打开时抽干执行器再切批，第三行 `CAST` 会在第一批之前失败。把 `execute_executor` 改成游标，会改掉整段入口的收集和诊断。
+
+**实际改动**
+
+- `src/result.rs`：`RowCursor`。`columns()` 返回计划列名和声明类型。执行器字段不进入公共签名。
+- `src/pipeline.rs`：`open_rows`、`prepare_cursor_plan`、`is_row_producing`、`declared_column_metadata`，以及 `RowCursor::next_batch`。
+- `src/database.rs`：`open_rows`、`open_rows_with_params`、`open_rows_in_tx`、`open_rows_in_tx_with_params`。
+- `src/lib.rs`：导出 `RowCursor`。
+- `tests/result_consumption_test.rs`：本轮 16 个测试。
+- `tasks.md`：T1、T2、T3 标为完成。
+
+**与计划的偏差**
+
+T2 的先行测试没有出现 RED。T1 的拉取已经是一次 `next_batch(max)`，`SELECT CAST(s AS INTEGER) FROM t` 的前两批是整数 1 和 2，第三批才返回与 `execute_sql` 相同的错误。这条语句没有被规划成必须先算完全部行的排序或聚合，T2 停止条件没有命中。
+
+可重复读且快照为 `None` 时，数据页扫描能看见其他语句尚未提交的行。事务测试用事务仍在活跃集里证明丢弃游标没有提交，再用调用方的 `commit` 和另一条 `rollback` 证明提交权仍在调用方。
+
+打开路径不读 plan cache，每次重新解析和计划。这样错误文本与整段入口相同，也不改 `execute_sql` 的缓存命中路径。
+
+**自检**
+
+Gate 3：T1、T2、T3 的要求、场景和禁止项都已核对。`execute_executor` 的收集循环和 `note_first_delivered_row`、`finish_delivered_rows` 仍只在整段路径上。游标不调用这两处，也不调用 `derive_types_from_rows`。
+
+遗留 Minor：一批里若出现 `AffectedRows` 或 `RowId`，游标记下 `streaming consumption received a non-row result` 并不再继续。本轮查询没有打到这条路径。
+
+**验证**
+
+未跑全量。命令都带 `--test-threads=1`，多个目标逐个执行。
+
+- `cargo test --test result_consumption_test batches_match_execute_sql -- --test-threads=1`：改前编译失败，没有 `RowCursor` 和 `open_rows`。实现后 1 passed，0 failed。
+- `cargo test --test result_consumption_test -- --test-threads=1`：当时文件内 7 passed，0 failed。
+- `cargo test --test result_consumption_test later_cast_failure_is_not_prefetched -- --test-threads=1`：1 passed，0 failed。
+- `cargo test --test result_consumption_test -- --test-threads=1`：11 passed，0 failed。
+- `cargo test --test diagnostics_comparison_test nonempty_query_records_first_row -- --test-threads=1`：1 passed，0 failed。此后没有再改 `execute_executor` 的诊断调用。
+- `cargo test --test result_consumption_test transaction_cursor_sees_uncommitted_row -- --test-threads=1`：改前编译失败，没有 `open_rows_in_tx`。补上入口后 1 failed。失败点是事务外 `SELECT` 仍能看见未提交行，产品代码未改。
+- `cargo test --test result_consumption_test -- --test-threads=1`：断言改为事务仍在活跃集后，16 passed，0 failed。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None。
+
+**未解决问题**
+
+无。
 
 ## Plan Review
 

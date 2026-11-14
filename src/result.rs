@@ -7,7 +7,7 @@
 //! 依赖保留——`value_to_json` 是 CLI 与协议边界共用的值转换工具，不属于
 //! 协议词表。
 
-use crate::executor::Value;
+use crate::executor::{Executor, Value};
 use crate::storage::ColumnType;
 
 /// 逐列元数据：列名 + 声明类型。
@@ -49,6 +49,31 @@ impl std::fmt::Display for SqlError {
 }
 
 impl std::error::Error for SqlError {}
+
+/// 查询行游标。
+///
+/// 持有根执行器和计划列元数据。一次拉取只向根执行器索取这一批。
+/// 丢弃游标只丢弃执行器，不提交也不回滚调用方的事务。
+pub struct RowCursor {
+    pub(crate) executor: Box<dyn Executor + Send>,
+    pub(crate) columns: Vec<ColumnMeta>,
+    pub(crate) error: Option<SqlError>,
+}
+
+impl RowCursor {
+    pub(crate) fn new(executor: Box<dyn Executor + Send>, columns: Vec<ColumnMeta>) -> Self {
+        Self {
+            executor,
+            columns,
+            error: None,
+        }
+    }
+
+    /// 计划列名和声明类型。声明类型不可得时为 `None`。首拉之前即可读。
+    pub fn columns(&self) -> &[ColumnMeta] {
+        &self.columns
+    }
+}
 
 /// 原生值 → JSON 值（CLI 与协议边界共用）。
 ///
