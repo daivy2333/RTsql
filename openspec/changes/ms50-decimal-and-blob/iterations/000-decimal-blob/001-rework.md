@@ -180,3 +180,55 @@ None
 **未解决**
 
 无。
+
+## Plan Review
+
+- Review Result: accepted
+
+**Findings**
+
+无阻塞 Acceptance 的发现。范围外实质缺陷：None。
+
+已满足：
+
+- T2-R1：`convert_data_type` 把 `DataType::Numeric` 与 `DataType::Decimal` 交给同一个 `decimal_column_type`。缺精度、精度不在 1..=38 时文本含 `requires precision`。scale 大于精度时文本含 `scale must not exceed precision`。schema 与 dump 仍由既有列类型文本写出 `DECIMAL(p,s)`。
+- T2-R2：无长度的 `Bytea`、`Binary(None)`、`Varbinary(None)` 成为 `ColumnType::Blob`。`Binary(Some)`、`Varbinary(Some)` 与 `Blob(Some)` 共用 `BLOB does not take a length`。
+- T2-R3：显式主键条件在 `Decimal` 旁放行 `ColumnType::Blob`。`Value::to_key` 与 `secondary_index_key` 对 Blob 仍返回 `None`。`pk_type_known_non_int` 对非 Int 主键返回 true，等值进入数据页。测试覆盖建表、插入 `X'6869'`、等值读回和两个 `None`。
+- 父 Cycle 已落地的范围：`ee3ed58..HEAD` 的产品 diff 只有 `ddl_dml.rs`、`query.rs`，以及 `tests/decimal_blob_test.rs` 末尾追加的三个测试。值标签、比较、dump、旧库样本和 `FORMAT_VERSION` 不在这次 diff 里。`FORMAT_VERSION` 仍是 1。原有断言没有改，其中包括字符串与 DECIMAL、BLOB 比较时的 `Type mismatch`。
+
+偏差，不阻塞：
+
+- Act 偏离。计划列出的主键改动只在建表检查。只放行建表后，`WHERE b = X'6869'` 到不了数据页。每张已注册表都会写入 `table_secondary_indexes`，空索引列表仍会调用 `predicate_atoms`。十六进制字面量在 `value_from_sqlparser` 返回 `UnsupportedValue`，路由在选择索引之前失败。调用点把这个错误当成没有路由。随后 `build_where` 的 `comparison_operand` 用已有 `literal_for_column` 按 BLOB 列解析，等值留在非 Int 主键的数据页。没有新的键编码。这使 T2-R3 的 Required behavior 可达。
+- 该匹配接受的是全部 `PlanError::UnsupportedValue`。其他类型上，`literal_for_column` 只处理 DECIMAL 的数字和 BLOB 的十六进制；其余比较字面量进入 `build_expression`，再次调用 `value_from_sqlparser`，语句仍以 `Unsupported value type` 失败。非法数字是 `ParseError`，仍从路由传出。数字、单引号字符串、NULL 和布尔能被 `value_from_sqlparser` 接受，不会进入这个分支，原来成功的索引路由仍按原结果返回。
+- 非法十六进制在 BLOB 列比较上由 `literal_for_column` 返回 `Invalid hex literal`。这只发生在 BLOB 列，写入路径已经使用同一函数。本 Cycle 的 Acceptance 没有规定这条错误文本。
+- 非阻塞 Minor：主键检查上方的注释仍写显式主键必须是 INTEGER。父 Cycle 放行 DECIMAL 时已经与代码不一致。Act 已记录，本 Cycle 没有改这句注释。
+
+**Acceptance Gaps**
+
+None
+
+**Evidence**
+
+审查时 HEAD `4948ba553dceb2ad69e0d140375f74cd414c247f`，分支 `changes/ms50-decimal-and-blob`，工作区干净。diff 边界是 merge-base `f323d58a452ce34467d2e33fd6dda5cebe798b56` 到该 HEAD。本 Cycle 相对父 Cycle 的范围是 `ee3ed58..4948ba5`。
+
+沿用本文件 Act Response 的验证节。命令跑在该 HEAD 的代码上，其后没有新的产品代码改动：
+
+- 三个 repair item 的 RED 都是退出码 101，`0 passed; 1 failed`。
+- 三个 GREEN 过滤命令都是退出码 0，`1 passed; 0 failed`。`blob_primary_key_is_reachable` 在只改主键检查时仍失败，文本是 `Unsupported value type`；路由改完后同一命令通过。
+- `cargo test --test decimal_blob_test -- --test-threads=1`：退出码 0，`8 passed; 0 failed`。
+
+父 Cycle Review 沿用的 `decimal_and_blob_round_trip`、`serialize_int_roundtrip`、`value_bytes_uses_fixed_measure` 所在文件不在 `ee3ed58..HEAD` 的产品 diff 里，结论仍有效。本审查没有重跑测试，也没有跑全量。
+
+代码阅读位置：`ddl_dml.rs` 的 `convert_data_type`、`decimal_column_type` 和显式主键条件；`query.rs` 的 `route_secondary_index` 调用点、`predicate_atoms`、`endpoint_value`；`parser/value.rs` 的 `value_from_sqlparser`；`literal_for_column`、`comparison_operand`、`build_expression` 的 `Expr::Value` 臂；`Value::to_key` 与 `secondary_index_key`。Persisted Evidence 为 none。没有 evidence 目录不构成问题。
+
+**Follow-up Decision**
+
+三项既有缺口都已有可观察结果。其他类型的 `Unsupported value type` 仍由 `build_where` 返回。当前 Cycle 的 Acceptance 已满足。Iteration Plan 不变。这是本 Acceptance 的第一个返工 Cycle，缺口已经关闭。按既有 Map 展开 Iteration 001，只做本里程碑唯一一次全量。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`iterations/001-full-suite/000-initial.md`

@@ -2,7 +2,7 @@
 
 对应路线：MS50 的值类型这一支。Gate 1：PASS，结论在 `proposal.md` 的 Gate 1 节。批准原文是「那就开始规划和实施这个ms，要求遵守各种规范，尤其是多批次串行测试规范，本次最多进行一次全量」。不是跳过。本文件不更新全局里程碑状态。
 
-Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-decimal-blob/000-initial.md`。该轮 Review Result 为 `rework-required`，后继是同目录 `001-rework.md`。Iteration 001 尚未展开。
+Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-decimal-blob/000-initial.md`，Review Result 为 `rework-required`。返工结论在 `iterations/000-decimal-blob/001-rework.md`，Review Result 为 `accepted`。Iteration 001 的执行依据是 `iterations/001-full-suite/000-initial.md`，Plan Context 为 ready。
 
 与 `ms50-result-consumption` 无依赖。两个分支都从当前 master 拉出。
 
@@ -10,8 +10,8 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/decimal-blob-types/spec.md`。
 - 000：执行依据是 `iterations/000-decimal-blob/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `rework-required`。
-- 000 的返工：执行依据是 `iterations/000-decimal-blob/001-rework.md`。Plan Context 为 ready。关闭 NUMERIC、字节别名和 BLOB 主键三处缺口。
-- 001：只写在本 Iteration Plan。目录尚未创建。000 未被接受，所以没有展开。
+- 000 的返工：执行依据是 `iterations/000-decimal-blob/001-rework.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `accepted`。NUMERIC、字节别名和 BLOB 主键三处缺口已关闭。
+- 001：执行依据是 `iterations/001-full-suite/000-initial.md`。Plan Context 为 ready。只跑本里程碑唯一一次全量，不改产品代码。
 - Persisted Evidence：none。
 - 跳过项：Iteration 000 不做全量。理由见下。
 
@@ -20,7 +20,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
 | T1 | 000 | 无 | 新标签往返；旧 tuple 仍可读；1.50 与 1.5 数值相等 | 完成 |
-| T2 | 000 | T1 | 声明、精确写入、比较、重开、超页、dump 往返、算术拒绝 | 场景已落地；声明别名与 BLOB 主键见 `001-rework` |
+| T2 | 000 | T1 | 声明、精确写入、比较、重开、超页、dump 往返、算术拒绝 | 完成 |
 | T3 | 000 | T1 | G1 样本打开、查询、写入 | 完成 |
 | T4 | 001 | 000 accepted | 本里程碑唯一一次 M19 全量分批 | 待执行 |
 
@@ -44,7 +44,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 - Diagnostic boundary: 失败的那一批。只复核该批一次。不重跑已经通过的批，也不再排一次全量。
 - Non-goals: 用这次全量补新功能。为流式变更再跑一次全量。
 
-平衡审计：000 的三步合在一起才是「能声明、写入、比较、读回，并且旧库有明确结果」。只做标签或只做旧库都还不是这个结果，所以不拆成多个 Iteration。001 只有全量，验证边界和故障域都与 000 不同，单独成轮。001 现在不建目录。
+平衡审计：000 的三步合在一起才是「能声明、写入、比较、读回，并且旧库有明确结果」。只做标签或只做旧库都还不是这个结果，所以不拆成多个 Iteration。001 只有全量，验证边界和故障域都与 000 不同，单独成轮。目录是 `iterations/001-full-suite/`。
 
 ## 1. 值与标签（Iteration 000）
 
@@ -60,7 +60,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 ## 4. 全量（Iteration 001）
 
-- [ ] 4.1 T4：000 被接受之后才展开本轮。按下面的分批方式跑一次。这是整个 MS50 的唯一一次全量。`ms50-result-consumption` 不另跑。本轮不改产品代码。
+- [ ] 4.1 T4：按 `iterations/001-full-suite/000-initial.md` 执行。按下面的分批方式跑一次。这是整个 MS50 的唯一一次全量。`ms50-result-consumption` 不另跑。本轮不改产品代码。
 
 分批是通过条件的一部分：
 
