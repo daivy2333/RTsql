@@ -194,4 +194,60 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: rework-required
+
+**Findings**
+
+父 Cycle 的场景级行为与代码一致，定向测试结论沿用，没有重跑。HEAD `ee3ed58e3b127220cf5e41bb17cb44717e755da6`，审查时工作区干净。diff 范围是 merge-base `f323d58` 到该 HEAD。
+
+已满足，不构成缺口：
+
+- T1：`decimal_and_blob_round_trip` 检查标签 `0x09`、`0x0A`、`0x0B`、系数 150 与 scale 2、字节 `68 69`、`0xFF` 拒绝、旧 Int 标签 `0x01`、1.50 与 1.5 的相等和哈希，以及 catalog 的 `0x07`/`0x08`。`FORMAT_VERSION` 仍是 1。
+- T2 的场景：`decimal_blob_test` 覆盖 schema、精确写入、拒绝舍入、数值比较、跨类型错误、DECIMAL 主键、重开、超过 `INLINE_SLOT_MAX` 的字节、dump 两代相同、`d + 1` 失败。`INLINE_SLOT_MAX` 为 4074，测试里的 5000 字节会走现有溢出链。
+- T3：`legacy_g1_opens_queries_and_writes` 打开副本，alice 行在插入前仍在，dave 可读，样本文件字节不变。
+- OID 与计费：`row_description` 中 DECIMAL 为 1700、BLOB 为 17，长度都是 -1。`value_bytes` 对 DECIMAL 为 16，对 BLOB 为 16 加字节长度。Act 的 `value_bytes_uses_fixed_measure` 结论沿用。
+- T4 标成 SKIPPED 符合本 Cycle 排除全量。Persisted Evidence 为 none，不因没有 evidence 目录记问题。
+
+阻塞：
+
+- Plan 遗漏。规格「声明类型」要求 `NUMERIC(p,s)` 与 `NUMERIC(p)` 成为 DECIMAL 列，缺精度或越界时拒绝。proposal 已锁定口径第 4 条要求未写精度的 NUMERIC 拒绝，并且 BYTEA、BINARY、VARBINARY 不接受长度。`convert_data_type` 只匹配 `DataType::Decimal` 与 `DataType::Blob`。sqlparser 0.44 把 NUMERIC、BYTEA、BINARY、VARBINARY 解析成独立变体，这些名字落入 String 兜底。Act 按任务正文只实现了 DECIMAL 与 BLOB，并在偏差中记录了这一点。任务 Required behavior 没有写下已经批准的 SHALL，原执行依据约束不了修复。
+- Plan 遗漏。规格「同类型比较」要求 BLOB 作主键时等值过滤仍能读到该行。design 的键路径是两种类型都返回 `None`，等值走非 Int 分流。建表检查只放行 Int 和 Decimal，BLOB 主键返回 `Unsupported constraint: NON-INTEGER PRIMARY KEY`。`to_key` 对 Blob 已经是 `None`。任务正文只要求 DECIMAL 主键。
+
+非阻塞：
+
+- `Value::Decimal([u8; 17])` 保存 scale 加小端 `i128`。比较、哈希、显示和往返仍使用系数与 scale。这是同一负载的线格式。
+- design 写了字符串与 DECIMAL 的 CAST 互转，以及 DECIMAL 到 Int 的精确转换。`CastType` 仍是原来的六种，这些转换落入 `Type mismatch`。本 Cycle 的 Acceptance 和规格场景没有 CAST。补上会扩大本轮验收，不进入返工。
+- `overflow.rs` 的注释仍写值标签域 `0x01..=0x08`。`decode_locator` 只认 `0xFF`，新标签不会被当成定位字节。
+- 参数表达式的 `evaluate_ref` 对 DECIMAL 和 BLOB 返回 Null，与既有 String 臂相同。Act 已记录。
+- `ctas_value_type` 把 DECIMAL 精度写成 `scale.max(38)`。没有对应验收场景。
+- `DEC` 继续是 String。规格没有要求 `DEC`。
+- RTM 中的 `exact_decimal_and_blob_round_trip_sql` 与 `decimal_orders_numerically` 不是独立测试函数。对应断言在 `exact_write_compare_reopen_and_overflow`。
+
+**Acceptance Gaps**
+
+- NUMERIC 缺精度时仍能建表，`NUMERIC(10,2)` 与 `NUMERIC(10)` 不会成为 DECIMAL 列。
+- BYTEA、BINARY、VARBINARY 不会成为 BLOB；`BINARY(n)` 与 `VARBINARY(n)` 不会因长度被拒绝。
+- `BLOB PRIMARY KEY` 在建表时被拒绝，等值读回没有落地。
+
+**Evidence**
+
+沿用父 Cycle Act Response 的 GREEN，来源是本文件的验证节，覆盖范围在 `ee3ed58` 之后没有新的产品代码改动：
+
+- `cargo test --lib decimal_and_blob_round_trip -- --test-threads=1`：退出码 0，`1 passed; 0 failed`。
+- `cargo test --lib serialize_int_roundtrip -- --test-threads=1`：退出码 0，`1 passed; 0 failed`。
+- `cargo test --test decimal_blob_test -- --test-threads=1`：退出码 0，`5 passed; 0 failed`。
+- `cargo test --lib value_bytes_uses_fixed_measure -- --test-threads=1`：退出码 0，`1 passed; 0 failed`。
+
+代码：`convert_data_type` 的匹配停在 `DataType::Decimal` 与 `DataType::Blob`；主键检查在 `ddl_dml.rs` 的 `ColumnType::Int` 与 `ColumnType::Decimal` 条件；`pk_type_known_non_int` 对非 Int 返回 true；`Value::to_key` 对 Blob 返回 `None`。解析变体来自 sqlparser 0.44 的 `parse_data_type`。本审查没有重跑测试，也没有跑全量。
+
+**Follow-up Decision**
+
+三项缺口都是当前 Iteration 已批准规格里的行为，不是新的验收边界。原 Task Definition 的 Required behavior 没有这些结果，Act 已经按该正文做完并记录偏差。有限修复不能再靠这份执行依据约束，所以不留在当前 Cycle。需求、Iteration Plan 和全量预算都不变，所以不是 replan。Iteration 001 的全量目录不展开。
+
+**Next Cycle**
+
+`iterations/000-decimal-blob/001-rework.md`
+
+**Next Iteration**
+
+None
