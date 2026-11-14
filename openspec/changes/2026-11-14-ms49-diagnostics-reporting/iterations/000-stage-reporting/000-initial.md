@@ -183,4 +183,41 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+无阻塞 Acceptance 的发现。
+
+独立阅读 `8779fdb...5531286` 的产品 diff 与测试。`submetric_start` 在旧开关打开时取 `Instant::now()`，否则取 `stage_instant()`。`record_measured_submetric` 用这一个起点的 `elapsed()`：仅旧开关调用 `record_time`，并 `record_stage`。三个 `table_metadata_lookup`、DML 臂与查询臂的 `executor_creation` / `executor_execution`、以及 `execute_ctas_routed` 的同样两段，都走这对函数，类别是 `Module::Pipeline`。执行器构造失败、`register_table` 失败、CTAS 源循环在记录点之前返回，仍然不记录。`Statement::CreateTable` 的无查询分支和 `DROP TABLE` 不调用 `submetric_start`。`execute_stage_in_tx_routed` 没有这五段测量。
+
+两个索引执行器内联同一口径，类别是 `Module::Index`。`search` / `search_all` 返回错误时，`?` 在 `record_stage` 之前返回；`search_all` 失败时不到 `initialized = true`。这是计划留给实施的辅助函数选择，每个调用点仍然只有一个起点。不构成偏差，不要求返工。
+
+diff 没有 `src/diagnostics.rs`、`src/profiling.rs`，没有新增 `open_stage`，没有 `record_pre_measured` 或 `diagnostics::report`。
+
+**Evidence**
+
+代码：`src/pipeline.rs` 的 `submetric_start`、`record_measured_submetric`、`plan_stage_impl`、`execute_stage_routed`、`execute_ctas_routed`、`execute_stage_in_tx_routed`；`src/executor/index_scan.rs` 的 `IndexScanExecutor::next`；`src/executor/index_scan_all.rs` 的 `IndexScanAllExecutor::next`。
+
+测试断言与 Acceptance 对应：`insert_records_pipeline_submetrics` 检查三个 Pipeline 阶段各一次、plan 与 execute 两条等式、`commit.inclusive_total <= execute.inclusive_total`、随后 `SELECT` 见到 `Value::Int(1)`。`insert_commit_is_child_of_execute` 与 `row_insert_share_of_hundred_inserts` 使用三条子阶段等式；后者的 `println` 与 `COUNT(*) = 100` 仍在。`primary_key_lookup_records_index_search` 要求 `index_manager_search` 一次且没有 `index_manager_search_all`，结果行与诊断关闭时相同。`secondary_index_lookup_records_search_all` 要求 `index_manager_search_all` 一次。两个类别过滤测试分别隐藏索引名和三个流水线子指标，并保持结果行。`file_page_read_records_io` 保留页数与 parse Io 断言，并要求 `index_manager_search` 一次；查询仍是 `Value::Int(3)`。`main_command_pk_scan_returns_row_and_legacy_table` 与 `main_command_secondary_scan_returns_row_and_legacy_table` 仍断言 stderr 里的旧表阶段名和结果行。本轮 diff 未改 CLI 测试。
+
+验证沿用本 Cycle Act Response 的 GREEN。来源是该 Response 的验证节，HEAD `5531286`，工作区干净，结论产生后被覆盖的代码没有再改。不重跑。
+
+- `cargo test --offline --test diagnostics_statement_test -- --test-threads=1`（T2 后）：退出码 0，`14 passed; 0 failed`。文件内 `#[test]` / `#[tokio::test]` 为 14 个。
+- `cargo test --offline --test typed_batch_write_test -- --test-threads=1`：退出码 0，`1 passed; 0 failed`。T2 未改 `pipeline.rs`，Act 未重跑；该文件只有这一个测试。
+- `cargo test --offline --test diagnostics_wait_test -- --test-threads=1`：退出码 0，`6 passed; 0 failed`。文件内测试为 6 个。
+- `cargo test --offline --test cli_main_profiling_test -- --test-threads=1`：退出码 0，`10 passed; 0 failed`。文件内测试为 10 个。
+
+Persisted Evidence 为 none。未因缺少 Evidence 目录提出问题。全量未跑，也不在本轮重跑。
+
+**Follow-up Decision**
+
+当前 Cycle 的 Acceptance 已满足。五个旧子指标用同一次测量进入当前语句摘要，插入等式、页读归属和旧表阶段名与计划一致。不需要当前 Cycle 修复，也不需要新的执行依据。Iteration Plan 保持不变。按 `tasks.md` 已写的 T3 展开 Iteration 001。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`openspec/changes/2026-11-14-ms49-diagnostics-reporting/iterations/001-comparison-metrics/000-initial.md`
