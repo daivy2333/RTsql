@@ -2,15 +2,16 @@
 
 对应路线：MS50 的值类型这一支。Gate 1：PASS，结论在 `proposal.md` 的 Gate 1 节。批准原文是「那就开始规划和实施这个ms，要求遵守各种规范，尤其是多批次串行测试规范，本次最多进行一次全量」。不是跳过。本文件不更新全局里程碑状态。
 
-Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-decimal-blob/000-initial.md`。Iteration 001 尚未展开。
+Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-decimal-blob/000-initial.md`。该轮 Review Result 为 `rework-required`，后继是同目录 `001-rework.md`。Iteration 001 尚未展开。
 
 与 `ms50-result-consumption` 无依赖。两个分支都从当前 master 拉出。
 
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/decimal-blob-types/spec.md`。
-- 000：执行依据是 `iterations/000-decimal-blob/000-initial.md`。Plan Context 为 ready。Act Response 为 reported，Review Result 仍为 pending。
-- 001：只写在本 Iteration Plan。目录尚未创建。
+- 000：执行依据是 `iterations/000-decimal-blob/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `rework-required`。
+- 000 的返工：执行依据是 `iterations/000-decimal-blob/001-rework.md`。Plan Context 为 ready。关闭 NUMERIC、字节别名和 BLOB 主键三处缺口。
+- 001：只写在本 Iteration Plan。目录尚未创建。000 未被接受，所以没有展开。
 - Persisted Evidence：none。
 - 跳过项：Iteration 000 不做全量。理由见下。
 
@@ -19,7 +20,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
 | T1 | 000 | 无 | 新标签往返；旧 tuple 仍可读；1.50 与 1.5 数值相等 | 完成 |
-| T2 | 000 | T1 | 声明、精确写入、比较、重开、超页、dump 往返、算术拒绝 | 完成 |
+| T2 | 000 | T1 | 声明、精确写入、比较、重开、超页、dump 往返、算术拒绝 | 场景已落地；声明别名与 BLOB 主键见 `001-rework` |
 | T3 | 000 | T1 | G1 样本打开、查询、写入 | 完成 |
 | T4 | 001 | 000 accepted | 本里程碑唯一一次 M19 全量分批 | 待执行 |
 
