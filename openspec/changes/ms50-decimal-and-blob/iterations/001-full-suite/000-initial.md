@@ -198,3 +198,55 @@ T4 未完成。全量不能声明通过。
 - 工作区：产品代码和测试代码无改动。
 - Evidence：None required。
 - 恢复条件：由 Plan 处理这个失败。本 Cycle 不能靠改产品代码、改测试、合并 master 或改分批公式继续。已通过的批不能重跑，也不能把这一次再跑成第二遍全量。
+
+## Plan Review
+
+- Review Result: replan-required
+
+**Findings**
+
+失败由本变更引入。Act 没有偏离 T4。偏差原因是新证据，加上 Iteration 000 把 `0x0A` 定成 `TAG_BLOB` 时没有核对这条手写负载。
+
+`test_abort_update_reverts_to_previous_version` 不经过 `UpdateExecutor`。它把 v1 写成 `[0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]`，索引键是 `b"test_key"`。`deserialize_tuple_width` 不按列类型核对标签。`TAG_BLOB = 0x0A` 加长度 `0` 使这 8 字节解码成空 `Value::Blob`。`Value::to_key` 对 Blob 返回 `None`，`read_prev_index_keys` 因此返回 `Some((None, …))`。`abort_cleanup_versions` 走 `(Some(None), Some(_))`，只删除索引项。查找得到 `None`。变更前 `0x0A` 是未知标签，解码失败，同一函数返回 `Ok(None)`，清理走 `update(&key, prev)`，查找得到 v1。`tests/mvcc_abort_test.rs` 相对 merge-base 没有 diff。`tests/` 里只有这一处 `0x0A` 负载。真实行由 `serialize_tuple` 写标签，`Int` 行首字节仍是 `0x01`。
+
+Act 按父 Cycle 停在 Gate 5，没有改代码，没有第二遍全量，也没有把未运行目标记成通过。B08 的 `2 passed; 1 failed` 与同文件另两个测试不读这个 v1 负载一致。
+
+范围外实质缺陷：None。这条碰撞由本变更的标签引起，留在本轮 replan，不另报 Issue。
+
+不阻塞：
+
+- `.agents/runbooks/m19-batched-full-regression.md` 把 `--lib --bins` 写成最后一批，并把失败处理写成先单独复核再整批复核。T4 把库和 bin 放在第一批，并且只允许整批复核一次。Act 按 T4 执行。不改 runbook。
+
+**Acceptance Gaps**
+
+T4 未满足。GREEN 要求每一批退出码 0 且每一行 `test result:` 的 failed 为 0。B08 两次退出码都是 101，failed 为 1。`mvcc_commit_test`、`mvcc_record_test`、`mvcc_tombstone_visibility_test`、`nested_loop_join_test`、`network_protocol_test`、`network_server_test`、`no_from_select_test`、`order_by_alias_sort_test`、`outer_join_test`、`overflow_page_test` 两次都没有运行，不算通过。B00–B07 与 B09–B14 沿用 Act Response，退出码 0 且 failed 为 0。全量不能声明通过。
+
+**Evidence**
+
+审查时 HEAD `64352e33b5ec914e53ca631fcd965198308499e4`，分支 `changes/ms50-decimal-and-blob`，工作区干净。diff 边界是 merge-base `f323d58a452ce34467d2e33fd6dda5cebe798b56` 到该 HEAD。`354aed6d997a6a1333665ea8d281d9a165a31c13..HEAD` 没有 `src/` 或 `tests/` 的文件，全量观察仍然覆盖当前产品代码。
+
+沿用本文件 Act Response 的验证表。本审查没有重跑任何批，也没有运行 `cargo test --test mvcc_abort_test test_abort_update_reverts_to_previous_version -- --test-threads=1`。代码已经能判定失败来自 `0x0A` 被解码成空 BLOB，不需要再跑这条命令。
+
+代码位置：`tests/mvcc_abort_test.rs` 的 v1 负载与中止后断言；`tuple.rs` 的 `TAG_BLOB` 和 `deserialize_tuple_width` 的 `TAG_BLOB` 臂；`manager.rs` 的 `read_prev_index_keys` 与 `abort_cleanup_versions` 中 `(Some(None), Some(_))` 分支；`recovery.rs` 的 `extract_index_keys`；`value.rs` 的 `Value::to_key`。Persisted Evidence 为 none。没有 evidence 目录不构成问题。
+
+**Follow-up Decision**
+
+当前执行依据禁止改测试和产品代码，也不能再跑全量。有限修复不受它约束。剩余证明从「每一批 failed 为 0」改成「只证明这条夹具回到不可解码回退」，验证方式变了，所以是 replan，不是同 Cycle 修复，也不是不改 Iteration Plan 的 rework。
+
+不另开 Iteration 002。001 的原验收还没有满足，不能先接受再展开下一轮。T5 只闭合已经打到的这一处碰撞，留在 001。
+
+所选修复是把 v1 首字节改成 `0x0C`。标签、解码和中止分支不动。被替代的方案是改 `TAG_BLOB`、按列类型拒绝标签，或让不可键控前版本走 `update`。前一个把已排定的标签让给夹具。后两个会改自描述 tuple，或改掉 NULL 与不可键控前版本只删除不回插的中止语义。这三处都不在本变更里改。
+
+这不扩大里程碑的结果。DECIMAL 与 BLOB 的声明、写入和读回不变。这一次全量保持已发生且 B08 失败的记录，不声明通过，也不再执行。
+
+**Iteration Plan Update**
+
+`tasks.md` 的 Iteration 001 增加 T5。稳定结果改为：这一次全量已经跑完；B08 未通过；未运行的 10 个目标不算通过；T5 只证明夹具回到不可解码回退；不声明第二次全量，也不声明全量通过。验证边界改为只跑那一条定向命令。`design.md` 增加「中止夹具不占用值标签」。规格没有新要求。
+
+**Next Cycle**
+
+`iterations/001-full-suite/001-replan.md`。Plan Context 为 ready。
+
+**Next Iteration**
+
+None
