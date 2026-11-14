@@ -9,7 +9,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/result-consumption/spec.md`。
-- 000：执行依据是 `iterations/000-row-cursor/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。
+- 000：执行依据是 `iterations/000-row-cursor/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。
 - Persisted Evidence：none。
 - 跳过项：全量分批。理由见 Iteration Plan。
 

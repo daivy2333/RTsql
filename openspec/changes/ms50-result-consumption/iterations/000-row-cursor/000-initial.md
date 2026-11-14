@@ -179,4 +179,42 @@ None。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+无阻塞 Acceptance 的发现。范围外实质缺陷：无。
+
+事务断言。`transaction_cursor_sees_uncommitted_row` 第一次失败时，事务外 `SELECT` 看见了未提交行，产品代码没有改。断言改为丢弃游标后事务仍在 `active_transactions`。这不阻塞 T3。
+
+`Database::open_in_memory` 的隔离级别是 `RepeatableRead`。`statement_snapshot` 在这个级别返回 `None`。`DataScan` 没有快照时跳过逐行可见性检查，非删除槽都会交出来，包括其他语句尚未提交的行。`TransactionManager` 的回滚注释写明：`snapshot: None` 的扫描交出每个未删除槽。事务外 `SELECT` 看见该行，不能证明游标提交了事务。T3 和规格要求事务内游标读到未提交行，丢弃不提交也不回滚，调用方 `commit` 后该行提交，另一条用例 `rollback` 后该行不可见。
+
+现有测试覆盖这些事实。游标读到 `7`。丢弃后 `tx.id()` 仍在活跃集。调用方 `commit` 成功。`TransactionManager::commit` 在活跃集里找不到该 id 时返回 `AlreadyCommitted`，所以这次提交成功说明游标没有提交。`dropping_cursor_still_allows_rollback` 在丢弃后回滚，随后全表为空。事务内 `INSERT` 被拒绝且没有写入。
+
+非行结果。`RowCursor::next_batch` 遇到 `AffectedRows` 或 `RowId` 时返回 `streaming consumption received a non-row result`，并记住这个错误。T1 的停止条件是查询臂若产出这两种结果就回到计划。本轮验收查询没有打到这条路径，自检已记为 Minor。这条分支不把它们当成数据行，已验收的拉取合同保持不变。它不构成 Acceptance 缺口，不要求当前 Cycle 修复。
+
+T2 的先行测试没有出现 RED。T1 的拉取已经是一次 `executor.next_batch(max)`。`SELECT CAST(s AS INTEGER) FROM t` 的前两批是 1 和 2，第三批才是与 `execute_sql` 相同的错误。T2 的停止条件没有命中。这是过程偏差，最终行为满足 T2。
+
+**Evidence**
+
+对照 `f323d58a452ce34467d2e33fd6dda5cebe798b56..aa111999c6dad57876518dc8073a3d80427039e0`。产品改动在 `src/result.rs` 的 `RowCursor`，`src/database.rs` 的四个 `open_rows*`，`src/pipeline.rs` 的 `open_rows`、`prepare_cursor_plan`、`is_row_producing`、`declared_column_metadata`、`RowCursor::next_batch`，以及 `src/lib.rs` 导出 `RowCursor`。`execute_executor` 的收集循环和 `note_first_delivered_row`、`finish_delivered_rows` 不在该 diff 的改动行里。游标路径不调用这两处，也不调用 `derive_types_from_rows`。执行器字段是 `pub(crate)`。
+
+`is_row_producing` 拒绝的计划变体与 `readonly_rejection` 的写变体相同。打开顺序是只读拒绝，然后非查询臂拒绝，再用 `statement_snapshot(tx_id)` 和同一个 `tx_id` 创建执行器。`next_batch(0)` 在调用执行器之前返回空批。执行错误包装为 `Execution error: {error}`，SQLSTATE 走 `storage_error_sqlstate`。
+
+测试沿用 Act Response，不重跑。最终 `cargo test --test result_consumption_test -- --test-threads=1` 为 16 passed、0 failed，发生在断言改为活跃集之后，覆盖 T1、T2、T3。文件里有 16 个 `tokio::test`，与这个计数一致。`cargo test --test diagnostics_comparison_test nonempty_query_records_first_row -- --test-threads=1` 为 1 passed、0 failed。此后 diff 没有改 `execute_executor` 的诊断调用，该结论仍然有效。没有跑全量。Persisted Evidence 为 none。
+
+**Acceptance Gaps**
+
+None
+
+**Follow-up Decision**
+
+T1、T2、T3 的可观察结果都有对应测试，整段入口和诊断计点保持。事务断言核对的是事务仍在活跃集，随后调用方仍能提交或回滚。不需要当前 Cycle 修复，也不需要新的执行依据。Iteration Plan 保持不变。`tasks.md` 只有 Iteration 000，不新建全量轮。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
