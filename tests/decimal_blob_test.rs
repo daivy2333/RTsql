@@ -320,6 +320,161 @@ async fn legacy_g1_opens_queries_and_writes() {
     assert_eq!(std::fs::read(&src).unwrap(), before);
 }
 
+#[tokio::test]
+async fn numeric_without_precision_is_rejected() {
+    let dir = tempdir().unwrap();
+    let path = db_path(dir.path(), "numeric.db");
+    let db = Database::open(Path::new(&path)).await.unwrap();
+
+    let err = db
+        .execute_sql("CREATE TABLE t (d NUMERIC)")
+        .await
+        .expect_err("NUMERIC without precision");
+    assert!(
+        err.message.contains("requires precision"),
+        "{}",
+        err.message
+    );
+    assert!(db.execute_sql("SELECT * FROM t").await.is_err());
+
+    let err = db
+        .execute_sql("CREATE TABLE bad (d NUMERIC(2,3))")
+        .await
+        .expect_err("scale above precision");
+    assert!(
+        err.message.contains("scale must not exceed precision")
+            || err.message.contains("requires precision"),
+        "{}",
+        err.message
+    );
+    let err = db
+        .execute_sql("CREATE TABLE bad (d NUMERIC(39,0))")
+        .await
+        .expect_err("precision above 38");
+    assert!(
+        err.message.contains("scale must not exceed precision")
+            || err.message.contains("requires precision"),
+        "{}",
+        err.message
+    );
+    assert!(db.execute_sql("SELECT * FROM bad").await.is_err());
+
+    db.execute_sql("CREATE TABLE ok (d NUMERIC(10,2), e NUMERIC(10))")
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    drop(db);
+
+    let (code, stdout, stderr) = cli(&["schema", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("DECIMAL(10,2)"),
+        "schema missing DECIMAL(10,2): {stdout}"
+    );
+    assert!(
+        stdout.contains("DECIMAL(10,0)"),
+        "schema missing DECIMAL(10,0): {stdout}"
+    );
+    assert!(
+        !stdout.contains("NUMERIC"),
+        "schema must not keep the NUMERIC alias: {stdout}"
+    );
+
+    let (code, dump, stderr) = cli(&["dump", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        dump.contains("DECIMAL(10,2)") && dump.contains("DECIMAL(10,0)"),
+        "dump missing DECIMAL declaration: {dump}"
+    );
+    assert!(
+        !dump.contains("NUMERIC"),
+        "dump must not keep the NUMERIC alias: {dump}"
+    );
+}
+
+#[tokio::test]
+async fn byte_aliases_declare_blob() {
+    let dir = tempdir().unwrap();
+    let path = db_path(dir.path(), "bytes.db");
+    {
+        let db = Database::open(Path::new(&path)).await.unwrap();
+        db.execute_sql("CREATE TABLE t (a BYTEA, b BINARY, c VARBINARY)")
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+    }
+
+    let (code, stdout, stderr) = cli(&["schema", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("\"a\" BLOB")
+            && stdout.contains("\"b\" BLOB")
+            && stdout.contains("\"c\" BLOB"),
+        "schema missing BLOB for byte aliases: {stdout}"
+    );
+    assert!(
+        !stdout.contains("BYTEA") && !stdout.contains("BINARY"),
+        "schema must not keep byte aliases: {stdout}"
+    );
+
+    let (code, dump, stderr) = cli(&["dump", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        dump.contains("\"a\" BLOB") && dump.contains("\"b\" BLOB") && dump.contains("\"c\" BLOB"),
+        "dump missing BLOB for byte aliases: {dump}"
+    );
+    assert!(
+        !dump.contains("BYTEA") && !dump.contains("BINARY"),
+        "dump must not keep byte aliases: {dump}"
+    );
+
+    let (db, _dir) = open_db("bytes-len.db").await;
+    let err = db
+        .execute_sql("CREATE TABLE bad (b BINARY(10))")
+        .await
+        .expect_err("BINARY length");
+    assert!(
+        err.message.contains("does not take a length"),
+        "{}",
+        err.message
+    );
+    let err = db
+        .execute_sql("CREATE TABLE bad (c VARBINARY(10))")
+        .await
+        .expect_err("VARBINARY length");
+    assert!(
+        err.message.contains("does not take a length"),
+        "{}",
+        err.message
+    );
+    assert!(db.execute_sql("SELECT * FROM bad").await.is_err());
+}
+
+#[tokio::test]
+async fn blob_primary_key_is_reachable() {
+    let (db, _dir) = open_db("blob-pk.db").await;
+    db.execute_sql("CREATE TABLE t (b BLOB PRIMARY KEY)")
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO t VALUES (X'6869')")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(
+            db.execute_sql("SELECT b FROM t WHERE b = X'6869'")
+                .await
+                .unwrap()
+        ),
+        vec![vec![serde_json::json!("6869")]]
+    );
+    let blob = Value::Blob(vec![0x68, 0x69]);
+    assert_eq!(blob.to_key(), None);
+    assert_eq!(
+        blob.secondary_index_key(&rtsql::storage::ColumnType::Blob),
+        None
+    );
+}
+
 fn hex_of(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

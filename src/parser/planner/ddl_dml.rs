@@ -1096,9 +1096,14 @@ impl PlanBuilder {
                     .to_string(),
             )),
 
-            DataType::Decimal(info) => decimal_column_type(*info),
-            DataType::Blob(None) => Ok(ColumnType::Blob),
-            DataType::Blob(Some(_)) => Err(PlanError::ParseError(
+            DataType::Decimal(info) | DataType::Numeric(info) => decimal_column_type(*info),
+            DataType::Blob(None)
+            | DataType::Bytea
+            | DataType::Binary(None)
+            | DataType::Varbinary(None) => Ok(ColumnType::Blob),
+            DataType::Blob(Some(_))
+            | DataType::Binary(Some(_))
+            | DataType::Varbinary(Some(_)) => Err(PlanError::ParseError(
                 "BLOB does not take a length".to_string(),
             )),
 
@@ -1383,7 +1388,10 @@ impl PlanBuilder {
         if let Some(pk_col) = primary_key.as_deref() {
             if let Some(pk_def) = column_defs.iter().find(|c| c.name == pk_col) {
                 if pk_def.data_type != ColumnType::Int
-                    && !matches!(pk_def.data_type, ColumnType::Decimal { .. })
+                    && !matches!(
+                        pk_def.data_type,
+                        ColumnType::Decimal { .. } | ColumnType::Blob
+                    )
                 {
                     return Err(PlanError::UnsupportedConstraint("NON-INTEGER PRIMARY KEY"));
                 }
