@@ -124,6 +124,10 @@ impl Expression for FunctionExpression {
                 "Scalar function string results are not available on the zero-copy evaluate_ref path"
                     .into(),
             ),
+            Value::Decimal(_) | Value::Blob(_) => Err(
+                "Scalar function decimal and blob results are not available on the zero-copy evaluate_ref path"
+                    .into(),
+            ),
         }
     }
 

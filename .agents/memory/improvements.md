@@ -65,7 +65,7 @@
 | 4 | I016 | 代价模型 + Join 重排（降范围起步：选较小 Hash 构建侧） | promoted（降范围起步纳入 MS40，尚未开始；完整代价模型仍留本条） |
 | 5 | I012 | 消息传递重构（Arc<Mutex> → mpsc/oneshot/Notify/watch） | promoted（会话刷盘、提交等待、checkpoint 与 close 的状态归属已随 MS43 交付；通道余项已随 MS48 消耗：记录与待提交事务号走无界通道） |
 | 6 | I074 | 数据库模块化——依据必要 SQL 实现形成的边界，先评估 feature，再按接口拆分 crate | promoted（feature 边界与接口归属已随 MS42 交付；拆分余项已随 MS48 消耗：没有独立构建或裁剪收益，包保持一个） |
-| 10 | I065 | 扫描结果流式化（最小结果接口） | promoted（2026-11-14 最小公共行游标已交付；类型一支尚未结束） |
+| 10 | I065 | 扫描结果流式化（最小结果接口） | promoted（2026-11-14 最小公共行游标已交付） |
 
 ### 梯队一 B：存储、并发与表示底层
 
@@ -85,7 +85,7 @@
 
 | 序 | 条目 | 内容 | 状态 |
 |---|---|---|---|
-| 24 | I069 | DECIMAL/BLOB 列类型（格式深水区，参照 MS13 先例） | planned（MS50 的类型一支尚未结束，不由结果消费变更消耗） |
+| 24 | I069 | DECIMAL/BLOB 列类型（格式深水区，参照 MS13 先例） | promoted（2026-11-14 随 MS50 类型变更交付） |
 | 25 | I060 | WAL 与 checkpoint 伴生文件加密（安全功能 + 载荷格式设计） | 锁定：初版非目标 |
 | 27 | I067 | REPL 交互模式与元命令 | 锁定：用户裁定后续可选 |
 | 28 | I071 | PG Extended Query + serve 复活 | 锁定：串行模型达天花板后触发 |
@@ -297,7 +297,7 @@
 - **证据**: 2026-09-24 SQLite 对比测量（README 对比板块、R26 runbook）；类型化结果迁移以 `openspec/changes/2026-10-21-ms31-typed-api-param-binding/iterations/000-typed-result-migration/000-initial.md` 为准，原核心直接返回 Response 的描述不再作为当前事实。已交付行为见 `openspec/specs/result-consumption/spec.md` 与 `openspec/changes/archive/2026-11-14-ms50-result-consumption/`。
 - **影响**: 调用方可以分批拿走查询行。CLI 与协议仍整段输出。算子内部驻留不在本条已交付范围内。
 - **方案**: MS50 把本条收成最小公共行游标。CLI、协议边输出和取消算子内部物化不在该范围。
-- **状态**: promoted（2026-11-14 最小结果接口已随 change `openspec/changes/archive/2026-11-14-ms50-result-consumption/` 交付，不再作为未排期工作。MS50 的类型一支尚未结束，I069 不由本变更消耗）
+- **状态**: promoted（2026-11-14 最小结果接口已随 change `openspec/changes/archive/2026-11-14-ms50-result-consumption/` 交付，不再作为未排期工作）
 - **关联**: I088 负责原生类型结果与列元数据，本条负责增量消费及背压，I082 负责算子内部物化。三者不能互相替代。后续优化归因使用已交付的统一诊断。I096 的上报和比较指标已随 MS49 消耗。
 
 ## I066: 分配器评估与切换（jemalloc/mimalloc）
@@ -321,11 +321,11 @@
 ## I069: DECIMAL/BLOB 列类型
 
 - **分类**: 功能 / 类型系统
-- **问题**: 列类型 6 类（Int/String/Float/Bool + MS13 的 Date/Timestamp），无 DECIMAL/BLOB——精确小数以 Float 近似、二进制数据无承载类型
-- **证据**: R18 主题 3 差距清单「DATE/TIMESTAMP/DECIMAL/BLOB | 大：改序列化格式，深水区应靠后」；前两类已由 MS13-T01 落地，DECIMAL/BLOB 未做
-- **影响**: 金额类精确计算与二进制存储场景不可用；常规分析负载不受影响
-- **方案**: tuple TAG/catalog COL_TAG 扩展的格式变更深水区，参照 MS13 日期类型先例独立规划
-- **状态**: planned（MS50 的类型一支尚未结束，不由结果消费变更 `openspec/changes/archive/2026-11-14-ms50-result-consumption/` 消耗）
+- **问题**: 列类型原先没有 DECIMAL 与 BLOB。这一支已交付：两种类型可以声明、精确写入、比较和读回。DECIMAL 算术和二级索引键不在已交付范围内。
+- **证据**: R18 主题 3 差距清单「DATE/TIMESTAMP/DECIMAL/BLOB | 大：改序列化格式，深水区应靠后」；DATE 与 TIMESTAMP 已由 MS13-T01 落地。已交付行为见 `openspec/specs/decimal-blob-types/spec.md` 与 `openspec/changes/archive/2026-11-14-ms50-decimal-and-blob/`。
+- **影响**: 精确小数和二进制值可以按列声明并读回。算术和二级索引键仍不覆盖这两种类型。
+- **方案**: MS50 的类型变更交付值布局、声明、写入、比较和旧库打开结果。文件格式版本保持 1，目录行不增加字段。
+- **状态**: promoted（2026-11-14 随 change `openspec/changes/archive/2026-11-14-ms50-decimal-and-blob/` 交付，不再作为未排期工作）
 
 ## I071: PG Extended Query 与 serve 子命令复活
 

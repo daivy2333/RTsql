@@ -102,6 +102,8 @@ pub fn value_to_json(value: Value) -> serde_json::Value {
         Value::Timestamp(t) => {
             serde_json::Value::String(crate::executor::datetime::format_timestamp(t))
         }
+        value @ Value::Decimal(_) => serde_json::Value::String(value.to_string()),
+        value @ Value::Blob(_) => serde_json::Value::String(value.to_string()),
     }
 }
 

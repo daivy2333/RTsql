@@ -1226,6 +1226,14 @@ fn ctas_value_type(value: &Value) -> Option<StorageColumnType> {
         Value::String(_) => Some(StorageColumnType::String(255)),
         Value::Date(_) => Some(StorageColumnType::Date),
         Value::Timestamp(_) => Some(StorageColumnType::Timestamp),
+        Value::Decimal(_) => {
+            let scale = value.decimal_parts().map(|(_, scale)| scale).unwrap_or(0);
+            Some(StorageColumnType::Decimal {
+                precision: scale.max(38),
+                scale,
+            })
+        }
+        Value::Blob(_) => Some(StorageColumnType::Blob),
     }
 }
 
@@ -1238,6 +1246,8 @@ fn ctas_type_name(column_type: &StorageColumnType) -> &'static str {
         StorageColumnType::Bool => "BOOL",
         StorageColumnType::Date => "DATE",
         StorageColumnType::Timestamp => "TIMESTAMP",
+        StorageColumnType::Decimal { .. } => "DECIMAL",
+        StorageColumnType::Blob => "BLOB",
     }
 }
 

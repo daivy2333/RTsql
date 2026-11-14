@@ -134,6 +134,17 @@ impl Predicate for ComparisonPredicate {
                 return Err(Box::new(ValueError::TypeMismatch));
             }
         }
+        if matches!(left_val, Value::Decimal(_) | Value::Blob(_))
+            || matches!(right_val, Value::Decimal(_) | Value::Blob(_))
+        {
+            let same_variant = matches!(
+                (&left_val, &right_val),
+                (Value::Decimal(_), Value::Decimal(_)) | (Value::Blob(_), Value::Blob(_))
+            );
+            if !same_variant {
+                return Err(Box::new(ValueError::TypeMismatch));
+            }
+        }
 
         let result = match self.op {
             ComparisonOp::Eq => Ok(left_val.equals(&right_val)),
@@ -481,7 +492,7 @@ impl Expression for ParameterExpression {
             // MS13: 日期族为 Copy 变体，直接回借
             Value::Date(d) => ValueRef::Date(*d),
             Value::Timestamp(t) => ValueRef::Timestamp(*t),
-            Value::String(_) => ValueRef::Null, // M37 TODO: Arc<str> zero-copy
+            Value::String(_) | Value::Decimal(_) | Value::Blob(_) => ValueRef::Null, // M37 TODO: Arc<str> zero-copy
         })
     }
 
@@ -555,6 +566,10 @@ impl Expression for CaseExpression {
             Value::String(_) => Err(
                 "CASE string results are not available on the zero-copy evaluate_ref path".into(),
             ),
+            Value::Decimal(_) | Value::Blob(_) => Err(
+                "CASE decimal and blob results are not available on the zero-copy evaluate_ref path"
+                    .into(),
+            ),
         }
     }
 
@@ -603,6 +618,10 @@ impl Expression for CoalesceExpression {
             Value::Timestamp(t) => Ok(ValueRef::Timestamp(t)),
             Value::String(_) => Err(
                 "COALESCE string results are not available on the zero-copy evaluate_ref path"
+                    .into(),
+            ),
+            Value::Decimal(_) | Value::Blob(_) => Err(
+                "COALESCE decimal and blob results are not available on the zero-copy evaluate_ref path"
                     .into(),
             ),
         }
@@ -707,6 +726,10 @@ impl Expression for CastExpression {
             Value::Timestamp(t) => Ok(ValueRef::Timestamp(t)),
             Value::String(_) => Err(
                 "CAST string results are not available on the zero-copy evaluate_ref path".into(),
+            ),
+            Value::Decimal(_) | Value::Blob(_) => Err(
+                "CAST decimal and blob results are not available on the zero-copy evaluate_ref path"
+                    .into(),
             ),
         }
     }

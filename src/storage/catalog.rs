@@ -26,8 +26,9 @@ use tokio::sync::Mutex;
 
 use crate::storage::data_page::page_write_error_to_storage_error;
 use crate::storage::page_format::{
-    ColumnType, PageWriteError, Slot, SlottedPage, SlottedPageRef, MAX_PAGE_SLOTS, TAG_BOOL,
-    TAG_DATE, TAG_FLOAT, TAG_INT, TAG_LONG_STRING, TAG_NULL, TAG_STRING, TAG_TIMESTAMP,
+    ColumnType, PageWriteError, Slot, SlottedPage, SlottedPageRef, MAX_PAGE_SLOTS, TAG_BLOB,
+    TAG_BOOL, TAG_DATE, TAG_DECIMAL, TAG_FLOAT, TAG_INT, TAG_LONG_BLOB, TAG_LONG_STRING, TAG_NULL,
+    TAG_STRING, TAG_TIMESTAMP,
 };
 use crate::storage::{AsyncStorage, BufferPool, Page, PageId, Result, StorageError};
 
@@ -52,6 +53,10 @@ const COL_TAG_BOOL: u8 = 0x04;
 const COL_TAG_DATE: u8 = 0x05;
 /// Tag byte for `ColumnType::Timestamp` in the catalog serialized form (MS13).
 const COL_TAG_TIMESTAMP: u8 = 0x06;
+/// DECIMAL column tag. The next two bytes are precision and scale.
+const COL_TAG_DECIMAL: u8 = 0x07;
+/// BLOB column tag. No length bytes follow the tag.
+const COL_TAG_BLOB: u8 = 0x08;
 
 /// One secondary-index registration in a `__tables` row's trailing
 /// section (MS21 Iteration 002, design D4).
@@ -1617,13 +1622,22 @@ pub(crate) fn matches_catalog_row_name(data: &[u8], name: &str) -> bool {
 pub(crate) fn serialize_catalog_column_row(row: &CatalogColumnRow) -> Vec<u8> {
     let table_name_bytes = row.table_name.as_bytes();
     let column_name_bytes = row.column_name.as_bytes();
+    enum Extra {
+        None,
+        StrLen(u16),
+        Decimal(u8, u8),
+    }
     let (col_tag, extra) = match row.column_type {
-        ColumnType::Int => (COL_TAG_INT, None),
-        ColumnType::Float => (COL_TAG_FLOAT, None),
-        ColumnType::Bool => (COL_TAG_BOOL, None),
-        ColumnType::Date => (COL_TAG_DATE, None),
-        ColumnType::Timestamp => (COL_TAG_TIMESTAMP, None),
-        ColumnType::String(max_len) => (COL_TAG_STRING, Some(max_len)),
+        ColumnType::Int => (COL_TAG_INT, Extra::None),
+        ColumnType::Float => (COL_TAG_FLOAT, Extra::None),
+        ColumnType::Bool => (COL_TAG_BOOL, Extra::None),
+        ColumnType::Date => (COL_TAG_DATE, Extra::None),
+        ColumnType::Timestamp => (COL_TAG_TIMESTAMP, Extra::None),
+        ColumnType::String(max_len) => (COL_TAG_STRING, Extra::StrLen(max_len)),
+        ColumnType::Decimal { precision, scale } => {
+            (COL_TAG_DECIMAL, Extra::Decimal(precision, scale))
+        }
+        ColumnType::Blob => (COL_TAG_BLOB, Extra::None),
     };
     let mut buf = Vec::new();
     buf.extend_from_slice(&(table_name_bytes.len() as u16).to_le_bytes());
@@ -1632,8 +1646,13 @@ pub(crate) fn serialize_catalog_column_row(row: &CatalogColumnRow) -> Vec<u8> {
     buf.extend_from_slice(&(column_name_bytes.len() as u16).to_le_bytes());
     buf.extend_from_slice(column_name_bytes);
     buf.push(col_tag);
-    if let Some(max_len) = extra {
-        buf.extend_from_slice(&max_len.to_le_bytes());
+    match extra {
+        Extra::None => {}
+        Extra::StrLen(max_len) => buf.extend_from_slice(&max_len.to_le_bytes()),
+        Extra::Decimal(precision, scale) => {
+            buf.push(precision);
+            buf.push(scale);
+        }
     }
     buf.push(if row.not_null { 1 } else { 0 });
     buf.push(if row.unique { 1 } else { 0 });
@@ -1681,6 +1700,20 @@ pub(crate) fn serialize_catalog_column_row(row: &CatalogColumnRow) -> Vec<u8> {
             crate::executor::Value::Timestamp(t) => {
                 buf.push(TAG_TIMESTAMP);
                 buf.extend_from_slice(&t.to_le_bytes());
+            }
+            crate::executor::Value::Decimal(bytes) => {
+                buf.push(TAG_DECIMAL);
+                buf.extend_from_slice(bytes);
+            }
+            crate::executor::Value::Blob(bytes) => {
+                if bytes.len() > u16::MAX as usize {
+                    buf.push(TAG_LONG_BLOB);
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                } else {
+                    buf.push(TAG_BLOB);
+                    buf.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+                }
+                buf.extend_from_slice(bytes);
             }
         }
     }
@@ -1756,6 +1789,18 @@ pub(crate) fn deserialize_catalog_column_row(data: &[u8]) -> Result<CatalogColum
         COL_TAG_BOOL => ColumnType::Bool,
         COL_TAG_DATE => ColumnType::Date,
         COL_TAG_TIMESTAMP => ColumnType::Timestamp,
+        COL_TAG_DECIMAL => {
+            if data.len() < p + 2 {
+                return Err(StorageError::Internal(
+                    "catalog column row truncated (decimal precision)".into(),
+                ));
+            }
+            let precision = data[p];
+            let scale = data[p + 1];
+            p += 2;
+            ColumnType::Decimal { precision, scale }
+        }
+        COL_TAG_BLOB => ColumnType::Blob,
         COL_TAG_STRING => {
             if data.len() < p + 2 {
                 return Err(StorageError::Internal(
@@ -1885,6 +1930,47 @@ pub(crate) fn deserialize_catalog_column_row(data: &[u8]) -> Result<CatalogColum
                     ]))
                 }
                 TAG_TIMESTAMP => crate::executor::Value::Timestamp(read_i64(data, p)?),
+                TAG_DECIMAL => {
+                    if data.len() < p + 17 {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    let mut packed = [0u8; 17];
+                    packed.copy_from_slice(&data[p..p + 17]);
+                    crate::executor::Value::Decimal(packed)
+                }
+                TAG_BLOB => {
+                    if data.len() < p + 2 {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    let len = u16::from_le_bytes([data[p], data[p + 1]]) as usize;
+                    p += 2;
+                    if data.len() < p + len {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    crate::executor::Value::Blob(data[p..p + len].to_vec())
+                }
+                TAG_LONG_BLOB => {
+                    if data.len() < p + 4 {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    let len = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+                        as usize;
+                    p += 4;
+                    if data.len() < p + len {
+                        return Err(StorageError::Internal(
+                            "catalog column row truncated (default payload)".into(),
+                        ));
+                    }
+                    crate::executor::Value::Blob(data[p..p + len].to_vec())
+                }
                 other => {
                     return Err(StorageError::Internal(format!(
                         "unknown default value tag {other:#x}"

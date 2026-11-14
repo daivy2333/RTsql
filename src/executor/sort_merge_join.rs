@@ -142,6 +142,8 @@ fn variant_rank(value: &Value) -> u8 {
         Value::String(_) => 4,
         Value::Date(_) => 5,
         Value::Timestamp(_) => 6,
+        Value::Decimal(_) => 7,
+        Value::Blob(_) => 8,
     }
 }
 
@@ -162,6 +164,12 @@ fn compare_join_value(left: &Value, right: &Value) -> Ordering {
         (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
         (Value::Date(left), Value::Date(right)) => left.cmp(right),
         (Value::Timestamp(left), Value::Timestamp(right)) => left.cmp(right),
+        (Value::Decimal(left), Value::Decimal(right)) => {
+            let (cl, sl) = super::value::unpack_decimal(left);
+            let (cr, sr) = super::value::unpack_decimal(right);
+            super::value::cmp_decimal(cl, sl, cr, sr)
+        }
+        (Value::Blob(left), Value::Blob(right)) => left.cmp(right),
         (Value::Null, Value::Null) => Ordering::Equal,
         _ => Ordering::Equal,
     }
