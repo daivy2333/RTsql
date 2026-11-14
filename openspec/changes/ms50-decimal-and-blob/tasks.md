@@ -2,7 +2,7 @@
 
 对应路线：MS50 的值类型这一支。Gate 1：PASS，结论在 `proposal.md` 的 Gate 1 节。批准原文是「那就开始规划和实施这个ms，要求遵守各种规范，尤其是多批次串行测试规范，本次最多进行一次全量」。不是跳过。本文件不更新全局里程碑状态。
 
-Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-decimal-blob/000-initial.md`，Review Result 为 `rework-required`。返工结论在 `iterations/000-decimal-blob/001-rework.md`，Review Result 为 `accepted`。Iteration 001 的执行依据是 `iterations/001-full-suite/000-initial.md`，Plan Context 为 ready。
+Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-decimal-blob/000-initial.md`，Review Result 为 `rework-required`。返工结论在 `iterations/000-decimal-blob/001-rework.md`，Review Result 为 `accepted`。Iteration 001 的执行依据是 `iterations/001-full-suite/000-initial.md`，Plan Context 为 ready。Act Response 为 blocked。
 
 与 `ms50-result-consumption` 无依赖。两个分支都从当前 master 拉出。
 
@@ -11,7 +11,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/decimal-blob-types/spec.md`。
 - 000：执行依据是 `iterations/000-decimal-blob/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `rework-required`。
 - 000 的返工：执行依据是 `iterations/000-decimal-blob/001-rework.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `accepted`。NUMERIC、字节别名和 BLOB 主键三处缺口已关闭。
-- 001：执行依据是 `iterations/001-full-suite/000-initial.md`。Plan Context 为 ready。只跑本里程碑唯一一次全量，不改产品代码。
+- 001：执行依据是 `iterations/001-full-suite/000-initial.md`。Plan Context 为 ready。Act Response 为 blocked。这一次全量已跑完。文件批 B08 两次退出码 101。没有改产品代码。
 - Persisted Evidence：none。
 - 跳过项：Iteration 000 不做全量。理由见下。
 
@@ -22,7 +22,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 | T1 | 000 | 无 | 新标签往返；旧 tuple 仍可读；1.50 与 1.5 数值相等 | 完成 |
 | T2 | 000 | T1 | 声明、精确写入、比较、重开、超页、dump 往返、算术拒绝 | 完成 |
 | T3 | 000 | T1 | G1 样本打开、查询、写入 | 完成 |
-| T4 | 001 | 000 accepted | 本里程碑唯一一次 M19 全量分批 | 待执行 |
+| T4 | 001 | 000 accepted | 本里程碑唯一一次 M19 全量分批 | blocked |
 
 ## Iteration Plan
 
@@ -75,6 +75,8 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 9. 某一批失败时只把该批再跑一次。第二次仍失败则本任务失败。不重跑已通过的批。
 
 本轮两个分支没有代码依赖。执行时树上有什么，这一次就覆盖什么。不为了带上另一个分支再增加一次全量。
+
+执行记录在 `iterations/001-full-suite/000-initial.md` 的 Act Response，状态是 blocked。15 批都已启动。B08 两次退出码 101，failed 为 1。4.1 未勾选。
 
 ## 完整性
 
