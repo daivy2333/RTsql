@@ -134,3 +134,52 @@ PASS。无 BLOCKED，无 SKIPPED。
 | 已通过部分沿用，补齐未运行目标和那条中止测试 | T4 | `mvcc_commit_test` | Covered |
 
 `tasks.md` 里原有的规格完整性表不新增行。本 Cycle 没有新的产品要求。
+
+## Act Response
+
+- Status: reported
+
+**实际改动**
+
+- 没有改 `src/` 或 `tests/`。开跑前和结束时，`git diff 6c6193ab2ff1402bd95f68553198872e38fba67a -- src tests` 都为空。
+- `tasks.md` 只更新本轮状态：T4 改为完成，4.1 勾选。完成记录是：这一次全量的已通过部分沿用，中断批的剩余目标和修复后的那条测试补齐。
+
+**偏差**
+
+无。11 条命令按 Cycle 正文的顺序单独启动，每条都带 `--test-threads=1`。上一条进程退出后才启动下一条。已通过的批没有重跑。
+
+**自检**
+
+Gate 3：本 Cycle 没有产品代码或测试改动。最后一条只运行 `test_abort_update_reverts_to_previous_version`，汇总行是 `2 filtered out`。`network_server_test` 的汇总是 `0 passed; 0 failed`：该文件现有测试都在注释中，这次没有可运行用例，failed 仍是 0。没有新增身份证明机制或判定层。无未修复的 Critical 或 Important。
+
+Gate 4：下面 11 条全部退出码 0，每条汇总行的 failed 都是 0。4.1 使用规定句子勾选。Gate 5：未命中。
+
+已通过的 B00–B07、B09–B14 和 `memory_db_test` 保持原记录，本 Cycle 没有重跑。这 11 条是中断处的补齐，再加一次已经改过的中止测试。
+
+**验证**
+
+工作树 `/home/daivy/projects/RTsql-changes/ms50-decimal-and-blob`，分支 `changes/ms50-decimal-and-blob`。开跑时 HEAD 是 `9dc1370624c073b8c97d9a5d672d822f729932dd`。
+
+- `cargo test --test mvcc_commit_test -- --test-threads=1`：退出码 0。`test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`。failed 是 0。
+- `cargo test --test mvcc_record_test -- --test-threads=1`：退出码 0。`test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s`。failed 是 0。
+- `cargo test --test mvcc_tombstone_visibility_test -- --test-threads=1`：退出码 0。`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s`。failed 是 0。
+- `cargo test --test nested_loop_join_test -- --test-threads=1`：退出码 0。`test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s`。failed 是 0。
+- `cargo test --test network_protocol_test -- --test-threads=1`：退出码 0。`test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`。failed 是 0。
+- `cargo test --test network_server_test -- --test-threads=1`：退出码 0。`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`。failed 是 0。
+- `cargo test --test no_from_select_test -- --test-threads=1`：退出码 0。`test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s`。failed 是 0。
+- `cargo test --test order_by_alias_sort_test -- --test-threads=1`：退出码 0。`test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s`。failed 是 0。
+- `cargo test --test outer_join_test -- --test-threads=1`：退出码 0。`test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s`。failed 是 0。
+- `cargo test --test overflow_page_test -- --test-threads=1`：退出码 0。`test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s`。failed 是 0。
+- `cargo test --test mvcc_abort_test test_abort_update_reverts_to_previous_version -- --test-threads=1`：退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s`。failed 是 0。同文件另两个测试在 `2 filtered out` 里，没有运行。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None
+
+**未解决**
+
+本 Cycle 的 Acceptance 没有剩余项。Review Result 仍是 pending。没有创建下一 Cycle，没有归档。
