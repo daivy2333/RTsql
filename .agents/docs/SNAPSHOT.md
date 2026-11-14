@@ -108,8 +108,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 49f9f27c13e8076e981915fe4c84be35b27ed274
-- **ahead of origin**: 6
+- **提交基线**: cdbe5d8bd16ac67c2d614543c46e5816179bd9f3
+- **ahead of origin**: 15
 - **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-14-ms50-decimal-and-blob/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 94 个域。
