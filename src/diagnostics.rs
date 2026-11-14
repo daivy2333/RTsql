@@ -301,6 +301,12 @@ pub struct Summary {
     pub events: Vec<Record>,
     /// 超出 `event_limit` 丢弃的事件数。
     pub dropped: u64,
+    /// 语句开始时刻。
+    pub started_at: Instant,
+    /// 首行等待。没有交回行时为 `None`。
+    pub first_row: Option<Duration>,
+    /// 交回给调用方的结果行数。
+    pub rows_delivered: u64,
 }
 
 /// 渲染一条摘要：`Off` 为空字符串，`Summary` 只有汇总数，`Full` 追加事件行；
@@ -328,6 +334,108 @@ pub fn render(summary: &Summary, detail: Detail) -> String {
         }
     }
     out
+}
+
+/// 从一批保留摘要读出的比较指标。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegmentMetrics {
+    /// 交回行数之和除以墙钟，单位是行每秒。没有摘要或墙钟为 0 时为 `None`。
+    pub throughput_rows_per_sec: Option<f64>,
+    /// 总耗时升序后的最近秩上界。没有摘要时为 `None`。
+    pub slow_p95: Option<Duration>,
+}
+
+/// 用传入摘要计算吞吐和 P95。不读会话，也不保留第二套存储。
+pub fn segment_metrics(summaries: &[Summary]) -> SegmentMetrics {
+    if summaries.is_empty() {
+        return SegmentMetrics {
+            throughput_rows_per_sec: None,
+            slow_p95: None,
+        };
+    }
+
+    let mut t0 = summaries[0].started_at;
+    let mut t1 = summaries[0].started_at + summaries[0].total;
+    let mut rows_delivered = summaries[0].rows_delivered;
+    for summary in &summaries[1..] {
+        t0 = t0.min(summary.started_at);
+        let ended = summary.started_at + summary.total;
+        t1 = t1.max(ended);
+        rows_delivered += summary.rows_delivered;
+    }
+    let wall = t1.saturating_duration_since(t0);
+    let throughput_rows_per_sec = if wall.is_zero() {
+        None
+    } else {
+        Some(rows_delivered as f64 / wall.as_secs_f64())
+    };
+
+    let mut totals: Vec<Duration> = summaries.iter().map(|summary| summary.total).collect();
+    totals.sort();
+    let rank = (95 * totals.len() + 99) / 100;
+    let slow_p95 = totals.get(rank - 1).copied();
+
+    SegmentMetrics {
+        throughput_rows_per_sec,
+        slow_p95,
+    }
+}
+
+/// 进程驻留峰值。Linux 上是 `ru_maxrss * 1024`；调用失败、值为负或其他操作系统为 `None`。
+pub fn process_memory_peak_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_ru_maxrss_bytes()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ru_maxrss_bytes() -> Option<u64> {
+    use std::os::raw::{c_int, c_long};
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct Timeval {
+        tv_sec: c_long,
+        tv_usec: c_long,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct Rusage {
+        ru_utime: Timeval,
+        ru_stime: Timeval,
+        ru_maxrss: c_long,
+        ru_ixrss: c_long,
+        ru_idrss: c_long,
+        ru_isrss: c_long,
+        ru_minflt: c_long,
+        ru_majflt: c_long,
+        ru_nswap: c_long,
+        ru_inblock: c_long,
+        ru_oublock: c_long,
+        ru_msgsnd: c_long,
+        ru_msgrcv: c_long,
+        ru_nsignals: c_long,
+        ru_nvcsw: c_long,
+        ru_nivcsw: c_long,
+    }
+
+    unsafe extern "C" {
+        fn getrusage(who: c_int, usage: *mut Rusage) -> c_int;
+    }
+
+    const RUSAGE_SELF: c_int = 0;
+    let mut usage = unsafe { std::mem::zeroed::<Rusage>() };
+    let rc = unsafe { getrusage(RUSAGE_SELF, &mut usage) };
+    if rc != 0 || usage.ru_maxrss < 0 {
+        return None;
+    }
+    Some((usage.ru_maxrss as u64) * 1024)
 }
 
 // ---------- 会话 ----------
@@ -394,11 +502,15 @@ impl Diagnostics {
     /// `None`——默认配置零成本。
     pub(crate) fn enter_statement(self: &Arc<Self>, sql: &str) -> Option<StatementScope> {
         let stages = STATEMENT_STAGES.try_with(|stack| Arc::clone(stack)).ok();
+        let start = Instant::now();
+        if let Some(stages) = &stages {
+            stages.lock().unwrap().started_at = Some(start);
+        }
         stages.map(|stages| StatementScope {
             session: Arc::clone(self),
             inner: Some(ScopeInner {
                 sql: sql.to_string(),
-                start: Instant::now(),
+                start,
             }),
             stages: Some(stages),
         })
@@ -416,7 +528,19 @@ impl Diagnostics {
         root: StageSample,
         events: Vec<Record>,
     ) {
-        self.record_statement(sql, end, StageNode::from_public(root), events);
+        let recorded_at = Instant::now();
+        let started_at = recorded_at
+            .checked_sub(root.inclusive)
+            .unwrap_or(recorded_at);
+        self.record_statement(
+            sql,
+            end,
+            StageNode::from_public(root),
+            events,
+            started_at,
+            None,
+            0,
+        );
     }
 
     /// 唯一的摘要形成路径：语句作用域结束与预量入口共用同一套计算。返回
@@ -427,6 +551,9 @@ impl Diagnostics {
         end: ScopeEnd,
         root: StageNode,
         mut events: Vec<Record>,
+        started_at: Instant,
+        first_row: Option<Duration>,
+        rows_delivered: u64,
     ) -> Option<Summary> {
         let mut state = self.state.lock().unwrap();
         let config = state.config.clone();
@@ -465,6 +592,9 @@ impl Diagnostics {
             samples,
             events,
             dropped,
+            started_at,
+            first_row,
+            rows_delivered,
         };
         state.summaries.push(summary.clone());
 
@@ -550,6 +680,12 @@ struct StageStack {
     waits: WaitSlot,
     /// 下一个 open 阶段的 id（0 保留给语句根）。
     next_stage_id: u64,
+    /// 语句开始时刻。`enter_statement` 写入，供首行等待计算。
+    started_at: Option<Instant>,
+    /// 第一行进入将返回的结果时，从 `started_at` 起的时长。
+    first_row: Option<Duration>,
+    /// 非空结果行集的交回行数。空结果、受影响行数和错误为 0。
+    rows_delivered: u64,
 }
 
 struct OpenStage {
@@ -769,6 +905,33 @@ pub(crate) fn record_wait(category: Category, duration: Duration) {
     });
 }
 
+/// 第一行 `ExecResult::Row` 放进将返回的结果时调用。
+/// 无阶段绑定，或绑定上没有开始时刻时，不记。
+pub(crate) fn note_first_delivered_row() {
+    let _ = STATEMENT_STAGES.try_with(|stack| {
+        let mut stack = stack.lock().unwrap();
+        if stack.first_row.is_some() {
+            return;
+        }
+        if let Some(started_at) = stack.started_at {
+            stack.first_row = Some(started_at.elapsed());
+        }
+    });
+}
+
+/// 执行器结束时落定交回行数。`rows` 为 0 时清掉首行时长。
+pub(crate) fn finish_delivered_rows(rows: u64) {
+    let _ = STATEMENT_STAGES.try_with(|stack| {
+        let mut stack = stack.lock().unwrap();
+        if rows == 0 {
+            stack.first_row = None;
+            stack.rows_delivered = 0;
+        } else {
+            stack.rows_delivered = rows;
+        }
+    });
+}
+
 /// 记一次文件页读取：Io 耗时 + 页数加 1。无绑定的任务为 no-op。
 pub(crate) fn record_page_read(duration: Duration) {
     let _ = STATEMENT_STAGES.try_with(|stack| {
@@ -859,9 +1022,17 @@ impl StatementScope {
         end: ScopeEnd,
         stages: Option<Arc<Mutex<StageStack>>>,
     ) -> Option<Summary> {
-        let children = match stages {
-            Some(stack) => stack.lock().unwrap().finish(),
-            None => Vec::new(),
+        let (children, first_row, rows_delivered) = match stages {
+            Some(stack) => {
+                let mut stack = stack.lock().unwrap();
+                let children = stack.finish();
+                if end == ScopeEnd::Success {
+                    (children, stack.first_row, stack.rows_delivered)
+                } else {
+                    (children, None, 0)
+                }
+            }
+            None => (Vec::new(), None, 0),
         };
         let root = StageNode {
             // 语句根是容器：不参与类别过滤，也不占阶段名。
@@ -871,7 +1042,15 @@ impl StatementScope {
             children,
             waits: WaitTotals::default(),
         };
-        session.record_statement(&inner.sql, end, root, vec![])
+        session.record_statement(
+            &inner.sql,
+            end,
+            root,
+            vec![],
+            inner.start,
+            first_row,
+            rows_delivered,
+        )
     }
 }
 

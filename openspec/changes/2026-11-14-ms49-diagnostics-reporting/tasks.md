@@ -10,7 +10,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/unified-diagnostics/spec.md`。
 - 000：执行依据是 `iterations/000-stage-reporting/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。
-- 001：执行依据是 `iterations/001-comparison-metrics/000-initial.md`。Plan Context 为 ready。尚未实施。
+- 001：执行依据是 `iterations/001-comparison-metrics/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。
 - 002：只列在下面的 Iteration Plan 里，不建目录。
 - Persisted Evidence：none。
 - 跳过项：无。
@@ -21,7 +21,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 |---|---|---|---|---|
 | T1 | 000 | 无 | 三个流水线子指标进入阶段树；插入的执行独占加上 creation、execution、commit 等于执行包含耗时；SQL 结果不变 | 完成 |
 | T2 | 000 | T1 | 两个索引子指标进入阶段树；页读和提交等待的归属不变；旧表仍打印索引子指标 | 完成 |
-| T3 | 001 | 000 accepted | 首行等待、交回行数、吞吐、P95、进程峰值可从保留摘要和进程读出；上限 0 仍不计预算字节 | 未开始 |
+| T3 | 001 | 000 accepted | 首行等待、交回行数、吞吐、P95、进程峰值可从保留摘要和进程读出；上限 0 仍不计预算字节 | 完成 |
 | T4 | 002 | 001 accepted | M19 分批全量一次，每批退出码 0 且 failed 为 0 | 未开始 |
 
 ## 1. 流水线子指标（Iteration 000）
@@ -34,7 +34,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 ## 3. 比较指标（Iteration 001）
 
-- [ ] 3.1 T3：000 被接受之后才展开本轮并实施。本文件给出读出口径，展开时把下列内容写入该轮的 Task Definition，不重新选择公式。
+- [x] 3.1 T3：000 被接受之后才展开本轮并实施。本文件给出读出口径，展开时把下列内容写入该轮的 Task Definition，不重新选择公式。
 
 当前行为：`Summary` 没有开始时刻、首行等待和交回行数。没有 `segment_metrics` 或 `process_memory_peak_bytes`。`execute_executor` 把行收进 `SqlOutcome::Rows`。`QueryBudget::charge` 在上限为 0 时直接返回。
 
