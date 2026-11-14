@@ -28,6 +28,33 @@ use std::sync::Arc;
 /// 契约是「超长 → 计划期拒绝零副作用」。
 const MAX_VIEW_SQL_BYTES: usize = 3000;
 
+fn decimal_column_type(info: sqlparser::ast::ExactNumberInfo) -> Result<ColumnType, PlanError> {
+    use sqlparser::ast::ExactNumberInfo;
+    let (precision, scale) = match info {
+        ExactNumberInfo::None => {
+            return Err(PlanError::ParseError(
+                "DECIMAL requires precision".to_string(),
+            ))
+        }
+        ExactNumberInfo::Precision(precision) => (precision, 0),
+        ExactNumberInfo::PrecisionAndScale(precision, scale) => (precision, scale),
+    };
+    if !(1..=38).contains(&precision) {
+        return Err(PlanError::ParseError(
+            "DECIMAL requires precision".to_string(),
+        ));
+    }
+    if scale > precision {
+        return Err(PlanError::ParseError(
+            "DECIMAL scale must not exceed precision".to_string(),
+        ));
+    }
+    Ok(ColumnType::Decimal {
+        precision: precision as u8,
+        scale: scale as u8,
+    })
+}
+
 /// 列类型大写名（声明期 DEFAULT 错误面用，与执行器 column_type_name 同形态）。
 fn column_type_name(ct: &ColumnType) -> &'static str {
     match ct {
@@ -37,6 +64,8 @@ fn column_type_name(ct: &ColumnType) -> &'static str {
         ColumnType::Bool => "BOOL",
         ColumnType::Date => "DATE",
         ColumnType::Timestamp => "TIMESTAMP",
+        ColumnType::Decimal { .. } => "DECIMAL",
+        ColumnType::Blob => "BLOB",
     }
 }
 
@@ -64,6 +93,8 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::Bool(_) => "BOOL",
         Value::Date(_) => "DATE",
         Value::Timestamp(_) => "TIMESTAMP",
+        Value::Decimal(_) => "DECIMAL",
+        Value::Blob(_) => "BLOB",
         Value::Null => "NULL",
     }
 }
@@ -359,8 +390,10 @@ impl PlanBuilder {
             );
         }
 
-        // Extract values from source
-        let values = self.extract_insert_values(source)?;
+        // Extract values from source. DECIMAL/BLOB columns keep the literal
+        // text; other columns keep the existing number and value parsing.
+        let target_types = self.insert_target_types(&table_name_str, &columns);
+        let values = self.extract_insert_values(source, &target_types)?;
 
         // MS16 Iteration 000 replan (BH-2, design D7): apply the column list —
         // validate it as a permutation of the table's columns and reorder each
@@ -615,7 +648,14 @@ impl PlanBuilder {
                     )),
                 }
             }
-            Expr::Value(v) => Ok(UpsertValueExpr::Literal(value_from_sqlparser(v)?)),
+            Expr::Value(v) => {
+                let column_type = self.storage_column_type(table_name, target_name);
+                if let Some(parsed) = Self::literal_for_column(expr, column_type.as_ref()) {
+                    Ok(UpsertValueExpr::Literal(parsed?))
+                } else {
+                    Ok(UpsertValueExpr::Literal(value_from_sqlparser(v)?))
+                }
+            }
             // 类型字面量 plan 期解析（与 `build_update` 同规则）；裸字符串的强制
             // 解析在执行期按目标列类型进行。
             Expr::TypedString { data_type, value } => {
@@ -808,9 +848,86 @@ impl PlanBuilder {
     /// existing value resolution wrapped in `Val`. Private: the only caller
     /// is `build_insert` in this module (the `InsertValue` intermediate stays
     /// module-internal).
+    pub(crate) fn storage_column_type(
+        &self,
+        table_name: &str,
+        column: &str,
+    ) -> Option<crate::storage::page_format::ColumnType> {
+        let columns = self.tables.get(&table_name.to_lowercase())?;
+        let types = self.table_column_types.get(&table_name.to_lowercase())?;
+        let pos = columns
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(column))?;
+        types.get(pos).cloned()
+    }
+
+    fn insert_target_types(
+        &self,
+        table_name: &str,
+        columns: &[String],
+    ) -> Vec<crate::storage::page_format::ColumnType> {
+        let Some(types) = self.table_column_types.get(&table_name.to_lowercase()) else {
+            return Vec::new();
+        };
+        let Some(table_columns) = self.tables.get(&table_name.to_lowercase()) else {
+            return Vec::new();
+        };
+        if columns.is_empty() {
+            return types.clone();
+        }
+        columns
+            .iter()
+            .filter_map(|name| {
+                let pos = table_columns
+                    .iter()
+                    .position(|column| column.eq_ignore_ascii_case(name))?;
+                types.get(pos).cloned()
+            })
+            .collect()
+    }
+
+    pub(crate) fn literal_for_column(
+        expr: &Expr,
+        column: Option<&crate::storage::page_format::ColumnType>,
+    ) -> Option<Result<Value, PlanError>> {
+        use crate::executor::{from_decimal_text, from_hex_text};
+        use crate::storage::page_format::ColumnType as SchemaColumnType;
+        match column? {
+            SchemaColumnType::Decimal { .. } => match expr {
+                Expr::Value(sqlparser::ast::Value::Number(text, _)) => Some(
+                    from_decimal_text(text)
+                        .ok_or_else(|| PlanError::ParseError(format!("Invalid decimal: {text}"))),
+                ),
+                Expr::UnaryOp {
+                    op: sqlparser::ast::UnaryOperator::Minus,
+                    expr: inner,
+                } => {
+                    if let Expr::Value(sqlparser::ast::Value::Number(text, _)) = inner.as_ref() {
+                        Some(from_decimal_text(&format!("-{text}")).ok_or_else(|| {
+                            PlanError::ParseError(format!("Invalid decimal: -{text}"))
+                        }))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            SchemaColumnType::Blob => match expr {
+                Expr::Value(sqlparser::ast::Value::HexStringLiteral(text)) => {
+                    Some(from_hex_text(text).ok_or_else(|| {
+                        PlanError::ParseError(format!("Invalid hex literal: {text}"))
+                    }))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn extract_insert_values(
         &self,
         source: &Option<Box<sqlparser::ast::Query>>,
+        target_types: &[crate::storage::page_format::ColumnType],
     ) -> Result<Vec<Vec<InsertValue>>, PlanError> {
         let source = source
             .as_ref()
@@ -824,7 +941,13 @@ impl PlanBuilder {
                     .iter()
                     .map(|row| {
                         row.iter()
-                            .map(|expr| {
+                            .enumerate()
+                            .map(|(index, expr)| {
+                                if let Some(parsed) =
+                                    Self::literal_for_column(expr, target_types.get(index))
+                                {
+                                    return parsed.map(InsertValue::Val);
+                                }
                                 match expr {
                                     // MS31 Iteration 001（T6）：参数占位位——记录
                                     // 参数序号（占位符已按 SQL 文本序编号）。
@@ -971,6 +1094,12 @@ impl PlanBuilder {
             DataType::Interval => Err(PlanError::ParseError(
                 "Unsupported column type: INTERVAL (interval is expression-only and cannot be a stored column type)"
                     .to_string(),
+            )),
+
+            DataType::Decimal(info) => decimal_column_type(*info),
+            DataType::Blob(None) => Ok(ColumnType::Blob),
+            DataType::Blob(Some(_)) => Err(PlanError::ParseError(
+                "BLOB does not take a length".to_string(),
             )),
 
             // Unknown/unsupported types -> String (existing fallback)
@@ -1253,7 +1382,9 @@ impl PlanBuilder {
         // declaration) and every pre-existing table are untouched.
         if let Some(pk_col) = primary_key.as_deref() {
             if let Some(pk_def) = column_defs.iter().find(|c| c.name == pk_col) {
-                if pk_def.data_type != ColumnType::Int {
+                if pk_def.data_type != ColumnType::Int
+                    && !matches!(pk_def.data_type, ColumnType::Decimal { .. })
+                {
                     return Err(PlanError::UnsupportedConstraint("NON-INTEGER PRIMARY KEY"));
                 }
             }
@@ -2127,7 +2258,16 @@ impl PlanBuilder {
                         }
                     }
                 }
-                Expr::Value(v) => UpdateValue::Literal(value_from_sqlparser(v)?),
+                Expr::Value(v) => {
+                    let column_type = self.storage_column_type(&table_name, &column);
+                    if let Some(parsed) =
+                        Self::literal_for_column(&assignment.value, column_type.as_ref())
+                    {
+                        UpdateValue::Literal(parsed?)
+                    } else {
+                        UpdateValue::Literal(value_from_sqlparser(v)?)
+                    }
+                }
                 // MS13 T4: 类型字面量 plan 期解析（决策 2）；裸字符串的强制解析
                 // 在 UpdateExecutor 按目标列类型进行。
                 Expr::TypedString { data_type, value } => {

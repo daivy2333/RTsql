@@ -64,6 +64,13 @@ impl Executor for AlterTableExecutor {
                     crate::executor::ColumnType::Bool => StorageColumnType::Bool,
                     crate::executor::ColumnType::Date => StorageColumnType::Date,
                     crate::executor::ColumnType::Timestamp => StorageColumnType::Timestamp,
+                    crate::executor::ColumnType::Decimal { precision, scale } => {
+                        StorageColumnType::Decimal {
+                            precision: *precision,
+                            scale: *scale,
+                        }
+                    }
+                    crate::executor::ColumnType::Blob => StorageColumnType::Blob,
                 };
                 // 加列放进独立任务。语句 future 只等结果通道；丢弃它会关掉接收端，
                 // 任务继续做提交或回退，不随这次丢弃取消。

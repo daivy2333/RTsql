@@ -9,7 +9,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/decimal-blob-types/spec.md`。
-- 000：执行依据是 `iterations/000-decimal-blob/000-initial.md`。Plan Context 为 ready。
+- 000：执行依据是 `iterations/000-decimal-blob/000-initial.md`。Plan Context 为 ready。Act Response 为 reported，Review Result 仍为 pending。
 - 001：只写在本 Iteration Plan。目录尚未创建。
 - Persisted Evidence：none。
 - 跳过项：Iteration 000 不做全量。理由见下。
@@ -18,9 +18,9 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 新标签往返；旧 tuple 仍可读；1.50 与 1.5 数值相等 | 待执行 |
-| T2 | 000 | T1 | 声明、精确写入、比较、重开、超页、dump 往返、算术拒绝 | 待执行 |
-| T3 | 000 | T1 | G1 样本打开、查询、写入 | 待执行 |
+| T1 | 000 | 无 | 新标签往返；旧 tuple 仍可读；1.50 与 1.5 数值相等 | 完成 |
+| T2 | 000 | T1 | 声明、精确写入、比较、重开、超页、dump 往返、算术拒绝 | 完成 |
+| T3 | 000 | T1 | G1 样本打开、查询、写入 | 完成 |
 | T4 | 001 | 000 accepted | 本里程碑唯一一次 M19 全量分批 | 待执行 |
 
 ## Iteration Plan
@@ -47,15 +47,15 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 ## 1. 值与标签（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-decimal-blob/000-initial.md` 的 T1 执行。
+- [x] 1.1 T1：按 `iterations/000-decimal-blob/000-initial.md` 的 T1 执行。
 
 ## 2. SQL 声明、写入、比较和读回（Iteration 000）
 
-- [ ] 2.1 T2：按同一 Cycle 的 T2 执行。依赖 T1 的值布局。
+- [x] 2.1 T2：按同一 Cycle 的 T2 执行。依赖 T1 的值布局。
 
 ## 3. 旧库打开（Iteration 000）
 
-- [ ] 3.1 T3：按同一 Cycle 的 T3 执行。依赖 T1，不依赖 T2 的新类型语句。
+- [x] 3.1 T3：按同一 Cycle 的 T3 执行。依赖 T1，不依赖 T2 的新类型语句。
 
 ## 4. 全量（Iteration 001）
 

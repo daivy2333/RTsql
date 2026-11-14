@@ -723,6 +723,28 @@ impl PlanBuilder {
         }
     }
 
+    /// A numeric literal compared with a DECIMAL column keeps its original
+    /// text. Other operands use the ordinary expression compiler, so FLOAT
+    /// literals stay floats.
+    fn comparison_operand(
+        &self,
+        table_name: &str,
+        operand: &Expr,
+        other: &Expr,
+    ) -> Result<ExpressionRef, PlanError> {
+        let other_name = match other {
+            Expr::Identifier(ident) => Some(ident.value.as_str()),
+            _ => None,
+        };
+        if let Some(name) = other_name {
+            let column_type = self.storage_column_type(table_name, name);
+            if let Some(parsed) = Self::literal_for_column(operand, column_type.as_ref()) {
+                return Ok(Arc::new(ConstantExpression { value: parsed? }));
+            }
+        }
+        self.build_expression(table_name, operand)
+    }
+
     /// Build PredicateRef from WHERE clause expression
     pub(crate) fn build_where(
         &self,
@@ -767,8 +789,8 @@ impl PlanBuilder {
                         let comp_op = self.convert_comparison_op(op).ok_or_else(|| {
                             PlanError::UnsupportedExpression(format!("COMPARISON OPERATOR {op}"))
                         })?;
-                        let left_expr = self.build_expression(table_name, left)?;
-                        let right_expr = self.build_expression(table_name, right)?;
+                        let left_expr = self.comparison_operand(table_name, left, right)?;
+                        let right_expr = self.comparison_operand(table_name, right, left)?;
                         Ok(Arc::new(ComparisonPredicate {
                             left: left_expr,
                             op: comp_op,

@@ -6,11 +6,12 @@
 //! to convert back to owned `Value` when needed (only allocation point
 //! for `Text` variant).
 
-use crate::executor::value::{Value, ValueError};
+use crate::executor::value::{canonical_decimal, cmp_decimal, unpack_decimal, Value, ValueError};
+use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
 /// 零拷贝 SQL 值视图，借用 'a 生命周期内的字节切片。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub enum ValueRef<'a> {
     Int(i64),
     Text(&'a str),
@@ -21,6 +22,31 @@ pub enum ValueRef<'a> {
     Date(i32),
     /// 时间戳（MS13：Unix epoch 微秒）
     Timestamp(i64),
+    /// 借用页内或拥有值里的 17 字节 DECIMAL 负载，避免把 `i128` 放进枚举。
+    Decimal(&'a [u8]),
+    /// 借用字节串。
+    Blob(&'a [u8]),
+}
+
+impl<'a> PartialEq for ValueRef<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Null, Self::Null) => true,
+            (Self::Float(a), Self::Float(b)) => a == b,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Date(a), Self::Date(b)) => a == b,
+            (Self::Timestamp(a), Self::Timestamp(b)) => a == b,
+            (Self::Decimal(a), Self::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                canonical_decimal(ca, sa) == canonical_decimal(cb, sb)
+            }
+            (Self::Blob(a), Self::Blob(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl<'a> Eq for ValueRef<'a> {}
@@ -36,6 +62,13 @@ impl<'a> Hash for ValueRef<'a> {
             Self::Bool(b) => b.hash(state),
             Self::Date(d) => d.hash(state),
             Self::Timestamp(t) => t.hash(state),
+            Self::Decimal(bytes) => {
+                let (coefficient, scale) = unpack_decimal(bytes);
+                let (coefficient, scale) = canonical_decimal(coefficient, scale);
+                coefficient.hash(state);
+                scale.hash(state);
+            }
+            Self::Blob(bytes) => bytes.hash(state),
         }
     }
 }
@@ -51,6 +84,12 @@ impl<'a> ValueRef<'a> {
             Self::Bool(b) => Value::Bool(*b),
             Self::Date(d) => Value::Date(*d),
             Self::Timestamp(t) => Value::Timestamp(*t),
+            Self::Decimal(bytes) => {
+                let mut packed = [0u8; 17];
+                packed.copy_from_slice(&bytes[..17]);
+                Value::Decimal(packed)
+            }
+            Self::Blob(bytes) => Value::Blob(bytes.to_vec()),
         }
     }
 
@@ -89,6 +128,12 @@ impl<'a> ValueRef<'a> {
             // MS13: 日期族同类型比较（跨族 false 兜底不变）
             (Self::Date(a), Self::Date(b)) => a == b,
             (Self::Timestamp(a), Self::Timestamp(b)) => a == b,
+            (Self::Decimal(a), Self::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                canonical_decimal(ca, sa) == canonical_decimal(cb, sb)
+            }
+            (Self::Blob(a), Self::Blob(b)) => a == b,
             (Self::Int(a), Self::Float(b)) => (*a as f64) == *b,
             (Self::Float(a), Self::Int(b)) => *a == (*b as f64),
             _ => false,
@@ -105,6 +150,12 @@ impl<'a> ValueRef<'a> {
             // MS13: 日期族同类型时间序比较
             (Self::Date(a), Self::Date(b)) => Ok(a > b),
             (Self::Timestamp(a), Self::Timestamp(b)) => Ok(a > b),
+            (Self::Decimal(a), Self::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                Ok(cmp_decimal(ca, sa, cb, sb) == Ordering::Greater)
+            }
+            (Self::Blob(a), Self::Blob(b)) => Ok(*a > *b),
             (Self::Int(a), Self::Float(b)) => Ok((*a as f64) > *b),
             (Self::Float(a), Self::Int(b)) => Ok(*a > *b as f64),
             _ => Err(ValueError::TypeMismatch),
@@ -121,6 +172,12 @@ impl<'a> ValueRef<'a> {
             // MS13: 日期族同类型时间序比较
             (Self::Date(a), Self::Date(b)) => Ok(a < b),
             (Self::Timestamp(a), Self::Timestamp(b)) => Ok(a < b),
+            (Self::Decimal(a), Self::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                Ok(cmp_decimal(ca, sa, cb, sb) == Ordering::Less)
+            }
+            (Self::Blob(a), Self::Blob(b)) => Ok(*a < *b),
             (Self::Int(a), Self::Float(b)) => Ok((*a as f64) < *b),
             (Self::Float(a), Self::Int(b)) => Ok(*a < *b as f64),
             _ => Err(ValueError::TypeMismatch),
@@ -137,6 +194,12 @@ impl<'a> ValueRef<'a> {
             // MS13: 日期族同类型时间序比较
             (Self::Date(a), Self::Date(b)) => Ok(a >= b),
             (Self::Timestamp(a), Self::Timestamp(b)) => Ok(a >= b),
+            (Self::Decimal(a), Self::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                Ok(cmp_decimal(ca, sa, cb, sb) != Ordering::Less)
+            }
+            (Self::Blob(a), Self::Blob(b)) => Ok(*a >= *b),
             (Self::Int(a), Self::Float(b)) => Ok((*a as f64) >= *b),
             (Self::Float(a), Self::Int(b)) => Ok(*a >= *b as f64),
             _ => Err(ValueError::TypeMismatch),
@@ -153,6 +216,12 @@ impl<'a> ValueRef<'a> {
             // MS13: 日期族同类型时间序比较
             (Self::Date(a), Self::Date(b)) => Ok(a <= b),
             (Self::Timestamp(a), Self::Timestamp(b)) => Ok(a <= b),
+            (Self::Decimal(a), Self::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                Ok(cmp_decimal(ca, sa, cb, sb) != Ordering::Greater)
+            }
+            (Self::Blob(a), Self::Blob(b)) => Ok(*a <= *b),
             (Self::Int(a), Self::Float(b)) => Ok((*a as f64) <= *b),
             (Self::Float(a), Self::Int(b)) => Ok(*a <= *b as f64),
             _ => Err(ValueError::TypeMismatch),

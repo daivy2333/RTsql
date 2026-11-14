@@ -9,6 +9,9 @@
 //!   Bool      = [0x05][1 byte 0/1]
 //!   Date      = [0x06][4 bytes i32 LE] (MS13: days since 0001-01-01)
 //!   Timestamp = [0x07][8 bytes i64 LE] (MS13: Unix epoch microseconds)
+//!   Decimal   = [0x09][u8 scale][16 bytes i128 LE]
+//!   Blob      = [0x0A][2 bytes len LE][N bytes] (len <= 65535)
+//!   LongBlob  = [0x0B][4 bytes len LE][N bytes] (len > 65535)
 
 use crate::executor::ValueRef;
 use crate::storage::{Result, StorageError};
@@ -32,9 +35,17 @@ pub(crate) const TAG_TIMESTAMP: u8 = 0x07;
 /// the value exceeds the u16 length prefix of TAG_STRING; ≤65535 keeps the
 /// legacy byte layout.
 pub(crate) const TAG_LONG_STRING: u8 = 0x08;
+/// DECIMAL tag. Payload is `u8 scale` plus little-endian `i128`.
+pub(crate) const TAG_DECIMAL: u8 = 0x09;
+/// BLOB tag for payloads of at most 65535 bytes: `[u16 len LE][bytes]`.
+pub(crate) const TAG_BLOB: u8 = 0x0A;
+/// BLOB tag for payloads longer than 65535 bytes: `[u32 len LE][bytes]`.
+pub(crate) const TAG_LONG_BLOB: u8 = 0x0B;
 
 /// Values at or below this length use the legacy `[0x02][u16 len]` layout.
 const STRING_U16_MAX: usize = u16::MAX as usize;
+/// Blobs at or below this length use `[0x0A][u16 len]`.
+const BLOB_U16_MAX: usize = u16::MAX as usize;
 
 /// Column type descriptor used as the schema for serialization / deserialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +62,10 @@ pub enum ColumnType {
     Date,
     /// Timestamp column (MS13: Unix epoch microseconds, no time zone).
     Timestamp,
+    /// Exact decimal column. `precision` is the total number of digits.
+    Decimal { precision: u8, scale: u8 },
+    /// Byte-string column. The declaration carries no length.
+    Blob,
 }
 
 /// Return the total number of bytes required to serialize the given values
@@ -73,6 +88,14 @@ pub fn compute_tuple_size(values: &[Value], schema: &[ColumnType]) -> usize {
             Value::Bool(_) => 1 + 1,
             Value::Date(_) => 1 + 4,
             Value::Timestamp(_) => 1 + 8,
+            Value::Decimal(_) => 1 + 17,
+            Value::Blob(bytes) => {
+                if bytes.len() > BLOB_U16_MAX {
+                    1 + 4 + bytes.len()
+                } else {
+                    1 + 2 + bytes.len()
+                }
+            }
         })
         .sum()
 }
@@ -160,6 +183,33 @@ pub fn serialize_tuple(values: &[Value], schema: &[ColumnType], buf: &mut [u8]) 
                 buf[pos] = TAG_TIMESTAMP;
                 buf[pos + 1..pos + 9].copy_from_slice(&t.to_le_bytes());
                 pos += 9;
+            }
+            Value::Decimal(bytes) => {
+                if pos + 18 > buf.len() {
+                    return Err(err_too_small());
+                }
+                buf[pos] = TAG_DECIMAL;
+                buf[pos + 1..pos + 18].copy_from_slice(bytes);
+                pos += 18;
+            }
+            Value::Blob(bytes) => {
+                if bytes.len() > BLOB_U16_MAX {
+                    if pos + 5 + bytes.len() > buf.len() {
+                        return Err(err_too_small());
+                    }
+                    buf[pos] = TAG_LONG_BLOB;
+                    buf[pos + 1..pos + 5].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf[pos + 5..pos + 5 + bytes.len()].copy_from_slice(bytes);
+                    pos += 5 + bytes.len();
+                } else {
+                    if pos + 3 + bytes.len() > buf.len() {
+                        return Err(err_too_small());
+                    }
+                    buf[pos] = TAG_BLOB;
+                    buf[pos + 1..pos + 3].copy_from_slice(&(bytes.len() as u16).to_le_bytes());
+                    buf[pos + 3..pos + 3 + bytes.len()].copy_from_slice(bytes);
+                    pos += 3 + bytes.len();
+                }
             }
         }
     }
@@ -322,6 +372,41 @@ pub fn deserialize_tuple_width(data: &[u8], schema: &[ColumnType]) -> Result<(Ve
                 ];
                 values.push(Value::Timestamp(i64::from_le_bytes(bytes)));
                 pos += 8;
+            }
+            TAG_DECIMAL => {
+                if pos + 17 > data.len() {
+                    return Err(eof("expected 17 bytes for decimal"));
+                }
+                let mut packed = [0u8; 17];
+                packed.copy_from_slice(&data[pos..pos + 17]);
+                values.push(Value::Decimal(packed));
+                pos += 17;
+            }
+            TAG_BLOB => {
+                if pos + 2 > data.len() {
+                    return Err(eof("expected 2 bytes for blob length"));
+                }
+                let len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+                pos += 2;
+                if pos + len > data.len() {
+                    return Err(eof("expected blob payload"));
+                }
+                values.push(Value::Blob(data[pos..pos + len].to_vec()));
+                pos += len;
+            }
+            TAG_LONG_BLOB => {
+                if pos + 4 > data.len() {
+                    return Err(eof("expected 4 bytes for long blob length"));
+                }
+                let len =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
+                pos += 4;
+                if pos + len > data.len() {
+                    return Err(eof("expected long blob payload"));
+                }
+                values.push(Value::Blob(data[pos..pos + len].to_vec()));
+                pos += len;
             }
             other => {
                 return Err(StorageError::Io(io::Error::new(
@@ -486,6 +571,39 @@ pub fn deserialize_value_refs<'a>(
                 ];
                 values.push(ValueRef::Timestamp(i64::from_le_bytes(bytes)));
                 pos += 8;
+            }
+            TAG_DECIMAL => {
+                if pos + 17 > data.len() {
+                    return Err(eof("expected 17 bytes for decimal"));
+                }
+                values.push(ValueRef::Decimal(&data[pos..pos + 17]));
+                pos += 17;
+            }
+            TAG_BLOB => {
+                if pos + 2 > data.len() {
+                    return Err(eof("expected 2 bytes for blob length"));
+                }
+                let len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+                pos += 2;
+                if pos + len > data.len() {
+                    return Err(eof("expected blob payload"));
+                }
+                values.push(ValueRef::Blob(&data[pos..pos + len]));
+                pos += len;
+            }
+            TAG_LONG_BLOB => {
+                if pos + 4 > data.len() {
+                    return Err(eof("expected 4 bytes for long blob length"));
+                }
+                let len =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
+                pos += 4;
+                if pos + len > data.len() {
+                    return Err(eof("expected long blob payload"));
+                }
+                values.push(ValueRef::Blob(&data[pos..pos + len]));
+                pos += len;
             }
             other => {
                 return Err(StorageError::Io(io::Error::new(
@@ -946,5 +1064,119 @@ mod tests {
         assert_eq!(refs, vec![ValueRef::Date(19792), ValueRef::Timestamp(42)]);
         assert_eq!(refs[0].to_value(), Value::Date(19792));
         assert_eq!(refs[1].to_value(), Value::Timestamp(42));
+    }
+
+    #[test]
+    fn decimal_and_blob_round_trip() {
+        use crate::storage::catalog::{
+            deserialize_catalog_column_row, serialize_catalog_column_row, CatalogColumnRow,
+        };
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let decimal = Value::decimal(150, 2);
+        let blob = Value::Blob(vec![0x68, 0x69]);
+        let schema = [
+            ColumnType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            ColumnType::Blob,
+        ];
+        let values = vec![decimal.clone(), blob.clone()];
+        let size = compute_tuple_size(&values, &schema);
+        let mut buf = vec![0u8; size];
+        let written = serialize_tuple(&values, &schema, &mut buf).unwrap();
+        assert_eq!(written, size);
+        assert_eq!(buf[0], 0x09, "DECIMAL value tag");
+        assert_eq!(buf[1], 2, "scale byte");
+        assert_eq!(i128::from_le_bytes(buf[2..18].try_into().unwrap()), 150);
+        let blob_at = 18;
+        assert_eq!(buf[blob_at], 0x0A, "short BLOB tag");
+        assert_eq!(u16::from_le_bytes([buf[blob_at + 1], buf[blob_at + 2]]), 2);
+        assert_eq!(&buf[blob_at + 3..blob_at + 5], &[0x68, 0x69]);
+        assert!(!buf[..written].contains(&0xFF), "0xFF is not a value tag");
+
+        let decoded = deserialize_tuple(&buf[..written], &schema).unwrap();
+        assert_eq!(decoded[0].decimal_parts(), Some((150, 2)));
+        assert_eq!(decoded[1], blob);
+        let refs = deserialize_value_refs(&buf[..written], &schema).unwrap();
+        assert_eq!(refs[0].to_value().decimal_parts(), Some((150, 2)));
+        assert_eq!(refs[1].to_value(), blob);
+
+        let long = Value::Blob(vec![0xAB; 65_536]);
+        let long_schema = [ColumnType::Blob];
+        let long_size = compute_tuple_size(std::slice::from_ref(&long), &long_schema);
+        assert_eq!(long_size, 1 + 4 + 65_536);
+        let mut long_buf = vec![0u8; long_size];
+        serialize_tuple(std::slice::from_ref(&long), &long_schema, &mut long_buf).unwrap();
+        assert_eq!(long_buf[0], 0x0B, "long BLOB tag");
+        assert_eq!(
+            deserialize_tuple(&long_buf, &long_schema).unwrap(),
+            vec![long]
+        );
+
+        let old = Value::Int(42);
+        let old_schema = [ColumnType::Int];
+        let old_size = compute_tuple_size(std::slice::from_ref(&old), &old_schema);
+        let mut old_buf = vec![0u8; old_size];
+        serialize_tuple(std::slice::from_ref(&old), &old_schema, &mut old_buf).unwrap();
+        assert_eq!(old_buf[0], 0x01);
+        assert_eq!(
+            deserialize_tuple(&old_buf, &old_schema).unwrap(),
+            vec![Value::Int(42)]
+        );
+        assert!(deserialize_tuple(&[0xFF], &[ColumnType::Int]).is_err());
+
+        assert_eq!(Value::decimal(150, 2), Value::decimal(15, 1));
+        assert_ne!(Value::decimal(150, 2), Value::decimal(151, 2));
+        let hash_of = |value: &Value| {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(
+            hash_of(&Value::decimal(150, 2)),
+            hash_of(&Value::decimal(15, 1))
+        );
+
+        let col = |name: &str, ty: ColumnType| CatalogColumnRow {
+            table_name: "t".into(),
+            column_index: 0,
+            column_name: name.into(),
+            column_type: ty,
+            not_null: false,
+            unique: false,
+            default_value: None,
+        };
+        let int_row = col("col", ColumnType::Int);
+        let int_bytes = serialize_catalog_column_row(&int_row);
+        assert_eq!(deserialize_catalog_column_row(&int_bytes).unwrap(), int_row);
+        assert_eq!(int_bytes[int_bytes.len() - 3], 0x01);
+
+        let blob_row = col("col", ColumnType::Blob);
+        let blob_bytes = serialize_catalog_column_row(&blob_row);
+        assert_eq!(blob_bytes.len(), int_bytes.len());
+        assert_eq!(blob_bytes[blob_bytes.len() - 3], 0x08);
+        assert_eq!(
+            deserialize_catalog_column_row(&blob_bytes)
+                .unwrap()
+                .column_type,
+            ColumnType::Blob
+        );
+
+        let dec_row = col(
+            "col",
+            ColumnType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+        );
+        let dec_bytes = serialize_catalog_column_row(&dec_row);
+        assert_eq!(dec_bytes.len(), int_bytes.len() + 2);
+        assert_eq!(dec_bytes[dec_bytes.len() - 5], 0x07);
+        assert_eq!(dec_bytes[dec_bytes.len() - 4], 10);
+        assert_eq!(dec_bytes[dec_bytes.len() - 3], 2);
+        assert_eq!(deserialize_catalog_column_row(&dec_bytes).unwrap(), dec_row);
     }
 }
