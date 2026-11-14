@@ -19,4 +19,4 @@ pub mod wal;
 // Re-export common types for convenience
 pub use executor::{ColumnConstraint, ColumnDef, ColumnType, PhysicalPlan, Value};
 pub use parser::{parse_sql, PlanBuilder, PlanError};
-pub use result::{ColumnMeta, SqlError, SqlOutcome};
+pub use result::{ColumnMeta, RowCursor, SqlError, SqlOutcome};
