@@ -128,7 +128,58 @@ Gate 2：PASS。无 BLOCKED。无 SKIPPED。
 
 ## Act Response
 
-Act 填写。本段在实施前没有结果。
+- Status: reported
+
+**实际改动**
+
+- `src/pipeline.rs`：`submetric_start`、`record_measured_submetric`。`plan_stage_impl` 的三处 `table_metadata_lookup`，`execute_stage_routed` 的 DML 臂和查询臂，以及 `execute_ctas_routed` 的 `executor_creation` / `executor_execution`，各用一个起点。旧开关为真时取 `Instant::now()`，否则 `stage_instant()`。仅旧开关调用 `record_time`，并 `record_stage`（`Module::Pipeline`）。
+- `src/executor/index_scan.rs`：`IndexScanExecutor::next` 对 `index_manager_search` 用同一口径，类别 `Module::Index`。`search` 返回错误时仍不记录。
+- `src/executor/index_scan_all.rs`：`IndexScanAllExecutor::next` 对 `index_manager_search_all` 同样处理。`search_all` 失败时不置 `initialized`。
+- `tests/diagnostics_statement_test.rs`：新增 `insert_records_pipeline_submetrics`、`primary_key_lookup_records_index_search`、`secondary_index_lookup_records_search_all`、`index_stages_hidden_when_module_excludes_index`、`pipeline_submetrics_hidden_when_module_excludes_pipeline`。`insert_commit_is_child_of_execute` 的等式改为三条子阶段。
+- `tests/typed_batch_write_test.rs`：`row_insert_share_of_hundred_inserts` 的等式改为三条子阶段。`println` 与 `COUNT(*) = 100` 未改。
+- `tests/diagnostics_wait_test.rs`：`file_page_read_records_io` 增加 `index_manager_search` 存在且次数为 1。原有页数和 parse Io 断言保留。
+
+**偏差**
+
+流水线测量点抽出 `submetric_start` 和 `record_measured_submetric`。每个调用点仍只有一个起点，记录函数不再取 `Instant`。两个索引执行器各自内联同一口径，不引用 pipeline 的辅助函数。
+
+**自检**
+
+Gate 3：T1、T2 均通过。未改 `src/diagnostics.rs`、`src/profiling.rs`，未新增 `open_stage`，未调用 `record_pre_measured` 或 `diagnostics::report`。`CREATE TABLE` / `DROP TABLE` 计划分支和 `execute_stage_in_tx_routed` 没有这五段测量。提前返回仍在记录点之前。
+
+无未修复的 Critical 或 Important。无遗留 Minor。
+
+**验证**
+
+RED（改对应产品代码前）：
+
+- `cargo test --offline --test diagnostics_statement_test -- --test-threads=1 insert_records_pipeline_submetrics insert_commit_is_child_of_execute`：退出码 101。`insert_records_pipeline_submetrics` 因摘要没有 `table_metadata_lookup` 失败；`insert_commit_is_child_of_execute` 因摘要没有 `executor_creation` 失败。`0 passed; 2 failed`。
+- `cargo test --offline --test typed_batch_write_test -- --test-threads=1`：退出码 101。`row_insert_share_of_hundred_inserts` 因摘要没有 `executor_creation` 失败。`0 passed; 1 failed`。
+- `cargo test --offline --test diagnostics_statement_test -- --test-threads=1`：退出码 101。`primary_key_lookup_records_index_search` 因摘要没有 `index_manager_search` 失败；`secondary_index_lookup_records_search_all` 因摘要没有 `index_manager_search_all` 失败。`12 passed; 2 failed`。两条排除类别用例在改执行器前已经通过。
+- `cargo test --offline --test diagnostics_wait_test -- --test-threads=1`：退出码 101。`file_page_read_records_io` 在页数和 parse Io 断言之后，因摘要没有 `index_manager_search` 失败。`5 passed; 1 failed`。
+- `cargo test --offline --test cli_main_profiling_test -- --test-threads=1`：改执行器前退出码 0。`10 passed; 0 failed`。
+
+GREEN：
+
+- `cargo test --offline --test diagnostics_statement_test -- --test-threads=1`（T1 后）：退出码 0。`10 passed; 0 failed`。
+- `cargo test --offline --test typed_batch_write_test -- --test-threads=1`：退出码 0。`1 passed; 0 failed`。T2 未改 `pipeline.rs`，此结果继续有效，不重跑。
+- `cargo test --offline --test diagnostics_statement_test -- --test-threads=1`（T2 后）：退出码 0。`14 passed; 0 failed`。
+- `cargo test --offline --test diagnostics_wait_test -- --test-threads=1`：退出码 0。`6 passed; 0 failed`。
+- `cargo test --offline --test cli_main_profiling_test -- --test-threads=1`：退出码 0。`10 passed; 0 failed`。
+
+Gate 4：T1、T2 的 Verification 均满足。Gate 5：未命中。全量未跑。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None
+
+**未解决**
+
+无。
 
 ## Plan Review
 

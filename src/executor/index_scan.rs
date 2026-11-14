@@ -1,5 +1,6 @@
 //! Index scan executor - primary key lookup
 
+use crate::diagnostics::{record_stage, stage_instant, Module};
 use crate::executor::apply_projection;
 use crate::executor::{ExecResult, Executor};
 use crate::profiling::{is_profiling_enabled, record_time};
@@ -67,16 +68,19 @@ impl Executor for IndexScanExecutor {
         self.executed = true;
 
         let profiling = is_profiling_enabled();
-        let row_id = {
-            if profiling {
-                let t0 = Instant::now();
-                let result = self.table_meta.index_manager.search(&self.key).await?;
-                record_time("index_manager_search", t0.elapsed());
-                result
-            } else {
-                self.table_meta.index_manager.search(&self.key).await?
-            }
+        let start = if profiling {
+            Some(Instant::now())
+        } else {
+            stage_instant()
         };
+        let row_id = self.table_meta.index_manager.search(&self.key).await?;
+        if let Some(start) = start {
+            let elapsed = start.elapsed();
+            if profiling {
+                record_time("index_manager_search", elapsed);
+            }
+            record_stage(Module::Index, "index_manager_search", elapsed);
+        }
 
         match row_id {
             Some(id) => {

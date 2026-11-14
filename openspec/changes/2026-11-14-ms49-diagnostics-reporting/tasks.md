@@ -9,7 +9,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/unified-diagnostics/spec.md`。
-- 000：执行依据是 `iterations/000-stage-reporting/000-initial.md`。Plan Context 为 ready。Act 未开始。只展开这一轮。
+- 000：执行依据是 `iterations/000-stage-reporting/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。只展开这一轮。
 - 001、002：只列在下面的 Iteration Plan 里，不建目录。
 - Persisted Evidence：none。
 - 跳过项：无。
@@ -18,18 +18,18 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 三个流水线子指标进入阶段树；插入的执行独占加上 creation、execution、commit 等于执行包含耗时；SQL 结果不变 | 未开始 |
-| T2 | 000 | T1 | 两个索引子指标进入阶段树；页读和提交等待的归属不变；旧表仍打印索引子指标 | 未开始 |
+| T1 | 000 | 无 | 三个流水线子指标进入阶段树；插入的执行独占加上 creation、execution、commit 等于执行包含耗时；SQL 结果不变 | 完成 |
+| T2 | 000 | T1 | 两个索引子指标进入阶段树；页读和提交等待的归属不变；旧表仍打印索引子指标 | 完成 |
 | T3 | 001 | 000 accepted | 首行等待、交回行数、吞吐、P95、进程峰值可从保留摘要和进程读出；上限 0 仍不计预算字节 | 未开始 |
 | T4 | 002 | 001 accepted | M19 分批全量一次，每批退出码 0 且 failed 为 0 | 未开始 |
 
 ## 1. 流水线子指标（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-stage-reporting/000-initial.md` 的 T1 执行。先写会失败的断言，再改 `plan_stage_impl`、`execute_stage_routed` 和 `execute_ctas_routed` 里已有的测量点。
+- [x] 1.1 T1：按 `iterations/000-stage-reporting/000-initial.md` 的 T1 执行。先写会失败的断言，再改 `plan_stage_impl`、`execute_stage_routed` 和 `execute_ctas_routed` 里已有的测量点。
 
 ## 2. 索引子指标（Iteration 000）
 
-- [ ] 2.1 T2：按同一 Cycle 的 T2 执行。先写会失败的断言，再改两个索引扫描执行器。不新开阶段。
+- [x] 2.1 T2：按同一 Cycle 的 T2 执行。先写会失败的断言，再改两个索引扫描执行器。不新开阶段。
 
 ## 3. 比较指标（Iteration 001）
 
@@ -85,7 +85,7 @@ cargo test --offline --test diagnostics_facade_test -- --test-threads=1
 
 - Tasks: T1, T2
 - Depends on: None
-- 状态：Plan Context 为 ready。Act 未开始。目录已展开。执行依据是 `iterations/000-stage-reporting/000-initial.md`。
+- 状态：Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。目录已展开。执行依据是 `iterations/000-stage-reporting/000-initial.md`。
 - Stable result: 性能统计打开时，五段旧耗时出现在当前语句摘要里；普通插入的执行独占加上 creation、execution、commit 等于执行包含耗时；页读和提交等待仍归当时开着的阶段；旧表仍打印这些名字；SQL 结果、错误文本和 SQLSTATE 不变。
 - Verification boundary: 只跑本轮 Cycle 里的定向命令，每条都带 `--test-threads=1`，按任务顺序执行。不跑全量。全量预算在 Iteration 002，整个变更一次。
 - Diagnostic boundary: T1 看 `plan_stage_impl`、`execute_stage_routed`、`execute_ctas_routed` 的现有测量点，以及两条独占等式测试。T2 看两个索引扫描执行器、`file_page_read_records_io` 和 `cli_main_profiling_test`。`diagnostics.rs` 的独占公式、`profiling.rs` 的打印、`execute_stage_in_tx_routed` 不在本轮修改范围。

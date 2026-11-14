@@ -210,6 +210,11 @@ async fn file_page_read_records_io() {
         "the page read belongs to the execution stage, not to parse: {:?}",
         parse.waits
     );
+    let search = stage_stat(summary, Module::Index, "index_manager_search");
+    assert_eq!(
+        search.count, 1,
+        "the primary-key lookup records index_manager_search"
+    );
 
     // 缓冲池已持有的页：再查一次不再读文件，Io 与页数都为 0。
     db.execute_sql("SELECT id FROM t WHERE id = 3")

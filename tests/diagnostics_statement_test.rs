@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use rtsql::database::Database;
 use rtsql::diagnostics::{
-    Collect, Detail, DiagnosticsConfig, Module, Severity, StageStat, Summary,
+    Collect, Detail, DiagnosticsConfig, Module, ModuleSet, Severity, StageStat, Summary,
 };
 use rtsql::executor::Value;
 use rtsql::result::SqlOutcome;
@@ -44,8 +44,9 @@ fn stage_stat<'a>(summary: &'a Summary, module: Module, name: &str) -> &'a Stage
 
 /// 需求 2 / S3b：未命中缓存的 INSERT 摘要含 parse / plan / execute / commit
 /// 阶段汇总；commit（Module::Wal）是 execute 的子阶段——单次插入下
-/// commit.inclusive_total <= execute.inclusive_total，且
-/// execute.exclusive_total + commit.inclusive_total == execute.inclusive_total。
+/// commit.inclusive_total <= execute.inclusive_total，且 execute 的独占耗时
+/// 加上 executor_creation、executor_execution、commit 的包含耗时等于
+/// execute 的包含耗时。
 #[tokio::test]
 async fn insert_commit_is_child_of_execute() {
     let dir = tempfile::tempdir().unwrap();
@@ -86,6 +87,8 @@ async fn insert_commit_is_child_of_execute() {
     }
 
     let execute = stage_stat(summary, Module::Pipeline, "execute");
+    let creation = stage_stat(summary, Module::Pipeline, "executor_creation");
+    let execution = stage_stat(summary, Module::Pipeline, "executor_execution");
     let commit = stage_stat(summary, Module::Wal, "commit");
     assert!(
         commit.inclusive_total <= execute.inclusive_total,
@@ -94,9 +97,84 @@ async fn insert_commit_is_child_of_execute() {
         execute.inclusive_total
     );
     assert_eq!(
-        execute.exclusive_total + commit.inclusive_total,
+        execute.exclusive_total
+            + creation.inclusive_total
+            + execution.inclusive_total
+            + commit.inclusive_total,
         execute.inclusive_total,
-        "execute exclusive + commit inclusive == execute inclusive (commit is the only child)"
+        "execute exclusive + creation + execution + commit == execute inclusive"
+    );
+}
+
+/// 只开 stats、未设置 `RTSQL_PROFILING` 时，成功的 `INSERT INTO t VALUES (1)`
+/// 把三个流水线子指标记入当前语句摘要。随后查询能看见这一行。
+#[tokio::test]
+async fn insert_records_pipeline_submetrics() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("statement.db"))
+        .await
+        .unwrap();
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
+
+    db.set_diagnostics(stats_config());
+    match db.execute_sql("INSERT INTO t VALUES (1)").await.unwrap() {
+        SqlOutcome::AffectedRows(1) => {}
+        other => panic!("insert must affect exactly one row, got {other:?}"),
+    }
+
+    let summaries = db.diagnostic_summaries();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "exactly the insert statement is summarized: {summaries:?}"
+    );
+    let summary = &summaries[0];
+    assert!(
+        summary.total > Duration::ZERO,
+        "statement total is the root inclusive duration"
+    );
+
+    for name in [
+        "table_metadata_lookup",
+        "executor_creation",
+        "executor_execution",
+    ] {
+        let stat = stage_stat(summary, Module::Pipeline, name);
+        assert_eq!(stat.count, 1, "{name} appears exactly once");
+    }
+
+    let plan = stage_stat(summary, Module::Pipeline, "plan");
+    let lookup = stage_stat(summary, Module::Pipeline, "table_metadata_lookup");
+    assert_eq!(
+        plan.exclusive_total + lookup.inclusive_total,
+        plan.inclusive_total,
+        "plan exclusive + table_metadata_lookup inclusive == plan inclusive"
+    );
+
+    let execute = stage_stat(summary, Module::Pipeline, "execute");
+    let creation = stage_stat(summary, Module::Pipeline, "executor_creation");
+    let execution = stage_stat(summary, Module::Pipeline, "executor_execution");
+    let commit = stage_stat(summary, Module::Wal, "commit");
+    assert!(
+        commit.inclusive_total <= execute.inclusive_total,
+        "commit is nested inside execute: commit={:?} execute={:?}",
+        commit.inclusive_total,
+        execute.inclusive_total
+    );
+    assert_eq!(
+        execute.exclusive_total
+            + creation.inclusive_total
+            + execution.inclusive_total
+            + commit.inclusive_total,
+        execute.inclusive_total,
+        "execute exclusive + creation + execution + commit == execute inclusive"
+    );
+
+    assert_eq!(
+        query_rows(&db, "SELECT id FROM t").await,
+        vec![vec![Value::Int(1)]]
     );
 }
 
@@ -660,4 +738,139 @@ async fn inserts_visible_with_and_without_diagnostics() {
     let db = Database::open(&path).await.unwrap();
     let rows = query_rows(&db, "SELECT id, v FROM t ORDER BY id").await;
     assert_eq!(rows, expected, "both rows survive the reopen, column-exact");
+}
+
+fn stats_for(modules: ModuleSet) -> DiagnosticsConfig {
+    DiagnosticsConfig {
+        collect: Collect {
+            events: false,
+            stats: true,
+            trace: false,
+        },
+        modules,
+        ..DiagnosticsConfig::default()
+    }
+}
+
+async fn indexed_table(db: &Database) {
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, b INT)")
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO t VALUES (1, 10)")
+        .await
+        .unwrap();
+}
+
+/// 主键等值查找把 `index_manager_search` 记入摘要一次，不记
+/// `index_manager_search_all`。返回行与诊断关闭时相同。
+#[tokio::test]
+async fn primary_key_lookup_records_index_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("statement.db"))
+        .await
+        .unwrap();
+    indexed_table(&db).await;
+
+    let baseline = query_rows(&db, "SELECT * FROM t WHERE id = 1").await;
+    db.set_diagnostics(stats_config());
+    let rows = query_rows(&db, "SELECT * FROM t WHERE id = 1").await;
+    assert_eq!(rows, baseline);
+
+    let summaries = db.diagnostic_summaries();
+    assert_eq!(summaries.len(), 1, "only the diagnosed lookup is summarized");
+    let summary = &summaries[0];
+    let search = stage_stat(summary, Module::Index, "index_manager_search");
+    assert_eq!(search.count, 1);
+    assert!(
+        summary
+            .stages
+            .iter()
+            .all(|stage| stage.name != "index_manager_search_all"),
+        "primary-key equality has no index_manager_search_all: {:?}",
+        summary.stages
+    );
+}
+
+/// 二级索引等值查找把 `index_manager_search_all` 记入摘要。返回行与诊断关闭时相同。
+#[tokio::test]
+async fn secondary_index_lookup_records_search_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("statement.db"))
+        .await
+        .unwrap();
+    indexed_table(&db).await;
+    db.execute_sql("CREATE INDEX idx_b ON t(b)").await.unwrap();
+
+    let baseline = query_rows(&db, "SELECT * FROM t WHERE b = 10").await;
+    db.set_diagnostics(stats_config());
+    let rows = query_rows(&db, "SELECT * FROM t WHERE b = 10").await;
+    assert_eq!(rows, baseline);
+
+    let summaries = db.diagnostic_summaries();
+    assert_eq!(summaries.len(), 1, "only the diagnosed lookup is summarized");
+    let search = stage_stat(&summaries[0], Module::Index, "index_manager_search_all");
+    assert_eq!(search.count, 1);
+}
+
+/// 观察类别只有 Pipeline 时，主键等值摘要没有两个索引阶段名，仍有 execute，
+/// 结果行与诊断关闭时相同。
+#[tokio::test]
+async fn index_stages_hidden_when_module_excludes_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("statement.db"))
+        .await
+        .unwrap();
+    indexed_table(&db).await;
+
+    let baseline = query_rows(&db, "SELECT * FROM t WHERE id = 1").await;
+    db.set_diagnostics(stats_for(ModuleSet::Only(vec![Module::Pipeline])));
+    let rows = query_rows(&db, "SELECT * FROM t WHERE id = 1").await;
+    assert_eq!(rows, baseline);
+
+    let summaries = db.diagnostic_summaries();
+    assert_eq!(summaries.len(), 1, "only the diagnosed lookup is summarized");
+    let summary = &summaries[0];
+    stage_stat(summary, Module::Pipeline, "execute");
+    assert!(
+        summary.stages.iter().all(|stage| {
+            stage.name != "index_manager_search" && stage.name != "index_manager_search_all"
+        }),
+        "Pipeline-only summary omits index stages: {:?}",
+        summary.stages
+    );
+}
+
+/// 观察类别只有 Index 时，成功插入的摘要没有三个流水线子指标，插入的行可见。
+#[tokio::test]
+async fn pipeline_submetrics_hidden_when_module_excludes_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("statement.db"))
+        .await
+        .unwrap();
+    db.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, b INT)")
+        .await
+        .unwrap();
+
+    db.set_diagnostics(stats_for(ModuleSet::Only(vec![Module::Index])));
+    match db.execute_sql("INSERT INTO t VALUES (1, 10)").await.unwrap() {
+        SqlOutcome::AffectedRows(1) => {}
+        other => panic!("insert must affect exactly one row, got {other:?}"),
+    }
+
+    let summaries = db.diagnostic_summaries();
+    assert_eq!(summaries.len(), 1, "only the insert is summarized");
+    assert!(
+        summaries[0].stages.iter().all(|stage| {
+            stage.name != "table_metadata_lookup"
+                && stage.name != "executor_creation"
+                && stage.name != "executor_execution"
+        }),
+        "Index-only summary omits pipeline submetrics: {:?}",
+        summaries[0].stages
+    );
+
+    assert_eq!(
+        query_rows(&db, "SELECT * FROM t").await,
+        vec![vec![Value::Int(1), Value::Int(10)]]
+    );
 }
