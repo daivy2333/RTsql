@@ -23,7 +23,7 @@ use crate::parser::{parse_sql, PlanBuilder, PlanError};
 use crate::profiling::{
     init_profiling, is_profiling_enabled, print_timings, record_time, with_profiling_scope,
 };
-use crate::result::{ColumnMeta, SqlError, SqlOutcome};
+use crate::result::{ColumnMeta, RowCursor, SqlError, SqlOutcome};
 use crate::storage::page_format::ColumnType as StorageColumnType;
 use crate::storage::{Result, StorageError};
 use crate::transaction::Snapshot;
@@ -804,6 +804,29 @@ pub(crate) fn readonly_rejection(db: &Database, plan: &PhysicalPlan) -> Option<S
 
 /// 只读写拒绝的 SQLSTATE 分类（PG `read_only_sql_transaction`，MS19 R2 通道）。
 const READ_ONLY_SQLSTATE: &str = "25006";
+
+const STREAMING_REQUIRES_ROWS: &str = "streaming consumption requires a row-producing statement";
+
+/// 隐式执行路径里落入查询臂的计划。写计划与 DDL 在打开游标时拒绝。
+fn is_row_producing(plan: &PhysicalPlan) -> bool {
+    !matches!(
+        plan,
+        PhysicalPlan::Insert(_)
+            | PhysicalPlan::Upsert(_)
+            | PhysicalPlan::InsertSelect(_)
+            | PhysicalPlan::Update(_)
+            | PhysicalPlan::Delete(_)
+            | PhysicalPlan::CreateTable(_)
+            | PhysicalPlan::CreateTableAsSelect(_)
+            | PhysicalPlan::CreateIndex(_)
+            | PhysicalPlan::DropIndex(_)
+            | PhysicalPlan::AlterTable(_)
+            | PhysicalPlan::Truncate(_)
+            | PhysicalPlan::CreateView(_)
+            | PhysicalPlan::DropView(_)
+            | PhysicalPlan::DropTable(_)
+    )
+}
 
 /// MS20-T02（design D2）：显式事务内附加库写入拒绝——写节点的**目标**命中
 /// 本语句路由表即点名拒绝（SQLSTATE `0A000`），发生于执行器构造 / 源求值 /
@@ -1834,6 +1857,137 @@ fn executor_creation_error(e: StorageError) -> SqlError {
     }
 }
 
+/// 四个打开入口共用的计划准备：解析、占位符、个数、计划和参数物化。
+/// 错误文本与整段入口相同。成功返回的计划尚未执行。
+async fn prepare_cursor_plan(
+    database: &Database,
+    sql: &str,
+    params: &[Value],
+) -> std::result::Result<PhysicalPlan, SqlError> {
+    let mut statements = match parse_stage(sql).await {
+        Ok(statements) => statements,
+        Err(message) => {
+            return Err(SqlError {
+                message: format!("Parse error: {message}"),
+                sqlstate: Some(PARSE_SQLSTATE.to_string()),
+            })
+        }
+    };
+    if statements.len() > 1 {
+        return Err(multi_statement_rejected(statements.len()));
+    }
+    let stmt = match statements.first_mut() {
+        Some(stmt) => stmt,
+        None => {
+            return Err(SqlError {
+                message: "No statement executed".to_string(),
+                sqlstate: None,
+            })
+        }
+    };
+    let placeholder_count = match assign_placeholder_indices(stmt) {
+        Ok(count) => count,
+        Err(error) => {
+            let failure = PlanFailure::from(error);
+            return Err(SqlError {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate.to_string()),
+            });
+        }
+    };
+    if placeholder_count != params.len() {
+        return Err(parameter_count_mismatch(placeholder_count, params.len()));
+    }
+    let mut plan = match plan_stage(database, sql, stmt, false).await {
+        Ok(plan) => plan,
+        Err(failure) => {
+            return Err(SqlError {
+                message: failure.to_string(),
+                sqlstate: Some(failure.sqlstate.to_string()),
+            })
+        }
+    };
+    if !params.is_empty() {
+        materialize_params(&mut plan, params);
+    }
+    Ok(plan)
+}
+
+/// 打开查询游标。计划成功后先做只读拒绝，再判断是不是查询臂。
+/// `tx_id` 为 `None` 时按自动提交查询建执行器；`Some` 时把调用方事务
+/// 传进执行器，快照用该事务的语句快照。
+pub(crate) async fn open_rows(
+    database: &Database,
+    sql: &str,
+    params: &[Value],
+    tx_id: Option<u64>,
+) -> std::result::Result<RowCursor, SqlError> {
+    let plan = prepare_cursor_plan(database, sql, params).await?;
+    if let Some(rejection) = readonly_rejection(database, &plan) {
+        return Err(rejection);
+    }
+    if !is_row_producing(&plan) {
+        return Err(SqlError {
+            message: STREAMING_REQUIRES_ROWS.to_string(),
+            sqlstate: None,
+        });
+    }
+    let names = PlanBuilder::new().get_plan_output_columns(&plan);
+    let types = resolve_type_slots(database, &RoutedTables::new(), plan_type_slots(&plan)).await;
+    let columns = declared_column_metadata(names, types);
+    let budget: SharedBudget = Arc::new(QueryBudget::new(database.query_memory_limit()));
+    let snapshot = database.statement_snapshot(tx_id).await;
+    let routed = RoutedTables::new();
+    let executor =
+        match create_executor_from_plan(plan, database, tx_id, snapshot, &routed, &budget).await {
+            Ok(executor) => executor,
+            Err(error) => return Err(executor_creation_error(error)),
+        };
+    Ok(RowCursor::new(executor, columns))
+}
+
+impl RowCursor {
+    /// 向根执行器拉取至多 `max` 行。`max == 0` 不调用 `next`。
+    /// 执行错误被记住，之后的拉取返回同一个错误。
+    pub async fn next_batch(
+        &mut self,
+        max: usize,
+    ) -> std::result::Result<Vec<Vec<Value>>, SqlError> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        let batch = match self.executor.next_batch(max).await {
+            Ok(batch) => batch,
+            Err(error) => {
+                let error = SqlError {
+                    message: format!("Execution error: {error}"),
+                    sqlstate: storage_error_sqlstate(&error),
+                };
+                self.error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        let mut rows = Vec::with_capacity(batch.len());
+        for item in batch {
+            match item {
+                ExecResult::Row(values) => rows.push(values),
+                ExecResult::AffectedRows(_) | ExecResult::RowId(_) => {
+                    let error = SqlError {
+                        message: "streaming consumption received a non-row result".to_string(),
+                        sqlstate: None,
+                    };
+                    self.error = Some(error.clone());
+                    return Err(error);
+                }
+            }
+        }
+        Ok(rows)
+    }
+}
+
 /// Execute an executor and return the response
 async fn execute_executor(
     mut executor: Box<dyn Executor + Send>,
@@ -1881,6 +2035,21 @@ async fn execute_executor(
             rows,
         })
     }
+}
+
+/// 游标列元数据只保留声明类型。未知槽保持 `None`，不按结果行推导。
+fn declared_column_metadata(names: Vec<String>, types: Vec<ResolvedType>) -> Vec<ColumnMeta> {
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| ColumnMeta {
+            name,
+            column_type: match types.get(index) {
+                Some(ResolvedType::Declared(column_type)) => Some(column_type.clone()),
+                _ => None,
+            },
+        })
+        .collect()
 }
 
 /// MS31-T01：查询结果装配逐列元数据。
