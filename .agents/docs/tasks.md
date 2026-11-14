@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-2026-11-10 用户指令按 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）把尚未做完的模块化、诊断、语义和性能条目写入路线，相近项并进同一里程碑。新增 MS48–MS55。MS48 模块边界与会话通道收口（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`；I074 拆分余项、I012 通道余项）。MS49 诊断上报与比较指标（I096 余项）。MS50 结果消费与值类型（I065、I069）。MS51 查询代价与 JOIN 重排（I016 余项）。MS52 撕裂树与跨进程访问的去留（I031、I084）。MS53 复制、分配与行锁（I020、I066、I050）。MS54 脏页批量写与 I/O 后端（I026、I028，依赖 MS52）。MS55 索引页空间与锁（I025、I029、I030）。MS48 为 completed。MS54 为 planned。MS49、MS50、MS51、MS52、MS53、MS55 为 ready。无开放缺陷可纳入。I077 余项与 I083 按 MS47 的稳定结果保持未排期。I049、I094、I057、I093、I095 以及已暂缓的交付与密钥便利层不在本批。本次只登记路线，不同步改进条目或 SNAPSHOT。
+2026-11-10 用户指令按 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）把尚未做完的模块化、诊断、语义和性能条目写入路线，相近项并进同一里程碑。新增 MS48–MS55。MS48 模块边界与会话通道收口（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`；I074 拆分余项、I012 通道余项）。MS49 诊断上报与比较指标（completed，2026-11-14，change `openspec/changes/archive/2026-11-14-ms49-diagnostics-reporting/`；I096 余项）。MS50 结果消费与值类型（I065、I069）。MS51 查询代价与 JOIN 重排（I016 余项）。MS52 撕裂树与跨进程访问的去留（I031、I084）。MS53 复制、分配与行锁（I020、I066、I050）。MS54 脏页批量写与 I/O 后端（I026、I028，依赖 MS52）。MS55 索引页空间与锁（I025、I029、I030）。MS48 为 completed。MS49 为 completed。MS54 为 planned。MS50、MS51、MS52、MS53、MS55 为 ready。无开放缺陷可纳入。I077 余项与 I083 按 MS47 的稳定结果保持未排期。I049、I094、I057、I093、I095 以及已暂缓的交付与密钥便利层不在本批。本次只登记路线，不同步改进条目或 SNAPSHOT。
 
 2026-11-03 用户指令「规划这一批你推荐的条目到ms，刚好三个ms就好」，新增 MS45–MS47，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）在 MS41–MS44 完成后的下一批过滤结果。MS45 主命令 profiling 不再因索引扫描中止（completed，2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`；承接 ISS42）。MS46 无键行版本链进入 GC（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`；承接 I038）。MS47 类型化批量写入入口的去留（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`；承接 I021）。三者无硬前置，建议序 MS45 → MS46 → MS47。macOS 构建与运行不在本批。I077 余项、I083、I065、I069、I084、I016 的完整代价模型、I031 以及已暂缓的交付与密钥便利层留在改进台账。本次只登记路线，不同步改进条目、缺陷状态或 SNAPSHOT。
 
@@ -24,7 +24,7 @@
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
 ## Milestone Roadmap
 
-详细的已完成里程碑段已归档，见文件末墓碑。各里程碑的完成摘要见「路线图结构」段与「依赖关系图」的 ✓ 标记；MS22 已 superseded 退回 improvements，其候选见「D-candidates」段与改进台账。当前路线上尚未执行的里程碑是 MS49–MS55。MS54 依赖 MS52，状态为 planned；其余为 ready。
+详细的已完成里程碑段已归档，见文件末墓碑。各里程碑的完成摘要见「路线图结构」段与「依赖关系图」的 ✓ 标记；MS22 已 superseded 退回 improvements，其候选见「D-candidates」段与改进台账。当前路线上尚未执行的里程碑是 MS50–MS55。MS54 依赖 MS52，状态为 planned；其余为 ready。
 
 ### MS45：主命令 profiling 不再因索引扫描中止
 
@@ -80,14 +80,14 @@
 
 ### MS49：诊断上报与比较指标
 
-- **Status**: ready
+- **Status**: completed（2026-11-14。change `openspec/changes/archive/2026-11-14-ms49-diagnostics-reporting/` 已归档。Iteration 000、001、002 的 Review Result 均为 accepted。五个旧子指标进入当前语句阶段树；比较指标从保留摘要读出首行等待、吞吐、P95，进程内存峰值在 Linux 上读 `ru_maxrss`。诊断仍只观察。收尾全量 15 批，每批退出码 0、failed 为 0）
 - **Outcome**: 各模块向已交付的诊断门面上报自身事件与资源统计。比较指标覆盖首行等待、吞吐、较慢请求耗时和内存峰值。诊断仍只观察，不改变 SQL 结果、错误和 SQLSTATE。
 - **Rationale**: 这是分析里和模块化衔接的诊断收口。门面已经存在，缺的是上报和可比口径。它和拆 crate 不是同一个故障域。
 - **Dependencies**: None。建议序在 MS48 之后。不把拆 crate 写成硬前置。
 - **Scope**: I096 尚未交付的两部分。复用现有门面和已有 profiling，不另建计时系统。
 - **Non-goals**: 替换 MS44 的门面；把诊断输出当作正确性判据；WAL 组提交或加密。
 - **Stable result**: 后续性能测量可以引用这组比较指标和模块上报。
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-11-14-ms49-diagnostics-reporting/`
 - **Consumes**: I096 的余项
 - **Split signals**: 若比较指标必须改 SQL 输出或错误文本，退回范围审议。
 
@@ -212,7 +212,7 @@ MS45 主命令 profiling 不再因索引扫描中止 ✓（无前置）
 MS46 无键行版本链进入 GC ✓（无前置）
 MS47 类型化批量写入入口的去留 ✓（无前置；建议序 MS45、MS46 之后）
 MS48 模块边界与会话通道收口 ✓（无前置）
-MS49 诊断上报与比较指标（无前置；建议序 MS48 后）
+MS49 诊断上报与比较指标 ✓（无前置；建议序 MS48 后）
 MS50 结果消费与值类型（无前置）
 MS51 查询代价与 JOIN 重排（无前置）
 MS52 撕裂树与跨进程访问的去留（无前置）
@@ -229,7 +229,7 @@ MS55 索引页空间与锁（无前置；建议序 MS52 后）
 
 2026-11-03 批：MS45 为 completed（2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`），MS46 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`）。MS47 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`）。依赖为 None，无环。建议执行序 MS45 → MS46 → MS47。MS45 先做，是为了旧 profiling 开关在主命令上不再中止进程；MS47 的测量不依赖这条修复也能用统一诊断和现有基准进行。MS46 与另外两项没有代码合同上的先后。每个里程碑可由一个或多个变更承载，不预定数量。I 条目与 ISS42 的状态不在本次改写。
 
-2026-11-10 批：新增 MS48–MS55，依据 R77，相近项并入同一里程碑。MS48 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`）。MS49、MS50、MS51、MS52、MS53、MS55 为 ready，依赖除建议序外均为 None。MS54 依赖 MS52，状态为 planned。建议执行序 MS48 → MS49 → MS50 → MS51 → MS52 → MS53 → MS54 → MS55。MS50、MS51、MS52、MS55 与这条顺序没有硬依赖，可以换位。无环。没有开放缺陷纳入本批。I 条目状态不在本次改写。
+2026-11-10 批：新增 MS48–MS55，依据 R77，相近项并入同一里程碑。MS48 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`）。MS49 为 completed（2026-11-14，change `openspec/changes/archive/2026-11-14-ms49-diagnostics-reporting/`）。MS50、MS51、MS52、MS53、MS55 为 ready，依赖除建议序外均为 None。MS54 依赖 MS52，状态为 planned。建议执行序 MS48 → MS49 → MS50 → MS51 → MS52 → MS53 → MS54 → MS55。MS50、MS51、MS52、MS55 与这条顺序没有硬依赖，可以换位。无环。没有开放缺陷纳入本批。I 条目状态不在本次改写。
 
 ## 进行中
 
