@@ -120,3 +120,63 @@ PASS。无 BLOCKED，无 SKIPPED。父 Cycle Gate 2 对标签、写入、比较�
 **Risks and Notes**
 
 全量仍是 Iteration 001，本 Cycle 不创建该目录，也不把这次定向测试算作里程碑的那一次全量。`DEC` 与 CAST 保持现状；它们不在本 Cycle 的 Acceptance 里。
+
+## Act Response
+
+- Status: reported
+
+**实际改动**
+
+- T2-R1 完成。`convert_data_type` 把 `DataType::Numeric` 与 `DataType::Decimal` 并到同一臂，精度规则仍由 `decimal_column_type` 决定。缺精度、精度不在 1..=38 时文本含 `requires precision`；scale 大于精度时文本含 `scale must not exceed precision`。schema 与 dump 写出 `DECIMAL(p,s)`，不写出 `NUMERIC`。
+- T2-R2 完成。无长度的 `BYTEA`、`BINARY`、`VARBINARY` 与 `BLOB` 一样建成 `ColumnType::Blob`。`BINARY(n)`、`VARBINARY(n)` 与 `BLOB(n)` 共用 `BLOB does not take a length`。schema 与 dump 写出 `BLOB`。
+- T2-R3 完成。显式主键检查在已放行 `Decimal` 的条件上加入 `ColumnType::Blob`。`Value::to_key` 与 `secondary_index_key` 未改，对 `X'6869'` 仍返回 `None`。
+- `tests/decimal_blob_test.rs` 增加 `numeric_without_precision_is_rejected`、`byte_aliases_declare_blob`、`blob_primary_key_is_reachable`。
+
+**偏差**
+
+计划列出的主键改动只在建表检查。建表和插入通过后，`WHERE b = X'6869'` 仍在 `route_secondary_index` 失败：十六进制字面量经 `value_from_sqlparser` 得到 `UnsupportedValue`，查询到不了数据页。调用点把这个错误当作没有索引路由，随后已有的 `literal_for_column` 按 BLOB 列解析字面量，等值走原来的非 Int 主键数据页。没有新增键编码。
+
+这个选择优先复用已有解析和数据页路径。另一条路是让 `value_from_sqlparser` 把所有十六进制字面量变成 `Blob`，非 BLOB 列上的错误面也会变，所以没有采用。成功的索引路由不受影响。不能被 `literal_for_column` 接受的字面量仍在 `build_where` 返回 `Unsupported value type`。
+
+`DEC`、`BYTES`、`BIGNUMERIC`、`BIGDECIMAL` 仍走 String 兜底。`FORMAT_VERSION` 未改。
+
+**自检**
+
+Gate 3：T2-R1 的缺精度、`NUMERIC(10,2)`、`NUMERIC(10)`、越界精度和越界 scale 由 `numeric_without_precision_is_rejected` 覆盖。T2-R2 的三个无长度别名和两处带长度拒绝由 `byte_aliases_declare_blob` 覆盖。T2-R3 的建表、插入、等值、`to_key` 和 `secondary_index_key` 由 `blob_primary_key_is_reachable` 覆盖。String、Float、Bool、Date、Timestamp 的显式主键条件未放行。非 Int 列的 UNIQUE 检查未改。
+
+只放行建表时，T2-R3 的第一次 GREEN 失败，原因是上面的路由错误。补上调用点后同一测试通过。无未修复的 Critical 或 Important。
+
+遗留 Minor：主键检查上方的注释仍写显式主键必须是 INTEGER。父 Cycle 放行 DECIMAL 时就已与代码不一致，本 Cycle 没有改这句注释。
+
+Gate 4：三个 repair item 的过滤命令和本 Cycle 的 `decimal_blob_test` 均满足。Gate 5：未命中。
+
+全量：`SKIPPED: 本 Cycle 排除全量，Iteration 001 尚未展开`。父 Cycle 已通过且本 Cycle 未改到的 lib 过滤测试未重跑。
+
+**验证**
+
+RED：
+
+- `cargo test --test decimal_blob_test numeric_without_precision_is_rejected -- --test-threads=1`：退出码 101。`CREATE TABLE t (d NUMERIC)` 返回 `AffectedRows(0)`。`0 passed; 1 failed`，5 filtered out。
+- `cargo test --test decimal_blob_test byte_aliases_declare_blob -- --test-threads=1`：退出码 101。schema 为 `CREATE TABLE "t" ("a" TEXT, "b" TEXT, "c" TEXT);`。`0 passed; 1 failed`，6 filtered out。
+- `cargo test --test decimal_blob_test blob_primary_key_is_reachable -- --test-threads=1`：退出码 101。建表错误是 `Unsupported constraint: NON-INTEGER PRIMARY KEY`。`0 passed; 1 failed`，7 filtered out。
+
+GREEN：
+
+- `cargo test --test decimal_blob_test numeric_without_precision_is_rejected -- --test-threads=1`：退出码 0。`1 passed; 0 failed`，5 filtered out。
+- `cargo test --test decimal_blob_test byte_aliases_declare_blob -- --test-threads=1`：退出码 0。`1 passed; 0 failed`，6 filtered out。
+- `cargo test --test decimal_blob_test blob_primary_key_is_reachable -- --test-threads=1`：只改主键检查后退出码 101，`WHERE b = X'6869'` 为 `Unsupported value type`，`0 passed; 1 failed`。路由改完后同一命令退出码 0，`1 passed; 0 failed`，7 filtered out。
+- `cargo test --test decimal_blob_test -- --test-threads=1`：退出码 0。`8 passed; 0 failed`，0 filtered out。
+
+全量未跑。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None
+
+**未解决**
+
+无。
