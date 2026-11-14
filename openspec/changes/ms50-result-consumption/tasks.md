@@ -9,7 +9,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/result-consumption/spec.md`。
-- 000：执行依据是 `iterations/000-row-cursor/000-initial.md`。Plan Context 为 ready。
+- 000：执行依据是 `iterations/000-row-cursor/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 仍为 pending。
 - Persisted Evidence：none。
 - 跳过项：全量分批。理由见 Iteration Plan。
 
@@ -17,9 +17,9 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 查询语句按批量交回，拼接等于整段结果；零批量不推进；非行语句无副作用 | 待执行 |
-| T2 | 000 | T1 | 未索取的行不会提前失败；整段入口仍整句失败；诊断计点不被游标调用 | 待执行 |
-| T3 | 000 | T1 | 带参和显式事务入口满足同一拉取合同，丢弃游标不结束事务 | 待执行 |
+| T1 | 000 | 无 | 查询语句按批量交回，拼接等于整段结果；零批量不推进；非行语句无副作用 | 完成 |
+| T2 | 000 | T1 | 未索取的行不会提前失败；整段入口仍整句失败；诊断计点不被游标调用 | 完成 |
+| T3 | 000 | T1 | 带参和显式事务入口满足同一拉取合同，丢弃游标不结束事务 | 完成 |
 
 ## Iteration Plan
 
@@ -36,15 +36,15 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 ## 1. 查询拉取（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-row-cursor/000-initial.md` 的 T1 执行。
+- [x] 1.1 T1：按 `iterations/000-row-cursor/000-initial.md` 的 T1 执行。
 
 ## 2. 背压与整段保持（Iteration 000）
 
-- [ ] 2.1 T2：按同一 Cycle 的 T2 执行。依赖 T1 的游标已经存在。
+- [x] 2.1 T2：按同一 Cycle 的 T2 执行。依赖 T1 的游标已经存在。
 
 ## 3. 带参与事务（Iteration 000）
 
-- [ ] 3.1 T3：按同一 Cycle 的 T3 执行。依赖 T1。
+- [x] 3.1 T3：按同一 Cycle 的 T3 执行。依赖 T1。
 
 ## 完整性
 
