@@ -84,7 +84,7 @@ async fn test_abort_update_reverts_to_previous_version() {
     let tx1_id = tx1.id();
 
     let version_header_v1 = VersionHeader::new(tx1_id, None);
-    let tuple_bytes_v1 = vec![0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // Int value 10
+    let tuple_bytes_v1 = vec![0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // first byte is not a value tag, so the previous version cannot be decoded
 
     let row_id_v1 = write_tuple_to_data_page(
         &buffer_pool,

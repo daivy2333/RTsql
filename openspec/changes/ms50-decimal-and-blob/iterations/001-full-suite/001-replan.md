@@ -99,3 +99,47 @@ PASS。无 BLOCKED，无 SKIPPED。
 - 首字节如果改成 `0x01`，负载会解码成整数，派生键与 `b"test_key"` 不相等，清理会删掉手写键，断言仍然是 `None`。所以指定 `0x0C`，不留字节选择。
 - `0x03` 会解码成 NULL，同样落入只删除的分支。`0x0C` 避开全部已分配值标签。
 - B08 未运行的 10 个目标与这条夹具没有同一个 `0x0A` 负载。本 Cycle 不把它们补进验证。
+
+## Act Response
+
+- Status: reported
+
+**实际改动**
+
+- T5 完成。`tests/mvcc_abort_test.rs` 的 `test_abort_update_reverts_to_previous_version` 中，`tuple_bytes_v1` 首字节从 `0x0A` 改为 `0x0C`，其后 7 字节仍是 `0x00`。同行注释不再把这 8 字节写成整数 10，写明首字节不是值标签，前版本因此不可解码。
+- 断言文本、比较对象、v2 的 `0x14`、同文件另两个测试和 `src/` 未改。`TAG_BLOB` 仍是 `0x0A`。
+- `tasks.md` 只更新本轮状态：T5 改为完成，5.1 勾选。
+
+**偏差**
+
+无。
+
+**自检**
+
+Gate 3：RED 沿用父 Cycle 的 B08，改前没有重跑。diff 只有 v1 首字节和同行注释，以及本 Response 与 `tasks.md` 的状态。断言仍比较 `search` 结果和 `Some(row_id_v1)`，文本仍是 `v1 should still be visible after tx2 abort - index should point back to v1`。GREEN 的 failed 为 0，证明中止后索引指回 v1。没有改值标签、解码或中止分支。没有新增身份证明机制或判定层。无未修复的 Critical 或 Important。
+
+Gate 4：定向命令退出码 0，汇总行 failed 为 0。Gate 5：未命中。
+
+全量：`SKIPPED: 本 Cycle 排除第二次全量。父 Cycle 的那一次全量保持原记录，不声明通过。B08 未运行的 10 个目标不补跑。`
+
+**验证**
+
+RED：沿用父 Cycle `iterations/001-full-suite/000-initial.md` 的 B08。同一断言两次失败，left 是 `None`，right 是 `Some(RowId { page_id: 2, slot_id: 0 })`。改前 `git diff 64352e33b5ec914e53ca631fcd965198308499e4 -- src tests/mvcc_abort_test.rs` 为空。产品代码自该观察之后没有变化，没有重跑这条测试。
+
+GREEN：
+
+- `cargo test --test mvcc_abort_test test_abort_update_reverts_to_previous_version -- --test-threads=1`：退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out`。failed 是 0。只跑了这一次。该文件另两个测试在 2 filtered out 里，没有运行。
+
+全量未跑。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None
+
+**未解决**
+
+本 Cycle 的 Acceptance 没有剩余项。父 Cycle 的 T4 仍是 blocked：这一次全量不声明通过，B08 未运行的 10 个目标不算通过。本 Cycle 不处理这两项。
