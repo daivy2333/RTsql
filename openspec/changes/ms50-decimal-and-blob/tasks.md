@@ -2,7 +2,7 @@
 
 对应路线：MS50 的值类型这一支。Gate 1：PASS，结论在 `proposal.md` 的 Gate 1 节。批准原文是「那就开始规划和实施这个ms，要求遵守各种规范，尤其是多批次串行测试规范，本次最多进行一次全量」。不是跳过。本文件不更新全局里程碑状态。
 
-Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-decimal-blob/000-initial.md`，Review Result 为 `rework-required`。返工结论在 `iterations/000-decimal-blob/001-rework.md`，Review Result 为 `accepted`。Iteration 001 的首轮执行依据是 `iterations/001-full-suite/000-initial.md`，Plan Context 为 ready，Act Response 为 blocked，Review Result 为 `replan-required`。后继执行依据是 `iterations/001-full-suite/001-replan.md`，Plan Context 为 ready，Act Response 为 reported，Review Result 为 `accepted`。这一次全量仍不声明通过。
+Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-decimal-blob/000-initial.md`，Review Result 为 `rework-required`。返工结论在 `iterations/000-decimal-blob/001-rework.md`，Review Result 为 `accepted`。Iteration 001 的首轮执行依据是 `iterations/001-full-suite/000-initial.md`，Plan Context 为 ready，Act Response 为 blocked，Review Result 为 `replan-required`。后继执行依据是 `iterations/001-full-suite/001-replan.md`，Plan Context 为 ready，Act Response 为 reported，Review Result 为 `accepted`。当前执行依据是 `iterations/001-full-suite/002-replan.md`，Plan Context 为 ready。4.1 仍未勾选。补齐完成前保持这个状态，也不写成又跑了一遍全量。
 
 与 `ms50-result-consumption` 无依赖。两个分支都从当前 master 拉出。
 
@@ -13,6 +13,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 - 000 的返工：执行依据是 `iterations/000-decimal-blob/001-rework.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `accepted`。NUMERIC、字节别名和 BLOB 主键三处缺口已关闭。
 - 001：首轮执行依据是 `iterations/001-full-suite/000-initial.md`。Plan Context 为 ready。Act Response 为 blocked。Review Result 为 `replan-required`。这一次全量已跑完。文件批 B08 两次退出码 101。其中 10 个目标没有运行，不算通过。没有改产品代码。
 - 001 的 replan：执行依据是 `iterations/001-full-suite/001-replan.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `accepted`。只改了那条中止夹具的前版本首字节。定向命令退出码 0，failed 为 0。没有改产品代码。没有跑全量，也不声明这一次全量通过。
+- 001 的补齐：执行依据是 `iterations/001-full-suite/002-replan.md`。Plan Context 为 ready。尚未执行。只补跑 B08 从未运行的 10 个目标，再跑已修改的那一条中止测试。已通过的批不重跑，也不另开一遍全量。
 - Persisted Evidence：none。
 - 跳过项：Iteration 000 不做全量。理由见下。
 
@@ -23,7 +24,7 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 | T1 | 000 | 无 | 新标签往返；旧 tuple 仍可读；1.50 与 1.5 数值相等 | 完成 |
 | T2 | 000 | T1 | 声明、精确写入、比较、重开、超页、dump 往返、算术拒绝 | 完成 |
 | T3 | 000 | T1 | G1 样本打开、查询、写入 | 完成 |
-| T4 | 001 | 000 accepted | 本里程碑唯一一次 M19 全量分批 | blocked |
+| T4 | 001 | 000 accepted | 这一次全量的已通过部分沿用；中断批的剩余目标和修复后的那条测试补齐。不写成又跑了一遍全量 | blocked |
 | T5 | 001 | T4 的这一次全量已经跑完 | 中止夹具的前版本重新不可解码，索引在中止后指回 v1 | 完成 |
 
 ## Iteration Plan
@@ -41,12 +42,12 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 - Tasks: T4, T5
 - Depends on: 000 accepted
-- Stable result: 这一次分批全量已经跑完，而且是两个变更合计的唯一一次。B08 没有通过。该批里没有运行的 10 个目标不算通过。T5 只证明那条中止夹具回到「前版本不可解码，索引沿手写键指回 v1」。不声明第二次全量，也不声明这一次全量通过。
-- Verification boundary: T4 的全量已经按 M19 执行过，不再执行。已通过的批不重跑。B08 剩下的 10 个目标不补跑。T5 只跑 `cargo test --test mvcc_abort_test test_abort_update_reverts_to_previous_version -- --test-threads=1`。
-- Diagnostic boundary: 该用例 v1 负载的首字节与 `TAG_BLOB = 0x0A`。不改事务回滚分支，不改值标签，不改 tuple 解码。
-- Non-goals: 第二次全量。补跑 B08 其余目标。改标签、解码或中止语义。用这次失败给 DECIMAL 或 BLOB 加新行为。
+- Stable result: 这一次分批全量仍是两个变更合计的唯一一次。已通过的批保持原记录。B08 从未运行的 10 个目标，以及修复后的那一条中止测试，按 `iterations/001-full-suite/002-replan.md` 补齐。这些命令全部退出码 0 且 failed 为 0 时，T4 记为：这一次全量的已通过部分沿用，中断批的剩余目标和修复后的那条测试补齐。不写成又跑了一遍全量。T5 已完成，不重开。补齐完成前，4.1 不勾选。
+- Verification boundary: 不重跑 B00–B07、B09–B14，也不重跑 B08 里已经 failed 为 0 的 `memory_db_test`。10 个未运行目标各一条 `cargo test --test <名> -- --test-threads=1`，然后一条中止测试。上一条退出后才启动下一条。不把它们合成一条命令，也不和已通过目标放在一起。不跑第二遍全量。
+- Diagnostic boundary: 某条命令退出码非 0 或 failed 非 0 时停在该命令。不改产品代码，不改其他测试，不改标签、解码或中止语义。
+- Non-goals: 第二遍全量。重跑已通过的批和 `memory_db_test`。重跑 `mvcc_abort_test` 里另外两条。改产品代码或其他测试。改标签、解码或中止语义。
 
-平衡审计：000 的三步合在一起才是「能声明、写入、比较、读回，并且旧库有明确结果」。只做标签或只做旧库都还不是这个结果，所以不拆成多个 Iteration。001 的全量与 000 的故障域不同，单独成轮。T5 只闭合这次全量已经打到的那一处标签碰撞，不构成另一项可独立交付的结果，所以留在 001，不另开一轮。目录仍是 `iterations/001-full-suite/`。后继文件是 `001-replan.md`。
+平衡审计：000 的三步合在一起才是「能声明、写入、比较、读回，并且旧库有明确结果」。只做标签或只做旧库都还不是这个结果，所以不拆成多个 Iteration。001 的全量与 000 的故障域不同，单独成轮。T5 只闭合这次全量已经打到的那一处标签碰撞，不构成另一项可独立交付的结果，所以留在 001。补齐仍是 T4 的剩余证明，和已经跑过的那一次全量是同一个结果，不另开一轮。目录仍是 `iterations/001-full-suite/`。`000-initial.md` 与 `001-replan.md` 已冻结。当前后继文件是 `002-replan.md`。
 
 ## 1. 值与标签（Iteration 000）
 
@@ -62,9 +63,9 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 ## 4. 全量（Iteration 001）
 
-- [ ] 4.1 T4：按 `iterations/001-full-suite/000-initial.md` 执行。按下面的分批方式跑一次。这是整个 MS50 的唯一一次全量。`ms50-result-consumption` 不另跑。本轮不改产品代码。
+- [ ] 4.1 T4：15 批已经跑过一次，记录在 `iterations/001-full-suite/000-initial.md`。那是整个 MS50 的唯一一次全量，不再执行。`ms50-result-consumption` 不另跑。剩下的证明按 `iterations/001-full-suite/002-replan.md` 补齐。不改产品代码，不改其他测试。
 
-分批是通过条件的一部分：
+下面 1 到 9 记录已经执行过的那一次分批，只保留现场，不再执行。当前通过条件是本节末尾的完成口径。
 
 1. 任何测试调用都带 `--test-threads=1`。禁止默认并行度。
 2. 执行时重新枚举 `ls tests/*.rs | sort`，数量为 N。不把规划时的文件数写死。
@@ -78,13 +79,17 @@ Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iteratio
 
 本轮两个分支没有代码依赖。执行时树上有什么，这一次就覆盖什么。不为了带上另一个分支再增加一次全量。
 
-执行记录在 `iterations/001-full-suite/000-initial.md` 的 Act Response，状态是 blocked。15 批都已启动。B08 两次退出码 101，failed 为 1。该批在失败目标之后的 10 个目标两次都没有运行，不算通过。4.1 未勾选。Review Result 为 `replan-required`。这一次全量不再执行。
+执行记录在 `iterations/001-full-suite/000-initial.md` 的 Act Response，状态是 blocked。15 批都已启动。B08 两次退出码 101，failed 为 1。该批失败点之前的 `memory_db_test` 汇总 failed 为 0。其后 10 个目标两次都没有运行，不算通过。B00–B07 与 B09–B14 退出码 0，failed 为 0。4.1 未勾选。`000-initial.md` 的 Review Result 为 `replan-required`。那 15 批不再执行。
+
+完成口径在 `iterations/001-full-suite/002-replan.md`。10 个未运行目标逐条补跑，再跑 `cargo test --test mvcc_abort_test test_abort_update_reverts_to_previous_version -- --test-threads=1`。全部退出码 0 且 failed 为 0 时，4.1 记为：这一次全量的已通过部分沿用，中断批的剩余目标和修复后的那条测试补齐。不写成又跑了一遍全量。任一命令退出码非 0 或 failed 非 0 时，4.1 保持未勾选，该 Cycle 的 Act Response 为 blocked，不改产品代码，不改其他测试。
 
 ## 5. 中止夹具回到不可解码回退（Iteration 001）
 
 - [x] 5.1 T5：按 `iterations/001-full-suite/001-replan.md` 执行。只改 `test_abort_update_reverts_to_previous_version` 的 v1 负载首字节。证明命令是 `cargo test --test mvcc_abort_test test_abort_update_reverts_to_previous_version -- --test-threads=1`。不跑全量，不补跑 B08 其余目标。
 
-执行记录在 `iterations/001-full-suite/001-replan.md` 的 Act Response，状态是 reported。定向命令退出码 0，failed 为 0。没有改产品代码。没有跑全量。Review Result 为 `accepted`。全量仍不声明通过。
+执行记录在 `iterations/001-full-suite/001-replan.md` 的 Act Response，状态是 reported。定向命令退出码 0，failed 为 0。没有改产品代码。没有跑全量。Review Result 为 `accepted`。全量仍按 4.1 的口径未完成。
+
+T5 保持勾选，不重开。5.1 里的「不补跑」只约束 T5。T4 剩下的命令在 4.1 和 `002-replan.md`。
 
 ## 完整性
 
