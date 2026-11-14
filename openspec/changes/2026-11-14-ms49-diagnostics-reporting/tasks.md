@@ -2,7 +2,7 @@
 
 对应路线：MS49。Gate 1：PASS，结论在 `proposal.md` 的 Gate 1 节。批准原文是「很好，按你推荐的来就行，默认全局最优」，加上提案里已锁定的六项口径。不是跳过。本文件不更新全局里程碑状态。
 
-Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-stage-reporting/000-initial.md`。Iteration 001 的结论在 `iterations/001-comparison-metrics/000-initial.md`。这两个 Cycle 的 Plan Context 都为 ready。
+Gate 2：PASS。无 BLOCKED，无 SKIPPED。Iteration 000 的结论在 `iterations/000-stage-reporting/000-initial.md`。Iteration 001 的结论在 `iterations/001-comparison-metrics/000-initial.md`。Iteration 002 的结论在 `iterations/002-full-suite/000-initial.md`。这三个 Cycle 的 Plan Context 都为 ready。
 
 M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
@@ -10,8 +10,8 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/unified-diagnostics/spec.md`。
 - 000：执行依据是 `iterations/000-stage-reporting/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。
-- 001：执行依据是 `iterations/001-comparison-metrics/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。
-- 002：只列在下面的 Iteration Plan 里，不建目录。
+- 001：执行依据是 `iterations/001-comparison-metrics/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。
+- 002：执行依据是 `iterations/002-full-suite/000-initial.md`。Plan Context 为 ready。尚未实施。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -98,7 +98,7 @@ cargo test --offline --test diagnostics_facade_test -- --test-threads=1
 
 - Tasks: T3
 - Depends on: Iteration 000 accepted
-- 状态：已展开。Plan Context 为 ready。执行依据是 `iterations/001-comparison-metrics/000-initial.md`。尚未实施。
+- 状态：Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。目录已展开。执行依据是 `iterations/001-comparison-metrics/000-initial.md`。
 - Stable result: 调用方从 `diagnostic_summaries` 和 `segment_metrics` / `process_memory_peak_bytes` 读到首行等待、吞吐、P95 和 Linux 进程峰值。上限为 0 的查询仍返回原行。指标不在结果列里。
 - Verification boundary: 本节 T3 的三条定向命令，均带 `--test-threads=1`。不跑全量。
 - Diagnostic boundary: `Summary` 的三个新字段、`execute_executor` 的行收集、`segment_metrics` 与 `process_memory_peak_bytes`。五段 `record_stage` 接线不在本轮重做。
@@ -110,7 +110,7 @@ cargo test --offline --test diagnostics_facade_test -- --test-threads=1
 
 - Tasks: T4
 - Depends on: Iteration 001 accepted
-- 状态：未展开。
+- 状态：已展开。Plan Context 为 ready。执行依据是 `iterations/002-full-suite/000-initial.md`。尚未实施。
 - Stable result: 默认构建上按 M19 分批串行的一次全量，每批退出码 0 且 failed 为 0，目标对账无缺无重。
 - Verification boundary: 本节 T4 的分批方式。只此一次。失败批只整批复核一次。
 - Diagnostic boundary: 按失败测试所在的批和目标文件定位。不把全量失败当成修改分批规则的理由。分批条件不满足时回到计划，不在本轮里改公式。
