@@ -102,3 +102,64 @@ Gate 2：PASS。无 BLOCKED。无 SKIPPED。
 ## Plan Review
 
 - Review Result: pending
+
+## Act Response
+
+- Status: reported
+
+**实际改动**
+
+没有产品代码或测试改动。本 Cycle 只更新 change 内的 `tasks.md`（T4 完成，Iteration 002 的 Act Response 为 reported，Review Result 仍为 pending）和本文件的 Act Response。
+
+**与计划的偏差**
+
+无。
+
+**枚举与分批**
+
+执行时在工作树根目录运行 `ls tests/*.rs | sort`。N = 165。B = (N + 11) / 12 = 14。K = B × 12 − N = 3。K 小于等于 B。前 3 个文件批各 11 个文件，其余 11 个文件批各 12 个文件，都在 8 到 12。文件批数为 14。加上第一批 `--lib --bins`，共 15 批。
+
+**对账**
+
+通过。全部 `--test` 名字集合等于这次枚举的 165 个名字，无缺失、无多余、无重复。名字按这次排序切分：前 33 个名字分入 3 个 11 文件批，后 132 个名字分入 11 个 12 文件批。`--lib` 和 `--bins` 只出现在第一批。`diagnostics_comparison_test`、`diagnostics_facade_test`、`diagnostics_statement_test` 都在枚举集合中，位于第 5 批。
+
+**自检**
+
+Gate 3：PASS。分批命令、串行、`--offline` 和 `--test-threads=1` 与 Task Definition 一致。开跑前产品代码 diff 为空，结束后仍为空。没有新增判定脚本。
+Gate 4：PASS。15 批都已运行，退出码都是 0，每一行汇总 `test result:` 的 failed 都是 0。
+Gate 5：未命中。
+没有遗留问题。
+
+**验证**
+
+没有批次复核。每一行下面的 failed 都是该行汇总 `test result:` 的 failed 计数。
+
+- 批 1：`cargo test --offline --lib --bins -- --test-threads=1`。退出码 0。failed：0，0。
+- 批 2：11 个 `--test`，从 `aggregate_extension_test` 到 `cache_perf_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0。
+- 批 3：11 个 `--test`，从 `catalog_bounded_read_test` 到 `composite_index_lifecycle_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0。
+- 批 4：11 个 `--test`，从 `composite_index_runtime_test` 到 `database_file_lock_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0。
+- 批 5：12 个 `--test`，从 `datetime_function_test` 到 `diagnostics_statement_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 6：12 个 `--test`，从 `diagnostics_wait_test` 到 `file_header_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 7：12 个 `--test`，从 `file_storage_io_test` 到 `index_range_routing_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 8：12 个 `--test`，从 `index_read_bounded_read_test` 到 `limit_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 9：12 个 `--test`，从 `memory_db_test` 到 `overflow_page_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 10：12 个 `--test`，从 `param_binding_test` 到 `prepared_statement_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 11：12 个 `--test`，从 `projection_expression_test` 到 `recovery_wal_convergence_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 12：12 个 `--test`，从 `release_durability_precondition_test` 到 `set_operations_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 13：12 个 `--test`，从 `sort_merge_join_test` 到 `subset_insert_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 14：12 个 `--test`，从 `sync_loader_test` 到 `version_chain_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+- 批 15：12 个 `--test`，从 `view_test` 到 `write_type_conformance_test`。退出码 0。failed：0，0，0，0，0，0，0，0，0，0，0，0。
+
+产品代码相对开跑前没有改动。`git status` 与 `git diff` 只含本 change 的 `tasks.md` 和本 Cycle 文件。
+
+**Persisted Evidence**
+
+None required。
+
+**Experience Candidates**
+
+None
+
+**未解决问题**
+
+无。

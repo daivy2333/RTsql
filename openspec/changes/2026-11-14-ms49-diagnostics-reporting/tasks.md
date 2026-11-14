@@ -11,7 +11,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/unified-diagnostics/spec.md`。
 - 000：执行依据是 `iterations/000-stage-reporting/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。
 - 001：执行依据是 `iterations/001-comparison-metrics/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 accepted。
-- 002：执行依据是 `iterations/002-full-suite/000-initial.md`。Plan Context 为 ready。尚未实施。
+- 002：执行依据是 `iterations/002-full-suite/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -22,7 +22,7 @@ M23 只覆盖实施中新发现的实质缺陷。本计划不预建那一轮。
 | T1 | 000 | 无 | 三个流水线子指标进入阶段树；插入的执行独占加上 creation、execution、commit 等于执行包含耗时；SQL 结果不变 | 完成 |
 | T2 | 000 | T1 | 两个索引子指标进入阶段树；页读和提交等待的归属不变；旧表仍打印索引子指标 | 完成 |
 | T3 | 001 | 000 accepted | 首行等待、交回行数、吞吐、P95、进程峰值可从保留摘要和进程读出；上限 0 仍不计预算字节 | 完成 |
-| T4 | 002 | 001 accepted | M19 分批全量一次，每批退出码 0 且 failed 为 0 | 未开始 |
+| T4 | 002 | 001 accepted | M19 分批全量一次，每批退出码 0 且 failed 为 0 | 完成 |
 
 ## 1. 流水线子指标（Iteration 000）
 
@@ -65,7 +65,7 @@ cargo test --offline --test diagnostics_facade_test -- --test-threads=1
 
 ## 4. 收尾全量（Iteration 002）
 
-- [ ] 4.1 T4：001 被接受之后才展开本轮。按下面的分批方式跑一次全量。这是整个变更的唯一一次全量。本轮不改产品代码。不写「通过后再跑一次全量」。
+- [x] 4.1 T4：001 被接受之后才展开本轮。按下面的分批方式跑一次全量。这是整个变更的唯一一次全量。本轮不改产品代码。不写「通过后再跑一次全量」。
 
 分批是通过条件的一部分：
 
@@ -110,7 +110,7 @@ cargo test --offline --test diagnostics_facade_test -- --test-threads=1
 
 - Tasks: T4
 - Depends on: Iteration 001 accepted
-- 状态：已展开。Plan Context 为 ready。执行依据是 `iterations/002-full-suite/000-initial.md`。尚未实施。
+- 状态：已展开。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。执行依据是 `iterations/002-full-suite/000-initial.md`。
 - Stable result: 默认构建上按 M19 分批串行的一次全量，每批退出码 0 且 failed 为 0，目标对账无缺无重。
 - Verification boundary: 本节 T4 的分批方式。只此一次。失败批只整批复核一次。
 - Diagnostic boundary: 按失败测试所在的批和目标文件定位。不把全量失败当成修改分批规则的理由。分批条件不满足时回到计划，不在本轮里改公式。
