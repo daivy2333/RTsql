@@ -2,8 +2,262 @@
 
 use super::ValueRef;
 use crate::storage::page_format::{Key, MAX_KEY_LEN};
+use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+
+/// Wire image of a DECIMAL value: `u8 scale` followed by little-endian `i128`.
+pub(crate) fn pack_decimal(coefficient: i128, scale: u8) -> [u8; 17] {
+    let mut bytes = [0u8; 17];
+    bytes[0] = scale;
+    bytes[1..].copy_from_slice(&coefficient.to_le_bytes());
+    bytes
+}
+
+pub(crate) fn unpack_decimal(bytes: &[u8]) -> (i128, u8) {
+    let scale = bytes[0];
+    let mut raw = [0u8; 16];
+    raw.copy_from_slice(&bytes[1..17]);
+    (i128::from_le_bytes(raw), scale)
+}
+
+/// Drop trailing zeros so 1.50 and 1.5 share one equality and hash image.
+pub(crate) fn canonical_decimal(mut coefficient: i128, mut scale: u8) -> (i128, u8) {
+    while scale > 0 && coefficient % 10 == 0 {
+        coefficient /= 10;
+        scale -= 1;
+    }
+    (coefficient, scale)
+}
+
+pub(crate) fn cmp_decimal(a_c: i128, a_s: u8, b_c: i128, b_s: u8) -> Ordering {
+    let (a_c, a_s) = canonical_decimal(a_c, a_s);
+    let (b_c, b_s) = canonical_decimal(b_c, b_s);
+    if a_s == b_s {
+        return a_c.cmp(&b_c);
+    }
+    if a_s < b_s {
+        cmp_scaled(a_c, b_s - a_s, b_c)
+    } else {
+        cmp_scaled(b_c, a_s - b_s, a_c).reverse()
+    }
+}
+
+/// Compare `coeff * 10^scale_up` with `other`. Overflow means the scaled
+/// magnitude does not fit in `i128`, so it is outside `other`'s range.
+fn cmp_scaled(coeff: i128, scale_up: u8, other: i128) -> Ordering {
+    let mut value = coeff;
+    for _ in 0..scale_up {
+        match value.checked_mul(10) {
+            Some(next) => value = next,
+            None => {
+                return if coeff >= 0 {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+        }
+    }
+    value.cmp(&other)
+}
+
+pub(crate) fn format_decimal(coefficient: i128, scale: u8) -> String {
+    let negative = coefficient < 0;
+    let digits = coefficient.unsigned_abs().to_string();
+    let places = scale as usize;
+    let body = if places == 0 {
+        digits
+    } else if digits.len() <= places {
+        format!("0.{digits:0>places$}")
+    } else {
+        let split = digits.len() - places;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if negative {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
+pub(crate) fn from_decimal_text(text: &str) -> Option<Value> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (negative, rest) = if let Some(rest) = text.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = text.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, text)
+    };
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
+    let (int_part, frac_part) = match rest.split_once('.') {
+        Some((int_part, frac_part)) => {
+            if frac_part.contains('.') {
+                return None;
+            }
+            (int_part, frac_part)
+        }
+        None => (rest, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    if frac_part.len() > u8::MAX as usize {
+        return None;
+    }
+    let digits = format!("{int_part}{frac_part}");
+    let trimmed = digits.trim_start_matches('0');
+    let coeff_text = if trimmed.is_empty() { "0" } else { trimmed };
+    let mut coefficient: i128 = coeff_text.parse().ok()?;
+    if negative {
+        coefficient = coefficient.checked_neg()?;
+    }
+    Some(Value::decimal(coefficient, frac_part.len() as u8))
+}
+
+pub(crate) fn from_hex_text(text: &str) -> Option<Value> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    let raw = text.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        let hi = hex_nibble(raw[index])?;
+        let lo = hex_nibble(raw[index + 1])?;
+        bytes.push((hi << 4) | lo);
+        index += 2;
+    }
+    Some(Value::Blob(bytes))
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decimal_digits(coefficient: i128) -> u32 {
+    let mut magnitude = coefficient.unsigned_abs();
+    if magnitude == 0 {
+        return 1;
+    }
+    let mut count = 0;
+    while magnitude > 0 {
+        magnitude /= 10;
+        count += 1;
+    }
+    count
+}
+
+/// Rescale to the column scale when every dropped digit is zero, and reject
+/// a coefficient that needs more digits than `precision`.
+pub(crate) fn fit_decimal(
+    coefficient: i128,
+    value_scale: u8,
+    precision: u8,
+    column_scale: u8,
+) -> Option<(i128, u8)> {
+    let mut coefficient = coefficient;
+    let mut scale = value_scale;
+    if scale > column_scale {
+        for _ in 0..(scale - column_scale) {
+            if coefficient % 10 != 0 {
+                return None;
+            }
+            coefficient /= 10;
+            scale -= 1;
+        }
+    } else {
+        for _ in 0..(column_scale - scale) {
+            coefficient = coefficient.checked_mul(10)?;
+            scale += 1;
+        }
+    }
+    if decimal_digits(coefficient) > u32::from(precision) {
+        return None;
+    }
+    Some((coefficient, scale))
+}
+
+pub(crate) fn coerce_decimal_blob_write(
+    value: &Value,
+    column: &crate::storage::page_format::ColumnType,
+    column_name: &str,
+) -> Result<Value, crate::storage::StorageError> {
+    use crate::storage::page_format::ColumnType as SchemaColumnType;
+    use crate::storage::StorageError;
+
+    let mismatch = |expected: String, actual: &str| StorageError::ColumnTypeMismatch {
+        column: column_name.to_string(),
+        expected,
+        actual: actual.to_string(),
+    };
+    match column {
+        SchemaColumnType::Decimal { precision, scale } => {
+            if value.is_null() {
+                return Ok(Value::Null);
+            }
+            let expected = format!("DECIMAL({precision},{scale})");
+            let (coefficient, value_scale) = match value {
+                Value::Decimal(bytes) => unpack_decimal(bytes),
+                Value::Int(n) => (*n as i128, 0),
+                Value::String(text) => from_decimal_text(text)
+                    .and_then(|parsed| parsed.decimal_parts())
+                    .ok_or_else(|| mismatch(expected.clone(), "String"))?,
+                Value::Float(_) => return Err(mismatch(expected, "Float")),
+                other => {
+                    return Err(mismatch(expected, &other_type_name(other)));
+                }
+            };
+            let Some((coefficient, scale)) =
+                fit_decimal(coefficient, value_scale, *precision, *scale)
+            else {
+                return Err(mismatch(expected, &value.to_string()));
+            };
+            Ok(Value::decimal(coefficient, scale))
+        }
+        SchemaColumnType::Blob => match value {
+            Value::Null => Ok(Value::Null),
+            Value::Blob(bytes) => Ok(Value::Blob(bytes.clone())),
+            other => Err(mismatch("BLOB".to_string(), &other_type_name(other))),
+        },
+        _ => Ok(value.clone()),
+    }
+}
+
+fn other_type_name(value: &Value) -> String {
+    match value {
+        Value::Int(_) => "Int".to_string(),
+        Value::String(_) => "String".to_string(),
+        Value::Null => "Null".to_string(),
+        Value::Float(_) => "Float".to_string(),
+        Value::Bool(_) => "Bool".to_string(),
+        Value::Date(_) => "Date".to_string(),
+        Value::Timestamp(_) => "Timestamp".to_string(),
+        Value::Decimal(_) => "Decimal".to_string(),
+        Value::Blob(_) => "Blob".to_string(),
+    }
+}
+
+pub(crate) fn format_blob_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
 
 /// SQL 列类型（M9: 支持 Int/String/Null/Float/Bool；MS13: + Date/Timestamp）
 #[derive(Debug, Clone, PartialEq)]
@@ -20,6 +274,10 @@ pub enum ColumnType {
     Date,
     /// 时间戳类型（TIMESTAMP，MS13：Unix epoch 微秒，无时区）
     Timestamp,
+    /// 精确小数。`precision` 为总位数，`scale` 为小数位数。
+    Decimal { precision: u8, scale: u8 },
+    /// 字节串。声明不带长度。
+    Blob,
 }
 
 /// 值类型错误
@@ -46,7 +304,7 @@ impl fmt::Display for ValueError {
 impl std::error::Error for ValueError {}
 
 /// SQL 值类型（M4: 仅支持 Int/String/Null）
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     /// 整数值
     Int(i64),
@@ -62,6 +320,31 @@ pub enum Value {
     Date(i32),
     /// 时间戳值（MS13: 新增，Unix epoch 微秒，无时区）
     Timestamp(i64),
+    /// 精确小数。负载是 `u8 scale` 加小端 `i128`。相等比较使用规范形。
+    Decimal([u8; 17]),
+    /// 原始字节。
+    Blob(Vec<u8>),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Date(a), Value::Date(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            (Value::Decimal(a), Value::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                canonical_decimal(ca, sa) == canonical_decimal(cb, sb)
+            }
+            (Value::Blob(a), Value::Blob(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 // 手动实现 Eq，因为 f64 不实现 Eq
@@ -82,11 +365,31 @@ impl Hash for Value {
             Value::Bool(b) => b.hash(state),
             Value::Date(d) => d.hash(state),
             Value::Timestamp(t) => t.hash(state),
+            Value::Decimal(bytes) => {
+                let (coefficient, scale) = unpack_decimal(bytes);
+                let (coefficient, scale) = canonical_decimal(coefficient, scale);
+                coefficient.hash(state);
+                scale.hash(state);
+            }
+            Value::Blob(bytes) => bytes.hash(state),
         }
     }
 }
 
 impl Value {
+    /// 由系数和小数位数构造 DECIMAL。往返保留传入的 scale，不在这里归一。
+    pub fn decimal(coefficient: i128, scale: u8) -> Self {
+        Value::Decimal(pack_decimal(coefficient, scale))
+    }
+
+    /// 存储形态的系数和 scale。不是规范形。
+    pub fn decimal_parts(&self) -> Option<(i128, u8)> {
+        match self {
+            Value::Decimal(bytes) => Some(unpack_decimal(bytes)),
+            _ => None,
+        }
+    }
+
     /// 转换为 Key（用于索引查找）
     /// 仅 Int 类型支持，返回其 big-endian 字节表示
     pub fn to_key(&self) -> Option<Key> {
@@ -96,9 +399,8 @@ impl Value {
                 Some(Key::new(&bytes))
             }
             Value::String(_) | Value::Null | Value::Float(_) | Value::Bool(_) => None,
-            // MS13: Date/Timestamp 不可键控（DA2——Date 列作 PK 走 MS16 非
-            // Int 键列路由回退，B-Tree 零改动）
-            Value::Date(_) | Value::Timestamp(_) => None,
+            // Date/Timestamp/Decimal/Blob 不可键控。非 Int 主键走数据页。
+            Value::Date(_) | Value::Timestamp(_) | Value::Decimal(_) | Value::Blob(_) => None,
         }
     }
 
@@ -121,7 +423,9 @@ impl Value {
             SchemaColumnType::Float
             | SchemaColumnType::Bool
             | SchemaColumnType::Date
-            | SchemaColumnType::Timestamp => None,
+            | SchemaColumnType::Timestamp
+            | SchemaColumnType::Decimal { .. }
+            | SchemaColumnType::Blob => None,
         }
     }
 
@@ -166,6 +470,12 @@ impl Value {
             // MS13: 日期族同类型比较（跨族由兜底返回 false）
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            (Value::Decimal(a), Value::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                canonical_decimal(ca, sa) == canonical_decimal(cb, sb)
+            }
+            (Value::Blob(a), Value::Blob(b)) => a == b,
 
             // 跨类型比较：Int vs Float（隐式转换）
             (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
@@ -190,6 +500,12 @@ impl Value {
             // MS13: 日期族同类型时间序比较
             (Value::Date(a), Value::Date(b)) => Ok(a > b),
             (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a > b),
+            (Value::Decimal(a), Value::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                Ok(cmp_decimal(ca, sa, cb, sb) == Ordering::Greater)
+            }
+            (Value::Blob(a), Value::Blob(b)) => Ok(a > b),
 
             // 跨类型比较：Int vs Float
             (Value::Int(a), Value::Float(b)) => Ok((*a as f64) > *b),
@@ -214,6 +530,12 @@ impl Value {
             // MS13: 日期族同类型时间序比较
             (Value::Date(a), Value::Date(b)) => Ok(a < b),
             (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a < b),
+            (Value::Decimal(a), Value::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                Ok(cmp_decimal(ca, sa, cb, sb) == Ordering::Less)
+            }
+            (Value::Blob(a), Value::Blob(b)) => Ok(a < b),
 
             // 跨类型比较：Int vs Float
             (Value::Int(a), Value::Float(b)) => Ok((*a as f64) < *b),
@@ -238,6 +560,12 @@ impl Value {
             // MS13: 日期族同类型时间序比较
             (Value::Date(a), Value::Date(b)) => Ok(a >= b),
             (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a >= b),
+            (Value::Decimal(a), Value::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                Ok(cmp_decimal(ca, sa, cb, sb) != Ordering::Less)
+            }
+            (Value::Blob(a), Value::Blob(b)) => Ok(a >= b),
 
             // 跨类型比较：Int vs Float
             (Value::Int(a), Value::Float(b)) => Ok((*a as f64) >= *b),
@@ -262,6 +590,12 @@ impl Value {
             // MS13: 日期族同类型时间序比较
             (Value::Date(a), Value::Date(b)) => Ok(a <= b),
             (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a <= b),
+            (Value::Decimal(a), Value::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                Ok(cmp_decimal(ca, sa, cb, sb) != Ordering::Greater)
+            }
+            (Value::Blob(a), Value::Blob(b)) => Ok(a <= b),
 
             // 跨类型比较：Int vs Float
             (Value::Int(a), Value::Float(b)) => Ok((*a as f64) <= *b),
@@ -295,6 +629,12 @@ impl Value {
             // MS13: 日期族同类型 MIN/MAX 比较（跨族 false 兜底不变）
             (Value::Date(a), Value::Date(b)) => a < b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a < b,
+            (Value::Decimal(a), Value::Decimal(b)) => {
+                let (ca, sa) = unpack_decimal(a);
+                let (cb, sb) = unpack_decimal(b);
+                cmp_decimal(ca, sa, cb, sb) == Ordering::Less
+            }
+            (Value::Blob(a), Value::Blob(b)) => a < b,
             _ => false,
         }
     }
@@ -321,6 +661,8 @@ impl Value {
             Value::Bool(b) => ValueRef::Bool(*b),
             Value::Date(d) => ValueRef::Date(*d),
             Value::Timestamp(t) => ValueRef::Timestamp(*t),
+            Value::Decimal(bytes) => ValueRef::Decimal(bytes),
+            Value::Blob(bytes) => ValueRef::Blob(bytes),
         }
     }
 
@@ -554,6 +896,11 @@ impl fmt::Display for Value {
             // MS13: DA5 显示格式（日期族不带引号）
             Value::Date(d) => write!(f, "{}", super::datetime::format_date(*d)),
             Value::Timestamp(t) => write!(f, "{}", super::datetime::format_timestamp(*t)),
+            Value::Decimal(bytes) => {
+                let (coefficient, scale) = unpack_decimal(bytes);
+                write!(f, "{}", format_decimal(coefficient, scale))
+            }
+            Value::Blob(bytes) => write!(f, "{}", format_blob_hex(bytes)),
         }
     }
 }

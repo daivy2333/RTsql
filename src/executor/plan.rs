@@ -415,6 +415,11 @@ impl ColumnDef {
             // MS13: 日期族直映射（固定宽度负载，无长度参数）
             ColumnType::Date => StorageColumnType::Date,
             ColumnType::Timestamp => StorageColumnType::Timestamp,
+            ColumnType::Decimal { precision, scale } => StorageColumnType::Decimal {
+                precision: *precision,
+                scale: *scale,
+            },
+            ColumnType::Blob => StorageColumnType::Blob,
         };
 
         // 解析约束

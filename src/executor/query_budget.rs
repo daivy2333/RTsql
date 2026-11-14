@@ -2,7 +2,7 @@
 //!
 //! 语句入口按 `Database` 上限快照构造一个预算对象，随语句结束丢弃——计数
 //! 不跨语句。`limit == 0`（默认，未配置）时 charge/release 全部短路，零
-//! 行为差异。计费口径单源：非字符串值 16 字节，字符串 16 加字节长度。
+//! 行为差异。计费口径单源：DECIMAL 与其它非字符串值 16 字节，字符串和 BLOB 为 16 加字节长度。
 
 use crate::executor::Value;
 use crate::storage::StorageError;
@@ -12,11 +12,12 @@ use std::sync::Arc;
 /// 单个非字符串值的固定计费字节数（design D4 口径）。
 const VALUE_BYTES: u64 = 16;
 
-/// 驻留字节口径（design D4）：非字符串值（含 NULL）恒 16 字节；字符串
-/// 16 加字节长度。同一份值的每个驻留副本分别计费。
+/// 驻留字节口径：DECIMAL 与其它非字符串值（含 NULL）为 16 字节；字符串和
+/// BLOB 为 16 加字节长度。同一份值的每个驻留副本分别计费。
 pub(crate) fn value_bytes(value: &Value) -> u64 {
     match value {
         Value::String(s) => string_bytes(s),
+        Value::Blob(bytes) => VALUE_BYTES + bytes.len() as u64,
         _ => VALUE_BYTES,
     }
 }
@@ -168,6 +169,8 @@ mod tests {
         assert_eq!(value_bytes(&Value::Null), 16);
         assert_eq!(value_bytes(&Value::Float(1.5)), 16);
         assert_eq!(value_bytes(&Value::String("abc".to_string())), 19);
+        assert_eq!(value_bytes(&Value::decimal(150, 2)), 16);
+        assert_eq!(value_bytes(&Value::Blob(vec![1, 2, 3])), 19);
         assert_eq!(
             row_bytes(&[Value::Int(1), Value::String("ab".to_string())]),
             34

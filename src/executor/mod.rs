@@ -116,6 +116,7 @@ pub use subquery_eval::SubqueryEvalExecutor;
 pub use truncate::TruncateExecutor;
 pub use update::UpdateExecutor;
 pub use upsert::UpsertExecutor;
+pub(crate) use value::{from_decimal_text, from_hex_text};
 pub use value::{
     BoundMark, ColumnType, IndexColumnBound, RangeSentinel, SecondaryRangeBounds, Value, ValueError,
 };

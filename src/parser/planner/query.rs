@@ -2298,7 +2298,12 @@ impl PlanBuilder {
                         projection: proj_or_empty.clone(),
                     })
                 }
-            } else if let Some(route) = self.route_secondary_index(&table_name, where_expr)? {
+            } else if let Some(route) = match self.route_secondary_index(&table_name, where_expr) {
+                // 不可键控的字面量（BLOB 的十六进制）不是索引键。放弃路由后，
+                // 非 Int 主键等值继续走数据页，由列类型解析该字面量。
+                Err(PlanError::UnsupportedValue) => None,
+                other => other?,
+            } {
                 // 二级索引等值仍是 `IndexScanAll`，前缀和范围是 `IndexRangeScan`。
                 // `columns` 恒为基表全列，输出形状由 `projection` 决定。
                 match route {

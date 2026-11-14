@@ -103,6 +103,8 @@ pub fn row_description(columns: &[(/* name */ &str, /* sample value */ Value)]) 
             Value::Null => 0i32,
             Value::Date(_) => 1082i32,      // PostgreSQL date OID
             Value::Timestamp(_) => 1114i32, // PostgreSQL timestamp OID
+            Value::Decimal(_) => 1700i32,   // PostgreSQL numeric OID
+            Value::Blob(_) => 17i32,        // PostgreSQL bytea OID
         };
         fields_data.extend_from_slice(&type_oid.to_be_bytes());
 
@@ -115,6 +117,7 @@ pub fn row_description(columns: &[(/* name */ &str, /* sample value */ Value)]) 
             Value::Null => 0i16,
             Value::Date(_) => 4i16,
             Value::Timestamp(_) => 8i16,
+            Value::Decimal(_) | Value::Blob(_) => -1i16,
         };
         fields_data.extend_from_slice(&type_size.to_be_bytes());
 
@@ -178,6 +181,11 @@ pub fn data_row(row: &[Value]) -> Vec<u8> {
             }
             Value::Timestamp(t) => {
                 let text = crate::executor::datetime::format_timestamp(*t);
+                columns_data.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                columns_data.extend_from_slice(text.as_bytes());
+            }
+            Value::Decimal(_) | Value::Blob(_) => {
+                let text = value.to_string();
                 columns_data.extend_from_slice(&(text.len() as i32).to_be_bytes());
                 columns_data.extend_from_slice(text.as_bytes());
             }
