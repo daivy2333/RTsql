@@ -129,15 +129,31 @@ PASS。无 BLOCKED。无 SKIPPED。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未实施。
+没有阻塞本轮 Acceptance 的偏差。
+
+`Database::open_rows` 把 `PhysicalPlan::Analyze` 当成产行计划。`is_row_producing` 的排除清单里没有它，随后 `create_executor_from_plan` 返回内部错误，不交回计数。本轮验收的入口是 `execute_sql` / `execute_stage`。这是非阻塞 Minor。不要求当前 Cycle 修复。
+
+`choose_left_deep_order` 用 `u64` 做乘加，一步只取第一条连通边的除数，平手时比较书写顺序里的下标。规格正文写的是溢出 `u128`、本步每一条新边各除一次，以及严格更便宜的顺序按限定符名字典序取最小。星型例子里 `fact, d1, d2` 与 `fact, d2, d1` 在两种平手规则下都是前者。`u64::MAX` 的书写顺序在 `u64` 乘法处溢出，决定仍是不足以重排。六个规定输入的代价和决定都成立。这是非阻塞 Minor，原因是 Plan 把可观察验收收成这六个输入。不要求当前 Cycle 修复，001 调用现有函数，不改这套整数。
+
+1 字节预算的失败文本和 SQLSTATE 与规格一致。实现按扫描行的字节记账，并在 `summarize` 之前释放。规定场景是 1 字节上限加一个非 NULL 整数，这条观察已经满足。非阻塞 Minor。
+
+**Evidence**
+
+对照 merge-base `97d183c9777716e5d54e5596ea857aab2c7821d1` 到 HEAD `9139878df480a3da57500d245cb9591964b723e5` 的 diff，以及当前代码。
+
+- `src/parser/planner/query.rs` 只为 `PhysicalPlan::Analyze` 增加了输出列名。`build_from_clause_with_projection` 的叶序循环没有改。
+- `src/table_stats.rs` 的 `summarize` 用 `Value` 的 `==` 累计不同值。`choose_left_deep_order` 对星型输入得到书写代价 506、选中 `fact, d1, d2` 代价 408；排序合并例子是 90 与 80；四条哈希顺序都是 80 并保留 `a, b, c`；9 表和 `u64::MAX` 返回 `Insufficient`；`a, c, b` 不是合法顺序。
+- `src/pipeline.rs` 的 `execute_analyze` 在扫描前记下 `schema_version`，`commit_table_stats` 只替换当前表，然后清缓存并加一。`bump_schema_version` 清空全部统计。显式事务在 `execute_stage_in_tx_routed` 里于扫描前拒绝。
+- `src/parser/planner/mod.rs` 仍拒绝 `EXPLAIN ANALYZE`。失败原文与 `tests/table_statistics_test.rs`、`src/database.rs` 箱内测试中的断言一致。
+- 测试沿用 Act Response，覆盖未失效：`cargo test --offline --test table_statistics_test -- --test-threads=1` 退出码 0，12 passed；`cargo test --offline --lib table_stats -- --test-threads=1` 退出码 0，14 passed，446 filtered out。先行失败分别是退出码 101 的不支持语句，以及代价符号尚不存在的编译失败。没有跑全量。Persisted Evidence 为 none，不因缺少证据目录提出问题。
 
 **Follow-up Decision**
 
-等待实施。
+T1 的失败原文、版本戳和两表 EXPLAIN，以及 T2 的六个输入，都已满足。叶序逻辑没有提前替换。Iteration Plan 不变。001 按既有 Map 展开。
 
 **Next Cycle**
 
@@ -145,7 +161,7 @@ None
 
 **Next Iteration**
 
-None
+`iterations/001-estimated-leaf-order/000-initial.md`
 
 ## Act Response
 

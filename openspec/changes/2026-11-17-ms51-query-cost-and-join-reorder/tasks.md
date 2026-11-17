@@ -2,7 +2,7 @@
 
 对应路线：`.agents/docs/tasks.md` 的 MS51。Gate 1：PASS，依据在 `proposal.md` 的 Gate 1 节。目标注入同时批准了需求和已记录的方案。这不是跳过。本文件不修改全局路线、改进台账或 `openspec/specs/`。
 
-Gate 2：PASS。无 BLOCKED，无 SKIPPED。当前轮次的结论在 `iterations/000-session-statistics/000-initial.md`。001 与 002 只有下面的 Iteration Plan，不展开 Cycle。
+Gate 2：PASS。无 BLOCKED，无 SKIPPED。000 的 Review Result 为 `accepted`，结论在 `iterations/000-session-statistics/000-initial.md`。001 的当前 Cycle 是 `iterations/001-estimated-leaf-order/000-initial.md`，Plan Context 为 ready。002 只有下面的 Iteration Plan，不展开 Cycle。
 
 M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。本计划不预建。
 
@@ -11,8 +11,8 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/query-cost-and-join-order/spec.md`、`specs/explain-plan-output/spec.md`、`specs/sql-parameter-binding/spec.md`。
-- 000：执行依据是 `iterations/000-session-statistics/000-initial.md`。Plan Context 为 ready。T1 与 T2 已实施，Act Response 为 reported，Review Result 仍为 pending。
-- 001：未展开。展开条件是 000 的 Review Result 为 `accepted`。
+- 000：执行依据是 `iterations/000-session-statistics/000-initial.md`。Plan Context 为 ready。Act Response 为 reported，Review Result 为 `accepted`。
+- 001：已展开。执行依据是 `iterations/001-estimated-leaf-order/000-initial.md`。Plan Context 为 ready。尚未实施。
 - 002：未展开。展开条件是 001 的 Review Result 为 `accepted`。
 - Persisted Evidence：none。
 - 跳过项：无。
