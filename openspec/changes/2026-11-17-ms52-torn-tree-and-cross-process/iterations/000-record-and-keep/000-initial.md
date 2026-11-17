@@ -201,4 +201,36 @@ Experience Candidates：None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+本轮四条验收都有记录，产品树仍停在测量时的代码。没有构成阻塞的偏差，也没有要留下的 Minor。偏差分类里没有 Plan 遗漏、Plan 错误、Act 偏离、现状变化或新证据。
+
+范围外的实质缺陷没有新的候选。空闲页重建放弃仍是 `database.rs` 里失败后继续打开的原有路径，计划已经写明不登记。
+
+**Acceptance Gaps**
+
+无。
+
+**Evidence**
+
+计时和锁等待沿用本文件 Act Response，不重跑。该节的表含有 10000 行与 40000 行的不洁打开、检查点后打开和行数。10000 行不洁打开 536.642784ms，行数 10000，检查点后打开 24.985182ms。40000 行不洁打开 3.81395909s，行数 40000，检查点后打开 100.101745ms。锁等待是退出码 4、306ms，以及退出码 0、5ms、stdout 为 `{"columns":["id"],"rows":[[1]]}`。同一节写了「不改刷盘，不改驱逐，不改「有重放就重建索引」」和「跨进程一写多读不成立，保持独占锁和共享锁」。
+
+Act 在 `3f95a874fd45ef55bf844a80ceb7e9aeac1357fc` 上执行 `git diff 0019bf127df5304f26e89927e336150fc6472b11 -- src tests Cargo.toml`，无输出，退出码 0。其后的 `c9ff98e0a24dab4b18abc1f4f88b3573f57d15bb` 只提交文档。因为结论产生后 HEAD 变了，本次只读核对了 merge-base `0019bf127df5304f26e89927e336150fc6472b11` 到 `c9ff98e` 的 diff：6 个文件都在 `openspec/changes/2026-11-17-ms52-torn-tree-and-cross-process/` 下。同一基点到 `src/`、`tests/`、`Cargo.toml` 的 diff 仍无输出，退出码 0。测量覆盖的代码没有变，空 diff 继续有效。没有新增测试，没有第二遍计时，没有全量。
+
+这些符号仍是测量时的行为。`BufferPool::evict_one` 按时钟选页，脏页复制后 `write_page`，写完若再次变脏就留在池内（`src/storage/buffer_pool.rs`）。`flush_all` 先收集脏页，再按收集顺序写出，失败时从失败页起交还脏标记。`CheckpointManager::checkpoint` 在非零工作路径调用 `flush_all`，随后写位点并 `rewrite_truncate`（`src/wal/checkpoint.rs`）。`redo_count > 0` 时调用 `rebuild_pk_indexes`；存在要重放的已提交数据记录时不走磁盘 B 树（`src/wal/recovery.rs`）。旧索引页类型非法时跳过子树（`src/storage/btree/index_manager.rs` 的 `collect_all_pages_tolerant`）。`open_with_lock` 使用 `try_lock`，`open_readonly_with_lock` 使用 `try_lock_shared`。`Database::close` 做检查点，不释放这把锁。`DatabaseLocked` 的 CLI 退出码是 4（`src/cli/mod.rs`）。
+
+Persisted Evidence 为 none。验收依据是 Act Response 里的命令和结果。
+
+**Follow-up Decision**
+
+验收已经满足，当前 Cycle 没有要修的缺口，也不需要新的执行依据。Iteration Plan 保持不变。按既有 Map 展开下一轮，只跑尚未开始的一次分批全量。整个目标的全量预算仍是这一次，返工不得再预算第二次。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`openspec/changes/2026-11-17-ms52-torn-tree-and-cross-process/iterations/001-batched-full/000-initial.md`
