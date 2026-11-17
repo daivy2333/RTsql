@@ -14,16 +14,19 @@ use super::expression::expr_to_column_name;
 use super::{CteDef, PlanBuilder};
 use crate::executor::{
     BoundMark, ColumnExpression, ColumnRef, DataScanNode, DistinctNode, ExpressionRef, FilterNode,
-    IndexColumnBound, IndexRangeScanNode, IndexScanAllNode, IndexScanNode, OrderByColumn,
-    OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode, RangeSentinel, ScanNode, SetOpKind,
-    SetOperationNode, SortNode, Value,
+    IndexColumnBound, IndexRangeScanNode, IndexScanAllNode, IndexScanNode, JoinCondition, JoinNode,
+    JoinSide, OrderByColumn, OutputColumn, PhysicalPlan, ProjectionItem, ProjectionNode,
+    RangeSentinel, ScanNode, SetOpKind, SetOperationNode, SortNode, Value,
 };
+use crate::table_stats::{choose_left_deep_order, EqEdge, LeafCard, LeftDeepChoice};
 use crate::parser::ast::*;
 use crate::parser::error::PlanError;
 use crate::parser::placeholder::is_placeholder_value;
 use crate::parser::value::value_from_sqlparser;
 use crate::storage::page_format::{ColumnType, Key};
-use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Query, TableFactor};
+use sqlparser::ast::{
+    Expr, FunctionArg, FunctionArgExpr, JoinConstraint, JoinOperator, Query, Select, TableFactor,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -258,6 +261,12 @@ impl PlanBuilder {
             PhysicalPlan::SetOperation(node) => node.columns.clone(),
             // MS25 T6: EXPLAIN 输出恒单列 `plan`（表头与行宽一致，I034 纪律）
             PhysicalPlan::Explain(_) => vec!["plan".to_string()],
+            PhysicalPlan::Analyze(_) => vec![
+                "column".to_string(),
+                "row_count".to_string(),
+                "null_count".to_string(),
+                "ndv".to_string(),
+            ],
             // MS20 T4: CTAS 输出列名 = 物化表列名（= SELECT 输出表头，构造时
             // 已由 build_create_table_as_select 记录）。
             PhysicalPlan::CreateTableAsSelect(node) => node.columns.clone(),
@@ -1687,6 +1696,11 @@ impl PlanBuilder {
             select.selection.is_some() || projection_has_aggregates || !query.order_by.is_empty(),
             select_list_is_pure_column_list(select, &subquery_indices),
         )?;
+        let decision = self.decide_leaf_order(query, select, &base_plan, &combined_qualifiers);
+        if let Some(label) = decision.label {
+            self.join_order = Some(label.to_string());
+        }
+        let base_plan = decision.plan.unwrap_or(base_plan);
 
         // MS25 T8（design D9）：JOIN 基座的行布局——`base_plan` 的 `output_columns`
         // 就是 Sort/Aggregate 输入行的真实列序（无 WHERE 且无聚合 = 过滤后布局；
@@ -3608,6 +3622,463 @@ impl PlanBuilder {
             })
             .collect()
     }
+
+    /// 书写装配已经成功。下面每一条都成立时，按统计更换左深叶序。
+    /// 最外层输出列顺序和返回的限定符序保持书写装配的那一份。
+    fn decide_leaf_order(
+        &self,
+        query: &Query,
+        select: &Select,
+        plan: &PhysicalPlan,
+        qualifiers: &[String],
+    ) -> LeafOrderDecision {
+        if !self.join_reorder_candidate(query, select) {
+            return LeafOrderDecision {
+                label: None,
+                plan: None,
+            };
+        }
+        let Some(shape) = self.left_deep_shape(plan, qualifiers) else {
+            return LeafOrderDecision {
+                label: None,
+                plan: None,
+            };
+        };
+        let Some(cards) = self.cards_for_leaves(&shape.leaves) else {
+            return LeafOrderDecision {
+                label: None,
+                plan: None,
+            };
+        };
+        let written: Vec<&str> = shape
+            .leaves
+            .iter()
+            .map(|leaf| leaf.qualifier.as_str())
+            .collect();
+        let choice = choose_left_deep_order(&cards, &shape.edges, &written, |left, right| {
+            self.sort_merge_on_first_step(left, right, &shape.leaves, &shape.edges)
+        });
+        match choice {
+            LeftDeepChoice::Insufficient => LeafOrderDecision {
+                label: Some(JOIN_ORDER_WRITTEN),
+                plan: None,
+            },
+            LeftDeepChoice::Estimated { order, .. } => {
+                let same = order
+                    .iter()
+                    .map(String::as_str)
+                    .eq(written.iter().copied());
+                if same {
+                    LeafOrderDecision {
+                        label: Some(JOIN_ORDER_ESTIMATED),
+                        plan: None,
+                    }
+                } else if let Some(plan) = self.rebuild_estimated_tree(&shape, &order) {
+                    LeafOrderDecision {
+                        label: Some(JOIN_ORDER_ESTIMATED),
+                        plan: Some(plan),
+                    }
+                } else {
+                    LeafOrderDecision {
+                        label: None,
+                        plan: None,
+                    }
+                }
+            }
+        }
+    }
+
+    fn join_reorder_candidate(&self, query: &Query, select: &Select) -> bool {
+        if self.building_subquery || self.building_from_derived || !self.pending_cte_names.is_empty()
+        {
+            return false;
+        }
+        if query.order_by.is_empty()
+            || query.limit.is_some()
+            || query.offset.is_some()
+            || query.fetch.is_some()
+            || !query.limit_by.is_empty()
+        {
+            return false;
+        }
+        if select.from.len() != 1 || select.from[0].joins.len() < 2 {
+            return false;
+        }
+        select.from[0].joins.iter().all(|join| {
+            matches!(
+                &join.join_operator,
+                JoinOperator::Inner(JoinConstraint::On(expr)) if is_pure_equi_join_on(expr)
+            )
+        })
+    }
+
+    fn left_deep_shape(&self, plan: &PhysicalPlan, qualifiers: &[String]) -> Option<LeftDeepShape> {
+        let (output_columns, leftmost, steps) = left_deep_join_steps(plan)?;
+        if output_columns.len() != qualifiers.len() || steps.len() < 2 {
+            return None;
+        }
+        let mut scans = vec![leftmost];
+        for (conditions, right) in &steps {
+            if conditions.is_empty() {
+                return None;
+            }
+            scans.push(right.clone());
+        }
+        let segments = qualifier_segments(qualifiers, &output_columns);
+        if segments.len() != scans.len() {
+            return None;
+        }
+        let mut leaves = Vec::with_capacity(scans.len());
+        for ((qualifier, segment_columns), scan) in segments.into_iter().zip(scans) {
+            if segment_columns != scan.columns || self.attached_tables.contains(&scan.table_name) {
+                return None;
+            }
+            if leaves
+                .iter()
+                .any(|leaf: &JoinLeaf| leaf.qualifier == qualifier)
+            {
+                return None;
+            }
+            leaves.push(JoinLeaf {
+                qualifier,
+                table_name: scan.table_name,
+                columns: scan.columns,
+            });
+        }
+        let mut edges = Vec::new();
+        for (index, (conditions, _)) in steps.iter().enumerate() {
+            let right = &leaves[index + 1];
+            for condition in conditions {
+                edges.push(edge_for_condition(condition, &leaves[..=index], right)?);
+            }
+        }
+        Some(LeftDeepShape {
+            leaves,
+            edges,
+            output_columns,
+            output_qualifiers: qualifiers.to_vec(),
+        })
+    }
+
+    fn cards_for_leaves(&self, leaves: &[JoinLeaf]) -> Option<Vec<LeafCard>> {
+        leaves.iter().map(|leaf| self.leaf_card(leaf)).collect()
+    }
+
+    /// 统计列名的顺序必须与计划时该表的列名顺序相同。有一列对不上就没有可用统计。
+    fn leaf_card(&self, leaf: &JoinLeaf) -> Option<LeafCard> {
+        let stats = self.table_stats.get(&leaf.table_name)?;
+        if stats.len() != leaf.columns.len() {
+            return None;
+        }
+        if stats
+            .iter()
+            .zip(&leaf.columns)
+            .any(|(stat, name)| stat.name != *name)
+        {
+            return None;
+        }
+        Some(LeafCard {
+            qualifier: leaf.qualifier.clone(),
+            rows: stats.first()?.row_count,
+            ndv: stats
+                .iter()
+                .map(|stat| (stat.name.clone(), stat.ndv))
+                .collect(),
+        })
+    }
+
+    /// 这两个基表扫描作为第一步时，现有的整数主键判定是否成立。
+    fn sort_merge_on_first_step(
+        &self,
+        left_name: &str,
+        right_name: &str,
+        leaves: &[JoinLeaf],
+        edges: &[EqEdge],
+    ) -> bool {
+        let Some(left) = leaves.iter().position(|leaf| leaf.qualifier == left_name) else {
+            return false;
+        };
+        let Some(right) = leaves.iter().position(|leaf| leaf.qualifier == right_name) else {
+            return false;
+        };
+        let join = JoinNode {
+            left: Box::new(scan_of(&leaves[left])),
+            right: Box::new(scan_of(&leaves[right])),
+            conditions: conditions_for_step(leaves, &[left], right, edges),
+            output_columns: Vec::new(),
+            output_sides: Vec::new(),
+        };
+        self.integer_pk_base_scan_join(&join)
+    }
+
+    /// 右子节点始终是一张基表扫描。最外层输出列仍按书写顺序取出。
+    fn rebuild_estimated_tree(&self, shape: &LeftDeepShape, order: &[String]) -> Option<PhysicalPlan> {
+        if order.len() != shape.leaves.len() {
+            return None;
+        }
+        let mut indexes = Vec::with_capacity(order.len());
+        for name in order {
+            indexes.push(
+                shape
+                    .leaves
+                    .iter()
+                    .position(|leaf| leaf.qualifier == *name)?,
+            );
+        }
+        let mut current = scan_of(&shape.leaves[indexes[0]]);
+        for step in 1..indexes.len() {
+            let right_index = indexes[step];
+            let placed = indexes[..step].to_vec();
+            let conditions =
+                conditions_for_step(&shape.leaves, &placed, right_index, &shape.edges);
+            if conditions.is_empty() {
+                return None;
+            }
+            let is_last = step + 1 == indexes.len();
+            let (output_columns, output_sides) = if is_last {
+                remap_outer_columns(
+                    &shape.output_columns,
+                    &shape.output_qualifiers,
+                    &shape.leaves,
+                    &indexes,
+                )?
+            } else {
+                concat_leaf_columns(&shape.leaves, &placed, right_index)
+            };
+            let join = JoinNode {
+                left: Box::new(current),
+                right: Box::new(scan_of(&shape.leaves[right_index])),
+                conditions,
+                output_columns,
+                output_sides,
+            };
+            current = if self.integer_pk_base_scan_join(&join) {
+                PhysicalPlan::SortMergeJoin(join)
+            } else {
+                PhysicalPlan::Join(join)
+            };
+        }
+        Some(current)
+    }
+}
+
+const JOIN_ORDER_ESTIMATED: &str = "JoinOrder estimated";
+const JOIN_ORDER_WRITTEN: &str = "JoinOrder written";
+
+struct LeafOrderDecision {
+    label: Option<&'static str>,
+    plan: Option<PhysicalPlan>,
+}
+
+struct JoinLeaf {
+    qualifier: String,
+    table_name: String,
+    columns: Vec<String>,
+}
+
+struct LeftDeepShape {
+    leaves: Vec<JoinLeaf>,
+    edges: Vec<EqEdge>,
+    output_columns: Vec<OutputColumn>,
+    output_qualifiers: Vec<String>,
+}
+
+fn left_deep_join_steps(
+    plan: &PhysicalPlan,
+) -> Option<(Vec<OutputColumn>, ScanNode, Vec<(Vec<JoinCondition>, ScanNode)>)> {
+    let output_columns = match plan {
+        PhysicalPlan::Join(node) | PhysicalPlan::SortMergeJoin(node) => node.output_columns.clone(),
+        _ => return None,
+    };
+    let mut steps = Vec::new();
+    let mut current = plan;
+    loop {
+        match current {
+            PhysicalPlan::Join(node) | PhysicalPlan::SortMergeJoin(node) => {
+                let PhysicalPlan::Scan(right) = node.right.as_ref() else {
+                    return None;
+                };
+                steps.push((node.conditions.clone(), right.clone()));
+                current = node.left.as_ref();
+            }
+            PhysicalPlan::Scan(scan) => {
+                steps.reverse();
+                return Some((output_columns, scan.clone(), steps));
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn qualifier_segments(
+    qualifiers: &[String],
+    columns: &[OutputColumn],
+) -> Vec<(String, Vec<String>)> {
+    let mut segments: Vec<(String, Vec<String>)> = Vec::new();
+    for (qualifier, column) in qualifiers.iter().zip(columns) {
+        match segments.last_mut() {
+            Some((name, cols)) if name == qualifier => cols.push(column.column.clone()),
+            _ => segments.push((qualifier.clone(), vec![column.column.clone()])),
+        }
+    }
+    segments
+}
+
+fn edge_for_condition(
+    condition: &JoinCondition,
+    left_leaves: &[JoinLeaf],
+    right: &JoinLeaf,
+) -> Option<EqEdge> {
+    match &condition.right_column.table {
+        Some(table) if table != &right.table_name => return None,
+        None if !right
+            .columns
+            .iter()
+            .any(|name| name == &condition.right_column.column) =>
+        {
+            return None;
+        }
+        _ => {}
+    }
+    Some(EqEdge {
+        left_qualifier: unique_leaf_qualifier(left_leaves, &condition.left_column)?,
+        left_column: condition.left_column.column.clone(),
+        right_qualifier: right.qualifier.clone(),
+        right_column: condition.right_column.column.clone(),
+    })
+}
+
+fn unique_leaf_qualifier(leaves: &[JoinLeaf], column: &ColumnRef) -> Option<String> {
+    let mut found = None;
+    for leaf in leaves {
+        let table_ok = match &column.table {
+            Some(table) => leaf.table_name == *table,
+            None => true,
+        };
+        let column_ok = leaf.columns.iter().any(|name| name == &column.column);
+        if table_ok && column_ok {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(leaf.qualifier.clone());
+        }
+    }
+    found
+}
+
+fn scan_of(leaf: &JoinLeaf) -> PhysicalPlan {
+    PhysicalPlan::Scan(ScanNode {
+        table_name: leaf.table_name.clone(),
+        columns: leaf.columns.clone(),
+        projection: Vec::new(),
+    })
+}
+
+fn conditions_for_step(
+    leaves: &[JoinLeaf],
+    placed: &[usize],
+    right: usize,
+    edges: &[EqEdge],
+) -> Vec<JoinCondition> {
+    let right_leaf = &leaves[right];
+    let mut conditions = Vec::new();
+    for &index in placed {
+        let left = &leaves[index];
+        for edge in edges {
+            let forward = edge.left_qualifier == left.qualifier
+                && edge.right_qualifier == right_leaf.qualifier;
+            let backward = edge.right_qualifier == left.qualifier
+                && edge.left_qualifier == right_leaf.qualifier;
+            if !forward && !backward {
+                continue;
+            }
+            let (left_column, right_column) = if forward {
+                (edge.left_column.clone(), edge.right_column.clone())
+            } else {
+                (edge.right_column.clone(), edge.left_column.clone())
+            };
+            conditions.push(JoinCondition {
+                left_column: ColumnRef {
+                    table: Some(left.table_name.clone()),
+                    column: left_column,
+                },
+                right_column: ColumnRef {
+                    table: Some(right_leaf.table_name.clone()),
+                    column: right_column,
+                },
+            });
+        }
+    }
+    conditions
+}
+
+fn concat_leaf_columns(
+    leaves: &[JoinLeaf],
+    placed: &[usize],
+    right: usize,
+) -> (Vec<OutputColumn>, Vec<JoinSide>) {
+    let mut columns = Vec::new();
+    let mut sides = Vec::new();
+    let mut offset = 0usize;
+    for &index in placed {
+        let leaf = &leaves[index];
+        for (idx, name) in leaf.columns.iter().enumerate() {
+            columns.push(OutputColumn {
+                table: Some(leaf.table_name.clone()),
+                column: name.clone(),
+                table_alias: leaf.table_name.clone(),
+                column_index: offset + idx,
+            });
+            sides.push(JoinSide::Left);
+        }
+        offset += leaf.columns.len();
+    }
+    let leaf = &leaves[right];
+    for (idx, name) in leaf.columns.iter().enumerate() {
+        columns.push(OutputColumn {
+            table: Some(leaf.table_name.clone()),
+            column: name.clone(),
+            table_alias: leaf.table_name.clone(),
+            column_index: idx,
+        });
+        sides.push(JoinSide::Right);
+    }
+    (columns, sides)
+}
+
+fn remap_outer_columns(
+    written: &[OutputColumn],
+    qualifiers: &[String],
+    leaves: &[JoinLeaf],
+    order: &[usize],
+) -> Option<(Vec<OutputColumn>, Vec<JoinSide>)> {
+    if written.len() != qualifiers.len() || order.is_empty() {
+        return None;
+    }
+    let last = order.len() - 1;
+    let mut columns = written.to_vec();
+    let mut sides = Vec::with_capacity(columns.len());
+    for (column, qualifier) in columns.iter_mut().zip(qualifiers) {
+        let pos = order
+            .iter()
+            .position(|&index| leaves[index].qualifier == *qualifier)?;
+        let within = leaves[order[pos]]
+            .columns
+            .iter()
+            .position(|name| name == &column.column)?;
+        if pos == last {
+            sides.push(JoinSide::Right);
+            column.column_index = within;
+        } else {
+            let offset: usize = order[..pos]
+                .iter()
+                .map(|&index| leaves[index].columns.len())
+                .sum();
+            sides.push(JoinSide::Left);
+            column.column_index = offset + within;
+        }
+    }
+    Some((columns, sides))
 }
 
 enum SecondaryRoute {

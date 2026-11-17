@@ -12,7 +12,7 @@
 
 ## 路线图结构
 
-2026-11-10 用户指令按 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）把尚未做完的模块化、诊断、语义和性能条目写入路线，相近项并进同一里程碑。新增 MS48–MS55。MS48 模块边界与会话通道收口（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`；I074 拆分余项、I012 通道余项）。MS49 诊断上报与比较指标（completed，2026-11-14，change `openspec/changes/archive/2026-11-14-ms49-diagnostics-reporting/`；I096 余项）。MS50 结果消费与值类型（completed，2026-11-14。结果消费 change `openspec/changes/archive/2026-11-14-ms50-result-consumption/` 已归档，交付 I065 的最小结果接口；类型 change `openspec/changes/archive/2026-11-14-ms50-decimal-and-blob/` 已归档，交付 I069。只跑过一次分批全量。B08 第一次和一次整批复核失败，原因是中止夹具首字节 0x0A 与新的 BLOB 标签相撞。夹具改为 0x0C 后，那条测试通过。B08 里当时没跑到的 10 个目标后来逐个通过）。MS51 查询代价与 JOIN 重排（I016 余项）。MS52 撕裂树与跨进程访问的去留（I031、I084）。MS53 复制、分配与行锁（I020、I066、I050）。MS54 脏页批量写与 I/O 后端（I026、I028，依赖 MS52）。MS55 索引页空间与锁（I025、I029、I030）。MS48 为 completed。MS49 为 completed。MS50 为 completed。MS54 为 planned。MS51、MS52、MS53、MS55 为 ready。无开放缺陷可纳入。I077 余项与 I083 按 MS47 的稳定结果保持未排期。I049、I094、I057、I093、I095 以及已暂缓的交付与密钥便利层不在本批。本次只登记路线，不同步改进条目或 SNAPSHOT。
+2026-11-10 用户指令按 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）把尚未做完的模块化、诊断、语义和性能条目写入路线，相近项并进同一里程碑。新增 MS48–MS55。MS48 模块边界与会话通道收口（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`；I074 拆分余项、I012 通道余项）。MS49 诊断上报与比较指标（completed，2026-11-14，change `openspec/changes/archive/2026-11-14-ms49-diagnostics-reporting/`；I096 余项）。MS50 结果消费与值类型（completed，2026-11-14。结果消费 change `openspec/changes/archive/2026-11-14-ms50-result-consumption/` 已归档，交付 I065 的最小结果接口；类型 change `openspec/changes/archive/2026-11-14-ms50-decimal-and-blob/` 已归档，交付 I069。只跑过一次分批全量。B08 第一次和一次整批复核失败，原因是中止夹具首字节 0x0A 与新的 BLOB 标签相撞。夹具改为 0x0C 后，那条测试通过。B08 里当时没跑到的 10 个目标后来逐个通过）。MS51 查询代价与 JOIN 重排（completed，2026-11-17，change `openspec/changes/archive/2026-11-17-ms51-query-cost-and-join-reorder/`；I016 余项）。MS52 撕裂树与跨进程访问的去留（I031、I084）。MS53 复制、分配与行锁（I020、I066、I050）。MS54 脏页批量写与 I/O 后端（I026、I028，依赖 MS52）。MS55 索引页空间与锁（I025、I029、I030）。MS48 为 completed。MS49 为 completed。MS50 为 completed。MS51 为 completed。MS54 为 planned。MS52、MS53、MS55 为 ready。无开放缺陷可纳入。I077 余项与 I083 按 MS47 的稳定结果保持未排期。I049、I094、I057、I093、I095 以及已暂缓的交付与密钥便利层不在本批。本次只登记路线，不同步改进条目或 SNAPSHOT。
 
 2026-11-03 用户指令「规划这一批你推荐的条目到ms，刚好三个ms就好」，新增 MS45–MS47，依据 [后续工作优先级分析](../analysis/future-work-priority-and-dependencies.md)（R77）在 MS41–MS44 完成后的下一批过滤结果。MS45 主命令 profiling 不再因索引扫描中止（completed，2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`；承接 ISS42）。MS46 无键行版本链进入 GC（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`；承接 I038）。MS47 类型化批量写入入口的去留（completed，2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`；承接 I021）。三者无硬前置，建议序 MS45 → MS46 → MS47。macOS 构建与运行不在本批。I077 余项、I083、I065、I069、I084、I016 的完整代价模型、I031 以及已暂缓的交付与密钥便利层留在改进台账。本次只登记路线，不同步改进条目、缺陷状态或 SNAPSHOT。
 
@@ -24,7 +24,7 @@
 旧优化项历史分类（各 superseded MS 原范围段）随 `ARC-202609242151` carrier 留档；未排期候选以 D-candidates 与 improvements 台账为准。
 ## Milestone Roadmap
 
-详细的已完成里程碑段已归档，见文件末墓碑。各里程碑的完成摘要见「路线图结构」段与「依赖关系图」的 ✓ 标记；MS22 已 superseded 退回 improvements，其候选见「D-candidates」段与改进台账。当前路线上尚未完成的里程碑是 MS51–MS55。MS50 为 completed。MS54 依赖 MS52，状态为 planned；MS51、MS52、MS53、MS55 为 ready。
+详细的已完成里程碑段已归档，见文件末墓碑。各里程碑的完成摘要见「路线图结构」段与「依赖关系图」的 ✓ 标记；MS22 已 superseded 退回 improvements，其候选见「D-candidates」段与改进台账。当前路线上尚未完成的里程碑是 MS52–MS55。MS50 为 completed。MS51 为 completed。MS54 依赖 MS52，状态为 planned；MS52、MS53、MS55 为 ready。
 
 ### MS45：主命令 profiling 不再因索引扫描中止
 
@@ -106,15 +106,15 @@
 
 ### MS51：查询代价与 JOIN 重排
 
-- **Status**: ready
+- **Status**: completed（2026-11-17。change `openspec/changes/archive/2026-11-17-ms51-query-cost-and-join-reorder/` 已归档。Iteration 000、001、002 的 Review Result 均为 accepted。会话内 `ANALYZE` 保存基表行数和列不同值；合格查询按估计更换左深叶序，结果多重集合与书写顺序一致，估算不足时保持书写叶序。收尾全量 16 批，每批退出码 0，合计 2504 passed、0 failed、2 ignored）
 - **Outcome**: 有可用的统计与估算。JOIN 重排要么按估算生效且结果与重排前一致，要么记录估算不足以支持重排并保持现有选择。
 - **Rationale**: 索引访问路径已经交付。完整代价模型与已做完的构建侧选择不是同一项。
 - **Dependencies**: None
 - **Scope**: I016 的余项。不重开已收尾的构建侧评估。
 - **Non-goals**: 节点锁、I/O 后端、新类型、流式结果。
 - **Stable result**: 后续查询改动可以知道 JOIN 顺序是估算决定的，还是仍由现有规则决定。
-- **Related changes**: None
-- **Consumes**: I016 的完整代价模型余项
+- **Related changes**: `openspec/changes/archive/2026-11-17-ms51-query-cost-and-join-reorder/`
+- **Consumes**: I016 的完整代价模型余项已由该变更交付
 - **Split signals**: 若重排会改变结果语义而不只是计划选择，退回范围审议。
 
 ### MS52：撕裂树与跨进程访问的去留
@@ -214,7 +214,7 @@ MS47 类型化批量写入入口的去留 ✓（无前置；建议序 MS45、MS4
 MS48 模块边界与会话通道收口 ✓（无前置）
 MS49 诊断上报与比较指标 ✓（无前置；建议序 MS48 后）
 MS50 结果消费与值类型 ✓（无前置）
-MS51 查询代价与 JOIN 重排（无前置）
+MS51 查询代价与 JOIN 重排 ✓（无前置）
 MS52 撕裂树与跨进程访问的去留（无前置）
 MS53 复制、分配与行锁（无前置；建议序 MS49 后）
 MS52 ──→ MS54 脏页批量写与 I/O 后端
@@ -229,7 +229,7 @@ MS55 索引页空间与锁（无前置；建议序 MS52 后）
 
 2026-11-03 批：MS45 为 completed（2026-11-03，change `openspec/changes/archive/2026-11-03-ms45-main-command-profiling/`），MS46 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms46-keyless-row-gc/`）。MS47 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms47-typed-batch-write/`）。依赖为 None，无环。建议执行序 MS45 → MS46 → MS47。MS45 先做，是为了旧 profiling 开关在主命令上不再中止进程；MS47 的测量不依赖这条修复也能用统一诊断和现有基准进行。MS46 与另外两项没有代码合同上的先后。每个里程碑可由一个或多个变更承载，不预定数量。I 条目与 ISS42 的状态不在本次改写。
 
-2026-11-10 批：新增 MS48–MS55，依据 R77，相近项并入同一里程碑。MS48 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`）。MS49 为 completed（2026-11-14，change `openspec/changes/archive/2026-11-14-ms49-diagnostics-reporting/`）。MS50 为 completed（2026-11-14。结果消费 change `openspec/changes/archive/2026-11-14-ms50-result-consumption/` 与类型 change `openspec/changes/archive/2026-11-14-ms50-decimal-and-blob/` 已归档。只跑过一次分批全量。B08 第一次和一次整批复核失败，原因是中止夹具首字节 0x0A 与新的 BLOB 标签相撞。夹具改为 0x0C 后，那条测试通过。B08 里当时没跑到的 10 个目标后来逐个通过）。MS51、MS52、MS53、MS55 为 ready，依赖除建议序外均为 None。MS54 依赖 MS52，状态为 planned。建议执行序 MS48 → MS49 → MS50 → MS51 → MS52 → MS53 → MS54 → MS55。MS50、MS51、MS52、MS55 与这条顺序没有硬依赖，可以换位。无环。没有开放缺陷纳入本批。I 条目状态不在本次改写。
+2026-11-10 批：新增 MS48–MS55，依据 R77，相近项并入同一里程碑。MS48 为 completed（2026-11-10，change `openspec/changes/archive/2026-11-10-ms48-module-boundary-and-session-channels/`）。MS49 为 completed（2026-11-14，change `openspec/changes/archive/2026-11-14-ms49-diagnostics-reporting/`）。MS50 为 completed（2026-11-14。结果消费 change `openspec/changes/archive/2026-11-14-ms50-result-consumption/` 与类型 change `openspec/changes/archive/2026-11-14-ms50-decimal-and-blob/` 已归档。只跑过一次分批全量。B08 第一次和一次整批复核失败，原因是中止夹具首字节 0x0A 与新的 BLOB 标签相撞。夹具改为 0x0C 后，那条测试通过。B08 里当时没跑到的 10 个目标后来逐个通过）。MS51 为 completed（2026-11-17，change `openspec/changes/archive/2026-11-17-ms51-query-cost-and-join-reorder/`）。MS52、MS53、MS55 为 ready，依赖除建议序外均为 None。MS54 依赖 MS52，状态为 planned。建议执行序 MS48 → MS49 → MS50 → MS51 → MS52 → MS53 → MS54 → MS55。MS50、MS51、MS52、MS55 与这条顺序没有硬依赖，可以换位。无环。没有开放缺陷纳入本批。I 条目状态不在本次改写。
 
 ## 进行中
 
