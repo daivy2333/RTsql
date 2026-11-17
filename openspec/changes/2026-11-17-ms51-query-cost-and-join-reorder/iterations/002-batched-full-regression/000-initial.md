@@ -154,3 +154,52 @@ Persisted Evidence：None required
 Experience Candidates：None
 
 未解决问题：无。
+
+## Plan Review
+
+- Review Result: accepted
+
+**Findings**
+
+002 的验收已经满足。
+
+`cb232abcf8309847b785c9ade1f0db9df1d07c57` 到 `4699d098e8476b8849cc0c03c6e20262434c0ea0` 的 diff 只改了本 Cycle 和 `tasks.md`。`git diff cb232abcf8309847b785c9ade1f0db9df1d07c57..4699d098e8476b8849cc0c03c6e20262434c0ea0 -- src tests` 为空。工作区干净。
+
+当前 `tests/*.rs` 按字典序是 169 个文件。`B = ceil(169 / 12) = 15`，前 `15 × 12 − 169 = 11` 批各 11 个文件，后 4 批各 12 个。批次表里的名字与这次排序逐行相同，missing、extra 和 duplicate 都是 0。第 16 批只有 `--lib --bins`。`tests/support/index_key_encoding.rs` 在子目录中，不属于 `tests/*.rs`，不进文件批。
+
+16 批的退出码和计数沿用本 Cycle 的 Act Response。产品文件在这次结果之后没有变化，覆盖范围没有失效。本次没有运行 `cargo test`。各批退出码都是 0，failed 都是 0。表内 passed 相加为 2504，ignored 相加为 2，汇总行相加为 171。171 等于 169 个文件加上 lib 与 bin。`join_reorder_test` 在第 7 批，`table_statistics_test` 在第 14 批，各出现一次。没有第二张批次表，也没有首跑失败记录。
+
+第 16 批里，`grep -E "^test result:"` 还会命中 `src/result.rs` 的 `value_to_json_preserves_conversion_semantics` 和 `value_to_json_renders_datetime_family_as_da5_string`。这两行进度以 `test result::tests::` 开头，Act 记为 `ok`，没有 failed 字段。汇总行仍是 lib 的 460 passed、0 failed、0 ignored，以及 bin 的 0 passed、0 failed、0 ignored。`tests/cli_test.rs` 里标了 `#[ignore]` 的是 `calibration_recovery_time` 和 `diagnostic_wal_parse`，与第 2 批 ignored 为 2 的记录一致。
+
+没有阻塞本轮验收的偏差。
+
+**Acceptance Gaps**
+
+无。
+
+**Evidence**
+
+- 批次表在本文件的 Act Response。退出码、passed、failed、ignored 沿用该表，没有重跑。
+- 文件对账是本次把 `tests/*.rs` 的字典序与批次表逐行比较的结果。
+- `git diff cb232abcf8309847b785c9ade1f0db9df1d07c57..4699d098e8476b8849cc0c03c6e20262434c0ea0 -- src tests` 为空。
+- `src/result.rs` 的上述两个测试，以及 `tests/cli_test.rs` 的两处 `#[ignore]`。
+
+**Follow-up Decision**
+
+不要求当前 Cycle 修复。这是 Iteration Plan 的最后一轮，不再展开下一轮，也不再预算全量。
+
+**Iteration Plan Update**
+
+None
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
+
+**Issue 候选**
+
+None
