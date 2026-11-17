@@ -2,7 +2,7 @@
 
 对应路线：`.agents/docs/tasks.md` 的 MS51。Gate 1：PASS，依据在 `proposal.md` 的 Gate 1 节。目标注入同时批准了需求和已记录的方案。这不是跳过。本文件不修改全局路线、改进台账或 `openspec/specs/`。
 
-Gate 2：PASS。无 BLOCKED，无 SKIPPED。000 的 Review Result 为 `accepted`，结论在 `iterations/000-session-statistics/000-initial.md`。001 的当前 Cycle 是 `iterations/001-estimated-leaf-order/000-initial.md`，Plan Context 为 ready。002 只有下面的 Iteration Plan，不展开 Cycle。
+Gate 2：PASS。无 BLOCKED，无 SKIPPED。000 与 001 的 Review Result 为 `accepted`。001 的结论在 `iterations/001-estimated-leaf-order/000-initial.md`。002 的当前 Cycle 是 `iterations/002-batched-full-regression/000-initial.md`，Plan Context 为 ready。
 
 M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。本计划不预建。
 
@@ -12,8 +12,8 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/query-cost-and-join-order/spec.md`、`specs/explain-plan-output/spec.md`、`specs/sql-parameter-binding/spec.md`。
 - 000：执行依据是 `iterations/000-session-statistics/000-initial.md`。Plan Context 为 ready。Act Response 为 reported，Review Result 为 `accepted`。
-- 001：已展开。执行依据是 `iterations/001-estimated-leaf-order/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。
-- 002：未展开。展开条件是 001 的 Review Result 为 `accepted`。
+- 001：已完成。执行依据是 `iterations/001-estimated-leaf-order/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `accepted`。
+- 002：已展开。执行依据是 `iterations/002-batched-full-regression/000-initial.md`。Plan Context 为 ready。Act Response 尚未写入。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -24,7 +24,7 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 | T1 | 000 | 无 | `ANALYZE TABLE` 交回可见行的计数，失败不留统计，成功后缓存清空且版本戳加一。连接叶序不变 | 已完成 |
 | T2 | 000 | T1 | 左深代价函数给出规格里的 506、408、90、80，以及平手、9 表和溢出的决定 | 已完成 |
 | T3 | 001 | 000 accepted | 合格查询按估计换叶序，结果与未统计时的多重集合和 ORDER BY 一致。不合格查询的节点行不变 | 已实施 |
-| T4 | 002 | 001 accepted | 按 M19 等分批次做一次全量，每批退出码 0 且 failed 为 0 | 未展开 |
+| T4 | 002 | 001 accepted | 按 M19 等分批次做一次全量，每批退出码 0 且 failed 为 0 | 已展开 |
 
 ## Iteration Plan
 
@@ -125,7 +125,7 @@ cargo test --offline --lib table_stats -- --test-threads=1
 
 ## 4. 一次全量（Iteration 002）
 
-002 展开之前不实施。
+执行依据是 `iterations/002-batched-full-regression/000-initial.md`。本段不再另选批次算法。
 
 - [ ] 4.1 T4：按 Runbook 做一次分批全量，并记录每一批的退出码和 passed、failed、ignored。
 
