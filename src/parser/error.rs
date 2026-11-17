@@ -66,6 +66,8 @@ pub enum PlanError {
     TransactionStatement(String),
     /// ATTACH 语句拒绝（MS20 T1；消息即全文）
     AttachStatement(String),
+    /// ANALYZE 拒绝。载荷是 `Plan error:` 前缀之后的全文，SQLSTATE 0A000。
+    AnalyzeStatement(String),
 }
 
 impl fmt::Display for PlanError {
@@ -133,6 +135,7 @@ impl fmt::Display for PlanError {
             PlanError::NotInWithNull => write!(f, "NOT IN subquery contains NULL values"),
             PlanError::TransactionStatement(msg) => write!(f, "{}", msg),
             PlanError::AttachStatement(msg) => write!(f, "{}", msg),
+            PlanError::AnalyzeStatement(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -153,7 +156,8 @@ impl PlanError {
             | PlanError::UnsupportedSubqueryPosition
             | PlanError::InSubqueryJoinUnsupported
             | PlanError::TransactionStatement(_)
-            | PlanError::AttachStatement(_) => "0A000",
+            | PlanError::AttachStatement(_)
+            | PlanError::AnalyzeStatement(_) => "0A000",
             PlanError::TableNotFound(_) => "42P01",
             PlanError::ColumnNotFound(_) | PlanError::GroupByColumnNotFound(_) => "42703",
             PlanError::AmbiguousColumn(_) => "42702",
@@ -183,6 +187,10 @@ mod tests {
             (PlanError::InSubqueryJoinUnsupported, "0A000"),
             (PlanError::TransactionStatement("SAVEPOINT".into()), "0A000"),
             (PlanError::AttachStatement("ATTACH".into()), "0A000"),
+            (
+                PlanError::AnalyzeStatement("ANALYZE does not support NOSCAN".into()),
+                "0A000",
+            ),
             (PlanError::TableNotFound("t".into()), "42P01"),
             (PlanError::ColumnNotFound("c".into()), "42703"),
             (PlanError::GroupByColumnNotFound("c".into()), "42703"),

@@ -146,6 +146,7 @@ pub fn inject_correlated_values(plan: &PhysicalPlan, param_values: &[(String, Va
         // MS25 T6: EXPLAIN 只渲染不执行（子查询内不可达 EXPLAIN 语句），
         // 被观测计划不参与参数注入。
         PhysicalPlan::Explain(_) => {}
+        PhysicalPlan::Analyze(_) => {}
     }
 }
 

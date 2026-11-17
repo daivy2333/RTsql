@@ -53,6 +53,7 @@ fn render_node(plan: &PhysicalPlan, depth: usize, out: &mut Vec<String>) {
         // InsertSelect 行本身）。
         PhysicalPlan::InsertSelect(node) => render_node(&node.source, depth + 1, out),
         PhysicalPlan::Explain(node) => render_node(&node.input, depth + 1, out),
+        PhysicalPlan::Analyze(_) => {}
         PhysicalPlan::Join(node) => {
             render_node(&node.left, depth + 1, out);
             render_node(&node.right, depth + 1, out);
@@ -383,6 +384,7 @@ fn describe(plan: &PhysicalPlan) -> String {
         ),
         PhysicalPlan::SingleRow => "SingleRow".to_string(),
         PhysicalPlan::Explain(_) => "Explain".to_string(),
+        PhysicalPlan::Analyze(node) => format!("Analyze {}", node.table_name),
     }
 }
 
