@@ -110,8 +110,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: b85a50b66ea527043d3a79993eeb6e92b601f260
-- **ahead of origin**: 26
+- **提交基线**: 287e3548583d73168bf02a138b2b44ca302603d9
+- **ahead of origin**: 37
 - **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-17-ms52-torn-tree-and-cross-process/`。
 - **最新 tag**: 无
 - **行为规格**: `openspec/specs/` 下 95 个域。
