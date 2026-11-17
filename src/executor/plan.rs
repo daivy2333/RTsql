@@ -927,6 +927,8 @@ pub struct SetOperationNode {
 pub struct ExplainNode {
     /// 被观测的内层计划（渲染对象，从不执行）
     pub input: Box<PhysicalPlan>,
+    /// `EXPLAIN` 首行之后插入的决定行。没有决定时为 `None`，输出与原来逐字节相同。
+    pub join_order: Option<String>,
 }
 
 /// `ANALYZE TABLE` 的目标基表。`columns` 与 `SELECT *` 的表头同序。

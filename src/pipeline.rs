@@ -424,6 +424,9 @@ async fn plan_stage_impl(
                     start,
                 );
             }
+            // 查询和 EXPLAIN 在书写装配成功后可能按这份快照更换左深叶序。
+            // ANALYZE 的计划臂不读取它。
+            plan_builder.set_table_stats(database.session_stats.snapshot());
             let plan = plan_builder.build_plan(stmt).map_err(PlanFailure::from)?;
             // MS20 T2: attach 身份不在 cache key 内——含附加库引用的语句不得
             // 进缓存，否则同文本语句在「有/无该别名」的会话间互相污染。
@@ -3295,7 +3298,10 @@ pub(crate) fn create_executor_from_plan<'a>(
             PhysicalPlan::Explain(node) => {
                 // MS25 T6: EXPLAIN 是只读观测面——渲染被观测计划，**不构造
                 // 内层执行器**（派生表急切物化与任何执行器副作用都不触发）。
-                Ok(Box::new(ExplainExecutor::new(&node.input)) as Box<dyn Executor + Send>)
+                Ok(Box::new(ExplainExecutor::new(
+                    &node.input,
+                    node.join_order.as_deref(),
+                )) as Box<dyn Executor + Send>)
             }
 
             PhysicalPlan::Analyze(_) => Err(StorageError::Internal(
