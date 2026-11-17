@@ -11,7 +11,7 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/query-cost-and-join-order/spec.md`、`specs/explain-plan-output/spec.md`、`specs/sql-parameter-binding/spec.md`。
-- 000：执行依据是 `iterations/000-session-statistics/000-initial.md`。Plan Context 为 ready。
+- 000：执行依据是 `iterations/000-session-statistics/000-initial.md`。Plan Context 为 ready。T1 与 T2 已实施，Act Response 为 reported，Review Result 仍为 pending。
 - 001：未展开。展开条件是 000 的 Review Result 为 `accepted`。
 - 002：未展开。展开条件是 001 的 Review Result 为 `accepted`。
 - Persisted Evidence：none。
@@ -21,8 +21,8 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | `ANALYZE TABLE` 交回可见行的计数，失败不留统计，成功后缓存清空且版本戳加一。连接叶序不变 | 未开始 |
-| T2 | 000 | T1 | 左深代价函数给出规格里的 506、408、90、80，以及平手、9 表和溢出的决定 | 未开始 |
+| T1 | 000 | 无 | `ANALYZE TABLE` 交回可见行的计数，失败不留统计，成功后缓存清空且版本戳加一。连接叶序不变 | 已完成 |
+| T2 | 000 | T1 | 左深代价函数给出规格里的 506、408、90、80，以及平手、9 表和溢出的决定 | 已完成 |
 | T3 | 001 | 000 accepted | 合格查询按估计换叶序，结果与未统计时的多重集合和 ORDER BY 一致。不合格查询的节点行不变 | 未展开 |
 | T4 | 002 | 001 accepted | 按 M19 等分批次做一次全量，每批退出码 0 且 failed 为 0 | 未展开 |
 
@@ -78,11 +78,11 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 
 ## 1. 会话统计（Iteration 000）
 
-- [ ] 1.1 T1：按 `iterations/000-session-statistics/000-initial.md` 的 T1 执行。先写会失败的测试，再实现 `ANALYZE`。本任务结束时连接叶序仍是书写顺序。
+- [x] 1.1 T1：按 `iterations/000-session-statistics/000-initial.md` 的 T1 执行。先写会失败的测试，再实现 `ANALYZE`。本任务结束时连接叶序仍是书写顺序。
 
 ## 2. 左深代价（Iteration 000）
 
-- [ ] 2.1 T2：按同一 Cycle 的 T2 执行。先写会编译失败的代价测试，再实现函数。计划器在本任务里不调用它。
+- [x] 2.1 T2：按同一 Cycle 的 T2 执行。先写会编译失败的代价测试，再实现函数。计划器在本任务里不调用它。
 
 ## 3. 叶序替换（Iteration 001）
 

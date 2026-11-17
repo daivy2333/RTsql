@@ -258,6 +258,12 @@ impl PlanBuilder {
             PhysicalPlan::SetOperation(node) => node.columns.clone(),
             // MS25 T6: EXPLAIN 输出恒单列 `plan`（表头与行宽一致，I034 纪律）
             PhysicalPlan::Explain(_) => vec!["plan".to_string()],
+            PhysicalPlan::Analyze(_) => vec![
+                "column".to_string(),
+                "row_count".to_string(),
+                "null_count".to_string(),
+                "ndv".to_string(),
+            ],
             // MS20 T4: CTAS 输出列名 = 物化表列名（= SELECT 输出表头，构造时
             // 已由 build_create_table_as_select 记录）。
             PhysicalPlan::CreateTableAsSelect(node) => node.columns.clone(),

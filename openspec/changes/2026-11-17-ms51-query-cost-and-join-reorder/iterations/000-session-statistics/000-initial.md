@@ -146,3 +146,61 @@ None
 **Next Iteration**
 
 None
+
+## Act Response
+
+Status: reported
+
+T1 和 T2 都已完成。Gate 3 与 Gate 4 通过。Gate 5 没有命中。连接叶序没有改。计划器不调用代价函数。
+
+### 实际改动
+
+`ANALYZE TABLE` 由 `PlanBuilder::build_analyze` 生成 `PhysicalPlan::Analyze`。`plan_stage_impl` 在此之前登记基表、标记附加表，并让视图保持为视图。`execute_analyze` 用当前快照上的 `DataScan` 取出与 `SELECT *` 相同的可见行，`summarize` 按 `Value` 的相等比较累计不同值，然后 `commit_table_stats` 只替换这一张表，再清空计划缓存并把 `schema_version` 加一。`bump_schema_version` 在原有清缓存和加版本之外清空全部已保存统计。成功的 `ANALYZE` 不调用它。
+
+涉及的符号和文件：
+
+- `src/table_stats.rs`：`summarize`、`ColumnStat`、`SessionStats`；`join_order` 里的 `choose_left_deep_order`、`order_cost`，并由 `table_stats` 重新导出
+- `src/database.rs`：`session_stats`、`table_stats_snapshot`
+- `src/parser/error.rs`：`PlanError::AnalyzeStatement`
+- `src/parser/planner/mod.rs`：`build_plan` 的 `Statement::Analyze` 臂、`build_analyze`
+- `src/pipeline.rs`：`plan_stage_impl` 的 Analyze 臂、`execute_analyze`、`scan_analyze_rows`、`commit_table_stats`、`bump_schema_version`
+- `src/executor/plan.rs`：`PhysicalPlan::Analyze`、`AnalyzeNode`
+- `src/executor/plan_format.rs`：`Analyze <表名>`
+- `src/executor/correlated.rs`、`src/parser/planner/query.rs`、`src/pipeline.rs` 的 `plan_type_slots` 和 `create_executor_from_plan`：补上穷尽匹配
+- `tests/table_statistics_test.rs`，以及 `src/database.rs` 里名称含 `table_stats` 的箱内测试
+
+### 与计划的偏差
+
+代价函数写在 `table_stats::join_order`，再从 `table_stats` 导出。非测试构建里计划器还不调用它们，直接放在外层会报未使用。函数名、代价整数和「已用估计 / 不足以重排」的区分没有变。
+
+`commit_table_stats` 和 `bump_schema_version` 共用统计表的锁，避免版本检查和写入之间插入一次清空。成功路径仍是先替换当前表，再清缓存并增加版本戳，其他表的统计还在。`bump_schema_version` 才会使全部统计失效。
+
+`NOSCAN`、`PARTITION`、`FOR COLUMNS`、`CACHE METADATA` 在查目录之前拒绝。这四种子句的测试都使用已存在的表。
+
+### 自检
+
+Gate 3 没有留下 Critical 或 Important。已核对：失败原文和 SQLSTATE、成功后缓存为 0 且版本戳加一、空表被保存、第二张表在另一次成功统计后仍在、关闭再打开后快照为空、版本戳不符时不写入、只读扫描没有让主文件或 WAL 变长、两表 `ORDER BY` 的 EXPLAIN 没有 `JoinOrder` 且第一条 `Scan ` 仍是书写顺序的左表。不同值没有用 `HashSet<Value>`。统计没有写入目录或 WAL。没有新增库外读取口。
+
+非测试构建曾对只被测试使用的快照读取和代价函数报未使用。已用 `cfg(not(test))` 的 allow 收掉。`cargo build --offline --lib` 退出码 0，没有代码警告。
+
+遗留 Minor：`Database::open_rows` 把 `ANALYZE` 当成产行语句，随后落到执行器构造的兜底臂，返回内部错误，不交回计数。规定入口是 `execute_sql` / `execute_stage`。
+
+### 验证
+
+先行失败：
+
+- `cargo test --offline --test table_statistics_test analyze_counts_visible_rows -- --test-threads=1` 退出码 101。`analyze_counts_visible_rows` 失败，实际结果是 `Plan error: Unsupported statement type: ANALYZE` / `0A000`，不是两行计数。
+- `cargo test --offline --lib table_stats -- --test-threads=1` 退出码 101。编译失败，`choose_left_deep_order`、`order_cost`、`LeafCard` 等尚不存在。
+
+通过：
+
+- `cargo test --offline --test table_statistics_test -- --test-threads=1` 退出码 0。12 passed，0 failed。
+- `cargo test --offline --lib table_stats -- --test-threads=1` 退出码 0。14 passed，0 failed，446 filtered out。
+
+两次通过的命令分开执行，都带 `--test-threads=1`。没有跑全量。
+
+Persisted Evidence：None required
+
+Experience Candidates：None
+
+未解决问题：无阻塞。上面的 `open_rows` 路径仍是 Minor。

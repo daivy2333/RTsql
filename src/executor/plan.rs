@@ -102,6 +102,8 @@ pub enum PhysicalPlan {
     /// 物化与任何执行器副作用都不触发），文本由 `plan_format::render_plan_tree`
     /// 纯函数渲染。
     Explain(ExplainNode),
+    /// 会话内基表统计。执行面扫描可见行、保存统计并交回计数，不写目录或 WAL。
+    Analyze(AnalyzeNode),
     /// 无 FROM 虚拟单行输入节点（MS13 T9 — no-FORM SELECT）
     ///
     /// 恰产出一行空行（`vec![]`），供其上的 ProjectionNode 逐项求值；无负载
@@ -925,4 +927,11 @@ pub struct SetOperationNode {
 pub struct ExplainNode {
     /// 被观测的内层计划（渲染对象，从不执行）
     pub input: Box<PhysicalPlan>,
+}
+
+/// `ANALYZE TABLE` 的目标基表。`columns` 与 `SELECT *` 的表头同序。
+#[derive(Debug, Clone)]
+pub struct AnalyzeNode {
+    pub table_name: String,
+    pub columns: Vec<String>,
 }

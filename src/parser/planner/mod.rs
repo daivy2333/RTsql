@@ -17,7 +17,7 @@ mod expression;
 mod query;
 mod subquery;
 
-use crate::executor::{ExplainNode, PhysicalPlan, Value};
+use crate::executor::{AnalyzeNode, ExplainNode, PhysicalPlan, Value};
 use crate::parser::ast::unsupported_statement_name;
 use crate::parser::error::PlanError;
 use crate::storage::page_format::ColumnType;
@@ -579,10 +579,75 @@ impl PlanBuilder {
                     )),
                 }
             }
+            Statement::Analyze {
+                table_name,
+                partitions,
+                for_columns,
+                cache_metadata,
+                noscan,
+                ..
+            } => self.build_analyze(
+                table_name,
+                partitions.is_some(),
+                *for_columns,
+                *cache_metadata,
+                *noscan,
+            ),
             _ => Err(PlanError::UnsupportedStatement(unsupported_statement_name(
                 stmt,
             ))),
         }
+    }
+
+    /// `ANALYZE TABLE`：拒绝扫描修饰、附加表和视图，基表则交出列序与 `SELECT *` 相同的计划。
+    fn build_analyze(
+        &self,
+        table_name: &sqlparser::ast::ObjectName,
+        has_partition: bool,
+        for_columns: bool,
+        cache_metadata: bool,
+        noscan: bool,
+    ) -> Result<PhysicalPlan, PlanError> {
+        if noscan {
+            return Err(PlanError::AnalyzeStatement(
+                "ANALYZE does not support NOSCAN".into(),
+            ));
+        }
+        if has_partition {
+            return Err(PlanError::AnalyzeStatement(
+                "ANALYZE does not support PARTITION".into(),
+            ));
+        }
+        if for_columns {
+            return Err(PlanError::AnalyzeStatement(
+                "ANALYZE does not support FOR COLUMNS".into(),
+            ));
+        }
+        if cache_metadata {
+            return Err(PlanError::AnalyzeStatement(
+                "ANALYZE does not support CACHE METADATA".into(),
+            ));
+        }
+        let flat = crate::parser::ast::object_name_to_table_name(table_name);
+        if self.attached_tables.contains(&flat) {
+            return Err(PlanError::AnalyzeStatement(format!(
+                "ANALYZE does not support attached tables: {flat}"
+            )));
+        }
+        if self.views.contains_key(&flat) {
+            return Err(PlanError::AnalyzeStatement(format!(
+                "ANALYZE requires a base table: {flat}"
+            )));
+        }
+        let columns = self
+            .tables
+            .get(&flat)
+            .cloned()
+            .ok_or_else(|| PlanError::TableNotFound(flat.clone()))?;
+        Ok(PhysicalPlan::Analyze(AnalyzeNode {
+            table_name: flat,
+            columns,
+        }))
     }
 
     /// Validate table exists
