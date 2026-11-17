@@ -17,7 +17,8 @@ mod expression;
 mod query;
 mod subquery;
 
-use crate::executor::{ExplainNode, PhysicalPlan, Value};
+use crate::executor::{AnalyzeNode, ExplainNode, PhysicalPlan, Value};
+use crate::table_stats::ColumnStat;
 use crate::parser::ast::unsupported_statement_name;
 use crate::parser::error::PlanError;
 use crate::storage::page_format::ColumnType;
@@ -25,7 +26,7 @@ use sqlparser::ast::Expr;
 use sqlparser::ast::ObjectType;
 use sqlparser::ast::Statement;
 use sqlparser::ast::Value as SqlValue;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// 计划器看到的一个二级索引：名字、世代和完整列序。
 #[derive(Debug, Clone)]
@@ -245,6 +246,10 @@ pub struct PlanBuilder {
     /// 与注册列清单）。加性通道同 `table_column_types` 先例，作用域段登记时
     /// 经 `table_binding_meta` 消费。
     pub(crate) table_not_null: HashMap<String, Vec<bool>>,
+    /// 本语句计划时可见的基表统计。空表表示这一语句没有可用统计。
+    pub(crate) table_stats: BTreeMap<String, Vec<ColumnStat>>,
+    /// 合格连接的 EXPLAIN 决定行。文本是 `JoinOrder estimated` 或 `JoinOrder written`。
+    pub(crate) join_order: Option<String>,
 }
 
 /// MS21 Iter005 (T5-b/D12)：一个已注册的持久化视图定义。列名清单 = 显式
@@ -294,6 +299,8 @@ impl PlanBuilder {
             binding_scopes: Vec::new(),
             binding_scope_boundary: 0,
             table_not_null: HashMap::new(),
+            table_stats: BTreeMap::new(),
+            join_order: None,
         }
     }
 
@@ -417,6 +424,11 @@ impl PlanBuilder {
     /// 快照；plan 阶段做 async 读取后一次性置换）。键为小写归一视图名。
     pub(crate) fn set_views(&mut self, views: HashMap<String, ViewDef>) {
         self.views = views;
+    }
+
+    /// 注入本语句计划时的基表统计快照。
+    pub(crate) fn set_table_stats(&mut self, stats: BTreeMap<String, Vec<ColumnStat>>) {
+        self.table_stats = stats;
     }
 
     /// MS20 T3：标记一个限定名为附加库引用（pipeline 路由分支调用）。
@@ -572,6 +584,7 @@ impl PlanBuilder {
                         let inner = self.build_query(query)?;
                         Ok(PhysicalPlan::Explain(ExplainNode {
                             input: Box::new(inner),
+                            join_order: self.join_order.clone(),
                         }))
                     }
                     _ => Err(PlanError::UnsupportedStatement(
@@ -579,10 +592,75 @@ impl PlanBuilder {
                     )),
                 }
             }
+            Statement::Analyze {
+                table_name,
+                partitions,
+                for_columns,
+                cache_metadata,
+                noscan,
+                ..
+            } => self.build_analyze(
+                table_name,
+                partitions.is_some(),
+                *for_columns,
+                *cache_metadata,
+                *noscan,
+            ),
             _ => Err(PlanError::UnsupportedStatement(unsupported_statement_name(
                 stmt,
             ))),
         }
+    }
+
+    /// `ANALYZE TABLE`：拒绝扫描修饰、附加表和视图，基表则交出列序与 `SELECT *` 相同的计划。
+    fn build_analyze(
+        &self,
+        table_name: &sqlparser::ast::ObjectName,
+        has_partition: bool,
+        for_columns: bool,
+        cache_metadata: bool,
+        noscan: bool,
+    ) -> Result<PhysicalPlan, PlanError> {
+        if noscan {
+            return Err(PlanError::AnalyzeStatement(
+                "ANALYZE does not support NOSCAN".into(),
+            ));
+        }
+        if has_partition {
+            return Err(PlanError::AnalyzeStatement(
+                "ANALYZE does not support PARTITION".into(),
+            ));
+        }
+        if for_columns {
+            return Err(PlanError::AnalyzeStatement(
+                "ANALYZE does not support FOR COLUMNS".into(),
+            ));
+        }
+        if cache_metadata {
+            return Err(PlanError::AnalyzeStatement(
+                "ANALYZE does not support CACHE METADATA".into(),
+            ));
+        }
+        let flat = crate::parser::ast::object_name_to_table_name(table_name);
+        if self.attached_tables.contains(&flat) {
+            return Err(PlanError::AnalyzeStatement(format!(
+                "ANALYZE does not support attached tables: {flat}"
+            )));
+        }
+        if self.views.contains_key(&flat) {
+            return Err(PlanError::AnalyzeStatement(format!(
+                "ANALYZE requires a base table: {flat}"
+            )));
+        }
+        let columns = self
+            .tables
+            .get(&flat)
+            .cloned()
+            .ok_or_else(|| PlanError::TableNotFound(flat.clone()))?;
+        Ok(PhysicalPlan::Analyze(AnalyzeNode {
+            table_name: flat,
+            columns,
+        }))
     }
 
     /// Validate table exists

@@ -85,8 +85,8 @@ pub use join::JoinExecutor;
 pub use limit::LimitExecutor;
 pub use nested_loop_join::NestedLoopJoinExecutor;
 pub use plan::{
-    AggregateNode, AlterTableNode, AlterTableOp, AntiJoinNode, ColumnConstraint, ColumnDef,
-    ColumnRef, ConflictAction, ConflictArbiter, CorrelatedParam, CreateIndexNode,
+    AggregateNode, AlterTableNode, AlterTableOp, AnalyzeNode, AntiJoinNode, ColumnConstraint,
+    ColumnDef, ColumnRef, ConflictAction, ConflictArbiter, CorrelatedParam, CreateIndexNode,
     CreateTableAsSelectNode, CreateTableNode, CreateViewNode, DataScanNode, DeleteNode,
     DerivedScanNode, DistinctNode, DropIndexNode, DropTableNode, DropViewNode, ExplainNode,
     FilterNode, HavingNode, IndexRangeScanNode, IndexScanAllNode, IndexScanNode, InsertNode,

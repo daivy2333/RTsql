@@ -10,9 +10,10 @@ use crate::storage::{
     BufferPool, CatalogKind, ColumnType, FileStorage, IoFailPoint, IoFailPointSlot, MemoryStorage,
     Result, StorageError, TableManager, TableMeta,
 };
+use crate::table_stats::{ColumnStat, SessionStats};
 use crate::transaction::{IsolationLevel, Snapshot, Transaction, TransactionManager};
 use crate::wal::{CheckpointManager, RecoveryManager, WALBuffer, WalReader, WalRecord, WalWriter};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -157,6 +158,8 @@ pub struct Database {
     /// `diagnostic_summaries` 读回摘要；随 `Clone` 共享（同一会话）。
     /// 默认采集全关，不产生任何摘要。
     diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    /// 本会话的基表统计。克隆共享，关闭后再打开为空，不写目录或 WAL。
+    pub(crate) session_stats: Arc<SessionStats>,
 }
 
 /// MS34 Iter000（T01）：库属隐式语句的作用域守卫。
@@ -490,7 +493,16 @@ impl Database {
             implicit_transactions: Arc::new(Mutex::new(HashSet::new())),
             path: path.to_path_buf(),
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
+            session_stats: Arc::new(SessionStats::default()),
         })
+    }
+
+    /// 本会话已保存的基表统计。库外不提供读取口。
+    ///
+    /// 本轮只有箱内测试读取它，非测试构建里因此看起来未被调用。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn table_stats_snapshot(&self) -> BTreeMap<String, Vec<ColumnStat>> {
+        self.session_stats.snapshot()
     }
 
     /// Statement-start snapshot for the current isolation level (MS09
@@ -1165,4 +1177,124 @@ fn check_param_count(param_count: usize, params: &[Value]) -> std::result::Resul
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::{bump_schema_version, commit_table_stats};
+    use crate::table_stats::ColumnStat;
+
+    async fn memory_db(statements: &[&str]) -> Database {
+        let db = Database::open_in_memory().await.unwrap();
+        for sql in statements {
+            db.execute_sql(sql).await.unwrap();
+        }
+        db
+    }
+
+    #[tokio::test]
+    async fn table_stats_empty_table_is_saved() {
+        let db = memory_db(&["CREATE TABLE t (id INT, name STRING)"]).await;
+        db.execute_sql("ANALYZE TABLE t").await.unwrap();
+        let saved = db
+            .table_stats_snapshot()
+            .remove("t")
+            .expect("empty table saved");
+        assert_eq!(
+            saved,
+            vec![
+                ColumnStat {
+                    name: "id".into(),
+                    row_count: 0,
+                    null_count: 0,
+                    ndv: 0,
+                },
+                ColumnStat {
+                    name: "name".into(),
+                    row_count: 0,
+                    null_count: 0,
+                    ndv: 0,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn table_stats_second_table_survives_another_analyze() {
+        let db = memory_db(&[
+            "CREATE TABLE t (id INT)",
+            "CREATE TABLE u (id INT)",
+            "INSERT INTO t VALUES (1)",
+        ])
+        .await;
+        db.execute_sql("ANALYZE TABLE t").await.unwrap();
+        db.execute_sql("ANALYZE TABLE u").await.unwrap();
+        let snapshot = db.table_stats_snapshot();
+        assert_eq!(snapshot["t"][0].row_count, 1);
+        assert_eq!(snapshot["u"][0].row_count, 0);
+    }
+
+    #[tokio::test]
+    async fn table_stats_bump_schema_version_drops_snapshot() {
+        let db = memory_db(&["CREATE TABLE t (id INT)"]).await;
+        db.execute_sql("ANALYZE TABLE t").await.unwrap();
+        assert!(db.table_stats_snapshot().contains_key("t"));
+        bump_schema_version(&db);
+        assert!(db.table_stats_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn table_stats_reopen_snapshot_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        {
+            let db = Database::open(&path).await.unwrap();
+            db.execute_sql("CREATE TABLE t (id INT)").await.unwrap();
+            db.execute_sql("ANALYZE TABLE t").await.unwrap();
+            assert!(db.table_stats_snapshot().contains_key("t"));
+            db.close().await.unwrap();
+        }
+        let db = Database::open(&path).await.unwrap();
+        assert!(db.table_stats_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn table_stats_stale_version_does_not_write() {
+        let db = memory_db(&["CREATE TABLE t (id INT)", "INSERT INTO t VALUES (1)"]).await;
+        db.execute_sql("ANALYZE TABLE t").await.unwrap();
+        let before = db.table_stats_snapshot();
+        let version = db.schema_version();
+        let error = commit_table_stats(
+            &db,
+            "t",
+            vec![ColumnStat {
+                name: "id".into(),
+                row_count: 99,
+                null_count: 7,
+                ndv: 3,
+            }],
+            version + 1,
+        )
+        .expect_err("stale version should abort");
+        assert_eq!(error.message, "ANALYZE aborted because the schema changed");
+        assert_eq!(error.sqlstate.as_deref(), Some("58000"));
+        assert_eq!(db.schema_version(), version);
+        assert_eq!(db.table_stats_snapshot(), before);
+    }
+
+    #[tokio::test]
+    async fn table_stats_memory_limit_does_not_write() {
+        let db = memory_db(&["CREATE TABLE t (id INT)", "INSERT INTO t VALUES (1)"]).await;
+        let version = db.schema_version();
+        db.set_query_memory_limit(1);
+        let error = db.execute_sql("ANALYZE TABLE t").await.unwrap_err();
+        assert_eq!(
+            error.message,
+            "Execution error: query memory limit exceeded (limit 1 bytes)"
+        );
+        assert_eq!(error.sqlstate.as_deref(), Some("53200"));
+        assert_eq!(db.schema_version(), version);
+        assert!(db.table_stats_snapshot().is_empty());
+    }
 }

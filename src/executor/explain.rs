@@ -17,9 +17,16 @@ pub struct ExplainExecutor {
 
 impl ExplainExecutor {
     /// 渲染被观测计划（不执行）并固化为文本行。
-    pub fn new(input: &PhysicalPlan) -> Self {
+    ///
+    /// `join_order` 为 `JoinOrder estimated` 或 `JoinOrder written` 时，插到首行
+    /// `EXPLAIN` 之后。没有这个文本时，行与 `render_plan_tree` 逐字节相同。
+    pub fn new(input: &PhysicalPlan, join_order: Option<&str>) -> Self {
+        let mut lines = render_plan_tree(input);
+        if let Some(label) = join_order {
+            lines.insert(1, format!("  {label}"));
+        }
         Self {
-            lines: render_plan_tree(input).into_iter(),
+            lines: lines.into_iter(),
         }
     }
 }
@@ -47,7 +54,7 @@ mod tests {
             limit: 3,
             offset: 0,
         });
-        let mut exec = ExplainExecutor::new(&plan);
+        let mut exec = ExplainExecutor::new(&plan, None);
 
         let mut rows: Vec<Vec<Value>> = Vec::new();
         while let Some(result) = exec.next().await.unwrap() {

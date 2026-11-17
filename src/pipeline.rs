@@ -5,17 +5,17 @@ use crate::diagnostics::{
 };
 use crate::executor::query_budget::{row_bytes, QueryBudget, SharedBudget};
 use crate::executor::{
-    inject_correlated_values, AggregateExecutor, AggregateNode, AlterTableExecutor,
+    inject_correlated_values, AggregateExecutor, AggregateNode, AlterTableExecutor, AnalyzeNode,
     AntiJoinExecutor, ConflictAction, CreateIndexExecutor, CreateTableAsSelectNode,
-    CreateTableExecutor, CreateViewExecutor, DataScanExecutor, DeleteExecutor, DerivedScanExecutor,
-    DistinctExecutor, DropIndexExecutor, DropTableExecutor, DropViewExecutor, ExecResult, Executor,
-    ExplainExecutor, FilterExecutor, HavingExecutor, IndexRangeScanExecutor, IndexScanAllExecutor,
-    IndexScanExecutor, InsertExecutor, InsertNode, InsertSelectNode, JoinConfig, JoinExecutor,
-    JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor, OutputColumn, PhysicalPlan,
-    ProjectionExecutor, ScalarSubqueryFilterExecutor, ScanExecutor, SemiJoinExecutorV2,
-    SetOperationExecutor, SingleRowExecutor, SortExecutor, SortMergeJoinExecutor,
-    SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor, UpsertExecutor, UpsertNode,
-    UpsertValueExpr, Value, ValueParamSlot,
+    CreateTableExecutor, CreateViewExecutor, DataScanExecutor, DataScanNode, DeleteExecutor,
+    DerivedScanExecutor, DistinctExecutor, DropIndexExecutor, DropTableExecutor, DropViewExecutor,
+    ExecResult, Executor, ExplainExecutor, FilterExecutor, HavingExecutor, IndexRangeScanExecutor,
+    IndexScanAllExecutor, IndexScanExecutor, InsertExecutor, InsertNode, InsertSelectNode,
+    JoinConfig, JoinExecutor, JoinRelatedConfig, LimitExecutor, NestedLoopJoinExecutor,
+    OutputColumn, PhysicalPlan, ProjectionExecutor, ScalarSubqueryFilterExecutor, ScanExecutor,
+    SemiJoinExecutorV2, SetOperationExecutor, SingleRowExecutor, SortExecutor,
+    SortMergeJoinExecutor, SubqueryEvalExecutor, TruncateExecutor, UpdateExecutor, UpsertExecutor,
+    UpsertNode, UpsertValueExpr, Value, ValueParamSlot,
 };
 use crate::parser::placeholder::{assign_placeholder_indices, count_placeholders, PARAM_PREFIX};
 use crate::parser::planner::ViewDef;
@@ -272,12 +272,7 @@ fn submetric_start(profiling: bool) -> Option<Instant> {
 }
 
 /// 把已经取到的时长写入旧表和当前语句阶段树。不再另取 `Instant`。
-fn record_measured_submetric(
-    profiling: bool,
-    module: Module,
-    name: &'static str,
-    start: Instant,
-) {
+fn record_measured_submetric(profiling: bool, module: Module, name: &'static str, start: Instant) {
     let elapsed = start.elapsed();
     if profiling {
         record_time(name, elapsed);
@@ -351,6 +346,33 @@ async fn plan_stage_impl(
             }
             plan_builder.build_plan(stmt).map_err(PlanFailure::from)
         }
+        Statement::Analyze { table_name, .. } => {
+            let table_lookup_start = submetric_start(profiling);
+            let mut plan_builder = PlanBuilder::new();
+            plan_builder.set_views(current_view_defs(database).await);
+            let parts = crate::parser::ast::object_name_parts(table_name);
+            let flat = parts.join(".");
+            let attached = match route {
+                Some(route) if parts.len() >= 2 && route.is_registered(&parts[0]) => true,
+                _ => false,
+            };
+            if attached {
+                plan_builder.mark_attached_table(&flat);
+            } else if !plan_builder.views.contains_key(&flat) {
+                if let Ok(table_meta) = database.table_manager.get_table(&flat).await {
+                    register_table_schema(&mut plan_builder, &flat, &table_meta);
+                }
+            }
+            if let Some(start) = table_lookup_start {
+                record_measured_submetric(
+                    profiling,
+                    Module::Pipeline,
+                    "table_metadata_lookup",
+                    start,
+                );
+            }
+            plan_builder.build_plan(stmt).map_err(PlanFailure::from)
+        }
         _ => {
             let table_lookup_start = submetric_start(profiling);
             let mut plan_builder = PlanBuilder::new();
@@ -402,6 +424,9 @@ async fn plan_stage_impl(
                     start,
                 );
             }
+            // 查询和 EXPLAIN 在书写装配成功后可能按这份快照更换左深叶序。
+            // ANALYZE 的计划臂不读取它。
+            plan_builder.set_table_stats(database.session_stats.snapshot());
             let plan = plan_builder.build_plan(stmt).map_err(PlanFailure::from)?;
             // MS20 T2: attach 身份不在 cache key 内——含附加库引用的语句不得
             // 进缓存，否则同文本语句在「有/无该别名」的会话间互相污染。
@@ -426,10 +451,37 @@ async fn plan_stage_impl(
 /// 版本戳只增不减；它与缓存失效同源，因此「缓存已清空」蕴含「版本已递增」，
 /// 预编译语句不会持有比缓存更旧的失效判据。
 pub(crate) fn bump_schema_version(database: &Database) {
+    let mut tables = database.session_stats.lock();
     database.plan_cache.clear();
     database
         .schema_version
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    tables.clear();
+}
+
+/// 保存一张表的统计，然后清计划缓存并增加版本戳。其他表的统计保留。
+///
+/// 看到的版本戳与当前不一致时不写、不增加版本戳。成功路径不调用
+/// [`bump_schema_version`]：那一步会使全部已保存统计失效。
+pub(crate) fn commit_table_stats(
+    database: &Database,
+    table: &str,
+    columns: Vec<crate::table_stats::ColumnStat>,
+    seen_version: u64,
+) -> std::result::Result<(), SqlError> {
+    let mut tables = database.session_stats.lock();
+    if database.schema_version() != seen_version {
+        return Err(SqlError {
+            message: "ANALYZE aborted because the schema changed".to_string(),
+            sqlstate: Some("58000".to_string()),
+        });
+    }
+    tables.insert(table.to_string(), columns);
+    database.plan_cache.clear();
+    database
+        .schema_version
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 /// Pipeline 阶段 3：PhysicalPlan → Response。
@@ -664,23 +716,13 @@ pub async fn execute_stage_routed(
                     }
                 };
             if let Some(start) = executor_creation_start {
-                record_measured_submetric(
-                    profiling,
-                    Module::Pipeline,
-                    "executor_creation",
-                    start,
-                );
+                record_measured_submetric(profiling, Module::Pipeline, "executor_creation", start);
             }
 
             let exec_start = submetric_start(profiling);
             let response = execute_executor(executor).await;
             if let Some(start) = exec_start {
-                record_measured_submetric(
-                    profiling,
-                    Module::Pipeline,
-                    "executor_execution",
-                    start,
-                );
+                record_measured_submetric(profiling, Module::Pipeline, "executor_execution", start);
             }
 
             match &response {
@@ -716,6 +758,9 @@ pub async fn execute_stage_routed(
             }
             response
         }
+        PhysicalPlan::Analyze(node) => {
+            execute_analyze(database, node, &budget, output_columns, output_types).await
+        }
         _ => {
             // Query path (and any non-DML/non-DDL).
             // MS09 Iter000 (D4): under Read Committed, the statement
@@ -738,23 +783,13 @@ pub async fn execute_stage_routed(
                 Err(e) => return Err(executor_creation_error(e)),
             };
             if let Some(start) = executor_creation_start {
-                record_measured_submetric(
-                    profiling,
-                    Module::Pipeline,
-                    "executor_creation",
-                    start,
-                );
+                record_measured_submetric(profiling, Module::Pipeline, "executor_creation", start);
             }
 
             let exec_start = submetric_start(profiling);
             let response = execute_executor(executor).await;
             if let Some(start) = exec_start {
-                record_measured_submetric(
-                    profiling,
-                    Module::Pipeline,
-                    "executor_execution",
-                    start,
-                );
+                record_measured_submetric(profiling, Module::Pipeline, "executor_execution", start);
             }
             // MS31-T01：查询臂装配列元数据（列名单源同 CLI 表头）。
             Ok(attach_column_metadata(
@@ -1414,6 +1449,10 @@ pub async fn execute_stage_in_tx_routed(
             message: "CREATE INDEX is not supported inside a transaction".to_string(),
             sqlstate: Some("0A000".to_string()),
         }),
+        PhysicalPlan::Analyze(_) => Err(SqlError {
+            message: "ANALYZE is not supported inside a transaction".to_string(),
+            sqlstate: Some("0A000".to_string()),
+        }),
         PhysicalPlan::DropIndex(_) => Err(SqlError {
             message: "DROP INDEX is not supported inside a transaction".to_string(),
             sqlstate: Some("0A000".to_string()),
@@ -2024,7 +2063,7 @@ async fn execute_executor(
                 return Err(SqlError {
                     message: format!("Execution error: {}", e),
                     sqlstate: storage_error_sqlstate(&e),
-                })
+                });
             }
         }
     }
@@ -2280,6 +2319,7 @@ fn plan_type_slots(plan: &PhysicalPlan) -> Vec<TypeSlot> {
             vec![TypeSlot::Unknown; count + 1]
         }
         PhysicalPlan::Explain(_) => vec![TypeSlot::Unknown; 1],
+        PhysicalPlan::Analyze(_) => vec![TypeSlot::Unknown; 4],
         PhysicalPlan::CreateTableAsSelect(node) => vec![TypeSlot::Unknown; node.columns.len()],
         PhysicalPlan::SingleRow => Vec::new(),
         // 写面与 DDL：无输出列。
@@ -3258,10 +3298,97 @@ pub(crate) fn create_executor_from_plan<'a>(
             PhysicalPlan::Explain(node) => {
                 // MS25 T6: EXPLAIN 是只读观测面——渲染被观测计划，**不构造
                 // 内层执行器**（派生表急切物化与任何执行器副作用都不触发）。
-                Ok(Box::new(ExplainExecutor::new(&node.input)) as Box<dyn Executor + Send>)
+                Ok(Box::new(ExplainExecutor::new(
+                    &node.input,
+                    node.join_order.as_deref(),
+                )) as Box<dyn Executor + Send>)
             }
+
+            PhysicalPlan::Analyze(_) => Err(StorageError::Internal(
+                "ANALYZE is executed by the statement pipeline".into(),
+            )),
         }
     })
+}
+
+async fn execute_analyze(
+    database: &Database,
+    node: &AnalyzeNode,
+    budget: &SharedBudget,
+    output_columns: Vec<String>,
+    output_types: Vec<ResolvedType>,
+) -> std::result::Result<SqlOutcome, SqlError> {
+    let seen_version = database.schema_version();
+    let rows = scan_analyze_rows(database, &node.table_name, &node.columns, budget).await?;
+    let stats = crate::table_stats::summarize(&node.columns, &rows);
+    commit_table_stats(database, &node.table_name, stats.clone(), seen_version)?;
+    let rows = stats
+        .into_iter()
+        .map(|column| {
+            vec![
+                Value::String(column.name),
+                Value::Int(column.row_count as i64),
+                Value::Int(column.null_count as i64),
+                Value::Int(column.ndv as i64),
+            ]
+        })
+        .collect();
+    Ok(attach_column_metadata(
+        SqlOutcome::Rows {
+            columns: Vec::new(),
+            rows,
+        },
+        output_columns,
+        output_types,
+    ))
+}
+
+async fn scan_analyze_rows(
+    database: &Database,
+    table_name: &str,
+    columns: &[String],
+    budget: &SharedBudget,
+) -> std::result::Result<Vec<Vec<Value>>, SqlError> {
+    let scan = PhysicalPlan::DataScan(DataScanNode {
+        table_name: table_name.to_string(),
+        columns: columns.to_vec(),
+        predicate: None,
+        scan_cap: None,
+        projection: Vec::new(),
+    });
+    let snapshot = database.statement_snapshot(None).await;
+    let mut executor =
+        create_executor_from_plan(scan, database, None, snapshot, &RoutedTables::new(), budget)
+            .await
+            .map_err(executor_creation_error)?;
+    let mut rows = Vec::new();
+    let mut charged = 0u64;
+    loop {
+        match executor.next().await {
+            Ok(Some(ExecResult::Row(values))) => {
+                let bytes = row_bytes(&values);
+                if let Err(error) = budget.charge(bytes) {
+                    budget.release(charged);
+                    return Err(SqlError {
+                        message: format!("Execution error: {error}"),
+                        sqlstate: storage_error_sqlstate(&error),
+                    });
+                }
+                charged += bytes;
+                rows.push(values);
+            }
+            Ok(Some(_)) | Ok(None) => break,
+            Err(error) => {
+                budget.release(charged);
+                return Err(SqlError {
+                    message: format!("Execution error: {error}"),
+                    sqlstate: storage_error_sqlstate(&error),
+                });
+            }
+        }
+    }
+    budget.release(charged);
+    Ok(rows)
 }
 
 // MS31-T01：`value_to_json` 已迁入 `crate::result`（核心/协议解耦的载体

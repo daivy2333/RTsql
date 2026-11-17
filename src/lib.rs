@@ -13,6 +13,7 @@ pub mod plan_cache;
 pub mod profiling;
 pub mod result;
 pub mod storage;
+pub(crate) mod table_stats;
 pub mod transaction;
 pub mod wal;
 
