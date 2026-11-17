@@ -124,7 +124,64 @@ PASS。无 BLOCKED。无 SKIPPED。
 
 ## Act Response
 
-尚未执行。
+Status: reported
+
+T3 已完成。Gate 3 与 Gate 4 通过。Gate 5 没有命中。T4 和全量没有执行。
+
+### 实际改动
+
+书写装配成功且查询合格时，`PlanBuilder::decide_leaf_order` 读取本语句的统计快照并调用 `choose_left_deep_order`。`Insufficient` 保留书写树，EXPLAIN 第二行是 `JoinOrder written`。估计叶序与书写顺序相同时同样保留书写树，行是 `JoinOrder estimated`。叶序不同时重造左深树：每一步的右子节点是一张基表扫描，内层行按选中叶序拼接各叶的全部列，最外层 `output_columns` 和返回给 `build_query` 的限定符序仍是书写装配的那一份，`output_sides` 与 `column_index` 指向重造后的子行。每个新连接节点形成后调用 `integer_pk_base_scan_join`，用它的结果选择 `SortMergeJoin` 或 `Join`。重造没有形成等值条件时不写 `JoinOrder`，书写树保留。
+
+`plan_stage_impl` 的 `_` 臂在 `build_plan` 之前调用 `set_table_stats`。`ANALYZE` 臂不注入这份快照。`ExplainNode.join_order` 保存决定文本。`ExplainExecutor::new` 把它插到 `render_plan_tree` 结果的首行 `EXPLAIN` 之后。没有决定时，输出与 `render_plan_tree` 逐字节相同。
+
+涉及的符号和文件：
+
+- `src/pipeline.rs`：`plan_stage_impl` 的 `_` 臂、`create_executor_from_plan` 的 Explain 臂
+- `src/parser/planner/mod.rs`：`PlanBuilder::table_stats`、`join_order`、`set_table_stats`，以及 Explain 包装
+- `src/parser/planner/query.rs`：`decide_leaf_order`、`join_reorder_candidate`、`left_deep_shape`、`sort_merge_on_first_step`、`rebuild_estimated_tree`
+- `src/executor/plan.rs`：`ExplainNode.join_order`
+- `src/executor/explain.rs`：`ExplainExecutor::new`
+- `src/table_stats.rs`：只更新了「计划器不调用代价函数」这句过时注释
+- `tests/join_reorder_test.rs`
+- 本变更 `tasks.md` 里 T3 的状态改为已实施，勾选 3.1
+
+### 与计划的偏差
+
+决定行的字段名用 `join_order`。两句文本、插入位置，以及最外层列序与书写装配相同，这些按计划保留。
+
+统计快照只交给 `plan_stage_impl` 最后的 `_` 臂。查询、EXPLAIN 和预编译重计划都在这条臂里。`ANALYZE` 臂保持原样。
+
+同一基表出现两个声明限定符时，等值条件上的真实表名不能区分是哪一个限定符。这种情况不重排，也不写 `JoinOrder`。本轮场景没有自连接。
+
+代价整数、权重、8 表上限、溢出宽度和 `sort_unstable_by` 没有改。新叶始终放在右扫描，没有按行数交换左右输入。
+
+### 自检
+
+Gate 3 没有留下 Critical 或 Important。已核对：星型查询在三张表都统计之后，去掉行首空白的 `JoinOrder estimated` 存在，第一条 `Scan ` 以 `Scan fact` 开头；`SELECT *`、`WHERE fact.id = 1` 和 `GROUP BY fact.d1` 与统计前的列序或分组一致。无 `ORDER BY`、只连接 `d1` 与 `fact`、以及 `LEFT JOIN` 都没有 `JoinOrder`，第一条扫描仍是 `d1`，外连接含有 `NestedLoopJoin`。带 `LIMIT 1` 的那一行与统计前相同，EXPLAIN 没有 `JoinOrder`。`a`、`b`、`c` 各 10 行且没有主键时是 `JoinOrder estimated`，第一条扫描仍是 `a`。九张表是 `JoinOrder written`，第一条扫描仍是 `t1`。预编译语句在三次 `ANALYZE` 之后与直接执行都是 100 行且彼此相同，`schema_version` 比这三次 `ANALYZE` 之前大。`CREATE INDEX` 和关闭再打开之后没有 `JoinOrder`，第一条扫描回到 `d1`。`analyze_keeps_written_join_order_in_explain` 通过。
+
+第一次整文件运行有 2 个失败。`CREATE TABLE` 会清空已保存统计，夹具当时在两次 `ANALYZE` 之间建表。夹具改为全部表建完并插入之后再统计。随后整文件通过。重造失败时不写决定行的改动之后，同一整文件再次通过。
+
+遗留 Minor：自连接的两个别名不重排。见上面的偏差。
+
+### 验证
+
+先行失败：
+
+- `cargo test --offline --test join_reorder_test star_join_explain_puts_fact_first -- --test-threads=1` 退出码 101。`star_join_explain_puts_fact_first` 失败，第一条扫描是 `Scan d1 ([id])`。
+
+通过：
+
+- `cargo test --offline --test join_reorder_test -- --test-threads=1` 退出码 0。8 passed，0 failed。这是重造失败分支改动之后的最终代码。
+- `cargo test --offline --test table_statistics_test -- --test-threads=1` 退出码 0。12 passed，0 failed。这次运行在上述分支改动之前。该文件里的连接在进入代价选择之前就返回，覆盖范围没有变。
+- `cargo test --offline --lib table_stats -- --test-threads=1` 退出码 0。14 passed，0 failed，446 filtered out。代价函数正文没有改。
+
+三条通过的命令分开执行，都带 `--test-threads=1`。没有跑全量，没有无过滤的 `cargo test`。
+
+Persisted Evidence：None required
+
+Experience Candidates：None
+
+未解决问题：无阻塞。自连接别名不重排，见偏差。
 
 ## Plan Review
 

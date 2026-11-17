@@ -66,7 +66,7 @@ impl SessionStats {
     }
 }
 
-/// 左深代价。本轮计划器不调用，只由本文件的测试读取。
+/// 左深叶序的代价。计划器调用 `choose_left_deep_order`。
 #[cfg_attr(not(test), allow(dead_code))]
 mod join_order {
     /// 一次左深枚举能接受的叶数。再多就不再挑顺序。

@@ -12,7 +12,7 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/query-cost-and-join-order/spec.md`、`specs/explain-plan-output/spec.md`、`specs/sql-parameter-binding/spec.md`。
 - 000：执行依据是 `iterations/000-session-statistics/000-initial.md`。Plan Context 为 ready。Act Response 为 reported，Review Result 为 `accepted`。
-- 001：已展开。执行依据是 `iterations/001-estimated-leaf-order/000-initial.md`。Plan Context 为 ready。尚未实施。
+- 001：已展开。执行依据是 `iterations/001-estimated-leaf-order/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。
 - 002：未展开。展开条件是 001 的 Review Result 为 `accepted`。
 - Persisted Evidence：none。
 - 跳过项：无。
@@ -23,7 +23,7 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 |---|---|---|---|---|
 | T1 | 000 | 无 | `ANALYZE TABLE` 交回可见行的计数，失败不留统计，成功后缓存清空且版本戳加一。连接叶序不变 | 已完成 |
 | T2 | 000 | T1 | 左深代价函数给出规格里的 506、408、90、80，以及平手、9 表和溢出的决定 | 已完成 |
-| T3 | 001 | 000 accepted | 合格查询按估计换叶序，结果与未统计时的多重集合和 ORDER BY 一致。不合格查询的节点行不变 | 未展开 |
+| T3 | 001 | 000 accepted | 合格查询按估计换叶序，结果与未统计时的多重集合和 ORDER BY 一致。不合格查询的节点行不变 | 已实施 |
 | T4 | 002 | 001 accepted | 按 M19 等分批次做一次全量，每批退出码 0 且 failed 为 0 | 未展开 |
 
 ## Iteration Plan
@@ -88,7 +88,7 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 
 001 展开之前不实施。展开时把下面的内容写入该轮的 Task Definition，不再选择另一套叶序或权重。
 
-- [ ] 3.1 T3：合格查询调用 000 已经定下的代价函数并替换左深叶序。
+- [x] 3.1 T3：合格查询调用 000 已经定下的代价函数并替换左深叶序。
 
 当前行为：000 完成后，`ANALYZE` 能保存统计，但 `build_from_clause_with_projection` 仍按书写顺序装配。EXPLAIN 没有 `JoinOrder` 行。
 
