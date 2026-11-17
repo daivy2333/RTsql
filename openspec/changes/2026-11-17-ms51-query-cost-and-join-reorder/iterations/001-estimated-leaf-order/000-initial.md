@@ -185,15 +185,40 @@ Experience Candidates：None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-尚未实施。
+001 的既有验收已经满足。独立阅读了 merge-base `97d183c9777716e5d54e5596ea857aab2c7821d1` 到 `cb232abcf8309847b785c9ade1f0db9df1d07c57` 的 diff，并核对了 `decide_leaf_order`、`rebuild_estimated_tree`、`ExplainExecutor::new` 和 `plan_stage_impl` 的 `_` 臂。没有重跑测试。
+
+星型查询没有主键，第一步不是排序合并。`choose_left_deep_order` 在书写代价 506、估计代价 408 时选出 `fact, d1, d2`：同代价的 `fact, d2, d1` 下标是 `[1, 2, 0]`，落选的原因是 `[1, 0, 2]` 更小。`rebuild_estimated_tree` 把新叶放在右扫描。最外层保留书写装配的 `output_columns` 顺序，只改 `column_index` 和 `output_sides`。`fact` 不是最后一叶，`fact.id` 从左子行下标 0 读取；左子行按 `fact`、`d1` 拼接，`d1.id` 在下标 3；`d2.id` 在右扫描下标 0。`JoinExecutor::build_output_row` 按侧和 `column_index` 取列，所以 `SELECT *`、`WHERE fact.id = 1` 和 `GROUP BY fact.d1` 仍看到书写列序。
+
+`join_reorder_candidate` 在无 ORDER BY、两表、外连接和 LIMIT 时直接返回。这些语句的 `label` 是 `None`，树保持书写装配，所以结果行与未统计时相同。九表由代价函数在叶数大于 8 时返回 `Insufficient`，EXPLAIN 第二行是 `JoinOrder written`。`a`、`b`、`c` 各 10 行且第一步不是排序合并时，估计序与书写序相同，行是 `JoinOrder estimated`，树不重造。
+
+`ExplainExecutor::new` 把 `  JoinOrder estimated` 或 `  JoinOrder written` 插到 `render_plan_tree` 结果的下标 1。`render_plan_tree` 自身仍以 `EXPLAIN` 开头。没有标签时传入 `None`，节点行与原来逐字节相同。`set_table_stats` 只在 `plan_stage_impl` 的 `_` 臂、`build_plan` 之前执行。`Statement::Analyze` 走前面的独立臂。`plan_prepared` 经 `plan_stage_uncached` 进入同一 `_` 臂。`CREATE INDEX` 成功后调用 `bump_schema_version`，统计被清空。关闭再打开是新的空快照。
+
+沿用 001 Act Response 的验证，覆盖范围没有失效：
+
+- `cargo test --offline --test join_reorder_test -- --test-threads=1` 退出码 0，8 passed，0 failed。这是重造失败分支改动之后的最终代码，对应该文件里的 8 个测试。
+- `cargo test --offline --test table_statistics_test -- --test-threads=1` 退出码 0，12 passed，0 failed。这次运行早于上述分支。该文件里唯一的连接是两表 `left_table JOIN right_table`，`joins.len() < 2`，在代价选择之前返回。后来的分支不在这条路径上。
+- `cargo test --offline --lib table_stats -- --test-threads=1` 退出码 0，14 passed，0 failed，446 filtered out。`src/table_stats.rs` 在 001 只改了一句注释。库内 8 个代价测试和 `database.rs` 里 6 个 `table_stats_*` 测试都不经过重造分支。
+
+非阻塞 Minor finding：同一基表的两个声明限定符无法区分。`JoinCondition` 里的 `ColumnRef.table` 是真实表名，`unique_leaf_qualifier` 遇到两张同名叶就返回 `None`，`left_deep_shape` 随之放弃。结果是不重排，也不写 `JoinOrder`。本轮验收场景没有自连接，`tests/self_join_test.rs` 也不调用 `ANALYZE`。这是 Act 偏离：计划没有把自连接写成验收项，实施加了这条退回。它不是当前验收的必要条件。
+
+另一条非阻塞 Minor finding：`rebuild_estimated_tree` 返回 `None` 时不写决定行，书写树保留。代价函数只交出仍有连接边的估计顺序，本轮场景到不了这条退回。
+
+**Evidence**
+
+- `src/parser/planner/query.rs` 的 `decide_leaf_order`、`join_reorder_candidate`、`rebuild_estimated_tree`、`remap_outer_columns`
+- `src/table_stats.rs` 的 `choose_left_deep_order`
+- `src/executor/explain.rs` 的 `ExplainExecutor::new`
+- `src/pipeline.rs` 的 `plan_stage_impl` 与 `bump_schema_version`
+- `tests/join_reorder_test.rs` 的 8 个测试
+- 验证来源是本 Cycle 的 Act Response，命令和结果见上。没有重跑。
 
 **Follow-up Decision**
 
-等待实施。
+验收已经满足，不要求当前 Cycle 修复。自连接退回留在 Findings，不另建 repair item。Iteration Plan 不变。展开 Iteration 002，全量预算仍只有那一次。
 
 **Next Cycle**
 
@@ -201,4 +226,4 @@ None
 
 **Next Iteration**
 
-None
+`iterations/002-batched-full-regression/000-initial.md`
