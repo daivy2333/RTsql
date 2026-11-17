@@ -8,7 +8,7 @@ Gate 1：PASS。需求、场景和范围来自 MS52，测量结果已写入 `pro
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。
 - 000：完成。Cycle 为 `iterations/000-record-and-keep/000-initial.md`。Plan Context 为 ready。Act Response 为 reported，Review Result 为 `accepted`。
-- 001：当前轮。Cycle 为 `iterations/001-batched-full/000-initial.md`。Plan Context 为 ready。Act Response 尚未写入。
+- 001：当前轮。Cycle 为 `iterations/001-batched-full/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 pending。
 - Persisted Evidence：none。
 - 跳过项：无。不建第二个变更，因为两项都不进入产品实现。
 
@@ -18,7 +18,7 @@ Gate 1：PASS。需求、场景和范围来自 MS52，测量结果已写入 `pro
 |---|---|---|---|---|
 | T1 | 000 | 无 | 恢复数字和「不改刷盘、不改驱逐」写入执行记录，`src/` 与 `tests/` 无差异 | 已完成 |
 | T2 | 000 | 无 | 锁等待数字和「保持文件锁」写入执行记录，`src/` 与 `tests/` 无差异 | 已完成 |
-| T3 | 001 | T1、T2 | 一次 M19 分批全量，各批 failed 为 0 | 待执行 |
+| T3 | 001 | T1、T2 | 一次 M19 分批全量，各批 failed 为 0 | 已完成 |
 
 T1 与 T2 的执行依据在 `iterations/000-record-and-keep/000-initial.md`。T3 的执行依据在 `iterations/001-batched-full/000-initial.md`。本文件不另写一套步骤。
 
