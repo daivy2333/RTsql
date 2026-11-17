@@ -109,7 +109,472 @@ PASS。无 BLOCKED。无 SKIPPED。计划由本次目标的批准离开 draft。
 
 ## Act Response
 
-Act 执行后覆盖这一节。
+Status: reported
+
+T3 已完成。16 批的通过依据都是退出码 0，且同一次输出里每一行 `test result:` 摘要的 failed 为 0。Gate 3 与 Gate 4 通过。Gate 5 没有命中。`src/`、`tests/` 和 `Cargo.toml` 相对 `0019bf127df5304f26e89927e336150fc6472b11` 没有差异。跑完后的 `ls tests/*.rs | sort` 与开跑前一致。
+
+### 实际改动
+
+没有修改产品符号。本文件替换了占位执行记录。`tasks.md` 里 T3 的状态改为已完成，001 的执行记录改为 reported。Review Result 仍是 pending。
+
+### 与计划的偏差
+
+主机有 32 个逻辑处理器、7.6GiB 内存，交换区已经占满。编译作业数设为 2，避免系统在编译时杀掉进程，使这次全量中断。每条 `cargo test` 的目标参数仍按任务定义，并且带 `--test-threads=1`。输出颜色设为 `CARGO_TERM_COLOR=never`。执行环境注入了 `CARGO_TARGET_DIR`，命令里清掉了它，产物写在本工作区的 `target/`。
+
+第 1 批第一次 `cargo test --lib --bins -- --test-threads=1` 的退出码是 0。两条摘要是 `460 passed; 0 failed` 和 `0 passed; 0 failed`。当时用 `^test result:` 读取摘要，这个模式还命中了单元测试行 `test result::tests::value_to_json_preserves_conversion_semantics` 和 `test result::tests::value_to_json_renders_datetime_family_as_da5_string`。脚本把这次结果当成失败，把同一整批又启动了一次。第二次退出码也是 0，摘要是 `460 passed; 0 failed`（16.57s）和 `0 passed; 0 failed`（0.00s）。脚本随后停住，第 2 批还没有启动。
+
+通过依据采用第一次。摘要匹配改为冒号后有空格的 `test result: `。第 1 批没有第三次启动。第 2 批到第 16 批各启动一次。多出来的那一次只覆盖第 1 批。16 批全量没有再跑一遍。
+
+### 自检
+
+Gate 3 没有留下 Critical 或 Important，也没有遗留 Minor。产品树没有计划外修改。没有新增测试或判定脚本。`cli_test` 的 `2 ignored` 留在普通套件之外。
+
+`crypto_off_build_test` 整文件处于 `#![cfg(not(feature = "crypto"))]` 之下，默认特性下摘要是 0 passed、0 failed。`network_server_test` 的测试代码在文件里被注释掉，摘要同样是 0 passed、0 failed。
+
+### 验证
+
+开跑前 `ls tests/*.rs | sort` 有 169 行。`B = (169 + 11) / 12 = 15`。11 个文件的批是 `15 × 12 - 169 = 11`。12 个文件的批是 `169 - 11 × 15 = 4`。批次表与这次清单逐项一致，missing、extra、duplicate 都是 0。12 个文件的批数是 4，停止条件没有命中。
+
+批与批串行。命令没有 `--ignored`，也没有无过滤的 `cargo test`。下面每一批的摘要行按目标启动顺序排列，取自同一次 cargo。除第 1 批记录偏差里的那一次额外启动外，每批只有这一次。
+
+第 1 批，退出码 0。`cargo test --lib --bins -- --test-threads=1`
+
+```text
+test result: ok. 460 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.91s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+第 2 批，退出码 0。`cargo test --test aggregate_extension_test --test aggregate_output_shape_test --test aggregate_test --test alter_table_test --test attach_session_test --test btree_merge_test --test btree_scale_test --test btree_split_test --test btree_test --test busy_timeout_test --test cache_perf_test -- --test-threads=1`
+
+```text
+aggregate_extension_test
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+aggregate_output_shape_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+aggregate_test
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+alter_table_test
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+attach_session_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.27s
+btree_merge_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+btree_scale_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.95s
+btree_split_test
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+btree_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+busy_timeout_test
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.18s
+cache_perf_test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+```
+
+第 3 批，退出码 0。`cargo test --test catalog_bounded_read_test --test catalog_durability_test --test chain_join_test --test check_command_test --test checkpoint_command_test --test checkpoint_redo_reduction_test --test checkpoint_skip_test --test checkpoint_test --test cli_main_profiling_test --test cli_test --test composite_index_lifecycle_test -- --test-threads=1`
+
+```text
+catalog_bounded_read_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+catalog_durability_test
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.19s
+chain_join_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+check_command_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.95s
+checkpoint_command_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.05s
+checkpoint_redo_reduction_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+checkpoint_skip_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+checkpoint_test
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+cli_main_profiling_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+cli_test
+test result: ok. 126 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 76.06s
+composite_index_lifecycle_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+```
+
+第 4 批，退出码 0。`cargo test --test composite_index_runtime_test --test concurrent_test --test connection_limit_test --test constraint_enforcement_test --test cross_db_dml_test --test cross_db_query_test --test crypto_off_build_test --test ctas_test --test cte_test --test data_page_bounded_read_test --test database_file_lock_test -- --test-threads=1`
+
+```text
+composite_index_runtime_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.10s
+concurrent_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+connection_limit_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.82s
+constraint_enforcement_test
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+cross_db_dml_test
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.40s
+cross_db_query_test
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.27s
+crypto_off_build_test
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+ctas_test
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.69s
+cte_test
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+data_page_bounded_read_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+database_file_lock_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+```
+
+第 5 批，退出码 0。`cargo test --test datetime_function_test --test datetime_type_test --test ddl_catalog_transactional_test --test ddl_crash_recovery_test --test ddl_layout_publication_test --test ddl_rewrite_consistency_test --test decimal_blob_test --test default_declaration_test --test default_precheck_test --test derived_scan_alias_test --test diagnostics_comparison_test -- --test-threads=1`
+
+```text
+datetime_function_test
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+datetime_type_test
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+ddl_catalog_transactional_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+ddl_crash_recovery_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+ddl_layout_publication_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+ddl_rewrite_consistency_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+decimal_blob_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+default_declaration_test
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+default_precheck_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+derived_scan_alias_test
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+diagnostics_comparison_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+```
+
+第 6 批，退出码 0。`cargo test --test diagnostics_facade_test --test diagnostics_statement_test --test diagnostics_wait_test --test dml_tombstone_abandon_window_test --test dml_tx_id_test --test drop_persistence_test --test drop_table_free_test --test e2e_test --test encryption_test --test executor_test --test explain_test -- --test-threads=1`
+
+```text
+diagnostics_facade_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+diagnostics_statement_test
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.27s
+diagnostics_wait_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+dml_tombstone_abandon_window_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+dml_tx_id_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+drop_persistence_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s
+drop_table_free_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.78s
+e2e_test
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 48.37s
+encryption_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.08s
+executor_test
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+explain_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+```
+
+第 7 批，退出码 0。`cargo test --test explicit_tx_test --test expression_e2e_test --test file_header_test --test file_storage_io_test --test free_page_lifecycle_test --test full_table_dml_test --test gc_test --test group_by_expr_test --test hash_join_build_side_test --test import_input_surface_test --test index_key_encoding_evaluation_test -- --test-threads=1`
+
+```text
+explicit_tx_test
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+expression_e2e_test
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+file_header_test
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.56s
+file_storage_io_test
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+free_page_lifecycle_test
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+full_table_dml_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.33s
+gc_test
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+group_by_expr_test
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+hash_join_build_side_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+import_input_surface_test
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+index_key_encoding_evaluation_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.75s
+```
+
+第 8 批，退出码 0。`cargo test --test index_manager_test --test index_page_ownership_stack_overflow_test --test index_page_ownership_test --test index_range_routing_test --test index_read_bounded_read_test --test index_write_atomicity_test --test insert_column_list_test --test insert_select_test --test isolation_level_test --test join_output_resolution_test --test join_reorder_test -- --test-threads=1`
+
+```text
+index_manager_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+index_page_ownership_stack_overflow_test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+index_page_ownership_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.42s
+index_range_routing_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+index_read_bounded_read_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+index_write_atomicity_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+insert_column_list_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+insert_select_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.85s
+isolation_level_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+join_output_resolution_test
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+join_reorder_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+```
+
+第 9 批，退出码 0。`cargo test --test join_test --test key_type_conformance_test --test keyless_eq_routing_test --test keyless_row_test --test legacy_compat_test --test limit_test --test memory_db_test --test mvcc_abort_test --test mvcc_commit_test --test mvcc_record_test --test mvcc_tombstone_visibility_test -- --test-threads=1`
+
+```text
+join_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+key_type_conformance_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+keyless_eq_routing_test
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+keyless_row_test
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+legacy_compat_test
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+limit_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+memory_db_test
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+mvcc_abort_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+mvcc_commit_test
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+mvcc_record_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+mvcc_tombstone_visibility_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+```
+
+第 10 批，退出码 0。`cargo test --test nested_loop_join_test --test network_protocol_test --test network_server_test --test no_from_select_test --test order_by_alias_sort_test --test outer_join_test --test overflow_page_test --test param_binding_test --test parser_test --test pg_integration_test --test pg_messages_test -- --test-threads=1`
+
+```text
+nested_loop_join_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+network_protocol_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+network_server_test
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+no_from_select_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+order_by_alias_sort_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+outer_join_test
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+overflow_page_test
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+param_binding_test
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+parser_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+pg_integration_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s
+pg_messages_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+第 11 批，退出码 0。`cargo test --test pg_protocol_test --test pipeline_test --test plan_cache_test --test plan_exec_test --test planner_test --test predicate_test --test prefetch_test --test prepared_statement_test --test projection_expression_test --test projection_test --test pushdown_test -- --test-threads=1`
+
+```text
+pg_protocol_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+pipeline_test
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+plan_cache_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+plan_exec_test
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+planner_test
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+predicate_test
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+prefetch_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+prepared_statement_test
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+projection_expression_test
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+projection_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+pushdown_test
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+```
+
+第 12 批，退出码 0。`cargo test --test query_memory_test --test readonly_session_test --test recovery_bounded_read_test --test recovery_e2e_test --test recovery_error_surface_test --test recovery_replay_convergence_test --test recovery_tail_persistence_test --test recovery_test --test recovery_wal_convergence_test --test release_durability_precondition_test --test release_path_bounded_read_test -- --test-threads=1`
+
+```text
+query_memory_test
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+readonly_session_test
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+recovery_bounded_read_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+recovery_e2e_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+recovery_error_surface_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+recovery_replay_convergence_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+recovery_tail_persistence_test
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+recovery_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+recovery_wal_convergence_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+release_durability_precondition_test
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+release_path_bounded_read_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+```
+
+第 13 批，退出码 0。`cargo test --test result_consumption_test --test runtime_test --test scalar_function_test --test scalar_subquery_comparison_test --test schema_persistence_test --test secondary_index_equality_test --test secondary_index_test --test select_distinct_test --test self_join_test --test session_lifecycle_test --test set_operations_test --test sort_merge_join_test -- --test-threads=1`
+
+```text
+result_consumption_test
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+runtime_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+scalar_function_test
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+scalar_subquery_comparison_test
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+schema_persistence_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+secondary_index_equality_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.19s
+secondary_index_test
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+select_distinct_test
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+self_join_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+session_lifecycle_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.08s
+set_operations_test
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+sort_merge_join_test
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+```
+
+第 14 批，退出码 0。`cargo test --test sort_test --test sql_differential_test --test statement_cancellation_test --test storage_test --test string_index_runtime_test --test string_index_sql_test --test string_secondary_index_test --test structural_property_test --test subquery_alias_binding_test --test subquery_test --test subset_insert_test --test sync_loader_test -- --test-threads=1`
+
+```text
+sort_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+sql_differential_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.81s
+statement_cancellation_test
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.09s
+storage_test
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+string_index_runtime_test
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.12s
+string_index_sql_test
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+string_secondary_index_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+structural_property_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+subquery_alias_binding_test
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+subquery_test
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+subset_insert_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+sync_loader_test
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+第 15 批，退出码 0。`cargo test --test table_alias_resolution_test --test table_manager_test --test table_statistics_test --test truncate_test --test tx_statement_test --test typed_api_test --test typed_batch_write_test --test update_expression_test --test update_index_maintenance_test --test upsert_test --test value_test --test version_chain_test -- --test-threads=1`
+
+```text
+table_alias_resolution_test
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+table_manager_test
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+table_statistics_test
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+truncate_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+tx_statement_test
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+typed_api_test
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+typed_batch_write_test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+update_expression_test
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+update_index_maintenance_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+upsert_test
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+value_test
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+version_chain_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+第 16 批，退出码 0。`cargo test --test view_test --test visibility_test --test wal_auto_checkpoint_test --test wal_buffer_test --test wal_handle_test --test wal_integration_test --test wal_record_test --test wal_recovery_large_test --test wal_writer_test --test write_failure_state_test --test write_path_slot_bounds_test --test write_type_conformance_test -- --test-threads=1`
+
+```text
+view_test
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+visibility_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+wal_auto_checkpoint_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.97s
+wal_buffer_test
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+wal_handle_test
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.07s
+wal_integration_test
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+wal_record_test
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+wal_recovery_large_test
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.25s
+wal_writer_test
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+write_failure_state_test
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+write_path_slot_bounds_test
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+write_type_conformance_test
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+```
+
+```text
+git diff 0019bf127df5304f26e89927e336150fc6472b11 -- src tests Cargo.toml
+```
+
+这条命令无输出，退出码 0。跑完后再次 `ls tests/*.rs | sort`，与开跑前的清单一致。HEAD 仍是 `a9256c3a4fc24d1b0b473d40ade32b30fe30c8a7`。写入本记录之前工作区是干净的。
+
+Persisted Evidence：None required
+
+Experience Candidates：分批读取摘要时要匹配 `test result: `，冒号后面有一个空格。`^test result:` 会命中模块名 `result` 的单元测试行。本轮第 1 批因此多启动了一次，两次都是退出码 0 且 failed 为 0。已有的分批全量操作说明可以补上这条边界。本轮不改那份说明。没有范围外的实质缺陷。
+
+未解决问题：无。
+
+### 跳过
+
+- `--ignored` 和上一轮计时：SKIPPED: 本轮命令不带 `--ignored`，不重跑恢复计时或锁等待。`cli_test` 摘要里有 2 个 ignored。
+- 第二遍全量：SKIPPED: 16 批都已有退出码 0 且 failed 为 0。第 1 批多出的那一次只覆盖同一批。
+- 产品代码修复：SKIPPED: 没有一批在复核后仍然失败，没有要求修改缓冲池、恢复或文件锁。
+- `openspec instructions apply`：SKIPPED: 该命令称 `tasks.md` 没有它认得的任务条目。执行依据是本 Cycle 的 Task Definition，不重建 `tasks.md`。
 
 ## Plan Review
 
