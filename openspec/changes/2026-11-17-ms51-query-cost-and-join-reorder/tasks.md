@@ -13,7 +13,7 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格增量在 `specs/query-cost-and-join-order/spec.md`、`specs/explain-plan-output/spec.md`、`specs/sql-parameter-binding/spec.md`。
 - 000：执行依据是 `iterations/000-session-statistics/000-initial.md`。Plan Context 为 ready。Act Response 为 reported，Review Result 为 `accepted`。
 - 001：已完成。执行依据是 `iterations/001-estimated-leaf-order/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review Result 为 `accepted`。
-- 002：已展开。执行依据是 `iterations/002-batched-full-regression/000-initial.md`。Plan Context 为 ready。Act Response 尚未写入。
+- 002：T4 已实施。执行依据是 `iterations/002-batched-full-regression/000-initial.md`。Plan Context 为 ready。Act Response 为 reported。Review 尚未写入。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -24,7 +24,7 @@ M23 只覆盖实施中新发现的实质缺陷。发现之后再追加轮次。�
 | T1 | 000 | 无 | `ANALYZE TABLE` 交回可见行的计数，失败不留统计，成功后缓存清空且版本戳加一。连接叶序不变 | 已完成 |
 | T2 | 000 | T1 | 左深代价函数给出规格里的 506、408、90、80，以及平手、9 表和溢出的决定 | 已完成 |
 | T3 | 001 | 000 accepted | 合格查询按估计换叶序，结果与未统计时的多重集合和 ORDER BY 一致。不合格查询的节点行不变 | 已实施 |
-| T4 | 002 | 001 accepted | 按 M19 等分批次做一次全量，每批退出码 0 且 failed 为 0 | 已展开 |
+| T4 | 002 | 001 accepted | 按 M19 等分批次做一次全量，每批退出码 0 且 failed 为 0 | 已实施 |
 
 ## Iteration Plan
 
@@ -127,7 +127,7 @@ cargo test --offline --lib table_stats -- --test-threads=1
 
 执行依据是 `iterations/002-batched-full-regression/000-initial.md`。本段不再另选批次算法。
 
-- [ ] 4.1 T4：按 Runbook 做一次分批全量，并记录每一批的退出码和 passed、failed、ignored。
+- [x] 4.1 T4：按 Runbook 做一次分批全量，并记录每一批的退出码和 passed、failed、ignored。
 
 当前行为：001 的定向测试已经通过。全量尚未为本次变更运行。
 
