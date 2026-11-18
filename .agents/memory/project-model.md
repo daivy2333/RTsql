@@ -1,6 +1,6 @@
 ## Purpose
 
-记录 RTsql 数据库的当前跨模块模型、组件边界和不变量。条目使用 `Mxx` 编号，按 domain/architecture/runtime 分类。
+记录 RTsql 现行的开发规范：用户发布、约束 agent 在本项目工作方式与倾向的规则与不变量。系统当前行为以 `openspec/specs/` 为权威，检索索引（含源码路径与 API 速查）见 `.agents/memory/references.md`，未承诺方向见 `.agents/memory/improvements.md`。条目使用 `Mxx` 编号，递增不重用。
 
 ## Requirements
 
@@ -15,16 +15,18 @@
 
 ---
 
+<!-- arc: b14f741 --> 4 条已归档 (2026-11-18) — M06（依赖关系与调用链）、M11（API 路径索引）、M12（文件速查索引）、M14（数据库表与目录约定）为检索元数据，已迁往 `references.md` 的 source-index 条目（R83–R86）；原文见 `git show b14f741:.agents/memory/project-model.md`。
+
 ## M01: 整体系统架构与数据流
 
 - **分类**: architecture
-- **范围**: 整个数据库系统
+- **范围**: 整个数据库系统的分层与数据流
 - **不变量**:
-  - SQL Text → Parser (sqlparser) → PlanCache (LRU, SELECT only) → PlanBuilder → PhysicalPlan (22 节点) → Pipeline → Volcano Executor Tree → Storage (BufferPool → PageGuard / BTree → AtomicPageId / SlottedPage)
-  - 22 种 PhysicalPlan 节点：Scan / DataScan / IndexScan / IndexScanAll / Filter / Join / NestedLoopJoin / Aggregate / Having / Sort / Limit / SemiJoin / AntiJoin / SubqueryEval / DerivedScan / Projection / SingleRow / Insert / Update / Delete / CreateTable / DropTable（Projection 为 MS11-T01 新增——SELECT 派生列逐行求值节点；NestedLoopJoin 为 MS09-T02 新增——非等值 JOIN；SingleRow 为 MS13-T03 新增——no-FORM 虚拟单行）
-- **证据**: `src/database.rs`, `src/pipeline.rs`, `src/executor/plan.rs`（枚举定义）, `src/parser/planner/`, `src/executor/mod.rs`, `src/storage/buffer_pool.rs`
+  - SQL 文本 → 解析（sqlparser）→ 计划（PlanBuilder，计划缓存只用于 SELECT）→ 物理计划 → 管道 → 火山执行器树 → 存储（BufferPool → 页守卫 → B-Tree → SlottedPage）
+  - 分层依赖方向：入口 → 核心 → {规划, 执行} → {存储, 事务, 持久化}；规划 → 执行；新增代码 SHALL NOT 引入新的跨层环边（现存环与处置约束见 M21）
+  - 物理计划节点集合以 `src/executor/plan.rs` 的枚举为准；计划输出行为见 `openspec/specs/explain-plan-output`
+- **证据**: `src/database.rs`, `src/pipeline.rs`, `src/executor/plan.rs`, `src/parser/planner/`
 - **状态**: active
-- **Legacy**: A001-A012 系统架构图与节点表（来自 `openspec/specs/architecture/spec.md`）
 
 ## M02: 两层分离索引结构
 
@@ -32,22 +34,17 @@
 - **范围**: B-Tree 索引层 + 数据页层
 - **不变量**:
   - 索引页存 (key → row_id_pointer)，数据页存实际 row（独立管理）
-  - 不采用 SQLite 聚簇索引模式
-- **证据**: `src/storage/btree/`, `src/storage/data/table_manager.rs:56`（data_page_head）
+  - SHALL NOT 采用 SQLite 聚簇索引模式
+- **证据**: `src/storage/btree/`, `src/storage/data/table_manager.rs`（data_page_head）
 - **状态**: active
-- **影响**: PK lookup 5.6x faster than SQLite（M17.5 实测），但文件大小 ~3x larger
-- **Legacy**: A001
 
 ## M03: 固定 32 字节 Key
 
 - **分类**: architecture
 - **范围**: B-Tree Key 编码
-- **不变量**: B-Tree Key 固定 32 字节存储
-- **代价**: 短 Key 浪费 ~28 bytes，无法支持 >32 bytes Key
-- **后续优化**: 无——Varint Key 评估（I024）经 MS38 实测后保留 32 字节定长键（2026-10-27），不再计划
+- **不变量**: B-Tree Key 固定 32 字节存储；放不下的完整值 SHALL NOT 截断、SHALL NOT 给列加长度上限（入树与扫描行为见 `openspec/specs/index-key-encoding-evaluation` 与 `openspec/specs/sql-secondary-indexes`）
 - **证据**: `src/storage/btree/`
 - **状态**: active
-- **Legacy**: A002
 
 ## M04: SlottedPage 页格式 + Logical Row ID
 
@@ -57,10 +54,8 @@
   - Slot 6B = `{ logical_id: u16, offset: u16, length: u16 }`
   - Header `next_logical_id: u16`（递增分配，永不回收）
   - RowId.slot_id = logical_id（稳定跨 compact）
-- **证据**: `src/storage/page_format/slotted_page.rs:21`（SlottedPageHeader）
-- **代价**: Slot overhead 6 bytes/entry，页填充率 50-70%
+- **证据**: `src/storage/page_format/slotted_page.rs`（SlottedPageHeader）
 - **状态**: active
-- **Legacy**: A003
 
 ## M05: 自定义二进制序列化（Tag + Value）
 
@@ -74,41 +69,18 @@
   - Bool = [Tag 0x05][1 byte]
   - Date = [Tag 0x06][4 bytes LE]
   - Timestamp = [Tag 0x07][8 bytes LE]
-- **证据**: `src/executor/value.rs`, `src/storage/page_format/tuple.rs`（TAG_DATE 0x06 / TAG_TIMESTAMP 0x07，MS13-T01）
+  - 长字符串 = [Tag 0x08][u32 len]；DECIMAL = [Tag 0x09][scale][i128 LE]；BLOB = [Tag 0x0A/0x0B]
+  - 格式版本保持 1；`__tables` 与 `__columns` 不因新类型增加字段
+- **证据**: `src/executor/value.rs`, `src/storage/page_format/tuple.rs`；类型语义见 `openspec/specs/decimal-blob-types`
 - **状态**: active
-- **Legacy**: A004
-
-## M06: 依赖关系与调用链
-
-- **分类**: architecture
-- **范围**: 模块依赖图
-- **不变量**:
-  ```
-  Database → Pipeline → Executor Tree
-                ↓
-         BufferPool → PageGuard
-                ↓
-           BTree → LeafNode/InternalNode
-                ↓
-        IndexManager → AtomicPageId (async)
-                ↓
-         WalWriter → WALBuffer → WALFile
-                ↓
-      RecoveryManager → TransactionManager
-  ```
-  - 事务 ID：`TransactionId` 全局 AtomicU64 单调递增分配，无锁（原 D09 决策记录与 K16 实测数据随 2026-09-24 K/D 退役移入清理 carrier，经 arc 指引可解析）
-- **证据**: `src/database.rs`, `src/storage/buffer_pool.rs`, `src/storage/btree/`, `src/wal/`
-- **状态**: active
-- **Legacy**: L013
 
 ## M08: AtomicPageId 无锁访问
 
 - **分类**: architecture
 - **范围**: B-Tree 根节点访问
-- **不变量**: `AtomicU64::load(Acquire)` 异步无锁读取根页 ID，避免 async 路径中 std::sync::RwLock 死锁
+- **不变量**: B-Tree 根页 ID 经 `AtomicU64::load(Acquire)` 异步无锁读取；async 路径 SHALL NOT 用 `std::sync::RwLock` 保护根页指针（避免跨 await 死锁）
 - **证据**: `src/storage/btree/index_manager.rs`
 - **状态**: active
-- **Legacy**: L012, L002
 
 ## M09: 异步协程驱动调度核心
 
@@ -117,116 +89,35 @@
 - **不变量**:
   - Tokio 多线程 scheduler 作为无栈协程运行时
   - 阻塞 I/O 通过 `spawn_blocking` 隔离（如 BTree 写操作）
-  - async 路径不持 std::sync::Mutex 跨 .await
-- **证据**: `Cargo.toml` (tokio features), `src/storage/btree/btree.rs` (BTree::from_root + spawn_blocking)
+  - async 路径不持 `std::sync::Mutex` 跨 `.await`
+- **证据**: `Cargo.toml`（tokio features）, `src/storage/btree/btree.rs`
 - **状态**: active
-- **Legacy**: L012（技巧模式 "临时 BTree 实例"）
 
 ## M10: MVCC 可见性语义
 
 - **分类**: domain
 - **范围**: 事务隔离
 - **不变量**:
-  - 隔离级别：Repeatable Read（默认，`Database::open` 行为与历史逐字节等价）+ Read Committed（`Database::open_with_isolation` 语句级已提交视图，MS09-T01）；Serializable 非目标
+  - 隔离级别：Repeatable Read（默认，`Database::open` 行为与历史逐字节等价）+ Read Committed（`Database::open_with_isolation` 语句级已提交视图）；Serializable 非目标
   - 读路径先查页级 `PageVisibilityInfo` 摘要（min_create_tx_id + all_visible），再回退到逐行 VersionHeader 检查
   - 不可见版本沿 `VersionHeader.next_version` 链查找
+  - 事务 ID 全局 AtomicU64 单调递增分配，无锁
   - 纯内存优化，崩溃后自动降级为逐行检查（正确性不受影响）
+  - 可见性与墓碑行为面见 `openspec/specs/mvcc-tombstone-visibility` 与 `openspec/specs/transaction-isolation-levels`
 - **证据**: `src/storage/page_visibility.rs`, `src/transaction/snapshot.rs`, `src/transaction/mod.rs`（IsolationLevel）
 - **状态**: active
-- **Legacy**: A011, R007, M21 spec
-
-## M11: API 路径索引（API 速查）
-
-- **分类**: architecture
-- **范围**: 公共 API 速查
-- **不变量**:
-  | 名称 | 路径 | 用途 |
-  |---|---|---|
-  | Database::open | src/database.rs | 打开/创建数据库 |
-  | Database::execute_sql | src/database.rs | 执行 SQL 语句 |
-  | BufferPool::get_page | src/storage/buffer_pool.rs | 获取页（DashMap + miss Sem + per-page loading lock，见 M17） |
-  | BufferPool::with_page_data | src/storage/buffer_pool.rs | 零拷贝页访问闭包 |
-  | PageGuard::page_data | src/storage/page_frame.rs | 零拷贝读取页数据 |
-  | PageGuard::modify_page | src/storage/page_frame.rs | 修改页数据（自动 dirty） |
-  | IndexManager::search | src/storage/btree/index_manager.rs | Async search |
-  | BTree::from_root | src/storage/btree/btree.rs | 临时实例（写操作） |
-  | PlanBuilder::build_plan | src/parser/planner/mod.rs | SQL → PhysicalPlan |
-  | Pipeline::execute | src/pipeline.rs | 执行管道入口 |
-  | inject_correlated_values | src/executor/correlated.rs | 向谓词树注入外层列值 |
-  | BTree::search_all | src/storage/btree/btree.rs | 返回所有匹配 RowId |
-  | BTree::delete_by_key | src/storage/btree/btree.rs | 删除所有匹配 entries |
-  | BTree::delete_exact | src/storage/btree/btree.rs | 精确删除 |
-  | LeafNode::merge_right | src/storage/btree/node.rs | 吸收右兄弟 entries |
-  | InternalNode::merge_right | src/storage/btree/node.rs | 吸收右兄弟 + 降级 separator |
-  | FileStorage.free_pages | src/storage/file_storage.rs | Mutex<Vec<u64>> free-list |
-  | Server::new | src/network/server.rs | 创建服务器（addr, db, max_connections） |
-  | Server::shutdown_token | src/network/server.rs | 获取 CancellationToken 用于优雅关闭 |
-  | TableMeta.data_page_head | src/storage/data/table_manager.rs:56 | 数据页链表头 |
-  | SlottedPageHeader.next_page_id | src/storage/page_format/slotted_page.rs:21 | 数据页链表指针 |
-  | IndexManager.scan_all | src/storage/btree/index_manager.rs:269 | BTree 全遍历 |
-  | PageVisibilityInfo | src/storage/page_visibility.rs | 页面级可见性摘要 |
-  | BufferPool::get_visibility | src/storage/buffer_pool.rs | 查询 visibility map |
-  | BufferPool::update_visibility_on_insert | src/storage/buffer_pool.rs | INSERT 后更新可见性 |
-  | BufferPool::clear_all_visible | src/storage/buffer_pool.rs | 写路径清标志 |
-  | BufferPool::set_all_visible | src/storage/buffer_pool.rs | 惰性设置 |
-  | DataScanExecutor 快速路径 | src/executor/data_scan.rs | 闭包外查 visibility_map |
-- **状态**: active
-- **Legacy**: L001
-
-## M12: 文件速查索引
-
-- **分类**: architecture
-- **范围**: 关键文件路径索引
-- **不变量**:
-  | 名称 | 路径 | 用途 |
-  |---|---|---|
-  | database.rs | src/database.rs | Database 协调器 |
-  | pipeline.rs | src/pipeline.rs | SQL 执行管道 |
-  | buffer_pool.rs | src/storage/buffer_pool.rs | BufferPool（DashMap + miss Sem） |
-  | slotted_page.rs | src/storage/page_format/slotted_page.rs | SlottedPage + compacting |
-  | index_manager.rs | src/storage/btree/index_manager.rs | IndexManager（AtomicPageId） |
-  | aggregate.rs | src/executor/aggregate.rs | AggregateFunc + AggregateState |
-  | join.rs | src/executor/join.rs | JoinExecutor（哈希连接） |
-  | semi_join.rs | src/executor/semi_join.rs | SemiJoinExecutorV2 |
-  | anti_join.rs | src/executor/anti_join.rs | AntiJoinExecutor |
-  | subquery_eval.rs | src/executor/subquery_eval.rs | SubqueryEvalExecutor |
-  | correlated.rs | src/executor/correlated.rs | inject_correlated_values |
-  | predicate.rs | src/executor/predicate.rs | Predicate/Expression + ParameterExpression |
-  | planner/ | src/parser/planner/ | PlanBuilder 六模块（mod/query/expression/aggregate/subquery/ddl_dml，MS07-T03） |
-  | data_page.rs | src/storage/data_page.rs | 数据页读写 + VersionHeader |
-  | table_manager.rs | src/storage/data/table_manager.rs | TableMeta（data_page_head/tail） |
-  | page_visibility.rs | src/storage/page_visibility.rs | PageVisibilityInfo（页面级 MVCC 摘要） |
-  | free_page_rebuild.rs | src/storage/free_page_rebuild.rs | 空闲页重建的受控页读失败注入点（测试支撑，路径限定 + 一次消费 + 默认不生效） |
-  | ddl_commit_window.rs | src/executor/ddl_commit_window.rs | DDL 提交点窗口的受控暂停点（测试支撑，路径限定 + 一次消费 + 默认不生效） |
-- **状态**: active
-- **Legacy**: L002
 
 ## M13: 异步执行原则
 
 - **分类**: runtime
 - **范围**: async 代码风格
 - **不变量**:
-  - async 路径不持 std::sync::Mutex 跨 .await
-  - 闭包内禁止 .await（FnOnce 非 async 编译期强制）
+  - async 路径不持 `std::sync::Mutex` 跨 `.await`
+  - 闭包内禁止 `.await`（FnOnce 非 async 编译期强制）
   - BufferPool 闭包内禁止递归调用其他 BufferPool 方法
   - BTree 写操作通过 `BTree::from_root()` + `spawn_blocking` 隔离
 - **证据**: `src/storage/buffer_pool.rs`, `src/storage/btree/btree.rs`
 - **状态**: active
-- **Legacy**: L012（技巧模式）, L022
-
-## M14: 数据库表与目录约定
-
-- **分类**: domain
-- **范围**: 代码组织
-- **不变量**:
-  - 源码目录：src/
-  - 存储层：src/storage/（buffer_pool、btree、page_format、file_storage、data）
-  - 执行器：src/executor/（每个执行器独立文件）
-  - 解析器：src/parser/（planner/ 六模块、ast）
-  - 测试目录：tests/（集成测试）+ 文件内 #[cfg(test)]（单元测试）
-  - 基准测试：benches/（criterion）
-- **状态**: active
-- **Legacy**: 项目特定规范
 
 ## M15: 命名规范
 
@@ -238,37 +129,35 @@
   - 常量：SCREAMING_SNAKE_CASE（MAX_RETRY_COUNT）
   - 布尔值：is_/has_/can_/should_ 前缀
   - 集合：复数形式（pages、slots）
+- **证据**: `src/` 现网代码一致性（抽样）
 - **状态**: active
-- **Legacy**: 项目特定规范（命名规范）
 
 ## M17: BufferPool 并发模型（DashMap + Miss Semaphore + Per-Page Loading Locks）
 
 - **分类**: architecture
 - **范围**: 缓存并发与页加载路径
 - **不变量**:
-  - `pages: DashMap<PageId, Arc<Mutex<PageFrame>>>`——cache hit 路径 lock-free（整体替代原 RwLock<HashMap> 两阶段锁加载模式）
+  - `pages: DashMap<PageId, Arc<Mutex<PageFrame>>>`——cache hit 路径 lock-free
   - miss Semaphore（16 permits）约束并发页加载总量，防突发 IO 风暴
-  - per-page `loading_locks: DashMap<PageId, Arc<tokio::sync::Mutex<()>>>`——同页并发 miss 仅一次 read_page（miss Sem 只限总量，不保证同页 double-check 正确性；per-page lock 才保证）
+  - per-page `loading_locks: DashMap<PageId, Arc<tokio::sync::Mutex<()>>>`——同页并发 miss 仅一次 read_page（miss Sem 只限总量，不保证同页 double-check 正确性）
   - 锁顺序约定：`miss_sem.acquire() → loading_lock.lock() → pages.get() → clock_hand.read() → frame.lock()`；同序获取无环，异序可死锁
-  - `flush_all` 采用 collect-then-write（DashMap iter 持分片读锁，await 不得持锁跨页写）
+  - `flush_all` 采用 collect-then-write（不得持分片读锁跨 await 写页）
   - 淘汰保持 clock_hand `RwLock<Vec<PageId>>` 串行淘汰；公开 API 签名不变
-- **证据**: `src/storage/buffer_pool.rs`（pages/vis_map/loading_locks 字段与 get_page）；原决策与设计修正全文见 2026-09-24 清理 carrier（D12/K10/K11，经 arc 指引可解析）
+- **证据**: `src/storage/buffer_pool.rs`（pages/vis_map/loading_locks 字段与 get_page）
 - **状态**: active
-- **Legacy**: D12, K10, K11（2026-09-24 K/D 退役迁入）；取代 M07 两阶段锁历史模型（M07 已归档同 carrier）
 
 ## M18: 恢复路径索引去信任与重建不变量
 
 - **分类**: domain
 - **范围**: WAL 恢复 × B-Tree 索引一致性
 - **不变量**:
-  - BufferPool 页驱逐按 LRU 而非树拓扑刷盘——checkpoint 后的运行期修改使磁盘 B-Tree 同时含洞（已刷盘父页指向未刷盘子页，读为 `InvalidPageType`）与孤儿页（已刷盘但不可达）；任何 catalog root 同步策略都无法修复
-  - `redo_count > 0`（不洁关闭）时恢复路径零消费磁盘索引树：Update `old_row_id` 由数据页自建的磁盘版本多映射按 `max{rid < record.row_id}` 派生（同键版本链 rid 序 == LSN 序，行锁串行化保证），重放后从最终数据页重建各表 PK 索引（链尾回溯 + 重复 PK 显式报错）经 `replace_index_manager` 换入
-  - `redo_count == 0`（checkpoint-clean 关闭）时磁盘树可信（checkpoint 全量刷盘保证一致）
-  - 数据页不受此影响——WAL 位置寻址重放本就以数据页为权威
-  - 触碰驱逐/刷盘路径的性能改动（I031 撕裂树运行期根修、脏页批量写回类）实施前必须对照本条
-- **证据**: `src/wal/recovery.rs::rebuild_pk_indexes`；MS10-T02 design D10 + 003/004-rework Cycle（归档 change `openspec/changes/archive/2026-09-08-2026-09-06-ms10-t02-file-lock-graceful-shutdown/`）；原全文见 2026-09-24 清理 carrier（K38，经 arc 指引可解析）
+  - BufferPool 页驱逐按 LRU 而非树拓扑刷盘——checkpoint 后的运行期修改使磁盘 B-Tree 同时含洞（已刷盘父页指向未刷盘子页）与孤儿页（已刷盘但不可达），任何 catalog root 同步策略都无法修复
+  - `redo_count > 0`（不洁关闭）时恢复路径 SHALL 零消费磁盘索引树：`old_row_id` 由数据页自建的磁盘版本多映射按 `max{rid < record.row_id}` 派生，重放后从最终数据页重建各表 PK 索引（链尾回溯 + 重复 PK 显式报错）并换入
+  - `redo_count == 0`（checkpoint-clean 关闭）时磁盘树可信
+  - 数据页不受此影响——WAL 位置寻址重放以数据页为权威
+  - 触碰驱逐/刷盘路径的性能改动实施前 SHALL 对照本条
+- **证据**: `src/wal/recovery.rs::rebuild_pk_indexes`；行为面见 `openspec/specs/wal-recovery-replay-integrity`
 - **状态**: active
-- **Legacy**: K38（2026-09-24 K/D 退役迁入）
 
 ## M19: 全量测试分批执行约束
 
@@ -276,14 +165,13 @@
 - **范围**: 测试执行与验证命令
 - **不变量**:
   - 全量回归验证 SHALL 分批执行：测试目标（`--lib`/`--bins` 与各集成测试文件）按确定性顺序分组，每组一次独立的 `cargo test … --test … -- --test-threads=1` 调用，批间顺序执行、同一时刻只有一批在跑；SHALL NOT 用一次无目标过滤的全量调用跑完（无论串行还是默认并行度），SHALL NOT 用默认并行度跑任何全量批次
-  - 原因：测试规模已过千（当前为 2231 tests / 143 个测试目标 / 14 批），无过滤的全量调用要一次性构建链接全部测试二进制并长时间独占机器，已超出目标开发机的承载能力（2026-09-29 用户指令）；批内保持 `--test-threads=1` 则延续 2026-09-26 的隔离理由——并行执行时大量用例同时持有库文件、跑大 WAL 构建与子进程信号用例，内存与进程余量不足
+  - 原因：测试规模已过千，无过滤的全量调用要一次性构建链接全部测试二进制并长时间独占机器，已超出目标开发机的承载能力；批内保持 `--test-threads=1` 则延续隔离理由——并行执行时大量用例同时持有库文件、跑大 WAL 构建与子进程信号用例，内存与进程余量不足
   - 批大小按机器能力调整（经验值 8–12 个目标/批）；分组顺序固定（如目标名字典序），保证覆盖可核对、不重不漏
   - 单次目标验证（`--test <name>`、单独 `--lib` 等非分批运行）同样使用 `--test-threads=1` 串行执行；SHALL NOT 用默认并行度跑任何测试调用（含单元测试与定向运行）
   - 新增测试 SHALL 保持「单用例自带独立 TempDir 现场」形态，不依赖并行度，也不得引入对执行顺序、并发度或批次边界的假设
   - 验证记录中的全量结论 SHALL 注明分批执行方式并保留各批的 passed/failed 计数；全量 Gate 等价于「全部批次各自 0 failed」，缺一批不得声明全量通过
-- **证据**: 2026-09-29 用户指令（全量单次串行负担超过本机能力，改为分批；豁免由 Act 直接修订本条）；溯源 2026-09-26 用户指令（禁并行跑全量）；MS19 两个 Cycle 的全量验证均为 `cargo test -- --test-threads=1`（1246 / 1261 tests）——该形态自 2026-09-29 起由分批执行取代
+- **证据**: 2026-09-29 用户指令（全量单次串行负担超过本机能力，改为分批；豁免由 Act 直接修订本条）；溯源 2026-09-26 用户指令（禁并行跑全量）；执行配方见 `.agents/runbooks/m19-batched-full-regression.md`（R48）
 - **状态**: active
-- **Legacy**: 无
 
 ## M20: 范围外缺陷的承载闭环约束
 
@@ -297,43 +185,39 @@
   - 适用边界：本条为人工/常规流程的基线；autopilot goal 驱动自动调度下同一批实施产出的实质缺陷改由当前 change 追加 Iteration 就地承载，见 M23
 - **证据**: 2026-10-24 用户指令「对于实施当中发现的所有issue候选，都直接寻找好的承载方式流程进行修复而不是等级」；MS34 实施期间产生的三个 Issue 候选（索引写侧原子性与取消后一致性、DDL 目录事务化）按本条进入承载闭环而非等级分类
 - **状态**: active
-- **Legacy**: 无
 
 ## M21: 六层公共接口与状态归属契约
 
 - **分类**: architecture
 - **范围**: 入口 / 核心 / 规划 / 执行 / 存储 / 事务六层的公共接口面、状态归属与依赖方向
 - **不变量**:
-  - 六层与各自对外公共接口面：入口（`cli/`、`network/`、`main.rs`——CLI 进程退出码与四格式输出合同；lib 面 `rtsql::cli::run()` 供 bin 装配；network 的 `Server::new`/`shutdown_token`、`network::protocol::to_response`、PgProtocol/JsonProtocol）、核心（`database.rs`、`pipeline.rs`、`plan_cache.rs`、`result.rs`、`profiling.rs`——`Database` open 家族与显式事务 API、`checkpoint()`、`prepare`/`PreparedStatement`、`set_query_memory_limit`；pipeline 的 parse/plan/execute 族与 `AttachRoute`/`RoutedTables`、`infer_ctas_column_types`；`SqlOutcome`/`SqlError`/`ColumnMeta`；`with_profiling_scope`/`is_profiling_enabled`；`PhysicalPlan`）、规划（`parser/` 七模块——`parse_sql`、`PlanBuilder`、`PlanError`、attach 与 transaction 语句分类面）、执行（`executor/`——`Value`、`ColumnType` 与 `datetime` 编码、`Executor` trait 与 `next_batch`、`query_budget` 预算面、32+ 执行器与 `ExplainExecutor`；渲染模块 `plan_format` 为执行层私有，不属对外公共面）、存储（`storage/`、`wal/`——`AsyncStorage` trait、`BufferPool`、`TableManager`/`TableMeta`、`IndexManager`、catalog 与页格式词表、`check_integrity`、`StorageError`；`WalWriter`/`WALBuffer`/`CheckpointManager`/Recovery）、事务（`transaction/`——`TransactionManager`、`TransactionId`、`Snapshot`/`IsolationLevel`、`VersionHeader`、`TransactionSession`、`abort_by_id`/`discard_tx_version_tables`）
+  - 六层划分：入口（`cli/`、`network/`、`main.rs`——CLI 进程退出码与四格式输出合同；lib 面 `rtsql::cli::run()` 供 bin 装配；network 的 `Server::new`/`shutdown_token`、`network::protocol::to_response`、PgProtocol/JsonProtocol）、核心（`database.rs`、`pipeline.rs`、`plan_cache.rs`、`result.rs`、`profiling.rs`）、规划（`parser/` 七模块）、执行（`executor/`）、存储（`storage/`、`wal/`）、事务（`transaction/`）；各层对外公共接口面与词表归属的逐项清单见归档 change `design.md` §5
   - 入口层消费核心与各层 pub 面，不被任何层引用（network、cli 均为叶子）
-  - 会话级可变状态统一归 `Database` 协调器所有（`Arc` 共享，克隆共享全部可变态）；字段清单以 `pub struct Database` 的 15 个结构体字段为准
+  - 会话级可变状态统一归 `Database` 协调器所有（`Arc` 共享，克隆共享全部可变态）
   - `plan_cache` 读写独占 pipeline；`schema_version` 单点递增在 pipeline `bump_schema_version`；克隆共享、open 归零、不持久化
-  - `wal_buffer` 是唯一「三层持有入口」的字段（执行器写路径直接追加 + TransactionManager 内部槽 + CLI shutdown），归属仍为 Database；异步协作改造以本清单为起点
+  - `wal_buffer` 是唯一「三层持有入口」的字段，归属仍为 Database
   - `views` 注册表归 Database，planner 持有注入快照副本（非共享 Arc）；`io_failpoint` 打开期定型，主库 FileStorage 与 WalWriter 共享同一单元，ATTACH 附加库各自独立
   - 会话级后台对象（WALBuffer 后台 flush/Notify、WalWriter 句柄与水位、TransactionManager 内部登记、BufferPool 并发结构、IndexManager 写侧闸门）归属其宿主管理器，生命周期随 `Database` 实例
-  - ATTACH 会话状态归入口层 CLI（`AttachSession`）——现存跨层归属先例：会话概念归入口，逐语句路由归核心
-  - 允许依赖方向：入口 → 核心 → {规划, 执行} → {存储, 事务, 持久化}；规划 → 执行（计划词表供给）；result 与 profiling 为零环跨切面
-  - 现存依赖环保留，处置为拆 crate 前置约束：环 1a（database→pipeline→executor→database——须把 executor 对 `Database` 的依赖面收敛为 trait 或参数包）、环 1b（executor↔pipeline——须为子查询重建臂的装配协议做专项设计）、环 1c（database↔transaction——须裁定 `TransactionSession` 执行臂注入方式）、环 2（storage↔transaction——须把 `Value`/`ColumnType` 词表归属下沉）
-  - 新增代码不得引入新的跨层环边
-  - 词表归属遗留决策：`Value` 在 `executor/value.rs`、`ColumnType` 在 `storage/page_format/tuple.rs` 与 `executor/value.rs`（两个同名类型分属存储与执行两层；lib 根重导出执行层版 `rtsql::ColumnType`，存储层版为 `rtsql::storage::ColumnType`）、`PhysicalPlan` 在 `executor/plan.rs`、`datetime` 在 `executor/datetime.rs`；归属调整属 crate 拆分 change 的专项设计
-- **证据**: `openspec/changes/archive/2026-10-28-ms42-module-boundaries/design.md` §5（六层接口、状态归属裁定、依赖方向与环清单；长期理由与逐条消费面数字以该 design 为准）；实施后代码事实的逐项核对见该 change 的 `iterations/003-combination-matrix-and-full-regression/000-initial.md` Plan Review
+  - ATTACH 会话状态归入口层 CLI（`AttachSession`）
+  - 允许依赖方向：入口 → 核心 → {规划, 执行} → {存储, 事务, 持久化}；规划 → 执行；result 与 profiling 为零环跨切面
+  - 现存依赖环保留，处置为拆 crate 前置约束；新增代码不得引入新的跨层环边
+  - 词表归属遗留（`Value`、`ColumnType` 同名双定义、`PhysicalPlan`、`datetime`）的调整属 crate 拆分 change 的专项设计
+- **证据**: `openspec/changes/archive/2026-10-28-ms42-module-boundaries/design.md` §5（六层接口、状态归属裁定、依赖方向与环清单）；实施后代码事实的逐项核对见该 change 的 `iterations/003-combination-matrix-and-full-regression/000-initial.md` Plan Review
 - **状态**: active
-- **Legacy**: 无
 
 ## M22: 模块向统一诊断报告信息的接口约定
 
 - **分类**: architecture
-- **范围**: 诊断信息的产生、采集与交付边界（面向 MS43 协作改造与 MS44 统一诊断衔接）
+- **范围**: 诊断信息的产生、采集与交付边界
 - **不变量**:
-  - 统一门面：后续统一诊断经单一门面模块（约定名 `rtsql::diagnostics`）收发；各模块不得再新增 `eprintln!`/`println!` 直写出口
-  - 数据模型：`DiagnosticRecord { severity（分级枚举，名称由 MS44 定）、category（模块/阶段标识）、message、data（可选键值：耗时、资源计数） }`；分事件记录与性能统计两类；阶段计时沿用 `with_profiling_scope` 的 scope 语义（阶段 + 算子两级）
-  - 交付 API：`diagnostics::report(record)`（同步投递，门面决定丢弃/缓冲/输出，模块不得自持输出）与 `diagnostics::scope(name) -> ScopeGuard`；MS44 实现时可收敛参数与返回形态，但不得把输出决策移回模块
-  - 职责边界：模块产生自身事件与统计（模块自己持有阶段语义）；门面独占配置（详细程度/观察模块/采集内容三分离，对齐 I096）、跨异步上下文关联与输出限量；诊断只观察，不改变事务结果、不替代行为断言
-  - 迁移原则：现存 34 个 `eprintln!`/`println!` 直写出口（排除 `cfg(test)`）由 MS43/MS44 按域增量迁移——分布为 table_manager 12、wal/recovery 6、profiling 5、btree/index_manager 4、network/server 3、executor/drop_index 2、data_page 1、database 1；「用户可见 stderr 告警」的有无变化属行为变化，须由承载 change 的 spec 增量明示，不得借诊断名义静默吸收；`profiling.rs` 并入门面作计时提供方，4 个产品接线点语义保持
-  - 与错误通道的关系：错误继续走 `Result` 返回值（错误不是诊断事件）；SQLSTATE 三源分类不变
-- **证据**: `openspec/changes/archive/2026-10-28-ms42-module-boundaries/design.md` §6（诊断报告接口约定与现状出口清单；长期理由以该 design 为准）；实施后代码事实的逐项核对见该 change 的 `iterations/003-combination-matrix-and-full-regression/000-initial.md` Plan Review
+  - 统一门面：诊断经单一门面模块（`rtsql::diagnostics`）收发；各模块不得新增 `eprintln!`/`println!` 直写出口
+  - 数据模型：`DiagnosticRecord { severity, category, message, data }`；分事件记录与性能统计两类；阶段计时沿用 `with_profiling_scope` 的 scope 语义
+  - 交付 API：`diagnostics::report(record)`（同步投递，门面决定丢弃/缓冲/输出）与 `diagnostics::scope(name) -> ScopeGuard`；输出决策不得移回模块
+  - 职责边界：模块产生自身事件与统计（模块自己持有阶段语义）；门面独占配置（详细程度/观察模块/采集内容三分离）、跨异步上下文关联与输出限量；诊断只观察，不改变事务结果、不替代行为断言
+  - 「用户可见 stderr 告警」的有无变化属行为变化，SHALL 由承载 change 的 spec 增量明示，不得借诊断名义静默吸收
+  - 错误继续走 `Result` 返回值（错误不是诊断事件）；SQLSTATE 三源分类不变
+- **证据**: `openspec/changes/archive/2026-10-28-ms42-module-boundaries/design.md` §6（诊断报告接口约定与现状出口清单）；行为面见 `openspec/specs/unified-diagnostics`
 - **状态**: active
-- **Legacy**: 无
 
 ## M23: 自动调度实施期缺陷的就地承载约束
 
@@ -346,6 +230,5 @@
   - 缺陷超出该承载方式（需新需求裁定、修改已批准 Acceptance 或扩大 goal 范围）时，子代理停止并回报用户决定，不自动扩权
 - **证据**: 2026-10-28 用户 goal 原话「开始实施，把这个change做完，要求遵守各种规范，尤其是多批次串行测试规范，对于实施当中发现的issue，直接登记后在这个change规划新iter进行解决，另外把这个issue在自动调度时候的规范写到M文档」
 - **状态**: active
-- **Legacy**: 无
 
 <!-- arc: ARC-202609241843b --> 2 条已归档 (2026-09-24) → openspec/changes/archive/2026-09-24-ARC-202609241843b/proposal.md
