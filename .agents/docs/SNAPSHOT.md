@@ -24,42 +24,43 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 
 ## 关键特性
 
-- **轻量**: 单库静态链接，无外部数据库服务依赖
-- **便捷**: one-shot CLI、12 个可见生命周期/分析子命令（`rtsql delete <db>` 删库：锁探测同窗口删除、伴生清理、逐文件报告、`--dry-run`；`rtsql checkpoint <db>` 显式落盘：WAL 截断 + checkpoint 位点推进、零工作明示 `no pending work` exit 0；`rtsql check <db>` 只读结构完整性校验：页 census/catalog/数据链/溢出链/三类索引树扫描、error 级损坏逐行报告页位置与语义 exit 1、info 级〔未引用溢出链、恢复后 tail 良性领先〕不改退出码、不修复不修改文件、`:memory:`/`--readonly` exit 2、pending WAL 经纯读恢复会话收敛后再 check、新建零行表即干净〔存量 0x00 head 打开不自愈、首次写入/TRUNCATE 自然转绿〕）；import 输入面（stdin `-` 通道、目标表缺失按 CSV 表头自动建表〔字段猜测 + CTAS 推导矩阵合并、冲突点名拒绝零副作用、首列隐式主键语义〕、`:memory:` import 豁免〔`--key` exit 2〕）；隐藏 shell 补全生成与本机安装脚本；锁等待预算可配置——`--busy-timeout <MS>` global flag/env `RTSQL_BUSY_TIMEOUT`/lib 三通道（默认 5000ms、显式 0 不额外等待、非法值 open 前 exit 2、flag 优先、`:memory:` 接受忽略、`delete` 探测永不等待），并发 one-shot 逐个原子完成；dump 数据链完整性预检（断链库 stderr 一行告警、rc 0 继续、stdout 纯 SQL 不受影响）；dump DDL 仅 INTEGER 主键列输出 `PRIMARY KEY`、仅 INTEGER 唯一列输出 `UNIQUE`（存量非 INT PK 与非 INT UNIQUE 表 dump→restore 往返可达）；主命令对缺失库显式拒绝（exit 1 + `rtsql new` 指引、零文件创建，创建通道收敛 `rtsql new`，lib 与生命周期子命令建库/拒绝语义不变）
-- **错误面可操作**: 不支持语句/表达式报错点名能力；PG 协议错误按类携带 SQLSTATE（0A000/42601/42P01/42703/42702/58000 兜底归类）；CLI 错误输出渲染 SQLSTATE（文本格式错误行尾 ` [SQLSTATE xxxx]`、`--format json` 错误对象 `sqlstate` 字段无分类时省略，退出码/文案/PG 面零变化）；计划期列解析显式化（未知投影列/未知排序键/列缺失点名）；恢复重放对「WAL 记录引用的表在 catalog 缺失」定向指因（点名表名与可能原因，打开拒绝与不跳过记录语义不变）
-- **高效**: 基于协程的异步 I/O、MVCC 无锁读、零拷贝页访问、DashMap 缓冲池；one-shot 只读会话零工作关闭整体跳过 checkpoint（无 WAL 追加且无脏页时，「close 即落盘」语义不变）
-- **统一分级诊断**: 会话内统一诊断门面（`Database::set_diagnostics` 下发配置 / `diagnostic_summaries` 读回摘要）——输出详细程度（`Detail::{Off, Summary, Full}`）、观察类别（`Module::{Pipeline, Wal, Storage, Index}`，默认全集）与采集内容（`Collect::{events, stats, trace}`）三项分开配置，输出详细程度不决定是否采集；未修改的会话配置三项采集全关、无摘要、不产生新的诊断 stderr。双上限（单条语句保留的事件与追踪样本默认 64 条，会话摘要默认只留最近 32 条）。语句阶段树：解析 / 规划 / 执行分列，实际提交记为执行的子阶段，语句总耗时取根阶段包含耗时而非父子相加，计划缓存命中不记解析与规划。等待类别 `Category::{Compute, Lock, Queue, Io, Schedule}`：未被等待包住的阶段时间记 Compute，内层等待不重复计入外层，同一次刷盘释放的每个提交各带该次刷盘的整段 Io。样本按同一次语句归属，刷盘任务上的样本只进该次提交的摘要，并发语句不互串；摘要只带自身 SQL 文本（超长截断），不含操作标识、运行标识或内容哈希字段。成功 / 失败 / 取消三种结局都结束记录并留下对应状态摘要。诊断只观察：SQL 结果、错误文本、SQLSTATE、取消后的行可见性与既有 stderr 告警（含 `[recovery]`）均不改变，诊断投递不在语句执行过程中写 stderr；`RTSQL_PROFILING` 已设置时，主命令把索引扫描的查询结果或既有 SQL 错误交回调用方，进入执行阶段的语句向 stderr 输出旧三段计时表，解析、规划以及 BEGIN、COMMIT、ROLLBACK、ATTACH 等未进入执行阶段的路径不输出该表；未设置该变量时主命令不输出该表。五个旧子指标 `table_metadata_lookup`、`executor_creation`、`executor_execution`、`index_manager_search`、`index_manager_search_all` 用同一次测量进入当前语句阶段树，前三个属 Pipeline，后两个属 Index；比较指标从保留摘要读出首行等待、吞吐和 P95，进程内存峰值在 Linux 上取 `ru_maxrss` 的 KiB 数乘以 1024。这些读出不进入 SQL 结果、错误文本或 SQLSTATE
-- **读面代数完整**: OUTER JOIN 三态（LEFT/RIGHT/FULL，含非等值 ON 三值语义）、`SELECT DISTINCT`、`UNION [ALL]` / `INTERSECT` / `EXCEPT`（左结合、NULL 相等）、非递归 CTE（`WITH`，前向引用/列别名/遮蔽基表）、聚合扩展（`COUNT/SUM/AVG(DISTINCT …)` 真实去重、`group_concat`）、聚合嵌套值表达式（`SELECT MAX(id)+1`、`COALESCE(MAX(id),0)`、HAVING 完整表达式、聚合查询 ORDER BY 聚合键、常量项混排合法、显示名重名按注册输出正确解析）、`ORDER BY <输出别名>` 按输出列真实排序、FROM 表别名全子句面解析（自连接多别名 × SELECT/ON/WHERE/GROUP BY/聚合参数/ORDER BY，限定符归一化单点，未知限定符 `TableNotFound` 42P01 点名、三段限定仅 attach 复合键可达）；JOIN 基座 ORDER BY 限定键真实排序（含无 WHERE 形态与自连接同名列限定符精确解析）、JOIN 纯列清单输出列序 = SELECT 序、单 FROM ≥3 表左深等值链端到端可达（hash+hash/hash+NLJ 混合）、自连接等值 JOIN 正确配对与投影（两腿同侧 `InvalidQuery` 点名）、WHERE 标量子查询比较（非相关/相关语句级缓存、多行点名拒绝、零行 NULL 三值、JOIN 基座 WHERE 维持拒绝、谓词不下推）、SELECT 投影位标量子查询输出形状与请求一致、FROM 派生表内集合操作（IN/EXISTS 表达式子查询内维持拒绝）、无键基表（PK 列非 INT）JOIN/SemiJoin 行完整可见（Scan 枚举通道回退数据页走查，带主键表索引枚举零变化）、`NOT IN` NULL 三值折叠（外键 NULL 行与右集含 NULL 时不返回、右集空集全返回；IN/NOT EXISTS 通道不变）、TEXT 相关参数按真实值求值（含参树 owned 求值通道）、聚合派生表与聚合 CTE 外层列引用按 SELECT 清单名解析（键位别名生效）、碰撞形状（外层同名未别名 + 内层别名声明同表 + 基名限定引用）四面解析为外层相关参数（对齐 SQLite 别名遮蔽语义）
-- **差分与性质测试保护网**: rusqlite 跨引擎差分（语义一致子集双向对比、别名/派生表/等价谓词变换一致性、已知分歧白名单逐条带分类与规避——现余 1 条 NULL 排序位置已知差异）+ 结构性质三组（编码往返 / B-Tree 插删查 / 版本链可见性，固定种子可重现）；全部判定位于 `cargo test` 集合内、无框架外判定层
-- **跨库交互**: `ATTACH '<path>' AS <alias>` 会话注册（路径解析复用 `resolve_db_path`、独占 advisory 锁冲突 exit 4、自附加 flock 同 inode 拒绝、DETACH 豁免 I076）+ 两段限定名路由（`alias.table` 命中附加库、未命中扁平名回落零回归、三段列引用路由命中可用）+ SELECT 全形态跨库组合 + 附加库写入（DML 路由目标库事务/WAL/缓冲池绑定、每文件独立提交非原子、显式主库事务 0A000 源求值前拒绝、只读会话 25006 优先、全部退出路径统一关闭且关闭失败不撤销已提交、UPDATE/DELETE 无子查询执行能力保持既有边界；`INSERT INTO … SELECT` 主库/附加目标物化写入）+ 附加库 DDL/CTAS 附加目标计划期拒绝；`CREATE TABLE AS SELECT` 主库物化（列名取输出表头、类型推导矩阵、建表→`flush_all()`→插入崩溃一致性序、失败零副作用、LIKE/CLONE/混合形态/事务内点名拒绝）
-- **嵌入式运行形态**: 只读打开模式——lib `Database::open_readonly[_with_key]` + CLI `--readonly`，advisory 共享锁多读单写（读读并发/读写互斥/冲突等待预算后 `DatabaseLocked` exit 4）、WAL 未决 `WalPendingRecovery` 点名拒绝（exit 1）、会话零写入、13 写计划变体计划期 25006 拒绝（exit 3）、`--readonly`×生命周期子命令 exit 2、ATTACH 附加库随会话只读；`:memory:` 内存库——lib `open_in_memory()` + CLI 主命令特判，`MemoryStorage` 内存页后端零文件、close/checkpoint 结构性 no-op、进程退出即弃、`--key`/`--readonly`/六生命周期子命令 exit 2、ATTACH/CTAS 零特殊化；WAL 字节水位自动 checkpoint——提交边界 `maybe_auto_checkpoint` 单点（16 MiB 默认 + `RTSQL_WAL_CHECKPOINT_BYTES`/lib 设置器双通道、0 禁用、非法值打开前 exit 2、活跃事务顺延、失败点名 `checkpoint failed` 传播且已提交数据不受影响/CTAS 表存活）；锁等待预算可配置——独占与只读共享锁同款按预算周期重试（内部 ~8ms 可见性下限恒存吸收平台 flock 释放窗口——同进程 close→立即重开假 `DatabaseLocked` 消除不依赖预算配置），预算耗尽维持 `DatabaseLocked` exit 4 错误面不变、等待期 SIGINT/SIGTERM 即时中断（130/143）
-- **catalog 持久化正确性**: catalog（`__tables`）行等长字段更新经 `update_slot_in_place` 原地覆写活行 slot（不依赖页剩余空间、窒息页自愈、零泄漏零行副本）、变长更新跨页链追加 + 旧副本清理 + `scan_tables` 同名确定性去重（logical_id 最大者）、全部更新失败携表名 `Err` 传播、跨进程背靠背写入 count/扫描/MIN-MAX/点查/dump 五面一致、索引根分裂写回持久；DDL 语句边界 catalog 有序落盘（成功返回前列行/索引根/数据页头先落盘、`__tables` 行最后落盘 = commit point，未 checkpoint 崩溃建后即崩恢复可达、check 干净）；`ALTER TABLE … DROP COLUMN` 的窄化意图随事务写入日志并与提交记录同一次持久化，目录窄化在提交之后幂等发布，提交前失败的目录面被补偿，同表窄化被拒绝，同表 ADD COLUMN 在窄化令牌期间不改该表目录并等待令牌清除后追加、不被令牌拒绝，正常路径发布安装取得令牌时捕获的窄化布局，两条都完成后进程内读取与重新打开所见列集合、列数和行值相同，未发布意图不因检查点丢失、建表 catalog 写入中途失败零残留（内存不注册/孤儿列行清理/页释放/同名可重试）、DEFAULT 字面量序列化超出 catalog 列行页内容量计划期点名拒绝（ALTER 同款预检）
-- **派生基座投影收口**: FROM 子查询/CTE/视图三通道（共用 `DerivedScan`）的外层纯列清单按清单裁剪行与表头、未知外层列计划期 `ColumnNotFound`（42703）、WHERE/ORDER BY 组合同型、CTAS 列名取裁剪后表头；`SELECT *`/聚合/别名项恒等面不回归
-- **DDL 演进与二级索引**: `CREATE INDEX`/`DROP INDEX` 非唯一二级索引，单列或组合列，列声明为 INT 或字符串（TEXT、VARCHAR、CHAR、CLOB）；完整编码放得进 32 字节键的值走索引，更长的字符串整值写入且等值查询扫描该完整字面量，不截断、不给列加长度上限；NULL 不入索引，重复字符串允许；存量回填、干净重开与未决 WAL 恢复后与已提交行一致，写路径以及回滚、提交前取消后条目与存活行一致；非主键等值谓词 `IndexScanAll` 路由且任意投影形状正确〔列元数据恒 base_schema、真实输出由 projection 唯一决定〕，结果与全表扫描严格相等——多叶等值连串双向任意重复键规模成立、失败语句索引零副作用；树遍历 `scan_all` 任意层树全量枚举、叶内条目重排后叶链指针保真、无 WHERE 全表 UPDATE/DELETE 多层树 affected_rows=行数；删除页物理释放后查询回落扫描；INT 与字符串列可建多列非唯一二级索引，键仍是 32 字节；放不下的行不入树、不截断。新建单列 INT 索引用翻转符号位的 8 字节编码，范围按有符号数值序走 `IndexRangeScan`；升级前的单列 INT 索引保持原大端字节，等值不变，范围继续扫描。字符串范围走有序键，并补上未入树且谓词成立的非 NULL 行，结果与全表扫描严格相等。全部为 INT 且超过四列的组合索引计划期拒绝。`CREATE UNIQUE INDEX`、表达式索引、部分索引、`IF NOT EXISTS` 与支持域外类型点名拒绝；PRIMARY KEY 与 UNIQUE 仍只接受整数；`ALTER TABLE ADD/DROP COLUMN`（尾部加列存量行按 DEFAULT/NULL 读回、NOT NULL 无 DEFAULT 非空表拒绝、约束声明拒绝；任意位置删列内隐式事务逐行重写全有或全无、索引引用/最后一列守卫、多操作与事务内拒绝）；`TRUNCATE TABLE`（checkpoint-first 数据页物理释放、表定义与三类索引定义保留索引重建为空、无墓碑崩溃不复活、事务内/多表/视图拒绝、空表幂等）；`CREATE`/`DROP VIEW` 只读视图（kind=View catalog 持久跨重启、CTE 通道展开与内联派生表逐字节一致、显式列清单、嵌套展开循环结构性封死、DML 只读拒绝、定义变更 plan cache 全清）；`DELETE` 未命中键零副作用（`LeafNode::delete` 精确键验证）
-- **计划可观测与名字解析严格**: `EXPLAIN <SELECT>` 输出计划树文本且不执行内层；有连接顺序决定时，首行 `EXPLAIN` 之后多一行 `JoinOrder estimated` 或 `JoinOrder written`，不改写节点行；没有可用统计时不增加该行；JOIN 基座聚合参数与分组键在完整组合列布局上解析，同名裸名歧义 `AmbiguousColumn` 点名、未知列 `ColumnNotFound` 点名；聚合查询输出行与表头恒为 SELECT 清单形状；聚合参数在 JOIN 与单表面均计划期解析（SHALL 引用输入基列）；派生表/CTE 基座 `col AS alias` 表头生效
-- **查询代价与连接叶序**: `ANALYZE TABLE <表>` 与末尾只加 `COMPUTE STATISTICS` 的同一语句，对主库基表按当前快照交回 `column`、`row_count`、`null_count`、`ndv`。可见行与同一快照的 `SELECT *` 相同。数字留在当前 `Database` 会话并由克隆共享，不写入数据页、目录、WAL 或检查点，关闭再打开即消失。失败不替换已有统计，也不推进 `schema_version`。成功则清空计划缓存并把 `schema_version` 加一，且不丢弃其他表仍有效的统计。`bump_schema_version` 的递增，包括既有 DDL 与 CTAS，使已收集统计不再参与计划。查询至少有三张主库基表叶、每一步都是纯等值内连接、带 `ORDER BY`、没有 `LIMIT`、`OFFSET`、`FETCH` 或 `LIMIT BY`，并且每张表都有可用统计时，计划器调用左深代价。不超过 8 张表时在合法叶序中取更小代价；与书写顺序代价相同则保持书写顺序。超过 8 张表，或书写顺序的代价溢出时，保持书写叶序。替换后的树仍是左深，右子节点是基表扫描，不按行数再交换左右输入。最外层交给 WHERE、ORDER BY 和投影的列序与书写装配相同。结果行的多重集合与书写叶序相同；有 `ORDER BY` 时结果序列满足该排序。没有可用统计时计划保持书写叶序
-- **约束执行**: 建表声明的约束要么写路径强制要么计划期点名拒绝——NOT NULL 零副作用强制、INT 列 UNIQUE 经专属唯一索引强制（重启与崩溃恢复两态一致）、CHECK/FOREIGN KEY/组合与非 INT UNIQUE/非 INTEGER 显式 PRIMARY KEY 诚实化拒绝（隐式首列主键既有语义零变化，存量非 INT PK 表可用）
-- **写面完整**: 子集列清单 INSERT + DEFAULT 解析→持久化→应用→渲染闭环；`ON CONFLICT DO NOTHING / DO UPDATE SET`（字面量 / `excluded.col` / 旧行裸列三形态）与 `REPLACE INTO`；写入值类型与列声明类型强制一致（拒绝零副作用，FLOAT 列整数值无损升格）；UPDATE SET 接受完整值表达式右值与多列赋值（`SET v = v + 1`、`SET a = a + 1, b = a` 同旧行快照、CAST/CASE/COALESCE/标量函数，既有类型门/NOT NULL/键列门/碰撞预检/rekey/唯一与次级索引维护照常，聚合与子查询右值计划期拒绝）；UPDATE/DELETE 无 WHERE 全表形态（逐行门序/版本写/索引维护照常、中途失败隐式事务回滚全部已写行、显式事务可用、附加库目标经路由同语义，TRUNCATE 物理释放并存不替代）；声明期 DEFAULT 校验/归一（CREATE TABLE/ALTER ADD COLUMN 与写入类型门同规则、TypedString 日期字面量声明、dump→restore 往返）；CREATE TABLE 重复列名计划期拒绝
-- **DECIMAL 与 BLOB**: 可以声明、写入、比较和读回。`DECIMAL(p,s)` 与 `NUMERIC(p,s)` 的精度为 1 到 38，小数位为 0 到精度；`DECIMAL(p)` 与 `NUMERIC(p)` 的小数位为 0。整数、数值和字符串按十进制原文解析，能按列的小数位精确缩放才写入；需要舍入、放不下或传入 Float 时拒绝。`BLOB`、`BYTEA`、`BINARY`、`VARBINARY` 不带长度时成为 BLOB 列，带长度时拒绝。DECIMAL 按数值比较，BLOB 按无符号字节序比较；跨类型比较失败。这两种值不进入二级索引键；用作主键时等值过滤仍返回该行。格式版本保持 1。`__tables` 与 `__columns` 的 G1、G2、G3 不增加字段。范围内的旧库仍可打开、查询和写入
-- **类型化 API 面与参数绑定**: 公共执行入口返回类型化结果（`Result<SqlOutcome, SqlError>`——查询返回原生 `Value` 行集合与逐列元数据〔列名 + 类型〕、DML 返回受影响行数、错误载荷携消息与 SQLSTATE 分类），核心执行路径与 `network::protocol::Response` 解耦（`Response` 退化为 CLI/Server 边界转换词表；CLI 四格式与 PG/JSON 输出逐字节零变化）；SQL 文本位置式占位符 `?` 绑定原生 `Value` 参数（AST 单遍按 SQL 文本序编号 `__param_{i}`，表达式位编译为 `ParameterExpression`、DML 值位登记槽位；个数/类型错误点名、NULL 三值、TEXT 真值；不可达位〔DML 定位键位 / 标识位 / DDL〕计划期零副作用拒绝）；可复用预编译语句（`Database::prepare` + `PreparedStatement::execute[_in_tx]`，自持计划不读写 plan cache，schema 变化〔DDL 八类 + CTAS + 成功的 ANALYZE〕后按版本戳透明重计划，显式事务内执行，同一条语句的并发执行经闸门串行化）；查询行游标 `RowCursor` 由 `open_rows`、`open_rows_with_params`、`open_rows_in_tx`、`open_rows_in_tx_with_params` 打开，`next_batch` 按批交回行，列名和声明类型在首拉前可读，未知类型保持未知，非行语句在副作用前拒绝，四个整段入口仍一次交回完整 `SqlOutcome`
-- **执行资源契约**: 执行器批量接口与查询内存预算——`Executor::next_batch(max)` 默认方法与逐行 `next` 同序（`max=0` 空批不推进游标；DataScan 批量生产路径经 criterion 10% 时间门判定未达标，接线撤回、生产抽取保持逐行）；等值哈希 JOIN 两阶段（BuildRight 建右表哈希 → Output 左表逐行探测，左表不整表驻留、匹配桶按下标取行不整桶克隆）；写出的整数 `PRIMARY KEY` 且两侧都是基表扫描的等值内连接走排序合并，多重集合与同一输入上的哈希连接相同，`Float(-0.0)` 与 `Float(0.0)` 两边都命中且输出保留原值；有界排序——`LIMIT` 直接包住 `Sort` 或仅隔一层 `Projection` 时 `SortNode.bounded = offset+limit` 只驻留有界行（唯一键前缀与全量排序再截取一致，`DISTINCT`/聚合/集合运算形态仍全量排序，`EXPLAIN` 文本不变）；每语句查询内存预算——默认 0 不限制，`Database::set_query_memory_limit` / `RTSQL_QUERY_MEMORY_BYTES` 双通道（非法值打开前 exit 2 零库文件，只影响之后开始的语句），驻留行数据按固定口径计费（非字符串值 16 字节、字符串和 BLOB 为 16 加字节长度、每个驻留副本分别计费；单行在途与最终结果行不计；哈希键/分组键/去重集合/派生表与 INSERT SELECT、CTAS 源行驻留计费），超限整句失败 `Execution error: query memory limit exceeded (limit N bytes)` + SQLSTATE `53200`（直接执行/显式事务/预编译三入口同面）、不返回部分行、写语句零副作用、计数不跨语句
-- **DROP 持久化边界与受控 I/O 失败**: 页清零从释放时移到空闲页再次分配时（`free_page` 进入待释放集合不写盘、释放完成并持久化后才提升进空闲列表、`allocate_page` 弹出时先写全零页、写零失败页号回退并返回错误）——checkpoint 前进程内崩溃（WAL shutdown + 丢弃句柄不 close，非断电）后 DROP TABLE/INDEX/VIEW 的对象与 DROP 前已提交内容仍可查询、`check_integrity` error 级发现为 0；同会话再分配只见新行；删列与加密库建表/删表崩溃结果同类（`.wal`/`.checkpoint` 保持明文）；同会话复用被释放页后、分配方 catalog 落盘前的崩溃窗口不在此保证内（由 `free-page-lifecycle` 域规定）；库测试失败开关 `Database::arm_io_failure`（类型化 `DataWrite`/`WalFsync`，下一次同型调用在系统调用前失败一次并自清除、未设置时字节行为不变、无 CLI flag 不入用户文档）——数据文件写失败（checkpoint 刷脏页之前）时 checkpoint 返回错误且重开回 DROP 前状态，WAL fsync 或 `.checkpoint` 位点路径失败（脏页已写完）时 DROP 已生效、其余已提交内容完好、check 无 error 级发现
-- **超页长值透明存储**: 超过单页内联容量（slot_data > 4074B）的行值经主页 slot 内 locator 与溢出页链（page_type 0x04、chunk ≤4080B/页）自动存取，无人为长度上限、对 SQL 层零感知——全写通道（INSERT VALUES/子集+DEFAULT、UPDATE 增长与缩回、UPSERT/REPLACE、CTAS、INSERT SELECT、import/restore/dump）、加密 4124B 页步长、`:memory:`/只读会话同等可用；长字符串 tag 0x08（u32 长度前缀），catalog DEFAULT 段同语义（DEFAULT 字面量长度受 catalog 列行页内容量约束）；崩溃恢复重放链页重分配 + locator 末步落位幂等两态一致；GC/drop/TRUNCATE/写入失败全部释放点无孤儿页（回滚 aborted slot 链保持可达非泄漏）；~1MB 单元组规模基线含恢复
-- **取消与超时结果约定**: 库入口把「语句 future 不再被驱动」（显式丢弃 / `tokio::time::timeout` 到期）当作唯一的取消事件——不新增取消或 deadline 公共 API，未被取消的语句行为不变；客户端连接在结果送达前断开不是取消触发来源（库入口不放弃正在执行的语句，语句执行完毕并提交，调用方得到的只是未送达的结果）。三种结果有确定约定：提交前被取消的语句不提交（库属隐式事务经登记表在下一条隐式写语句之前、checkpoint 之前与自动 checkpoint 判定之前回收——DML、CTAS、ALTER TABLE DROP COLUMN 三处），提交已完成但调用方未收到结果视为已提交（调用方靠重新读取判断，不能把「没拿到结果」当作「没提交」），显式事务继续还是回滚由调用方决定（超时不代替回滚，库不代替调用方提交或回滚）；页锁随 future 释放，WAL writer、WAL buffer 与缓冲池等会话级后台对象不随语句取消拆除。已知边界：取消域的保证面只覆盖**行**（被取消语句的行不可见）；键的释放不由取消域保证，由存储域索引写侧契约承载（域 `index-write-side-atomicity`），DDL 语句的目录面保证由域 `ddl-catalog-transactional` 承载
-- **索引写侧原子性**: 主键/唯一索引的结构变更、根页 id 发布与键→行反向映射更新构成**同一不可分割写单元**（同一 blocking 闭包内完成，语句被取消不留「结构已变、根未发布」或「正向条目在、反向映射缺」的半写状态）；同一索引的结构写侧经写侧闸门**串行化**（并发写者不交错改同一索引页、不用过期根覆盖另一写者刚发布的根页 id）；取消/回滚后被取消语句写入的**全部**键从索引释放（同键可再次插入、不报重复键错误），索引结构自洽（后续写语句不 abort、完整性检查无 Error 级发现）
-- **DDL 目录事务化**: `ALTER TABLE DROP COLUMN` 的目录面变更（列定义改写 + 列数）**延后到语句提交点之后**生效——事务体内只做守卫检查、布局计算与数据面改写，目录变更以待应用变更交回提交点应用（列行先、计数后、再切活布局）；被放弃（丢弃或超时）或失败的 DDL **不留下目录面变更**（目录列定义与列数保持语句执行前状态）；放弃后回收并重开库，目录列数与数据面行宽一致。列数刷盘已经成功、成功结果尚未交回时被放弃的 `ADD COLUMN`，目录列数与可见列定义回到语句前；不经调用方 `close`，崩溃再打开后新列不可见，列数仍是语句前的值。刷盘返回错误的失败补偿本身不刷盘
-- **空闲页跨重启复用**: 释放的页只有在其释放在崩溃边界上已经成立之后才成为可分配页——锚点写（`DROP TABLE` / `DROP INDEX` 的目录变更、`TRUNCATE` 的表头重置与目录尾指针更新）已被一次在释放完成之后开始且成功完成的 checkpoint 刷脏页写入数据文件，释放前该页不交给任何新对象；释放时不写零页，清零仍在该页被再次分配时。重新打开数据库时按持久目录重建本次打开的可分配页集合（目录链、每个基表的数据页链、槽内 locator 指向的溢出链页、PK / 唯一 / 二级三类索引树页，恢复期内存重建的索引树并入活页集合）；任一所有权遍历失败即放弃整次重建——打开仍成功、不复用任何释放空间、绝不把活页判成空闲页。崩溃后未完成持久化的释放所涉页不是可分配页，旧表原行仍可查询且完整性 error 级发现数为 0
-- **释放可分配判定的耐久性前提**: 刷盘（整池刷盘 / 排除指定页的整池刷盘 / 指定页刷盘）中若有页写失败，该页保持脏状态，后续任一次成功刷盘重写该页；释放被提升为可分配时其锚点写已持久化——仅「锚点写已发出」不构成充分条件；锚点页仍在写盘失败集合内时该释放不提升，该页经其后一次成功写入离开失败集合后可提升，其他页的写盘失败不阻止该释放
-- **索引页归属唯一性**: 索引树在删除路径上合并两个兄弟节点时，被合并掉的节点页只释放一次（同一页号不在同一次删除操作中被推进待释放集合两次），被释放的页进入可分配集合后不同时属于两个对象、可分配集合不含同一页号的多个条目；索引插入路径沿内部节点下降时必然终止——每层下降到达严格不同的节点页，下降再次回到已访问过的页时插入返回错误，不耗尽栈
-- **释放路径有界读**: 释放路径（`DROP TABLE` / `TRUNCATE` / `DROP INDEX`）扫描数据页槽位以收集溢出链页时经由有边界检查的读取路径——越界的槽偏移或长度不造成越界切片，损坏页上不 panic、不导致进程 abort，按释放路径既有的尽力而为语义结束（告警并跳过不可读的部分）；索引树叶页槽负载短于条目格式（`MAX_KEY_LEN + RowId::SIZE`）时计入损坏计数、报出该页并跳过
-- **改写窗口读一致性**: `ALTER TABLE DROP COLUMN` 的改写从开始到提交点之间该表处于窄化在途状态，读路径显式识别并给出明确拒绝（点名该表正在被修改），不按旧列数对已窄化的行做位置取值并以尾部 NULL 补齐后返回；改写完成后读路径恢复正常，未改写的表不受影响
-- **DML 墓碑放弃窗口**: `DELETE` 的墓碑写序与 DDL 改写路径逐段同形——不带链指针写 → 登记 → 补链指针 → 再清理索引条目；墓碑槽终态与修复前逐字节等价，REPLACE 的冲突行删除段同形闭合；被放弃的 DML 语句其墓碑不抑制其前驱版本
-- **索引读路径有界读**: 索引树访问器族与索引树的下降 / 条目提取路径经由有边界检查的读取路径取得槽数据，页级判据覆盖槽边界与叶页条目长度（短于 `MAX_KEY_LEN + RowId::SIZE` 即未通过）；读取到未通过页级判据的索引树页时，系统返回明确的错误（点名损坏的页与该索引树），不把该页当作「没有这个子树」或「没有这个条目」继续（跳过 ⇒ 点查静默返回「查不到该行」），不降级为告警后继续下降；未损坏路径的读 / 写行为零变化
-- **其余页型有界读**: 数据页、目录页、恢复面与缓冲池对槽负载的读取经有边界检查的路径。数据页越界槽返回点名该页与该槽的错误。目录页损坏时打开以该错误结束，完整性扫描、导出和模式查看报出打开错误。恢复扫描类跳过该槽并报出，已提交记录重放类以错误结束打开。页头槽数超出槽目录容量时读路径不 abort
-- **页写入有界**: 数据页、目录页与恢复面的落位、删槽和原地改写经与读侧相同的页级槽数判据和槽负载判界。页头槽数越界，或槽负载越界、载荷不足时，不越界写，以点名该页的错误结束，语句失败并回滚事务，不把损坏页当成页满而换页继续
-- **写盘失败状态**: 被驱逐出缓冲池的页，其内容已经落盘，或仍可在池内取回。刷盘取走页内容时页帧记下在途未落盘，驱逐不按干净页移出该页。写盘失败按页记录，该页后续一次成功写入后移出失败集合
-- **旧格式与 dump 兼容**: 受支持的旧库文件按系统表目录行的布局代际区分——G1（`__tables` 行止于数据链尾指针，无唯一根段 / 二级索引段 / 表类型字节；`__columns` 行无默认值段）、G2（含唯一根段，无二级索引段与表类型字节）、G3（当前代际，含唯一根段 + 二级索引段 + 表类型字节 + `explicit_primary_key` 字节；`1` 为写出 PRIMARY KEY，`0` 或缺失为未写出。被写到的旧行升级时该字节写 `0`）；G1 / G2 / G3 全部在支持范围内，兼容由读取路径「可选尾段缺失即取默认值」实现，不做格式嗅探、猜测性迁移或写时全库重排。范围内的旧库可打开、查询、写入；被写到的表目录行升级为当前代际，未被写到的表保持原代际；完整性扫描 error 级发现数为 0；打开时按持久目录的重建不放弃。旧 dump 是纯 SQL 文本（其代际特征是 DDL 渲染差异），可恢复到当前库且行数据等价。范围外输入给出定位到语句的明确拒绝（非整数主键、非整数列的 `UNIQUE`、`NOT NULL` 列含 NULL）并给出可执行迁移路径
-- **可选加密**: Argon2id 密钥派生 + 页级 AES-256-GCM；`--key` / `RTSQL_KEY` 双通道
+- **轻量**：单库静态链接，无外部数据库服务依赖。
+- **便捷**：one-shot CLI 与 12 个生命周期/分析子命令（new/list/schema/dump/restore/import/delete/checkpoint/check/stats/sample/profile），含隐藏 shell 补全与本机安装脚本；导入支持 stdin 通道与按 CSV 表头自动建表；锁等待预算可配置（`--busy-timeout` / `RTSQL_BUSY_TIMEOUT` / lib 三通道，默认 5000ms）。
+- **错误面可操作**：不支持语句与表达式点名报错；PG 协议错误按类携带 SQLSTATE；CLI 错误输出渲染 SQLSTATE；恢复重放对「WAL 记录引用的表在 catalog 缺失」定向指因。
+- **高效**：协程异步 I/O、MVCC 无锁读、零拷贝页访问、DashMap 缓冲池；one-shot 只读会话零工作时跳过 checkpoint。
+- **统一分级诊断**：会话内诊断门面（详细程度、观察类别、采集内容三项独立配置）、语句阶段树、等待类别分类、事件与摘要双上限、跨模块比较指标；诊断只观察，不改变 SQL 结果、错误文本与 SQLSTATE。
+- **读面代数完整**：OUTER JOIN 三态、DISTINCT、集合运算、非递归 CTE、聚合扩展与嵌套聚合表达式、别名排序、多表别名解析、标量子查询、派生表与集合操作组合、NULL 三值折叠、参数与真值求值。
+- **差分与性质测试保护网**：rusqlite 跨引擎差分（语义一致子集双向对比、已知分歧白名单）与结构性质测试（编码往返、B-Tree 插删查、版本链可见性），判定全部位于 `cargo test` 集合内。
+- **跨库交互**：ATTACH 会话注册与两段限定名路由、跨库 SELECT 全形态与写入、附加库 DDL/CTAS 边界。
+- **嵌入式运行形态**：只读打开模式、`:memory:` 内存库、WAL 字节水位自动 checkpoint、锁等待预算与信号中断。
+- **catalog 持久化正确性**：目录行等长原地覆写与变长跨页更新、DDL 语句边界的落盘顺序与提交点、ALTER DROP COLUMN 窄化意图的延迟发布。
+- **派生基座投影收口**：FROM 子查询/CTE/视图三通道的外层投影裁剪与未知列点名。
+- **DDL 演进与二级索引**：非唯一二级索引（单列/组合，INT 与字符串）、唯一索引、CREATE/DROP VIEW、ALTER TABLE ADD/DROP COLUMN、TRUNCATE、DELETE 未命中零副作用。
+- **计划可观测与名字解析严格**：`EXPLAIN` 计划树输出与连接顺序行、JOIN 聚合参数解析与歧义点名、聚合输出形状。
+- **查询代价与连接叶序**：`ANALYZE` 会话内统计、schema 版本失效、合格查询的左深代价重排、超过阈值保持书写叶序。
+- **约束执行**：NOT NULL 与 INT 列 UNIQUE 强制执行；CHECK、FOREIGN KEY、非 INT UNIQUE、非 INTEGER 主键点名拒绝。
+- **写面完整**：子集列清单 INSERT 与 DEFAULT、UPSERT 与 REPLACE、UPDATE 表达式与多列赋值、无 WHERE 全表 UPDATE/DELETE、声明期 DEFAULT 校验。
+- **DECIMAL 与 BLOB**：可声明、写入、比较与读回；精度与小数位受限，跨类型比较失败；不进入二级索引键。
+- **类型化 API 面与参数绑定**：公共入口返回类型化结果与 SQLSTATE；位置式占位符绑定原生值；可复用预编译语句与行游标按批消费。
+- **执行资源契约**：执行器批量接口、等值哈希 JOIN 不整表驻留、有界排序、每语句查询内存预算与超限失败语义。
+- **DROP 持久化边界与受控 I/O 失败**：页清零延后到再分配时、崩溃后 DROP 结果可查询、受控写盘失败开关下的两种恢复结果。
+- **超页长值透明存储**：超过单页内联容量的行值经溢出页链存取，全写通道、加密与内存库同等可用，无人为长度上限。
+- **取消与超时结果约定**：语句 future 不再被驱动是唯一取消事件；提交前取消不提交，提交已完成但结果未送达视为已提交；行可见性由取消域保证，键释放由存储域契约承载。
+- **索引写侧原子性**：结构变更、根页发布与反向映射更新构成同一写单元，同一索引写侧串行化，取消或回滚后键全部释放。
+- **DDL 目录事务化**：DROP COLUMN 的目录变更延后到提交点应用，被放弃或失败的 DDL 不留目录面变更。
+- **空闲页跨重启复用**：释放在崩溃边界成立后才是可分配页；重开库按持久目录重建可分配页集合。
+- **释放可分配判定的耐久性前提**：刷盘写失败页保持脏状态；锚点写真正持久化后释放才提升为可分配。
+- **索引页归属唯一性**：删除合并兄弟节点时页只释放一次；插入路径沿内部节点下降必然终止。
+- **释放路径有界读**：释放路径扫描槽位经有边界检查的读取路径，损坏页不 panic、不 abort。
+- **改写窗口读一致性**：DROP COLUMN 改写期间读路径显式拒绝，不按旧列数取值。
+- **DML 墓碑放弃窗口**：墓碑写序与 DDL 改写路径同形，被放弃语句的墓碑不抑制前驱版本。
+- **索引读路径有界读**：索引树访问经页级判据，未通过时点名损坏页与索引树，不降级为「查不到」。
+- **其余页型有界读**：数据页、目录页、恢复面与缓冲池的槽负载读取有边界检查。
+- **页写入有界**：落位、删槽与原地改写经同一页级判据，越界时点名该页并回滚事务。
+- **写盘失败状态**：被驱逐页内容已落盘或仍在池内可取回；写盘失败按页记录，并在该页后续一次成功写入后移出失败集合。
+- **旧格式与 dump 兼容**：按目录行布局代际（G1/G2/G3）支持旧库打开、查询与写入；旧 dump 可恢复到当前库且行数据等价；范围外输入给出定位到语句的拒绝与迁移路径。
+- **可选加密**：Argon2id 密钥派生与页级 AES-256-GCM；`--key` / `RTSQL_KEY` 双通道。
+- **系统行为**：以 `openspec/specs/` 的行为规格为权威，本节只描述支持范围，不复制行为规格正文。
 
 ## 主要模块边界
 
@@ -91,7 +92,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - 集成测试: `tests/`（169 个 `tests/*.rs`；分批串行执行约束见 project-model M19）
 - 单元测试: 各文件内 `#[cfg(test)]`
 - 基准测试: `benches/`（12 套：micro / concurrent / cache / scale / index_key_encoding / sqlite_compare / data_scan / wal_group_commit / tx_id / visibility / buffer_pool_concurrency / pipeline_stages）
-- OpenSpec: `openspec/`（行为规格 `openspec/specs/` 95 域）
+- OpenSpec: `openspec/`（行为规格见 `openspec/specs/`）
 - 安装脚本: `install.sh`
 - 交叉构建脚本: `build-riscv64-musl.sh`（RISC-V 64 musl 固定 target；产物输出 `dist/`，Git 忽略）
 - 用户文档: `README.md`、`README.zh-CN.md`、`rtsql-docs/SKILL.md`
@@ -114,25 +115,14 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - **ahead of origin**: 37
 - **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-17-ms52-torn-tree-and-cross-process/`。
 - **最新 tag**: 无
-- **行为规格**: `openspec/specs/` 下 95 个域。
 
 ## 权威文档
 
-- 公共规则: `AGENTS.md`
-- 项目模型: `.agents/memory/project-model.md` (Mxx)
-- 决策/知识（已退役 2026-09-24）: `decisions`/`knowledge` spec 为空壳；历史 Dxx/Kxx 编号经其底部 arc 墓碑 → 清理 carrier `2026-09-24-ARC-202609241843b` proposal 映射解析；现役承载——当前约束 project-model（Mxx）、可复用方法论 R27 runbook、已验证结论 R28 analysis
-- 参考: `.agents/memory/references.md` (Rxx)
-- 改进: `.agents/memory/improvements.md` (Ixx)
-- 任务与路线: `.agents/docs/tasks.md`
-- 变更: `openspec/changes/`（无活跃 change；归档目录含已完成 change carriers，最新 `archive/2026-11-17-ms52-torn-tree-and-cross-process/`）
-- Legacy migration carrier: `.agents/legacy/2026-08-25-openspec-init-migration/`
-
-## 行为规格语料（95 域，权威以 `openspec/specs/` 为准）
-
-早期域：`dml-transaction-lifecycle`（DML 事务包裹）/ `plancache-key-normalization`（4）/ `wal-writer-handle-reuse`（4）/ `pipeline-stage-decomposition`（8）/ `schema-persistence`（7）/ `drop-table-physical-free`（7，含同进程 free-list 复用与跨重启 drop 安全）/ `planner-module-decomposition`（5）/ `ms07-rest-tx-checkpoint-pushdown`（4：显式事务/位点消费缩 redo/谓词-LIMIT 下推/checkpoint 零工作跳过）/ `storage-io-optimization`（3：页 I/O 位置参数化/零接口零格式变更/预取可选默认关闭）/ `wal-recovery-frame-parsing`（2）/ `database-file-lock`（2：锁等待预算策略化/生命周期释放）/ `wal-recovery-replay-integrity`（6：位置寻址幂等/无键行回退/tail 持久一致/自愈/错误面诚实等）/ `database-file-format-header`（5，含加密头扩展与格式版本产品契约）/ `transaction-isolation-levels`（4）/ `mvcc-tombstone-visibility`（7，含回滚索引还原、哨兵语义与未提交墓碑的键占用澄清）/ `join-executor-selection`（11）/ `correlated-subquery-cache`（6，含绑定期显式报错）/ `planner-key-equality-routing`（4）/ `update-index-maintenance`（5，含 rekey/回滚还原/未命中零副作用）/ `key-column-type-conformance`（1）/ `insert-column-list-mapping`（1，子集排列）/ `table-name-resolution`（4）/ `in-subquery-join-rejection`（2）/ `sql-expression-evaluation`（6）/ `sql-transaction-statements`（5）/ `sql-scalar-functions`（6）/ `datetime-type-system`（7）/ `datetime-functions`（4）/ `group-by-expression`（2）/ `no-from-select`（3）/ `cli-analytics-commands`（4）/ `database-encryption`（4）/ `install-script`（2）/ `riscv64-musl-build`（4）
-
-中期域：`sql-attach-session` / `cross-db-namespace-query`（4，附加库只读边界收窄）/ `create-table-as-select` / `sql-constraint-enforcement`（7，含非 INT PK 拒绝）/ `sql-write-surface`（9，含 INSERT SELECT/DEFAULT 声明期/重复列名/UPDATE 表达式）/ `sql-secondary-indexes`（9，含组合二级索引、范围路由，以及字符串单列与超容量完整值扫描）/ `alter-table-column-evolution`（3）/ `truncate-table`（2）/ `sql-views`（3）/ `readonly-open-mode`（6）/ `in-memory-database`（4）/ `wal-auto-checkpoint`（5）/ `cli-noninteractive-shell`（19）/ `sql-outer-join`（4）/ `select-distinct`（3）/ `sql-set-operations`（4）/ `sql-common-table-expressions`（3）/ `explain-plan-output`（3，有统计决定时在首行后多一行 JoinOrder）/ `sql-aggregate-extensions`（5）/ `order-by-alias-sorting`（3）/ `join-output-shape-resolution`（5）/ `aggregate-output-shape-conformance`（2）/ `error-reporting`（8，含前缀单层与执行器通道）/ `sql-table-alias-resolution`（7）/ `cross-db-dml`（5）
-
-近期域：`catalog-update-persistence`（6）/ `overflow-page-storage`（5）/ `data-integrity-verification`（3，含建表首数据页初始化）/ `sql-differential-testing`（4）/ `sql-semantic-binding`（4）/ `sql-semantics-conformance`（4）/ `typed-library-results`（3）/ `sql-parameter-binding`（2，成功的 ANALYZE 递增版本戳并令预编译语句重计划）/ `executor-batch-interface`（2）/ `query-memory-budget`（6）/ `drop-persistence-boundary`（5，含受控 I/O 失败两种恢复结果与释放生命周期归属的移交）/ `statement-cancellation-outcome`（6，含取消触发来源收窄与键释放已知边界）/ `index-write-side-atomicity`（4，含写单元原子性与写侧串行化）/ `ddl-catalog-transactional`（4，含被放弃的 ADD COLUMN 不留下已落盘的列数上调）/ `free-page-lifecycle`（4，含跨重启空闲页重建与释放持久化判定）/ `legacy-format-compat`（5，含按目录行布局代际的旧库支持范围与旧 dump 恢复）/ `index-page-ownership`（3，含页归属唯一性与插入下降终止）/ `ddl-rewrite-consistency`（3，含改写窗口读一致性与墓碑放弃窗口）/ `release-path-bounded-read`（1）/ `release-durability-precondition`（2）/ `index-read-bounded-read`（1）/ `page-read-bounded-read`（1）/ `page-write-bounded-write`（1）/ `write-failure-state`（3）/ `ddl-layout-publication`（5）/ `index-key-encoding-evaluation`（2，编码采用先满足行为一致性再经实测取舍，并保留旧库与既有整数索引边界）/ `build-feature-combinations`（5，feature 组合下的构建面与核心行为面）/ `session-service-lifecycle`（5，含刷盘单飞与提交等待、shutdown 后同步刷盘且写盘失败仍返回成功、checkpoint 暂停后恢复与 close 后停循环、关闭后未提交插入按默认重开仍被查到且不覆盖丢弃句柄并不调用 close 的既有测试、取消不拆除刷盘循环与缓冲池）/ `unified-diagnostics`（11，含详细程度与观察类别与采集内容三项分离配置、语句阶段树与父子耗时口径、等待类别与同次语句的样本归属、事件与摘要双上限、三种开销实测且不设数值门槛、诊断不改变事务结果、五个旧子指标进入当前语句阶段树、比较指标从保留摘要和进程峰值读出）/ `typed-batch-write`（3，一百条逐行插入可从诊断阶段读出 `total_ns` 与 `execute_exclusive_ns`；本次比较 `9804119 * 10 < 332234286`，未新增 `insert_batch`）/ `row-version-gc`（4，`gc_table` 回收无键链上已提交且不是链头的旧版本；链头、未提交版本和带键墓碑链不回收）/ `result-consumption`（4，四个入口按批交回查询行，未索取的行不提前失败，整段入口仍一次交回完整结果）/ `decimal-blob-types`（5，DECIMAL 与 BLOB 可声明、精确写入、同类型比较和读回；格式版本保持 1，目录行不增加字段）/ `query-cost-and-join-order`（5，会话内基表统计、失败不留数字、统计替换使计划失效、左深代价，以及合格查询按估计更换叶序）
-
-（域内 Requirement 数为当前值；逐域 Requirement/Scenario 正文见各 `spec.md`。）
+- 公共规则：`AGENTS.md`。
+- 任务与路线：`.agents/docs/tasks.md`。
+- 项目规范：`.agents/memory/project-model.md`（Mxx）。
+- 检索元数据：`.agents/memory/references.md`（Rxx）。
+- 未承诺方向：`.agents/memory/improvements.md`（Ixx）。
+- 行为规格：`openspec/specs/`。
+- 变更：`openspec/changes/`（当前无活跃 change；已完成 change 在 `openspec/changes/archive/`）。
+- 历史迁移 carrier：`.agents/legacy/2026-08-25-openspec-init-migration/`。
