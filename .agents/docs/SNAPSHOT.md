@@ -111,8 +111,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 287e3548583d73168bf02a138b2b44ca302603d9
-- **ahead of origin**: 37
+- **提交基线**: b03f7cff06ba5c344c59016ff7d8b3c389fd09b7
+- **ahead of origin**: 11
 - **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-19-ms53-avoidable-copy/`。
 - **最新 tag**: 无
 
