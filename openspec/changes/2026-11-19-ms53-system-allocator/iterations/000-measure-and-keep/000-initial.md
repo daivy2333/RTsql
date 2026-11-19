@@ -111,4 +111,51 @@ Experience Candidates: None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+对照 `tests/ms53_allocator_measure.rs`，以及 merge-base `4ebbdfdf420b0c4eb6c59b5fef7814dc92523461` 到 `c4eda21595e0851a6a019676c7556cbcc5d99e4c` 的 diff。这次 diff 新增变更文档和这一个测试。`src/` 与 `Cargo.toml` 不在其中。从实施起点 `50e0241e338c3bfa41e58de5ebc3ccd9a5c774a5` 到这个提交，`git diff --name-only -- src Cargo.toml` 没有输出。
+
+`StageAllocator` 的 `alloc`、`alloc_zeroed`、`realloc` 和 `dealloc` 都转给 `std::alloc::System`。`alloc` 和 `alloc_zeroed` 在返回非空指针时各计一次，字节数是 `layout.size()`。`realloc` 在返回非空指针时计一次，字节数是 `new_size`。`dealloc` 和空指针不计。这条路径没有锁，没有格式化，也没有打印。`#[global_allocator]` 只写在这个测试文件。`src/` 和 `Cargo.toml` 里没有 `jemalloc`、`mimalloc` 或 `#[global_allocator]`。
+
+计数窗口包住三次调用：`parse_stage`，然后 `plan_stage(&db, SELECT_SQL, stmt, false)`，然后 `execute_stage(&db, plan, false)`。建表和插入在第一次读数之前。每段前后各调用一次 `load_counts`，次数和字节数各读一次。六个差值在 `println!` 之前算完，打印在断言之前。测试不把这些数和截止值比较，也不按它们更换分配器。
+
+`is_profiling_enabled()` 在准备数据之前断言为 false。计划用 `PhysicalPlan::NestedLoopJoin` 匹配根节点。`assert_join_row` 要求列名依次是 `k`、`name`、`v`，行是 `Int(2)`、内容为 `b` 的 `String`，以及 `Int(10)`。`execute_stage` 和随后的 `execute_sql` 都经过这个断言。缺表消息是 `Table 'missing' not found: table not found: missing`，`sqlstate` 是 `Some("42P01")`。六个数都断言大于 0。
+
+`l` 的行是 `(1, 'a')` 和 `(2, 'b')`，`r` 的行是 `(1, 10)` 和 `(3, 30)`。语句是 `SELECT l.k, l.name, r.v FROM l JOIN r ON l.k > r.k`。
+
+执行记录中的打印与 `println!` 相同：
+
+```
+parse_allocs=244 parse_bytes=22993 plan_allocs=309 plan_bytes=14284 execute_allocs=107 execute_bytes=15330
+```
+
+六个整数都大于 0。同一节写明保留系统默认分配器，并写明不与截止值比较。
+
+验证沿用本 Cycle 的 Act Response，来源提交 `c4eda21595e0851a6a019676c7556cbcc5d99e4c`。命令是 `cargo test --offline --release --test ms53_allocator_measure -- --test-threads=1 --nocapture`。退出码 0，结果是 `1 passed; 0 failed`。该提交之后测试文件没有再改，工作区也是干净的，所以不重跑。
+
+`src/executor/nested_loop_join.rs` 的组合求值仍是取出左行和右行、`append` 之后按左列数 `split_off` 放回。该文件不在本次 diff 里。
+
+非阻塞：`design.md` 的 D1 写「一行一个」。测试把六个字段打在同一行。执行依据只要求输出含这六个 `name=value` 字段。执行记录抄的是这一行。不改打印，也不重跑。
+
+**Evidence**
+
+- 测试：`tests/ms53_allocator_measure.rs` 的 `allocator_stage_counts_and_sql_results`。
+- 打印与退出码：本 Cycle 的 Act Response，提交 `c4eda21595e0851a6a019676c7556cbcc5d99e4c`。
+- diff：`git diff --name-status 4ebbdfdf420b0c4eb6c59b5fef7814dc92523461..c4eda21595e0851a6a019676c7556cbcc5d99e4c`。`src/` 与 `Cargo.toml` 相对 `50e0241e338c3bfa41e58de5ebc3ccd9a5c774a5` 为空。
+- 产品分配器：`src/` 和 `Cargo.toml` 没有 `global_allocator`、`jemalloc` 或 `mimalloc`。
+- 嵌套循环：`src/executor/nested_loop_join.rs` 的 `next` 仍是移入再移回。该文件不在 diff 里。
+- Persisted Evidence 为 none。没有要求 `evidence/` 目录。
+
+**Follow-up Decision**
+
+T1 和 T2 的验收都满足。上面一项不挡住验收，不留在当前 Cycle 修，也不另开返工。任务表没有未展开的后续 Iteration。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
