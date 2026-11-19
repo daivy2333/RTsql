@@ -181,15 +181,43 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-待 Act 提交后填写。
+对照 `tests/ms53_copy_measure.rs`，以及 merge-base `f940925831e5e78f201bd27a09173cbaa2bad2bc` 到 `37f4a662bc7403f11308c13a73b47970e17ca02f` 的 diff。diff 新增变更文档和这一个测试，没有 `src/`，没有 `Cargo.toml`。
+
+测试打印九个纳秒字段和四个行数字段。断言是 `hash_rows=50`、`nlj_rows=2500`、`sort_rows=100`、`smj_rows=50`，排序首行 `Int(0)`、末行 `Int(99)`，四个执行器耗时大于 0，`hash_bucket_clone_ns` 为常量 0。克隆结果交给 `black_box`。每段计时只有前后各一次 `Instant`。测试里没有 10% 比较。嵌套循环克隆是左右各 50 行的双重循环。字符串循环是 `customer_0` 到 `customer_49`。
+
+`src/executor/join.rs` 的探测仍是 `right_hashmap.get` 之后按下标取行。`Value::String` 的负载仍是 `String`。嵌套循环的组合行仍是 `left_row.iter().cloned().chain(right_row.iter().cloned())`。这三个文件不在本次 diff 里。
+
+用本 Cycle Act Response 的打印重算。来源是删掉未使用导入之后的那次命令：`cargo test --offline --release --test ms53_copy_measure -- --test-threads=1 --nocapture`，退出码 0，`1 passed; 0 failed`。工作区在该提交之后没有再改测试文件，所以不重跑。
+
+| 站点 | clone_ns × 10 | 分母 | 达到 |
+|---|---|---|---|
+| 哈希桶 | 0 | 19421 | 否 |
+| 嵌套循环 | 619090 | 386503 | 是 |
+| 排序 | 20380 | 21324 | 否 |
+| 排序合并 | 11980 | 25135 | 否 |
+| 字符串 | 16850 | 19421 | 否 |
+
+四个执行器耗时都大于 0。五个乘积都落在 `u128` 里。整组里只有嵌套循环达到，它也是达到者里克隆耗时最大的一处。字符串未达到。
+
+非阻塞，计划遗漏：计划里的命令没有 `--nocapture`。测试通过时，libtest 不把 `println!` 打进那条命令的输出。Act 加上这个参数，测量口径没有改。
+
+非阻塞：带未使用 `Predicate` 导入的第一次 release 运行退出码也是 0。裁定只用删掉该导入之后的第二次打印。重跑原因是去掉编译警告。
+
+`RowSource` 用 `IntoIter` 移出已有行。计划允许测试文件里的本地 `Executor`。
+
+**Evidence**
+
+- 测试与打印：本 Cycle Act Response，提交 `37f4a662bc7403f11308c13a73b47970e17ca02f`。
+- diff：`git diff --name-status f940925831e5e78f201bd27a09173cbaa2bad2bc..37f4a662bc7403f11308c13a73b47970e17ca02f`，八个新增文件，无 `src/`。
+- 探测与字符串负载：`src/executor/join.rs` 的 `right_hashmap.get`，`src/executor/value.rs` 的 `String(String)`，`src/executor/nested_loop_join.rs` 的组合行克隆。
 
 **Follow-up Decision**
 
-待 Act 提交后填写。
+T1 和 T2 的验收都满足。上面两项不挡住验收，不留在当前 Cycle 修，也不另开返工。裁定点名嵌套循环，任务表里的下一轮因此展开，只执行嵌套循环那一小节。
 
 **Next Cycle**
 
@@ -197,4 +225,4 @@ None
 
 **Next Iteration**
 
-None
+`openspec/changes/2026-11-19-ms53-avoidable-copy/iterations/001-implement-named-site/000-initial.md`
