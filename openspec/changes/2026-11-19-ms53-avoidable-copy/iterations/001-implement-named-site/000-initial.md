@@ -128,15 +128,27 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
 **Findings**
 
-待 Act 提交后填写。
+对照 `src/executor/nested_loop_join.rs` 的 `NestedLoopJoinExecutor::next`，以及 merge-base `f940925831e5e78f201bd27a09173cbaa2bad2bc` 到 `fff97e7f8998168e526f2080513a78cd3d3c66ee` 的 diff。`src/` 里只有这一个文件。本 Cycle 的提交还改了本文件的 Act Response 和 `tasks.md`。
+
+组合求值不再调用 `iter().cloned()`。每一对用 `Option::take` 取出 `current_left`，用 `std::mem::take` 取出 `right_rows[index]`，再 `append` 成左列后接右列。`predicate.evaluate` 拿到的是 `&[Value]`。返回之后、进入 `Ok(true)`、`Ok(false)` 或 `Err` 之前，`split_off` 按调用前的左列数把后缀移回右行，前缀放回 `current_left`。`Ok(true)` 仍调用 `build_output_row`。`Err` 仍是 `StorageError::ExecutionError`，格式字符串仍是 `Predicate evaluation error: {}`。移出和移回之间没有 `.await`。
+
+`build_output_row` 和 `build_padded_row` 仍按输出列克隆单元格。`next_unmatched_right_row` 仍克隆未匹配的整行右行。外连接补齐在循环之后重新借用已经放回的 `current_left`。
+
+三条测试沿用本 Cycle 的 Act Response，来源提交 `fff97e7f8998168e526f2080513a78cd3d3c66ee`。该提交之后工作区没有再改被测文件，所以不重跑。`nested_loop_join_test` 在改前和改后都是 9 passed、退出码 0。`outer_join_test` 是 16 passed、退出码 0。`ms53_copy_measure` 是 1 passed、退出码 0，命令没有 `--nocapture`。该测试仍断言 `hash_rows`、`nlj_rows`、`sort_rows`、`smj_rows` 为 50、2500、100、50。
+
+**Evidence**
+
+- 代码：`src/executor/nested_loop_join.rs` 的 `next`，185–222 行。输出单元格克隆在 `build_output_row` 和 `build_padded_row`。未匹配右行克隆在 `next_unmatched_right_row`。
+- diff：`git diff --name-only f940925831e5e78f201bd27a09173cbaa2bad2bc..fff97e7f8998168e526f2080513a78cd3d3c66ee -- src/`，只有 `src/executor/nested_loop_join.rs`。
+- 验证：本 Cycle Act Response 里的三条命令和 `test result` 行。行数断言在 `tests/ms53_copy_measure.rs` 的 `assert_eq!`。
 
 **Follow-up Decision**
 
-待 Act 提交后填写。
+嵌套循环这一处的验收都满足。没有要留在当前 Cycle 修的缺口，也不需要新的执行依据。任务表没有未展开的后续 Iteration。
 
 **Next Cycle**
 

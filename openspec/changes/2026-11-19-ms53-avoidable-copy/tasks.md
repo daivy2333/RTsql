@@ -8,7 +8,7 @@ Gate 1：PASS。需求、场景和范围来自 MS53 的复制部分，以及本�
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/avoidable-copy/spec.md`。
 - 000：T1 与 T2 已执行。Review Result 为 `accepted`。胜出者是嵌套循环。`iterations/000-measure-and-decide/000-initial.md` 的 Plan Context 状态仍为 `ready`。
-- 001：T3 的嵌套循环小节已执行。执行依据是 `iterations/001-implement-named-site/000-initial.md`。Plan Context 仍为 `ready`。Act Response 为 `reported`。Review Result 仍为 `pending`。
+- 001：T3 的嵌套循环小节已执行。Review Result 为 `accepted`。`iterations/001-implement-named-site/000-initial.md` 的 Plan Context 状态仍为 `ready`。没有后续 Iteration。
 - Persisted Evidence：none。
 - 跳过项：无。全量不在测量轮，理由写在 000 的 Verification boundary。
 
