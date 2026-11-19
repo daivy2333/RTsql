@@ -7,7 +7,7 @@ Gate 1：PASS。需求、场景和范围来自 MS53 的行锁部分，以及已�
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。没有行为规格增量，`.openspec.yaml` 的 `skip_specs: true` 记录这个事实。
-- 000：已执行。Cycle 为 `iterations/000-measure-and-keep/000-initial.md`。Plan Context 状态为 `ready`。Act Response 状态为 `reported`。Review Result 为 `pending`。
+- 000：已执行。Review Result 为 `accepted`。`iterations/000-measure-and-keep/000-initial.md` 的 Plan Context 状态仍为 `ready`。没有后续 Iteration。
 - Persisted Evidence：none。
 - 没有后续 Iteration。
 

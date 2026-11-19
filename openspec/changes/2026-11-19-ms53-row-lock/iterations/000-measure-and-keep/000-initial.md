@@ -121,4 +121,41 @@ Experience Candidates: None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+对照 `src/transaction/row_lock.rs`，以及 merge-base `b6e81b3bd781393cef8e9d6a33e15ef391a0749b` 到 `ce9afb41def866a5c478d98eb40a2d3cc2540fc0` 的 diff。这次 diff 只新增本变更的文档。`src/`、`Cargo.toml`、`tests/` 不在其中。`git diff --exit-code b6e81b3bd781393cef8e9d6a33e15ef391a0749b -- src` 退出码 0。从实施起点 `263be5df13a23eb72533b497a8dcada375df286f` 到这个提交，`git diff --name-only -- src Cargo.toml tests` 没有输出。工作区干净。
+
+`locks` 的类型是 `RwLock<HashMap<RowId, Arc<Mutex<()>>>>`。`RwLock` 和 `Mutex` 来自 `tokio::sync`，`HashMap` 来自 `std::collections`。`get_lock` 在读锁下命中则克隆 `Arc` 返回；未命中则取得写锁，再查一次，仍没有就插入新的 `Mutex`。表锁随函数返回放开。函数返回的是 `Arc<Mutex<()>>`，测试里由调用者 `lock().await`。
+
+`get_lock(` 的调用只出现在 `test_row_lock_acquire_release`、`test_row_lock_concurrent_same_row` 和 `test_row_lock_different_rows`。`src/executor` 没有这张表。`src/transaction/mod.rs` 再导出 `RowLockTable`。
+
+`test_row_lock_concurrent_same_row` 持锁 50ms，另一侧先等 10ms，断言 `elapsed >= 40ms`。`test_row_lock_different_rows` 断言 `elapsed < 20ms`。执行记录写明这两个毫秒数不是换结构的门槛，也不作为切换条件。同一节写有「保留现有 RowLockTable，不迁到 DashMap」。
+
+执行记录里的测试输出与 Plan Context 的代码块一致，含三条 `ok` 和 `3 passed; 0 failed`。
+
+验证沿用 Plan Context 的 Investigation Facts，以及本 Cycle 的 Act Response。命令是基点 `b6e81b3bd781393cef8e9d6a33e15ef391a0749b` 上的 `cargo test --offline --lib transaction::row_lock::tests -- --test-threads=1`。退出码 0，`3 passed; 0 failed`。`src/` 相对该基点没有差异，所以不重跑。
+
+非阻塞：任务定义写本 Cycle 允许改动的只有这份 Act Response。实施还改了 `tasks.md` 的状态行，把 000 标成已执行，T1 和 T2 标成已完成，当时的 Review Result 仍是 pending。任务正文没有改。这不改变验收里的记录、产品和测试输出。不要求改回。
+
+**Evidence**
+
+- 结构与测试断言：`src/transaction/row_lock.rs` 的 `RowLockTable`、`get_lock` 和三个测试。
+- 再导出：`src/transaction/mod.rs` 的 `pub use row_lock::RowLockTable`。
+- 调用点：仓库 `*.rs` 里 `get_lock(` 只在 `src/transaction/row_lock.rs`。
+- 测试输出：本 Cycle 的 Act Response，与 Plan Context 代码块一致。来源是基点上的那一次运行，本 Cycle 没有重跑。
+- diff：`git diff --name-status b6e81b3bd781393cef8e9d6a33e15ef391a0749b..ce9afb41def866a5c478d98eb40a2d3cc2540fc0`。`src/` 相对基点退出码 0。`src/`、`Cargo.toml`、`tests/` 相对 `263be5df13a23eb72533b497a8dcada375df286f` 为空。
+- Persisted Evidence 为 none。没有要求 `evidence/` 目录。
+
+**Follow-up Decision**
+
+T1 和 T2 的验收都满足。上面一项不挡住验收，不留在当前 Cycle 修，也不另开返工。任务表没有未展开的后续 Iteration。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
