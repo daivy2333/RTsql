@@ -11,7 +11,7 @@
 
 ## Milestone Roadmap
 
-详细的已完成里程碑段已归档，见文件末墓碑。MS22 已 superseded 退回 improvements，候选见 `.agents/memory/improvements.md`。当前路线上尚未完成的里程碑是 MS53–MS55：MS53 与 MS55 为 ready，MS54 依赖 MS52，状态为 planned。
+详细的已完成里程碑段已归档，见文件末墓碑。MS22 已 superseded 退回 improvements，候选见 `.agents/memory/improvements.md`。当前路线上尚未完成的里程碑是 MS54 与 MS55：MS54 依赖 MS52，状态为 planned，MS55 仍为 ready。
 
 ### MS45：主命令 profiling 不再因索引扫描中止
 
@@ -119,14 +119,14 @@
 
 ### MS53：复制、分配与行锁
 
-- **Status**: ready。嵌套循环组合行不再克隆；分配器已测量并保留系统默认分配器；行锁尚未测量。
+- **Status**: completed（2026-11-19。三份归档见 Related changes。嵌套循环组合行不再克隆，SQL 结果保持；分配器测量后保留系统默认分配器；行锁测量后保留现有 RowLockTable）
 - **Outcome**: 复制、分配和行锁争用有测量。只有被测量证明值得改的那一处进入实现，且 SQL 结果不变。其余明确保留原实现。
 - **Rationale**: 三者都在执行路径的内存和争用上。先减少不必要复制，再看分配器，便于把收益归因到一处。
 - **Dependencies**: None。建议序在 MS49 之后，以便使用比较指标。已有诊断门面足够测量，新指标不是硬前置。
 - **Scope**: I020、I066、I050。行锁先测争用，再决定是否换成并发结构。
 - **Non-goals**: 节点锁、页 I/O、io_uring、导入攒批。
 - **Stable result**: 这三处要么已改且行为不变，要么明确保留原实现。后续 I/O 优化不把未证实的复制热点算进自己的收益。
-- **Related changes**: `openspec/changes/archive/2026-11-19-ms53-avoidable-copy/`；`openspec/changes/archive/2026-11-19-ms53-system-allocator/`
+- **Related changes**: `openspec/changes/archive/2026-11-19-ms53-avoidable-copy/`；`openspec/changes/archive/2026-11-19-ms53-system-allocator/`；`openspec/changes/archive/2026-11-19-ms53-row-lock/`
 - **Consumes**: I020、I066、I050
 - **Split signals**: 三处不能用同一次测量判断时，分成多个 change，不新编号。任一改动若改变可见性或锁等待的对外错误，退回范围审议。
 
@@ -183,7 +183,7 @@ MS49 诊断上报与比较指标 ✓（无前置；建议序 MS48 后）
 MS50 结果消费与值类型 ✓（无前置）
 MS51 查询代价与 JOIN 重排 ✓（无前置）
 MS52 撕裂树与跨进程访问的去留 ✓（无前置）
-MS53 复制、分配与行锁（无前置；建议序 MS49 后）
+MS53 复制、分配与行锁 ✓（无前置；建议序 MS49 后）
 MS52 ──→ MS54 脏页批量写与 I/O 后端
 MS55 索引页空间与锁（无前置；建议序 MS52 后）
 ```
