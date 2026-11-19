@@ -179,24 +179,35 @@ impl Executor for NestedLoopJoinExecutor {
                     Some(_) => continue,
                 }
             }
-            let left_row = self.current_left.as_ref().expect("current left row loaded");
-
-            // Phase 3: 当前左行 × 右行逐组合求值谓词
+            // Phase 3: 当前左行 × 右行逐组合求值谓词。
+            // `evaluate` 只借用组合行，返回值不持有这次借用。左右值移入同一向量，
+            // 返回后按调用前的左列数拆回，再走产出、继续或错误分支。
             while self.current_right_index < self.right_rows.len() {
                 let right_index = self.current_right_index;
-                let right_row = &self.right_rows[right_index];
-                let combined: Vec<Value> = left_row
-                    .iter()
-                    .cloned()
-                    .chain(right_row.iter().cloned())
-                    .collect();
-                match self.predicate.evaluate(&combined) {
+                let mut left_row = self
+                    .current_left
+                    .take()
+                    .expect("current left row loaded");
+                let left_len = left_row.len();
+                let mut right_row = std::mem::take(&mut self.right_rows[right_index]);
+                left_row.append(&mut right_row);
+                let eval_result = self.predicate.evaluate(&left_row);
+                let restored_right = left_row.split_off(left_len);
+                self.right_rows[right_index] = restored_right;
+                self.current_left = Some(left_row);
+
+                match eval_result {
                     Ok(true) => {
                         self.current_right_index += 1;
                         self.left_matched = true;
                         if self.join_type == NestedLoopJoinType::Full {
                             self.right_matched[right_index] = true;
                         }
+                        let left_row = self
+                            .current_left
+                            .as_ref()
+                            .expect("current left row loaded");
+                        let right_row = &self.right_rows[right_index];
                         return Ok(Some(ExecResult::Row(
                             self.build_output_row(left_row, right_row),
                         )));
@@ -210,6 +221,11 @@ impl Executor for NestedLoopJoinExecutor {
                     }
                 }
             }
+
+            let left_row = self
+                .current_left
+                .as_ref()
+                .expect("current left row loaded");
 
             // MS25 T1: Left/Full 语义下当前左行无匹配 → 补 NULL 右列产出一行。
             // 置位匹配标志：本保存侧行的唯一输出已发出（否则下次 `next()` 会在

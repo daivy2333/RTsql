@@ -67,15 +67,64 @@ PASS。无 BLOCKED。无 SKIPPED。goal 原文「那么请你开始计划并实�
 
 ## Act Response
 
-- Status: 待填写
+- Status: reported
 
 ### 实际改动
 
-待 Act 填写。
+- `src/executor/nested_loop_join.rs` 的 `NestedLoopJoinExecutor::next`：组合求值不再 `iter().cloned()`。每一对用 `Option::take` 取出 `current_left`，用 `std::mem::take` 取出 `right_rows[index]`，`append` 成左列后接右列，记下左列数后再调用 `predicate.evaluate`。返回后、进入 `Ok(true)`、`Ok(false)` 或 `Err` 之前，按该列数 `split_off` 移回两侧。`Ok(true)` 仍调用 `build_output_row`。`Err` 仍是 `StorageError::ExecutionError`，格式字符串仍是 `Predicate evaluation error: {}`。
+- `build_padded_row` 和 `next_unmatched_right_row` 未改。输出单元格克隆、NULL 补齐和未匹配右行的整行克隆仍在。
+- `openspec/changes/2026-11-19-ms53-avoidable-copy/tasks.md`：T3 标为已完成。001 的批次状态记为已执行，Review Result 仍为 `pending`。
+- 没有修改谓词 trait、规划器、pipeline、哈希连接、排序、排序合并、`Value::String`、`RowLockTable` 或 `Cargo.toml`。
+
+### 与计划的偏差
+
+无。计划允许整行 `take` 或按元素移出。这里用整行 `take`。移出和移回之间没有 `.await`。没有为长度不一致新增错误，也没有加 panic 恢复。
+
+### 自检
+
+Gate 3 对照了 `next` 的 diff。组合路径上的 `.cloned()` 已去掉。三路分支都在移回之后。外连接补齐仍读恢复后的 `current_left`。diff 只有这一个产品文件，没有计划外修改。编译输出里没有新的 rustc 警告。
+
+已修复：无。本轮没有二次修改。
+
+遗留 Minor：无。
 
 ### 验证
 
-待 Act 填写。
+改 `nested_loop_join.rs` 之前：
+
+```
+cargo test --offline --test nested_loop_join_test -- --test-threads=1
+```
+
+退出码 0。`test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s`。
+
+改动之后，按顺序各起一个 cargo 进程：
+
+```
+cargo test --offline --test nested_loop_join_test -- --test-threads=1
+```
+
+退出码 0。`test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s`。
+
+```
+cargo test --offline --test outer_join_test -- --test-threads=1
+```
+
+退出码 0。`test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s`。
+
+```
+cargo test --offline --release --test ms53_copy_measure -- --test-threads=1
+```
+
+退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`。这条命令没有 `--nocapture`，没有读取新的纳秒数，也没有重新比较 10%。通过表示该测试里已有的行数断言成立。
+
+### Experience Candidates
+
+None
+
+### 未解决问题
+
+无。
 
 ## Plan Review
 
