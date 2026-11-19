@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-19
+skip_specs: true
+goal: 测量行锁争用，结论写明保留现有 RowLockTable，不迁到 DashMap，不改锁语义、可见性和锁等待的对外错误，不改产品代码，不改 Cargo.toml。
