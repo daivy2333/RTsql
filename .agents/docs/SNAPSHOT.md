@@ -113,7 +113,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - **分支**: master
 - **提交基线**: 317e0d2cf5b2f578f11dc147f75b60b481ef0b82
 - **ahead of origin**: 18
-- **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-19-ms53-system-allocator/`。
+- **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-19-ms53-row-lock/`。
 - **最新 tag**: 无
 
 ## 权威文档
