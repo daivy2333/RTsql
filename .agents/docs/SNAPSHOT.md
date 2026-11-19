@@ -89,7 +89,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 目录约定
 
 - 源码: `src/`
-- 集成测试: `tests/`（170 个 `tests/*.rs`；分批串行执行约束见 project-model M19）
+- 集成测试: `tests/`（171 个 `tests/*.rs`；分批串行执行约束见 project-model M19）
 - 单元测试: 各文件内 `#[cfg(test)]`
 - 基准测试: `benches/`（12 套：micro / concurrent / cache / scale / index_key_encoding / sqlite_compare / data_scan / wal_group_commit / tx_id / visibility / buffer_pool_concurrency / pipeline_stages）
 - OpenSpec: `openspec/`（行为规格见 `openspec/specs/`）
@@ -113,7 +113,7 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 - **分支**: master
 - **提交基线**: b03f7cff06ba5c344c59016ff7d8b3c389fd09b7
 - **ahead of origin**: 11
-- **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-19-ms53-avoidable-copy/`。
+- **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-19-ms53-system-allocator/`。
 - **最新 tag**: 无
 
 ## 权威文档

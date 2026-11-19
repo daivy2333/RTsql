@@ -336,7 +336,7 @@
 - **方向**: 先 profile 分配热点（MS08「先量化再决定」纪律），再评估 jemalloc/mimalloc 以 feature-gated 依赖引入（crate 化后可作为微内核拓扑的可选件 feature，呼应 R25）；与 I020（clone 消除）、I065（流式化减少物化）互补——先减分配次数还是先换分配器，以 profile 数据定序
 - **依据**: 2026-09-24 SQLite 对比测量（RSS 16.7MiB、扫描吞吐差距——分配器因素为推断，未单独 profile）
 - **影响**: 分配密集路径的吞吐与常驻内存；无正确性影响
-- **状态**: promoted（2026-10-23 自 MS22 退回后，已纳入 MS53 路线「复制、分配与行锁」，未实施；MS53 为 ready）
+- **状态**: promoted（2026-10-23 自 MS22 退回后，已纳入 MS53 路线「复制、分配与行锁」。测量已由归档 change `openspec/changes/archive/2026-11-19-ms53-system-allocator/` 记录，保留系统默认分配器，MS53 尚未完成）
 
 ## I067: REPL 交互模式与元命令
 
