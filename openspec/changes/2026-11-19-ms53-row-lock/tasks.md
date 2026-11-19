@@ -7,7 +7,7 @@ Gate 1：PASS。需求、场景和范围来自 MS53 的行锁部分，以及已�
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。没有行为规格增量，`.openspec.yaml` 的 `skip_specs: true` 记录这个事实。
-- 000：待执行。Cycle 为 `iterations/000-measure-and-keep/000-initial.md`。Plan Context 状态为 `ready`。
+- 000：已执行。Cycle 为 `iterations/000-measure-and-keep/000-initial.md`。Plan Context 状态为 `ready`。Act Response 状态为 `reported`。Review Result 为 `pending`。
 - Persisted Evidence：none。
 - 没有后续 Iteration。
 
@@ -15,8 +15,8 @@ Gate 1：PASS。需求、场景和范围来自 MS53 的行锁部分，以及已�
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 执行记录写明持锁结构、调用点和基点上那一次测试输出 | 待执行 |
-| T2 | 000 | T1 | 同一节写明保留现有 RowLockTable，且产品代码不变 | 待执行 |
+| T1 | 000 | 无 | 执行记录写明持锁结构、调用点和基点上那一次测试输出 | 已完成 |
+| T2 | 000 | T1 | 同一节写明保留现有 RowLockTable，且产品代码不变 | 已完成 |
 
 T1 与 T2 的执行依据是 `iterations/000-measure-and-keep/000-initial.md` 的 Task Definition。本文件不另写一套步骤。
 

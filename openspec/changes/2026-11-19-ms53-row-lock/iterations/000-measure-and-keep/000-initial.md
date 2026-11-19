@@ -88,7 +88,36 @@ PASS。审查项全部通过。
 
 ## Act Response
 
-- Status:
+- Status: reported
+
+`src/transaction/row_lock.rs` 里 `RowLockTable` 的 `locks` 是 `tokio::sync::RwLock<HashMap<RowId, Arc<tokio::sync::Mutex<()>>>>`。`get_lock` 在读锁下命中则克隆 `Arc` 返回；未命中则取得写锁，再查一次，仍没有就插入新的 `Mutex`。表锁在函数返回时放开。调用者自己 `lock().await`。
+
+`get_lock(` 的 `.rs` 调用点只有 `test_row_lock_acquire_release`、`test_row_lock_concurrent_same_row`、`test_row_lock_different_rows`。执行器不调用 `get_lock`。`src/transaction/mod.rs` 只做 `pub use row_lock::RowLockTable`。
+
+`test_row_lock_concurrent_same_row` 持锁 50ms，另一侧提前 10ms 开始等，断言 `>= 40ms`。`test_row_lock_different_rows` 断言 `< 20ms`。40ms 和 20ms 是这两个测试自己的检查，不是换结构的门槛。这一次测试输出和这两个毫秒数都不作为切换条件。
+
+保留现有 RowLockTable，不迁到 DashMap。
+
+沿用基点 `b6e81b3bd781393cef8e9d6a33e15ef391a0749b` 上的 `cargo test --offline --lib transaction::row_lock::tests -- --test-threads=1`。退出码 0。命令没有再次执行。输出原文：
+
+```
+running 3 tests
+test transaction::row_lock::tests::test_row_lock_acquire_release ... ok
+test transaction::row_lock::tests::test_row_lock_concurrent_same_row ... ok
+test transaction::row_lock::tests::test_row_lock_different_rows ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 457 filtered out; finished in 0.10s
+```
+
+`git diff --exit-code b6e81b3bd781393cef8e9d6a33e15ef391a0749b -- src` 退出码 0。`git diff --name-only HEAD -- src Cargo.toml tests` 没有路径。当时的 `HEAD` 是 `263be5df13a23eb72533b497a8dcada375df286f`。
+
+改动是本文件的 Act Response，以及 `openspec/changes/2026-11-19-ms53-row-lock/tasks.md` 的状态行。`src/`、`Cargo.toml`、`tests/` 没有改。没有新测试，也没有耗时字段。
+
+与计划的偏差：任务定义写本 Cycle 允许改动的只有这份 Act Response。`tasks.md` 里 Iteration 000 改为已执行，T1 和 T2 改为已完成，用来让任务状态和这一轮的完成情况一致。任务正文没有改。
+
+Experience Candidates: None
+
+未解决问题：无。
 
 ## Plan Review
 
