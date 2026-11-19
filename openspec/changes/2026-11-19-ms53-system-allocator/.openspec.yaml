@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-19
+skip_specs: true
+goal: 测量分配器对执行路径的影响，结论写明保留系统默认分配器，不引入 jemalloc 或 mimalloc，不改 Cargo.toml 依赖，不改产品代码。
