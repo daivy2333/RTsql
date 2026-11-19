@@ -91,15 +91,93 @@ PASS。无 BLOCKED。无 SKIPPED。
 
 ## Act Response
 
-- Status: 待填写
+- Status: reported
 
 ### 实际改动
 
-待 Act 填写。
+- `tests/ms53_copy_measure.rs`：新增 `avoidable_copy_times_and_row_counts`。`RowSource` 按给定行序把行移出。哈希连接和排序合并使用 `JoinConfig`：条件两侧都是 `ColumnRef { table: None, column: "k" }`，左列映射 `k -> 0`、`name -> 1`，右列映射 `k -> 0`、`v -> 1`，输出四列，侧别依次为 Left、Left、Right、Right，列下标依次为 0、1、0、1。嵌套循环使用 `Arc<dyn Predicate>` 形式的 `ConstantPredicate { value: true }` 和 `NestedLoopJoinType::Inner`，输出列与侧别与上面相同。排序的 `columns` 是 `["k", "name"]`，`OrderByColumn { column: "k", asc: true, expr: None }`。`hash_bucket_clone_ns` 写成常量 0。
+- `openspec/changes/2026-11-19-ms53-avoidable-copy/tasks.md`：T1、T2 标为已完成。
+- 没有修改 `src/` 或 `Cargo.toml`。
+
+### 与计划的偏差
+
+验证命令在测试参数后加了 `--nocapture`。计划里的命令不带这个参数。测试通过时，libtest 不会把 `println!` 打进那条命令的输出，T2 就没有可核对的整数。`--offline`、`--release`、`--test ms53_copy_measure` 和 `--test-threads=1` 保持原样。
+
+带未使用导入的那一次 release 运行退出码是 0，编译警告是 `unused import: Predicate`。删掉该导入后重跑。下面的整数和裁定来自重跑。第一次打印不参与比较。
+
+`RowSource` 用 `IntoIter` 把行移出。计划只要求测试文件里有本地 `Executor`。
+
+### 自检
+
+Gate 3 对照了测试和 diff。断言覆盖行数、排序首行 `Int(0)`、末行 `Int(99)`、四个执行器耗时大于 0，以及 `hash_bucket_clone_ns` 为 0。测试里没有 10% 比较。哈希探测仍是 `right_hashmap.get` 之后按下标取行，桶克隆因此记 0。嵌套循环的克隆循环是左右各 50 行的双重循环，每次 `iter().cloned().chain(...).collect()` 后交给 `black_box`。排序和排序合并的克隆循环各克隆排空得到的输出行。字符串循环把 `customer_0` 到 `customer_49` 包进 `Value::String` 再克隆。重跑后这条测试没有编译警告。
+
+已修复：未使用的 `Predicate` 导入。
+
+遗留 Minor：无。
 
 ### 验证
 
-待 Act 填写。
+文件还不存在时：
+
+```
+cargo test --offline --release --test ms53_copy_measure -- --test-threads=1
+```
+
+退出码 101。输出为 `error: no test target named ms53_copy_measure in default-run packages`。
+
+删掉未使用导入之后：
+
+```
+cargo test --offline --release --test ms53_copy_measure -- --test-threads=1 --nocapture
+```
+
+退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`。这次编译输出里没有 `unused import`。
+
+打印原文：
+
+```
+hash_executor_ns=19421
+hash_bucket_clone_ns=0
+nlj_executor_ns=386503
+nlj_clone_ns=61909
+sort_executor_ns=21324
+sort_clone_ns=2038
+smj_executor_ns=25135
+smj_clone_ns=1198
+string_clone_ns=1685
+hash_rows=50
+nlj_rows=2500
+sort_rows=100
+smj_rows=50
+```
+
+### 裁定
+
+四个执行器耗时都大于 0。`checked_mul(10)` 都得到 `Some`。比较用的就是上面这组整数。
+
+| 站点 | clone_ns × 10 | 分母 | 达到 |
+|---|---|---|---|
+| 哈希桶 | 0 | `hash_executor_ns` 19421 | 否 |
+| 嵌套循环 | 619090 | `nlj_executor_ns` 386503 | 是 |
+| 排序 | 20380 | `sort_executor_ns` 21324 | 否 |
+| 排序合并 | 11980 | `smj_executor_ns` 25135 | 否 |
+| 字符串 | 16850 | `hash_executor_ns` 19421 | 否 |
+
+整组里只有嵌套循环达到。`nlj_clone_ns` 是 61909，也是达到者里最大的克隆耗时。相等时的次序没有用上。
+
+胜出者：嵌套循环。
+
+字符串未达到。整组已经有达到者，所以这一轮不改 `Value::String`。
+
+Iteration 001 可以展开，只改嵌套循环的组合行构造。本 Cycle 不创建该目录，不改产品代码。
+
+### Experience Candidates
+
+None
+
+### 未解决问题
+
+无。
 
 ## Plan Review
 

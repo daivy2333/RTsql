@@ -7,7 +7,7 @@ Gate 1：PASS。需求、场景和范围来自 MS53 的复制部分，以及本�
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/avoidable-copy/spec.md`。
-- 000：执行依据已写好。`iterations/000-measure-and-decide/000-initial.md` 的 Plan Context 状态为 `ready`。
+- 000：T1 与 T2 已执行。Act Response 状态为 `reported`。Review Result 仍为 `pending`。`iterations/000-measure-and-decide/000-initial.md` 的 Plan Context 状态仍为 `ready`。
 - 001：不展开。展开条件是 000 的裁定点名了唯一一处。
 - Persisted Evidence：none。
 - 跳过项：无。全量不在测量轮，理由写在 000 的 Verification boundary。
@@ -16,8 +16,8 @@ Gate 1：PASS。需求、场景和范围来自 MS53 的复制部分，以及本�
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | release 测试打印全部纳秒和行数，产品代码不变 | 待执行 |
-| T2 | 000 | T1 | 用 T1 的整数裁定改哪一处或不改，并写入执行记录 | 待执行 |
+| T1 | 000 | 无 | release 测试打印全部纳秒和行数，产品代码不变 | 已完成 |
+| T2 | 000 | T1 | 用 T1 的整数裁定改哪一处或不改，并写入执行记录 | 已完成 |
 | T3 | 001 | T2 点名了唯一一处 | 只改那一处，同一输入的结果与改前一致 | 不展开 |
 
 ## Iteration Plan
