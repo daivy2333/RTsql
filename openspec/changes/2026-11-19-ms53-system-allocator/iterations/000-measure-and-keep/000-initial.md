@@ -87,7 +87,27 @@ PASS。审查项全部通过。
 
 ## Act Response
 
-- Status:
+- Status: reported
+
+保留系统默认分配器。下面六个整数是这一次命令的打印原文，不与截止值比较，也不从中扣减阶段等待期间运行时发出的请求。
+
+```
+parse_allocs=244 parse_bytes=22993 plan_allocs=309 plan_bytes=14284 execute_allocs=107 execute_bytes=15330
+```
+
+新增 `tests/ms53_allocator_measure.rs`，测试函数是 `allocator_stage_counts_and_sql_results`。`StageAllocator` 实现 `GlobalAlloc`，`alloc`、`alloc_zeroed`、`realloc` 和 `dealloc` 都转给 `std::alloc::System`。前三个只在返回非空指针时各计一次；`alloc` 与 `alloc_zeroed` 的字节数是 `layout.size()`，`realloc` 的字节数是 `new_size`。`#[global_allocator]` 只写在这个测试文件。`src/` 与 `Cargo.toml` 相对实施开始时的 `50e0241e338c3bfa41e58de5ebc3ccd9a5c774a5` 没有差异。
+
+每段的次数和字节数各读一次原子整数，读数放在 `load_counts`。这不改变窗口：建表和插入在窗口之外，打印在断言之前。
+
+`cargo test --offline --release --test ms53_allocator_measure -- --test-threads=1 --nocapture` 退出码 0。结果是 `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`。输出含上面六个字段。`is_profiling_enabled()` 为 false。计划根节点是 `NestedLoopJoin`。`execute_stage` 与随后的 `execute_sql` 都返回一行，值依次是 `Int(2)`、内容为 `b` 的 `String`，以及 `Int(10)`。列名依次是 `k`、`name` 和 `v`。缺表错误消息是 `Table 'missing' not found: table not found: missing`，`sqlstate` 是 `Some("42P01")`。
+
+`git diff --name-only HEAD -- src Cargo.toml` 没有输出。当时的 `HEAD` 是 `50e0241e338c3bfa41e58de5ebc3ccd9a5c774a5`。
+
+分配路径不获取锁，不格式化，也不打印。测试不按这六个数字切换分配器。
+
+Experience Candidates: None
+
+未解决问题：无。
 
 ## Plan Review
 
