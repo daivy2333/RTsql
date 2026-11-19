@@ -119,14 +119,14 @@
 
 ### MS53：复制、分配与行锁
 
-- **Status**: ready
+- **Status**: ready。嵌套循环组合行不再克隆，SQL 结果保持；分配器与行锁尚未测量。
 - **Outcome**: 复制、分配和行锁争用有测量。只有被测量证明值得改的那一处进入实现，且 SQL 结果不变。其余明确保留原实现。
 - **Rationale**: 三者都在执行路径的内存和争用上。先减少不必要复制，再看分配器，便于把收益归因到一处。
 - **Dependencies**: None。建议序在 MS49 之后，以便使用比较指标。已有诊断门面足够测量，新指标不是硬前置。
 - **Scope**: I020、I066、I050。行锁先测争用，再决定是否换成并发结构。
 - **Non-goals**: 节点锁、页 I/O、io_uring、导入攒批。
 - **Stable result**: 这三处要么已改且行为不变，要么明确保留原实现。后续 I/O 优化不把未证实的复制热点算进自己的收益。
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-11-19-ms53-avoidable-copy/`
 - **Consumes**: I020、I066、I050
 - **Split signals**: 三处不能用同一次测量判断时，分成多个 change，不新编号。任一改动若改变可见性或锁等待的对外错误，退回范围审议。
 
