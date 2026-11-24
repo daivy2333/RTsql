@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-24
+skip_specs: true
+goal: 未过加节点锁的门槛时保持现有 write_gate。不改产品代码。
