@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-24
+skip_specs: true
+goal: 等索引页格式结论被接受之后，再测量写争用。本批不加节点锁，也不展开 Cycle。
