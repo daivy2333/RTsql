@@ -265,24 +265,7 @@ impl BufferPool {
             }
         }
 
-        // Phase 2: write to storage (no locks held).
-        //
-        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
-        // Iteration 004 (RDP R1): the dirty bit is cleared in phase 1, so a
-        // failure in phase 2 must hand the bit back for **every** page this
-        // flush cleared but did not write — the failing page *and* the pages
-        // after it that were never attempted. Restoring only the failing page
-        // would leave the same hole: those pages would never be rewritten and
-        // their content would be lost silently.
-        for (index, (page_id, page)) in to_write.iter().enumerate() {
-            if let Err(e) = self.storage.write_page(*page_id, page).await {
-                self.restore_dirty_from(&to_write, index);
-                return Err(e);
-            }
-            self.finish_write_in_flight(*page_id, true);
-        }
-
-        Ok(())
+        self.flush_claimed(to_write).await
     }
 
     /// Give the dirty bit back to every page of `collected` from index
@@ -350,20 +333,47 @@ impl BufferPool {
             }
         }
 
-        // Phase 2: write to storage (no locks held).
-        //
-        // change 2026-10-24-open-defect-batch-storage-ddl-legacy-evidence
-        // Iteration 004 (RDP R1): same discipline as `flush_all` — a failure
-        // hands the dirty bit back to every page this flush cleared but did
-        // not write.
-        for (index, (page_id, page)) in to_write.iter().enumerate() {
-            if let Err(e) = self.storage.write_page(*page_id, page).await {
-                self.restore_dirty_from(&to_write, index);
-                return Err(e);
-            }
-            self.finish_write_in_flight(*page_id, true);
-        }
+        self.flush_claimed(to_write).await
+    }
 
+    /// 认领之后按页号升序切出相邻页号差为 1 的最大段。长度大于等于 2 的段
+    /// 调用 `write_page_run`，单页仍调用 `write_page`。
+    ///
+    /// 脏位在认领时已经清掉。当前段失败时，从该段第一页到已排序向量末尾
+    /// 交还脏位并清除 `write_in_flight`：段内尚未单独返回的页，以及更后面
+    /// 还没尝试的页，都会重新变脏。更早已经成功的段保持清洁。
+    async fn flush_claimed(&self, mut claimed: Vec<(PageId, Page)>) -> Result<()> {
+        claimed.sort_by_key(|(page_id, _)| *page_id);
+        let mut start = 0;
+        while start < claimed.len() {
+            let mut end = start + 1;
+            while end < claimed.len() {
+                let previous = claimed[end - 1].0;
+                let current = claimed[end].0;
+                if previous.0.checked_add(1) != Some(current.0) {
+                    break;
+                }
+                end += 1;
+            }
+            let write_result = if end - start >= 2 {
+                let pages = claimed[start..end]
+                    .iter()
+                    .map(|(_, page)| page.clone())
+                    .collect();
+                self.storage.write_page_run(pages).await
+            } else {
+                let (page_id, page) = &claimed[start];
+                self.storage.write_page(*page_id, page).await
+            };
+            if let Err(error) = write_result {
+                self.restore_dirty_from(&claimed, start);
+                return Err(error);
+            }
+            for (page_id, _) in &claimed[start..end] {
+                self.finish_write_in_flight(*page_id, true);
+            }
+            start = end;
+        }
         Ok(())
     }
 
@@ -882,6 +892,186 @@ mod tests {
         assert!(
             on_storage.data.iter().all(|byte| *byte == OLD),
             "the injected write must not update storage"
+        );
+    }
+
+    /// 默认实现在段内第二页失败：不覆盖 `write_page_run`，第一次 `write_page`
+    /// 成功，第二次返回 `Io` 且不更新该页。
+    struct PrefixThenFail {
+        calls: Mutex<usize>,
+        persisted: Mutex<HashMap<PageId, Page>>,
+    }
+
+    #[async_trait]
+    impl AsyncStorage for PrefixThenFail {
+        async fn read_page(&self, page_id: PageId) -> Result<Page> {
+            Ok(self
+                .persisted
+                .lock()
+                .unwrap()
+                .get(&page_id)
+                .cloned()
+                .unwrap_or_else(|| Page::new(page_id)))
+        }
+
+        async fn write_page(&self, page_id: PageId, page: &Page) -> Result<()> {
+            let call = {
+                let mut calls = self.calls.lock().unwrap();
+                *calls += 1;
+                *calls
+            };
+            if call == 1 {
+                self.persisted.lock().unwrap().insert(page_id, page.clone());
+                Ok(())
+            } else {
+                Err(StorageError::Io(std::io::Error::other(
+                    "injected write failure",
+                )))
+            }
+        }
+
+        async fn allocate_page(&self) -> Result<PageId> {
+            Ok(PageId(0))
+        }
+
+        async fn free_page(&self, _page_id: PageId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn page_count(&self) -> u64 {
+            self.persisted.lock().unwrap().len() as u64
+        }
+    }
+
+    /// 覆盖 `write_page_run`：第一次成功并记下页号，第二次返回 `Io` 且不记下。
+    struct RunThenFail {
+        run_calls: Mutex<usize>,
+        recorded: Mutex<Vec<PageId>>,
+        write_page_ids: Mutex<Vec<PageId>>,
+    }
+
+    #[async_trait]
+    impl AsyncStorage for RunThenFail {
+        async fn read_page(&self, page_id: PageId) -> Result<Page> {
+            Ok(Page::new(page_id))
+        }
+
+        async fn write_page(&self, page_id: PageId, _page: &Page) -> Result<()> {
+            self.write_page_ids.lock().unwrap().push(page_id);
+            Ok(())
+        }
+
+        async fn write_page_run(&self, pages: Vec<Page>) -> Result<()> {
+            let call = {
+                let mut calls = self.run_calls.lock().unwrap();
+                *calls += 1;
+                *calls
+            };
+            if call == 1 {
+                self.recorded
+                    .lock()
+                    .unwrap()
+                    .extend(pages.iter().map(|page| page.id));
+                Ok(())
+            } else {
+                Err(StorageError::Io(std::io::Error::other(
+                    "injected run failure",
+                )))
+            }
+        }
+
+        async fn allocate_page(&self) -> Result<PageId> {
+            Ok(PageId(0))
+        }
+
+        async fn free_page(&self, _page_id: PageId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn page_count(&self) -> u64 {
+            0
+        }
+    }
+
+    fn frame_state(pool: &BufferPool, id: u64) -> (bool, bool) {
+        let frame = pool
+            .pages
+            .get(&PageId(id))
+            .expect("page stays in the pool");
+        let guard = frame.value().lock().unwrap();
+        (guard.dirty, guard.write_in_flight)
+    }
+
+    /// 当前段失败时，该段每一页和尚未尝试的页重新为脏；更早成功的段保持清洁。
+    #[tokio::test]
+    async fn failed_run_restores_every_page_in_the_run() {
+        let storage = Arc::new(PrefixThenFail {
+            calls: Mutex::new(0),
+            persisted: Mutex::new(HashMap::new()),
+        });
+        let pool = BufferPool::new(8, storage.clone() as Arc<dyn AsyncStorage>).unwrap();
+        for id in 0..3u64 {
+            let guard = pool.get_page(PageId(id)).await.unwrap();
+            guard.mark_dirty();
+        }
+        let flush_result = pool.flush_all().await;
+        assert!(flush_result.is_err(), "the second page write must fail the flush");
+        for id in 0..3u64 {
+            assert_eq!(
+                frame_state(&pool, id),
+                (true, false),
+                "page {id} must be dirty and not in flight"
+            );
+        }
+        let persisted = storage.persisted.lock().unwrap();
+        assert!(persisted.contains_key(&PageId(0)));
+        assert!(
+            !persisted.contains_key(&PageId(1)),
+            "the failing write_page must not update that page"
+        );
+        drop(persisted);
+
+        let storage = Arc::new(RunThenFail {
+            run_calls: Mutex::new(0),
+            recorded: Mutex::new(Vec::new()),
+            write_page_ids: Mutex::new(Vec::new()),
+        });
+        let pool = BufferPool::new(8, storage.clone() as Arc<dyn AsyncStorage>).unwrap();
+        for id in [0u64, 1, 3, 4, 6] {
+            let guard = pool.get_page(PageId(id)).await.unwrap();
+            guard.mark_dirty();
+        }
+        let flush_result = pool.flush_all().await;
+        assert!(flush_result.is_err(), "the second run must fail the flush");
+        for id in [0u64, 1] {
+            assert_eq!(
+                frame_state(&pool, id),
+                (false, false),
+                "page {id} was in the run that succeeded"
+            );
+        }
+        for id in [3u64, 4, 6] {
+            assert_eq!(
+                frame_state(&pool, id),
+                (true, false),
+                "page {id} must be dirty and not in flight"
+            );
+        }
+        assert_eq!(
+            storage.recorded.lock().unwrap().as_slice(),
+            &[PageId(0), PageId(1)]
+        );
+        assert!(
+            !storage.write_page_ids.lock().unwrap().contains(&PageId(6)),
+            "page 6 must not be written after the previous run failed"
         );
     }
 }

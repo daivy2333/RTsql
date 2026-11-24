@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -513,6 +514,73 @@ impl FileStorage {
     }
 }
 
+fn contiguous_page_run(pages: &[Page]) -> bool {
+    if pages.len() < 2 {
+        return false;
+    }
+    pages
+        .windows(2)
+        .all(|pair| pair[0].id.0.checked_add(1) == Some(pair[1].id.0))
+}
+
+fn write_page_run_blocking(
+    file: &std::fs::File,
+    record_size: usize,
+    pages: &[Page],
+    #[cfg(feature = "crypto")] cipher: Option<Arc<PageCipher>>,
+) -> Result<()> {
+    let offset = HEADER_SIZE as u64 + pages[0].id.to_offset(record_size);
+    let mut buf = Vec::with_capacity(pages.len() * record_size);
+    #[cfg(feature = "crypto")]
+    if let Some(cipher) = cipher.as_ref() {
+        for page in pages {
+            let record = cipher.encrypt_page(page.id, page.data.as_ref());
+            buf.extend_from_slice(&record);
+        }
+        pwritev_fully(file, &buf, offset)?;
+        return Ok(());
+    }
+    for page in pages {
+        buf.extend_from_slice(&page.data[..]);
+    }
+    pwritev_fully(file, &buf, offset)?;
+    Ok(())
+}
+
+/// 短写则前进偏移继续 `pwritev`。负值、未写完就返回 0，或报告的字节数大于剩余缓冲时失败。
+fn pwritev_fully(file: &std::fs::File, buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let iov = libc::iovec {
+            iov_base: buf[done..].as_ptr() as *mut libc::c_void,
+            iov_len: buf.len() - done,
+        };
+        let off = libc::off_t::try_from(offset)
+            .map_err(|_| std::io::Error::other("pwritev offset does not fit off_t"))?;
+        // SAFETY: `iov` 指向 `buf` 里尚未写出的字节，缓冲活过这次调用。
+        // `pwritev` 只读取这些字节。
+        let n = unsafe { libc::pwritev(file.as_raw_fd(), &iov, 1, off) };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "pwritev returned 0 before the buffer was fully written",
+            ));
+        }
+        let written = usize::try_from(n).unwrap_or(usize::MAX);
+        if written > buf.len() - done {
+            return Err(std::io::Error::other(
+                "pwritev reported more bytes than the remaining buffer",
+            ));
+        }
+        done += written;
+        offset += written as u64;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl AsyncStorage for FileStorage {
     async fn read_page(&self, page_id: PageId) -> Result<Page> {
@@ -590,6 +658,61 @@ impl AsyncStorage for FileStorage {
                     self.mark_write_failed(page_id);
                     Err(e)
                 }
+            }
+        }
+    }
+
+    async fn write_page_run(&self, pages: Vec<Page>) -> Result<()> {
+        if self.readonly {
+            return Err(read_only_violation("write a page"));
+        }
+        if !contiguous_page_run(&pages) {
+            return Err(StorageError::Internal(
+                "non-contiguous page run".to_string(),
+            ));
+        }
+        if consume_io_failpoint(&self.io_failpoint, IoFailPoint::DataWrite) {
+            for page in &pages {
+                self.mark_write_failed(page.id);
+            }
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected io failure (write_page)",
+            )));
+        }
+
+        let file = self.file.clone();
+        let record_size = self.record_size;
+        let ids: Vec<PageId> = pages.iter().map(|page| page.id).collect();
+        #[cfg(feature = "crypto")]
+        let cipher = self.cipher.clone();
+        let written = {
+            #[cfg(feature = "crypto")]
+            {
+                spawn_blocking(move || {
+                    write_page_run_blocking(file.as_ref(), record_size, &pages, cipher)
+                })
+                .await?
+            }
+            #[cfg(not(feature = "crypto"))]
+            {
+                spawn_blocking(move || {
+                    write_page_run_blocking(file.as_ref(), record_size, &pages)
+                })
+                .await?
+            }
+        };
+        match written {
+            Ok(()) => {
+                for id in ids {
+                    self.mark_write_succeeded(id);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                for id in ids {
+                    self.mark_write_failed(id);
+                }
+                Err(error)
             }
         }
     }
@@ -1012,7 +1135,202 @@ mod tests {
         Ok(calls)
     }
 
+    /// 连续脏页合并成一次写出；空洞页、哨兵页和排除页保持原字节。
+    #[tokio::test]
+    async fn contiguous_flush_coalesces_a_run_and_keeps_the_gap() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("coalesce.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        for expected in 0..71u64 {
+            let id = storage.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+
+        let original_3 = page_pattern(3, 0x31);
+        let original_4 = page_pattern(4, 0x34);
+        let mut page3 = Page::new(PageId(3));
+        page3.data.copy_from_slice(&original_3);
+        storage.write_page(PageId(3), &page3).await.unwrap();
+        let mut page4 = Page::new(PageId(4));
+        page4.data.copy_from_slice(&original_4);
+        storage.write_page(PageId(4), &page4).await.unwrap();
+
+        let mut sentinel = Page::new(PageId(70));
+        sentinel.data.fill(0x5A);
+        storage.write_page(PageId(70), &sentinel).await.unwrap();
+
+        let pooled = Arc::clone(&storage);
+        let pool = BufferPool::new(128, pooled).unwrap();
+        for id in [0u64, 1, 2, 3, 4, 5] {
+            pool.get_page(PageId(id)).await.unwrap();
+        }
+        for id in [0u64, 1, 2, 5] {
+            let guard = pool.get_page(PageId(id)).await.unwrap();
+            let pattern = page_pattern(id, 0xA1);
+            guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+        }
+
+        super::reset_page_io_counts();
+        pool.flush_all().await.unwrap();
+        let writes = super::page_write_count();
+        assert!(
+            writes < 4,
+            "flush of four dirty pages wrote {writes} times"
+        );
+
+        let kept3 = storage.read_page(PageId(3)).await.unwrap();
+        assert_eq!(&kept3.data[..], &original_3[..]);
+        let kept4 = storage.read_page(PageId(4)).await.unwrap();
+        assert_eq!(&kept4.data[..], &original_4[..]);
+        for id in [0u64, 1, 2, 5] {
+            let page = storage.read_page(PageId(id)).await.unwrap();
+            assert_eq!(&page.data[..], &page_pattern(id, 0xA1)[..]);
+        }
+        let kept70 = storage.read_page(PageId(70)).await.unwrap();
+        assert_eq!(&kept70.data[..], &[0x5A; Page::PAGE_SIZE][..]);
+
+        for id in 0..64u64 {
+            let guard = pool.get_page(PageId(id)).await.unwrap();
+            let pattern = page_pattern(id, 0x3C);
+            guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+        }
+        super::reset_page_io_counts();
+        pool.flush_all().await.unwrap();
+        let writes = super::page_write_count();
+        assert!(
+            writes < 64,
+            "flush of 64 dirty pages wrote {writes} times"
+        );
+        for id in 0..64u64 {
+            let page = storage.read_page(PageId(id)).await.unwrap();
+            assert_eq!(&page.data[..], &page_pattern(id, 0x3C)[..]);
+        }
+
+        let except_dir = tempdir().unwrap();
+        let except_path = except_dir.path().join("except.db");
+        let except_storage = Arc::new(FileStorage::open(&except_path).unwrap());
+        for expected in 0..6u64 {
+            let id = except_storage.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+        let old_5 = page_pattern(5, 0x51);
+        let mut page5 = Page::new(PageId(5));
+        page5.data.copy_from_slice(&old_5);
+        except_storage.write_page(PageId(5), &page5).await.unwrap();
+
+        let except_pooled = Arc::clone(&except_storage);
+        let except_pool = BufferPool::new(16, except_pooled).unwrap();
+        for id in [0u64, 1, 2, 5] {
+            let guard = except_pool.get_page(PageId(id)).await.unwrap();
+            let fill = if id == 5 { 0xE5 } else { 0x21 };
+            let pattern = page_pattern(id, fill);
+            guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+        }
+        let mut exclude = std::collections::HashSet::new();
+        exclude.insert(PageId(5));
+        super::reset_page_io_counts();
+        except_pool.flush_all_except(&exclude).await.unwrap();
+        let writes = super::page_write_count();
+        assert!(
+            writes < 3,
+            "flush of three dirty pages wrote {writes} times"
+        );
+        for id in [0u64, 1, 2] {
+            let page = except_storage.read_page(PageId(id)).await.unwrap();
+            assert_eq!(&page.data[..], &page_pattern(id, 0x21)[..]);
+        }
+        let kept5 = except_storage.read_page(PageId(5)).await.unwrap();
+        assert_eq!(&kept5.data[..], &old_5[..]);
+
+        let fail_dir = tempdir().unwrap();
+        let fail_path = fail_dir.path().join("failset.db");
+        let fail_storage = Arc::new(FileStorage::open(&fail_path).unwrap());
+        for expected in 0..5u64 {
+            let id = fail_storage.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+        let mut written_run = Vec::new();
+        for id in [0u64, 1] {
+            let mut page = Page::new(PageId(id));
+            page.data.copy_from_slice(&page_pattern(id, 0x71));
+            written_run.push(page);
+        }
+        fail_storage.write_page_run(written_run).await.unwrap();
+
+        let before_3 = fail_storage.read_page(PageId(3)).await.unwrap();
+        let before_4 = fail_storage.read_page(PageId(4)).await.unwrap();
+        let mut failed_run = Vec::new();
+        for id in [3u64, 4] {
+            let mut page = Page::new(PageId(id));
+            page.data.copy_from_slice(&page_pattern(id, 0xF3));
+            failed_run.push(page);
+        }
+        *fail_storage.io_failpoint.lock().unwrap() = Some(IoFailPoint::DataWrite);
+        let err = fail_storage.write_page_run(failed_run).await.unwrap_err();
+        assert!(
+            err.to_string().contains("injected io failure (write_page)"),
+            "got: {err}"
+        );
+        {
+            let failed = fail_storage.failed_pages.lock().unwrap();
+            assert!(failed.contains(&3), "page 3 must be in the failed set");
+            assert!(failed.contains(&4), "page 4 must be in the failed set");
+            assert!(
+                !failed.contains(&0),
+                "page 0 already succeeded and must stay out of the failed set"
+            );
+            assert!(
+                !failed.contains(&1),
+                "page 1 already succeeded and must stay out of the failed set"
+            );
+        }
+        for id in [0u64, 1] {
+            let page = fail_storage.read_page(PageId(id)).await.unwrap();
+            assert_eq!(&page.data[..], &page_pattern(id, 0x71)[..]);
+        }
+        let after_3 = fail_storage.read_page(PageId(3)).await.unwrap();
+        assert_eq!(&after_3.data[..], &before_3.data[..]);
+        let after_4 = fail_storage.read_page(PageId(4)).await.unwrap();
+        assert_eq!(&after_4.data[..], &before_4.data[..]);
+    }
+
+    /// 加密库连续两页一次刷出，同一密钥读回明文。
+    #[cfg(feature = "crypto")]
+    #[tokio::test]
+    async fn contiguous_flush_encrypted_pages_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("enc-run.db");
+        let storage = Arc::new(FileStorage::open_with_key(&path, Some("pw")).unwrap());
+        for expected in 0..2u64 {
+            let id = storage.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+        let pooled = Arc::clone(&storage);
+        let pool = BufferPool::new(8, pooled).unwrap();
+        for id in 0..2u64 {
+            let guard = pool.get_page(PageId(id)).await.unwrap();
+            let fill = 0x11 + id as u8;
+            guard.modify_page(|page| page.data.fill(fill));
+        }
+        super::reset_page_io_counts();
+        pool.flush_all().await.unwrap();
+        let writes = super::page_write_count();
+        assert!(
+            writes < 2,
+            "flush of two encrypted dirty pages wrote {writes} times"
+        );
+        for id in 0..2u64 {
+            let page = storage.read_page(PageId(id)).await.unwrap();
+            let fill = 0x11 + id as u8;
+            assert!(
+                page.data.iter().all(|byte| *byte == fill),
+                "page {id} did not round-trip"
+            );
+        }
+    }
+
     /// 连续 64 个脏页：五次逐页刷盘和五次测试内 `pwritev` 的提交次数、写次数和耗时。
+    #[ignore = "五次打印已记在 Iteration 000 的执行记录"]
     #[tokio::test]
     async fn contiguous_dirty_page_write_measure() {
         let dir = tempdir().unwrap();

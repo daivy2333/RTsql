@@ -94,7 +94,70 @@ PASS。审查计划 11 项通过；RTM 无 Missing、无 Simplified；本 Cycle 
 
 ## Act Response
 
-- Status: 尚未执行
+- Status: reported
+
+### 实际改动
+
+- `AsyncStorage::write_page_run`：默认实现按页 `await write_page`，中途失败立即返回。
+- `FileStorage::write_page_run`：只读拒绝文本与 `write_page` 相同。页数小于 2 或相邻页号差不是 1 时，在任何字节落盘前返回 `StorageError::Internal`，文本含 `non-contiguous page run`，不消费 `DataWrite`，不调用 `mark_write_failed`。连续时在 `spawn_blocking` 之前消费一次 `DataWrite`；命中则为这一段每一页 `mark_write_failed`，返回含 `injected io failure (write_page)` 的 `Io`，不调用 `pwritev`。未命中时一次 `spawn_blocking` 写出整段。偏移是第一页的 `HEADER_SIZE + page_id.to_offset(record_size)`。明文按页号顺序拼接 4096 字节，加密先 `encrypt_page` 再按同样顺序拼接 4124 字节。写出用一块连续缓冲上的 `pwritev`，短写则前进偏移继续。返回负值、未写完就返回 0，或报告的字节数大于剩余缓冲时，这一段每一页 `mark_write_failed` 并返回 `Io`。成功则每一页 `mark_write_succeeded`。这条路径不调用 `write_all_at`，不增加 `page_write_count`。
+- `BufferPool::flush_claimed`：`flush_all` 与 `flush_all_except` 在认领之后按 `PageId` 升序切出相邻页号差为 1 的最大段。长度大于或等于 2 调用 `write_page_run`，长度为 1 调用 `write_page`。调用方收到 `Err` 时，从当前段第一个下标到已排序向量末尾交还脏位并清除 `write_in_flight`。更早已经成功的段保持 `finish_write_in_flight(id, true)`。
+- `Cargo.toml`：`libc = "0.2"` 从 `[dev-dependencies]` 移到 `[dependencies]`。default features 仍是 `cli`、`network`、`crypto`。
+- 测试：`contiguous_flush_coalesces_a_run_and_keeps_the_gap`、`contiguous_flush_encrypted_pages_roundtrip`、`failed_run_restores_every_page_in_the_run`。`contiguous_dirty_page_write_measure` 加上 `#[ignore = "五次打印已记在 Iteration 000 的执行记录"]`。
+- 未改 `flush_pages`、`evict_one`、`allocate_page`、`src/wal/checkpoint.rs`。diff 不含 `io_uring_setup`。
+
+### 与计划的偏差
+
+- 失败集合断言加进合并测试后的第一次运行就是退出码 0。明文 `write_page_run` 在接上 `pwritev` 时已经对成功段调用 `mark_write_succeeded`，对注入失败段的每一页调用 `mark_write_failed`。按 Verification 第 3 步，断言已经通过时保留这次通过，没有拆掉标记再制造失败。
+- `failed_run_restores_every_page_in_the_run` 的第一次运行就是退出码 0。`flush_claimed` 在接上合并写时已经从当前段起点交还脏位。按 Verification 第 6 步，已经接上时这一次通过就是 GREEN。
+- `pwritev` 使用一块连续缓冲和单个 `iovec`。计划把一组向量或一块连续缓冲留给实现，字节分组、偏移和短写重试与 Required behavior 相同。
+
+### 自检
+
+Gate 3 通过。连续段、单页、排除页、加密记录、注入失败和失败交还都有对应断言。`flush_pages` 仍按调用方顺序逐页 `write_page`。检查点文件和 default features 没有被修改。测试编译没有新增警告。没有身份证明机制或判定层。
+
+Gate 4 通过。下面每条命令都是单独的 cargo 进程，都带 `--test-threads=1`，退出码来自这次实际运行。
+
+### 验证
+
+工作目录是 `/home/daivy/projects/RTsql-changes/2026-11-24-ms54-dirty-page-batch-io`。
+
+改前 GREEN：
+
+1. `cargo test --offline --lib storage::file_storage::tests -- --test-threads=1 --skip contiguous_dirty_page_write_measure`：退出码 0，8 passed。
+2. `cargo test --offline --lib storage::buffer_pool::tests::failed_flush_then_evict_keeps_the_new_bytes -- --test-threads=1`：退出码 0，1 passed。
+
+合并测试 RED，然后明文 `pwritev`：
+
+3. 只加入 `contiguous_flush_coalesces_a_run_and_keeps_the_gap` 后，`cargo test --offline --release --lib storage::file_storage::tests::contiguous_flush_coalesces_a_run_and_keeps_the_gap -- --test-threads=1`。第一次编译失败，原因是 `Arc::clone` 被目标类型收成 `Arc<dyn AsyncStorage>`。测试改为先克隆 `Arc<FileStorage>` 再交给 `BufferPool::new`。重跑退出码 101，断言是 `flush of four dirty pages wrote 4 times`。
+4. 接上明文 `pwritev`、移动 `libc`、给测量测试加上规定的 `#[ignore]` 后，同一条命令退出码 0，1 passed。加密分支在这一步仍对这一段的每一页调用 `write_page`。
+5. 把失败集合断言加进同一个测试后再跑同一条命令：退出码 0，1 passed。这就是上面记下的第一次即通过。
+
+加密 RED，然后加密记录的 `pwritev`：
+
+6. 加入 `contiguous_flush_encrypted_pages_roundtrip` 后，`cargo test --offline --release --lib storage::file_storage::tests::contiguous_flush_encrypted_pages_roundtrip -- --test-threads=1`：退出码 101，断言是 `flush of two encrypted dirty pages wrote 2 times`。
+7. 补上加密记录的 `pwritev` 后，同一条命令退出码 0，1 passed。
+
+失败交还：
+
+8. 加入 `failed_run_restores_every_page_in_the_run` 后，`cargo test --offline --lib storage::buffer_pool::tests::failed_run_restores_every_page_in_the_run -- --test-threads=1`：退出码 0，1 passed。这就是上面记下的第一次即通过。
+
+既有命令，按这个顺序，每条退出码 0：
+
+9. `cargo test --offline --lib storage::buffer_pool::tests::failed_flush_then_evict_keeps_the_new_bytes -- --test-threads=1`：1 passed。
+10. `cargo test --offline --test write_failure_state_test -- --test-threads=1`：3 passed。
+11. `cargo test --offline --test release_durability_precondition_test -- --test-threads=1`：2 passed。
+12. `cargo test --offline --test free_page_lifecycle_test -- --test-threads=1`：12 passed。
+13. `cargo test --offline --lib wal::checkpoint::tests -- --test-threads=1`：5 passed。
+14. `cargo test --offline --test checkpoint_test -- --test-threads=1`：2 passed。
+15. `cargo test --offline --test ddl_layout_publication_test -- --test-threads=1`：11 passed。
+
+### Experience Candidates
+
+None
+
+### 未解决问题
+
+无。
 
 ## Plan Review
 
