@@ -92,6 +92,8 @@
 
 计数只在测试构建中存在。非测试构建的 `write_page`、`write_page_blocking` 和 `sync` SHALL NOT 因计数而改变成功、失败或写出的字节。
 
+裁定为值得交付并且 `flush_all` 已改为合并连续段之后，该测量测试 SHALL 标为 `#[ignore]`，忽略理由写明这次打印已记在执行记录中。保留逐页写时 SHALL NOT 给它加 `#[ignore]`。
+
 #### Scenario: 五次重复打印字段且字节一致
 
 - **GIVEN** 上述负载，命令为 `cargo test --offline --release --lib storage::file_storage::tests::contiguous_dirty_page_write_measure -- --test-threads=1 --nocapture`
