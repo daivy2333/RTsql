@@ -82,7 +82,31 @@ PASS。检查项全部通过。没有 BLOCKED。没有 SKIPPED。
 
 ## Act Response
 
-待 Act 填写。Plan 不把本节写成 `reported` 或 `blocked`。
+- Status: reported
+
+实际改动：只填写本 Cycle 的 Act Response。`src/`、`tests/`、`Cargo.toml` 没有改。没有新增测试，没有节点锁，没有耗时比例或等待次数。
+
+`IndexManager.write_gate` 的类型是 `Arc<Mutex<()>>`，`Mutex` 来自 `std::sync`（`src/storage/btree/index_manager.rs` 第 17、165 行）。`IndexManager::new` 第 246 行和 `IndexManager::from_root` 第 265 行各自写 `write_gate: Arc::new(Mutex::new(()))`。文件里没有第三处构造。
+
+取得它的函数是 `insert`、`delete`、`delete_exact`、`update`、`find_key_by_row_id`。都是闭包外 `clone`，`spawn_blocking` 闭包开头 `write_gate.lock().unwrap()`，守卫持有到闭包结束。
+
+- `insert`：clone 第 450 行，闭包第 453 行，lock 第 455 行。闭包内顺序是 `BTree::insert`、`pause_at(AfterStructureChangeBeforeRootPublish)`、按需 `root_page_id.store`、`row_to_key.write().insert`。`sync_root_to_catalog` 在 `.await` 之后，第 482 行。
+- `delete`：clone 第 497 行，闭包第 500 行，lock 第 501 行。闭包内是查找、`BTree::delete`、同一暂停点、按需发布根、按需删除反向映射。目录同步在闭包外，第 529 行。
+- `delete_exact`：clone 第 557 行，闭包第 559 行，lock 第 560 行。`BTree::delete_exact` 之后按需删映射，不发布根。
+- `update`：clone 第 729 行，闭包第 731 行，lock 第 732 行。`BTree::update` 之后更新映射，不发布根。
+- `find_key_by_row_id`：clone 第 760 行，闭包第 761 行，lock 第 762 行。闭包内读 `row_to_key`。
+
+不取得它的函数是 `search`（第 330 行）、`scan_all`（第 580 行）、`scan_range`（第 643 行）。三处只 `load(Ordering::Acquire)` 根页 id，函数体内没有 `write_gate.lock`。`search_all`（第 338 行）和 `collect_all_pages`（第 784 行）同样不取得它。全文件 `write_gate.lock` 只有上述五处。
+
+与计划的偏差：无。
+
+自检没有发现。Gate 3 通过：符号与 Current behavior 一致，产品代码没有计划外修改。
+
+验证：工作目录 `/home/daivy/projects/RTsql-changes/2026-11-24-ms55-index-node-lock`，分支 `changes/2026-11-24-ms55-index-node-lock`，执行时 HEAD 是 `703eac55e761e472a216ca060378f3b08c100dbc`。`git diff --exit-code 55efdb0fb872a1d6406891128cf8d4e0f29c8997 -- src tests Cargo.toml` 退出码 0，没有 diff 文本。符号阅读见上。没有跑 `cargo test`，没有跑 `tests/index_write_atomicity_test.rs`。Gate 4 通过。
+
+Experience Candidates: None
+
+未解决问题：无。
 
 ## Plan Review
 
