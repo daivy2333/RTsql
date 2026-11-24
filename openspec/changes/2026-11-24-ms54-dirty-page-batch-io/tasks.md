@@ -9,8 +9,8 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/storage-io-optimization/spec.md`。
 - 000：Plan Context 见 `iterations/000-measure-and-decide/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是值得交付。
 - 001：`iterations/001-apply-batch-decision/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是已交付连续段合并写。
-- 002：`iterations/002-compare-io-uring/000-initial.md`，Plan Context `ready`，Gate 2 PASS。Act Response 状态 `reported`。Review Result 仍为 `pending`。
-- 003：只列在下面的 Iteration Plan 里，不建目录。T4 记下保留或平台不适合时不展开本轮。
+- 002：`iterations/002-compare-io-uring/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是值得采用。
+- 003：`iterations/003-io-uring-feature/000-initial.md`。Plan Context `ready`，Gate 2 PASS。Act Response 尚未执行。Review Result 为 `pending`。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -155,16 +155,16 @@ T1 与 T2 的执行依据是 `iterations/000-measure-and-decide/000-initial.md` 
 
 ## T5: 默认关闭的 io_uring feature
 
-本任务在 Iteration 003 展开之后执行。前几轮不执行。
+本任务的执行依据是 `iterations/003-io-uring-feature/000-initial.md` 的 Task Definition。前几轮不执行。
 
-- Requirement/Scenario: 「默认构建不启用 io_uring」。
-- Depends on: T4 记录的是值得采用。
-- Targets: `Cargo.toml` 的 feature `io-uring`，默认 features 不增加它。`src/storage/file_storage.rs` 的 `write_page` 与 `write_page_run` 在该 feature 启用时走 io_uring。
-- Current behavior: 没有这个 feature。写入是 T3 的路径。
-- Required behavior: 默认构建的 `flush_all` 与 T3 完成后相同。`cargo test --features io-uring` 下，连续两页 `flush_all` 后读回一致，武装 `DataWrite` 时错误文本仍含 `injected io failure (write_page)` 且没有字节落盘。提交在阻塞线程里等待完成。读仍是 `read_exact_at`。
-- Preserve: 默认 features、注入文本、失败集合、检查点步骤、`evict_one`。
+- Requirement/Scenario: 「默认构建不启用 io_uring」，以及「io_uring 比较不替换默认后端」里启用 feature 的正文。
+- Depends on: T4 的执行记录是值得采用。
+- Targets: `Cargo.toml` 增加 feature `io-uring`，不放进 default features。`src/storage/file_storage.rs` 的 `write_page` 与 `write_page_run` 在该 feature 启用时，于既有 `spawn_blocking` 里提交 io_uring 并等待完成。
+- Current behavior: 没有这个 feature。写入是 T3 交付的合并写。
+- Required behavior: 默认构建的两页连续 `flush_all` 产品写次数小于 2，读回一致。`--features io-uring` 下，连续两页 `flush_all` 与单页 `write_page` 都走 io_uring，读回一致；武装 `DataWrite` 时错误文本仍含 `injected io failure (write_page)`，没有字节落盘。读仍是 `read_exact_at`。
+- Preserve: 默认 features、注入文本、失败集合、检查点步骤、`evict_one` 的选页。
 - Forbidden: 把 `io-uring` 写入 default features。依赖 `tokio-uring`。把读路径改成 io_uring。
-- First test: 默认构建下的 `io_uring_feature_off_keeps_the_decided_write_path`。它调用 `flush_all` 并断言与 T3 的写次数合同一致：T3 是保留时 2 个连续脏页的产品写次数为 2；T3 是交付时小于 2。测试先写成会失败的断言，观察到 RED，再加 feature 门控，使默认构建通过。
-- GREEN condition: 默认构建的该测试退出码 0。然后 `cargo test --offline --features io-uring --lib storage::file_storage::tests::io_uring_feature_on_write_roundtrip -- --test-threads=1` 在 feature 写路径完成前失败，完成后退出码 0。
-- Verification: 上面两条按顺序各跑一次。然后跑一次收尾全量，使用默认 features，不附加 `--features io-uring`。
+- First test: 见 003 Cycle。T3 已交付合并写，两页连续脏页的 `page_write_count() < 2` 现在已经成立。合同断言先观察到 GREEN。缺测试时过滤结果是 `0 passed`。`io_uring_feature_on_write_roundtrip` 在写路径完成前失败，完成后退出码 0。被替代的做法是把写次数断言改成等于 2 来制造失败。
+- GREEN condition: 见 003 Cycle。
+- Verification: 见 003 Cycle。定向测试通过后跑一次收尾全量，使用默认 features，不附加 `--features io-uring`。
 - Stop when: 不把 feature 放进默认 features 就不能让启用构建通过，或等待完成会改变 `injected io failure (write_page)` 的文本。停止并回到计划，不改默认 features。

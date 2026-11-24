@@ -140,4 +140,30 @@ Experience Candidates: None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+- 非阻塞 Minor。测试模块里的 `IoUringSqe`、`IoUringCqe`、`IoSqringOffsets`、`IoCqringOffsets`、`IoUringParams` 带 `#[allow(dead_code)]`。这些字段构成内核读写的 `repr(C)` 布局，测试只填写或读取其中一部分。去掉未读字段会改变 SQE 64 字节、CQE 16 字节或 `params` 120 字节。这一项留下，不作为返工。
+
+**Evidence**
+
+- 沿用 Act Response 的验证，不重跑。工作目录是 `/home/daivy/projects/RTsql-changes/2026-11-24-ms54-dirty-page-batch-io`。代码与该结论同在 `5c0a4f67919a1b0615a77f5241b616e5d9ea3ae4`，工作区干净，其后没有新提交。公共规则「验证」列出的重跑情形没有出现。
+- RED：测试还不存在时，`cargo test --offline --release --lib storage::file_storage::tests::io_uring_flush_compare -- --test-threads=1 --nocapture` 退出码 0，`running 0 tests`，`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 464 filtered out`。
+- 写入测试后的第一次同命令退出码 101，`error[E0308]`，`Arc::clone(&storage)` 的类型对不上。测试没有运行，没有耗时。修正留在测试模块：`storage` 保持 `Arc<FileStorage>`，克隆后再转成 `Arc<dyn AsyncStorage>` 交给 `BufferPool::new`。裁定只使用修正后那一次的输出。
+- 裁定用的那一次退出码 0。`setup=ok`。五行是 `repeat=0 flush_ns=425476 uring_ns=299838`、`repeat=1 flush_ns=120110 uring_ns=68438`、`repeat=2 flush_ns=87114 uring_ns=63427`、`repeat=3 flush_ns=157533 uring_ns=62194`、`repeat=4 flush_ns=266090 uring_ns=144907`。`flush_ns` 升序后的第三个是 157533，`uring_ns` 升序后的第三个是 68438。68438 < 157533。执行记录是值得采用。收尾全量没有跑，`Cargo.toml` 没有 feature 差异。
+- 独立阅读 `io_uring_flush_compare`、`uring_write_all`、`map_uring` 和 `UringMaps`。`FileStorage::open` 打开明文临时文件。`allocate_page` 得到页 0 到 70。页 70 经 `write_page` 写成 `0x5A`。池容量 128，只装入页 0 到 63。五次循环前有一次不计时的 `flush_all`。建环一次，`entries` 为 8，`params` 先清零，`flags` 保持 0。失败时打印 `setup=` 加十进制错误号并返回，不进入循环，不 `mmap`。成功时打印 `setup=ok`。三次 `mmap` 的保护是 `PROT_READ | PROT_WRITE`，标志是 `MAP_SHARED`，长度分别由 `sq_off.array + sq_entries * 4`、`cq_off.cqes + cq_entries * 16`、`sq_entries * 64` 算出，偏移是 0、`0x8000000`、`0x10000000`。提交 opcode 是 23。`io_uring_enter` 的参数是环描述符、`1u32`、`1u32`、`IORING_ENTER_GETEVENTS`、`0usize`。SQ `tail` 与 CQ `head` 的存储是 `Release`，对端 `head` 或 `tail` 的读取是 `Acquire`。`user_data` 从 1 起，完成项必须带回同一值。`res` 小于等于 0 或大于剩余长度时断言失败。短写留在同一次 `uring_ns` 里继续提交。偏移是 `HEADER_SIZE`。计时包住从池中复制 64 页到全部字节写完。写完后 `read_page` 核对页 0 到 63、页 64 和页 70。两侧纳秒都要求大于 0。测试源码不打印「值得采用」「保留」或「平台不适合」。五次结束后由 `UringMaps` 析构 `munmap` 三次并 `close` 环描述符，不关闭数据文件。进入建环前断言 SQE 64 字节、CQE 16 字节、`params` 120 字节。
+- `git diff ab7515e2024e3adf764f25590fa66272db70745c..HEAD -- Cargo.toml src`：`Cargo.toml` 无差异。`src` 只有 `src/storage/file_storage.rs` 的 `@@ -1458,4 +1458,394 @@ mod tests`。`async_storage.rs` 与 `buffer_pool.rs` 无差异。default features 仍是 `cli`、`network`、`crypto`。`src` 里的 `SYS_io_uring_setup` 只出现在这个测试模块。`contiguous_dirty_page_write_measure` 的忽略属性仍是 `#[ignore = "五次打印已记在 Iteration 000 的执行记录"]`。
+- merge-base `2a78e01b44b7275add1f1fe9d539a887e889e4ad` 到 HEAD 的其余产品差异是 001 已接受的 `libc` 移动、`write_page_run` 和 `flush_claimed`。002 没有改这些路径。本轮 Persisted Evidence 为 none。不因缺少 Evidence 目录记问题。
+
+**Follow-up Decision**
+
+Acceptance 已满足。上面一项不阻塞，不要求当前 Cycle 修复，也不创建 rework 或 replan。Iteration Plan 保持不变。执行记录是值得采用。按 `tasks.md` 的既有 Map 展开 Iteration 003：增加默认关闭的 `io-uring` feature，不放进默认 features，并在该轮跑一次收尾全量。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`openspec/changes/2026-11-24-ms54-dirty-page-batch-io/iterations/003-io-uring-feature/000-initial.md`
