@@ -111,8 +111,8 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 04988dc9df2c8a869cced8b753e2611df0bbc99a
-- **ahead of origin**: 25
+- **提交基线**: d428e27b6baebf30d9dde1ecd79601c76f1c208d
+- **ahead of origin**: 39
 - **工作区**: 干净。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-24-ms54-dirty-page-batch-io/`。
 - **最新 tag**: 无
 
