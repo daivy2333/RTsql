@@ -111,9 +111,9 @@ RTsql（**v0.2.0**）— 异步协程驱动的高性能嵌入式关系型数据�
 ## 仓库现场
 
 - **分支**: master
-- **提交基线**: 0e31c1ceb68e63f101c52eb0a4b61f32b9a5ce65
-- **ahead of origin**: 46
-- **工作区**: `.agents/memory/improvements.md` 有未提交修改。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-24-ms55-index-page-space/`。
+- **提交基线**: 64219463adb325da44c4ba1bc35a4eeec9e3318a
+- **ahead of origin**: 54
+- **工作区**: `.agents/memory/improvements.md` 有未提交修改。`openspec/changes/` 下无活跃 change。最新归档 `openspec/changes/archive/2026-11-24-ms55-index-node-lock/`。
 - **最新 tag**: 无
 
 ## 权威文档
