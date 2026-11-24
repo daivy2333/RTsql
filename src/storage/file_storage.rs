@@ -1458,4 +1458,394 @@ mod tests {
             assert!(merged_ns > 0);
         }
     }
+
+    const IORING_OP_WRITE: u8 = 23;
+    const IORING_ENTER_GETEVENTS: u32 = 1;
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoUringSqe {
+        opcode: u8,
+        flags: u8,
+        ioprio: u16,
+        fd: i32,
+        off: u64,
+        addr: u64,
+        len: u32,
+        rw_flags: u32,
+        user_data: u64,
+        buf_index: u16,
+        personality: u16,
+        splice_fd_in: i32,
+        pad: [u64; 2],
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoUringCqe {
+        user_data: u64,
+        res: i32,
+        flags: u32,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoSqringOffsets {
+        head: u32,
+        tail: u32,
+        ring_mask: u32,
+        ring_entries: u32,
+        flags: u32,
+        dropped: u32,
+        array: u32,
+        resv1: u32,
+        resv2: u64,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoCqringOffsets {
+        head: u32,
+        tail: u32,
+        ring_mask: u32,
+        ring_entries: u32,
+        overflow: u32,
+        cqes: u32,
+        flags: u32,
+        resv1: u32,
+        resv2: u64,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoUringParams {
+        sq_entries: u32,
+        cq_entries: u32,
+        flags: u32,
+        sq_thread_cpu: u32,
+        sq_thread_idle: u32,
+        features: u32,
+        wq_fd: u32,
+        resv: [u32; 3],
+        sq_off: IoSqringOffsets,
+        cq_off: IoCqringOffsets,
+    }
+
+    struct UringMaps {
+        ring_fd: i32,
+        sq: usize,
+        sq_len: usize,
+        cq: usize,
+        cq_len: usize,
+        sqes: usize,
+        sqes_len: usize,
+        sq_head_off: u32,
+        sq_tail_off: u32,
+        sq_ring_mask_off: u32,
+        sq_array_off: u32,
+        sq_entries: u32,
+        cq_head_off: u32,
+        cq_tail_off: u32,
+        cq_ring_mask_off: u32,
+        cq_cqes_off: u32,
+    }
+
+    impl Drop for UringMaps {
+        fn drop(&mut self) {
+            unsafe {
+                if self.sq != 0 {
+                    libc::munmap(self.sq as *mut libc::c_void, self.sq_len);
+                    self.sq = 0;
+                }
+                if self.cq != 0 {
+                    libc::munmap(self.cq as *mut libc::c_void, self.cq_len);
+                    self.cq = 0;
+                }
+                if self.sqes != 0 {
+                    libc::munmap(self.sqes as *mut libc::c_void, self.sqes_len);
+                    self.sqes = 0;
+                }
+                if self.ring_fd >= 0 {
+                    libc::close(self.ring_fd);
+                    self.ring_fd = -1;
+                }
+            }
+        }
+    }
+
+    fn atomic_at(base: usize, offset: u32) -> *const std::sync::atomic::AtomicU32 {
+        (base + offset as usize) as *const std::sync::atomic::AtomicU32
+    }
+
+    fn ring_load(base: usize, offset: u32) -> u32 {
+        unsafe { (*atomic_at(base, offset)).load(Ordering::Acquire) }
+    }
+
+    fn ring_store(base: usize, offset: u32, value: u32) {
+        unsafe { (*atomic_at(base, offset)).store(value, Ordering::Release) }
+    }
+
+    fn mmap_shared(fd: i32, len: usize, offset: libc::off_t) -> *mut libc::c_void {
+        unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                offset,
+            )
+        }
+    }
+
+    fn map_uring(fd: i32, params: &IoUringParams) -> UringMaps {
+        let sq_len = params.sq_off.array as usize + params.sq_entries as usize * 4;
+        let cq_len = params.cq_off.cqes as usize + params.cq_entries as usize * 16;
+        let sqes_len = params.sq_entries as usize * 64;
+        if params.sq_entries == 0 || params.cq_entries == 0 || sq_len == 0 || cq_len == 0 || sqes_len == 0
+        {
+            unsafe {
+                libc::close(fd);
+            }
+            panic!(
+                "ring map is empty: sq_entries {} cq_entries {} sq_len {sq_len} cq_len {cq_len} sqes_len {sqes_len}",
+                params.sq_entries, params.cq_entries
+            );
+        }
+
+        let sq = mmap_shared(fd, sq_len, 0);
+        if sq == libc::MAP_FAILED {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            panic!("mmap sq ring failed: {err}");
+        }
+        let cq = mmap_shared(fd, cq_len, 0x8000000);
+        if cq == libc::MAP_FAILED {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::munmap(sq, sq_len);
+                libc::close(fd);
+            }
+            panic!("mmap cq ring failed: {err}");
+        }
+        let sqes = mmap_shared(fd, sqes_len, 0x10000000);
+        if sqes == libc::MAP_FAILED {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::munmap(sq, sq_len);
+                libc::munmap(cq, cq_len);
+                libc::close(fd);
+            }
+            panic!("mmap sqes failed: {err}");
+        }
+
+        UringMaps {
+            ring_fd: fd,
+            sq: sq as usize,
+            sq_len,
+            cq: cq as usize,
+            cq_len,
+            sqes: sqes as usize,
+            sqes_len,
+            sq_head_off: params.sq_off.head,
+            sq_tail_off: params.sq_off.tail,
+            sq_ring_mask_off: params.sq_off.ring_mask,
+            sq_array_off: params.sq_off.array,
+            sq_entries: params.sq_entries,
+            cq_head_off: params.cq_off.head,
+            cq_tail_off: params.cq_off.tail,
+            cq_ring_mask_off: params.cq_off.ring_mask,
+            cq_cqes_off: params.cq_off.cqes,
+        }
+    }
+
+    fn uring_write_all(ring: &UringMaps, fd: i32, buf: &[u8], mut offset: u64) {
+        let sq_mask = ring_load(ring.sq, ring.sq_ring_mask_off);
+        let cq_mask = ring_load(ring.cq, ring.cq_ring_mask_off);
+        let mut done = 0usize;
+        let mut user_data = 1u64;
+        while done < buf.len() {
+            let head = ring_load(ring.sq, ring.sq_head_off);
+            let tail = ring_load(ring.sq, ring.sq_tail_off);
+            assert!(
+                tail.wrapping_sub(head) < ring.sq_entries,
+                "submission queue is full"
+            );
+            let index = tail & sq_mask;
+            let remaining = buf.len() - done;
+            let sqe = IoUringSqe {
+                opcode: IORING_OP_WRITE,
+                flags: 0,
+                ioprio: 0,
+                fd,
+                off: offset,
+                addr: buf[done..].as_ptr() as u64,
+                len: u32::try_from(remaining).expect("write length fits u32"),
+                rw_flags: 0,
+                user_data,
+                buf_index: 0,
+                personality: 0,
+                splice_fd_in: 0,
+                pad: [0; 2],
+            };
+            unsafe {
+                let sqe_ptr = (ring.sqes + (index as usize) * std::mem::size_of::<IoUringSqe>())
+                    as *mut IoUringSqe;
+                sqe_ptr.write(sqe);
+                let slot = atomic_at(ring.sq, ring.sq_array_off + index * 4);
+                (*slot).store(index, Ordering::Relaxed);
+            }
+            ring_store(ring.sq, ring.sq_tail_off, tail.wrapping_add(1));
+
+            let cq_tail_before = ring_load(ring.cq, ring.cq_tail_off);
+            let entered = unsafe {
+                libc::syscall(
+                    libc::SYS_io_uring_enter,
+                    ring.ring_fd,
+                    1u32,
+                    1u32,
+                    IORING_ENTER_GETEVENTS,
+                    0usize,
+                )
+            };
+            assert!(
+                entered >= 0,
+                "io_uring_enter failed: {}",
+                std::io::Error::last_os_error()
+            );
+            let cq_tail = ring_load(ring.cq, ring.cq_tail_off);
+            assert_ne!(
+                cq_tail, cq_tail_before,
+                "completion queue did not advance"
+            );
+            let cq_head = ring_load(ring.cq, ring.cq_head_off);
+            let cq_index = cq_head & cq_mask;
+            let cqe = unsafe {
+                let cqe_ptr = (ring.cq
+                    + ring.cq_cqes_off as usize
+                    + (cq_index as usize) * std::mem::size_of::<IoUringCqe>())
+                    as *const IoUringCqe;
+                cqe_ptr.read()
+            };
+            assert_eq!(cqe.user_data, user_data, "completion user_data");
+            assert!(
+                cqe.res > 0 && (cqe.res as usize) <= remaining,
+                "completion res {} remaining {remaining}",
+                cqe.res
+            );
+            let n = cqe.res as usize;
+            done += n;
+            offset += n as u64;
+            ring_store(ring.cq, ring.cq_head_off, cq_head.wrapping_add(1));
+            user_data = user_data.wrapping_add(1);
+            if user_data == 0 {
+                user_data = 1;
+            }
+        }
+    }
+
+    async fn assert_uring_compare_bytes(storage: &FileStorage, fill: u8) {
+        for id in 0..64u64 {
+            let page = storage.read_page(PageId(id)).await.unwrap();
+            assert_eq!(
+                &page.data[..],
+                &page_pattern(id, fill)[..],
+                "page {id} fill {fill}"
+            );
+        }
+        let gap = storage.read_page(PageId(64)).await.unwrap();
+        assert_eq!(&gap.data[..], &[0u8; Page::PAGE_SIZE][..]);
+        let kept = storage.read_page(PageId(70)).await.unwrap();
+        assert_eq!(&kept.data[..], &[0x5A; Page::PAGE_SIZE][..]);
+    }
+
+    /// 明文库页 0 到 63：五次 `flush_all` 与五次测试内 io_uring 写入的耗时。
+    #[tokio::test]
+    async fn io_uring_flush_compare() {
+        use std::os::unix::io::AsRawFd;
+
+        assert_eq!(std::mem::size_of::<IoUringSqe>(), 64);
+        assert_eq!(std::mem::size_of::<IoUringCqe>(), 16);
+        assert_eq!(std::mem::size_of::<IoUringParams>(), 120);
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring-compare.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        for expected in 0..71u64 {
+            let id = storage.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+        let mut sentinel = Page::new(PageId(70));
+        sentinel.data.fill(0x5A);
+        storage.write_page(PageId(70), &sentinel).await.unwrap();
+
+        let pooled = Arc::clone(&storage);
+        let pooled: Arc<dyn AsyncStorage> = pooled;
+        let pool = BufferPool::new(128, pooled).unwrap();
+        for id in 0..64u64 {
+            pool.get_page(PageId(id)).await.unwrap();
+        }
+        for id in 0..64u64 {
+            let guard = pool.get_page(PageId(id)).await.unwrap();
+            let pattern = page_pattern(id, 0x11);
+            guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+        }
+        pool.flush_all().await.unwrap();
+
+        let mut params: IoUringParams = unsafe { std::mem::zeroed() };
+        let setup = unsafe {
+            libc::syscall(
+                libc::SYS_io_uring_setup,
+                8u32,
+                &mut params as *mut IoUringParams,
+            )
+        };
+        if setup < 0 {
+            let code = std::io::Error::last_os_error()
+                .raw_os_error()
+                .expect("io_uring_setup error has no raw os error");
+            println!("setup={code}");
+            return;
+        }
+        println!("setup=ok");
+        let ring_fd = i32::try_from(setup).expect("ring fd fits i32");
+        let ring = map_uring(ring_fd, &params);
+        let data_file = Arc::clone(&storage.file);
+        let data_fd = data_file.as_raw_fd();
+
+        for repeat in 0..5u32 {
+            let flush_fill = (repeat + 1) as u8;
+            for id in 0..64u64 {
+                let guard = pool.get_page(PageId(id)).await.unwrap();
+                let pattern = page_pattern(id, flush_fill);
+                guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+            }
+            let started = Instant::now();
+            pool.flush_all().await.unwrap();
+            let flush_ns = started.elapsed().as_nanos();
+            assert_uring_compare_bytes(&storage, flush_fill).await;
+
+            let uring_fill = (repeat + 101) as u8;
+            for id in 0..64u64 {
+                let guard = pool.get_page(PageId(id)).await.unwrap();
+                let pattern = page_pattern(id, uring_fill);
+                guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+            }
+            let started = Instant::now();
+            let mut buf = Vec::with_capacity(64 * Page::PAGE_SIZE);
+            for id in 0..64u64 {
+                let guard = pool.get_page(PageId(id)).await.unwrap();
+                buf.extend_from_slice(&guard.page_data());
+            }
+            assert_eq!(buf.len(), 64 * Page::PAGE_SIZE);
+            uring_write_all(&ring, data_fd, &buf, HEADER_SIZE as u64);
+            let uring_ns = started.elapsed().as_nanos();
+            assert_uring_compare_bytes(&storage, uring_fill).await;
+            assert!(flush_ns > 0, "flush_ns is 0");
+            assert!(uring_ns > 0, "uring_ns is 0");
+            println!("repeat={repeat} flush_ns={flush_ns} uring_ns={uring_ns}");
+        }
+    }
 }

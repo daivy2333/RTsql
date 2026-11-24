@@ -85,7 +85,58 @@ PASS。审查计划 11 项通过；RTM 里 T4 映射到 `io_uring_flush_compare`
 
 ## Act Response
 
-- Status: 尚未执行
+- Status: reported
+
+实际改动：
+
+- `src/storage/file_storage.rs` 的 `mod tests` 增加 `io_uring_flush_compare`。同模块还有布局结构 `IoUringSqe`、`IoUringCqe`、`IoSqringOffsets`、`IoCqringOffsets`、`IoUringParams`，以及 `UringMaps`、`map_uring`、`uring_write_all`、`assert_uring_compare_bytes`。
+- 非测试代码没有改。`Cargo.toml` 没有改。默认 features 仍是 `cli`、`network`、`crypto`。没有增加 `io-uring` feature。
+- 五次循环结束后，`UringMaps` 析构时 `munmap` 三次并 `close` 环描述符。数据文件没有关闭。
+
+与计划的偏差：
+
+无行为偏差。`BufferPool::new` 接收 `Arc<dyn AsyncStorage>`。测试写完后的第一次 release 命令在 `Arc::clone(&storage)` 处类型不匹配，退出码 101，测试没有执行，也没有耗时。改为先得到 `Arc<FileStorage>` 再转换之后，才有下面这一次裁定输出。
+
+自检：
+
+类型不匹配已修复。通过的那次编译没有新增 rustc 警告。页 0 到 63、页 64、页 70、建环、`mmap` 和完成队列都由这次通过的测试断言。没有遗留 Minor。
+
+验证：
+
+工作目录是 `/home/daivy/projects/RTsql-changes/2026-11-24-ms54-dirty-page-batch-io`。命令带 `--test-threads=1`，一次一个 cargo。
+
+1. RED，测试函数还不存在。命令：
+
+`cargo test --offline --release --lib storage::file_storage::tests::io_uring_flush_compare -- --test-threads=1 --nocapture`
+
+退出码 0。`running 0 tests`。`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 464 filtered out`。
+
+2. 写入测试后的第一次同命令：退出码 101。`error[E0308]`，`Arc::clone(&storage)` 期望 `&Arc<dyn AsyncStorage>`，实际是 `&Arc<FileStorage>`。没有运行测试。
+
+3. 修正后的同命令。这一次的输出用于裁定。退出码 0。
+
+```
+setup=ok
+repeat=0 flush_ns=425476 uring_ns=299838
+repeat=1 flush_ns=120110 uring_ns=68438
+repeat=2 flush_ns=87114 uring_ns=63427
+repeat=3 flush_ns=157533 uring_ns=62194
+repeat=4 flush_ns=266090 uring_ns=144907
+```
+
+`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 464 filtered out`。
+
+`flush_ns` 升序是 87114、120110、157533、266090、425476，第三个是 157533。`uring_ns` 升序是 62194、63427、68438、144907、299838，第三个是 68438。68438 < 157533。
+
+裁定：值得采用
+
+收尾全量没有跑。裁定是值得采用，所以本 Cycle 不实现 feature，也不把 `io-uring` 放进默认 features。
+
+4. `git diff ab7515e2024e3adf764f25590fa66272db70745c -- Cargo.toml src`：`Cargo.toml` 无差异。`src` 只有 `src/storage/file_storage.rs` 的一个 hunk，`@@ -1458,4 +1458,394 @@ mod tests`。
+
+Experience Candidates: None
+
+未解决问题：无。
 
 ## Plan Review
 
