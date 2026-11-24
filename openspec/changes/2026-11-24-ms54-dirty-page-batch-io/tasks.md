@@ -10,7 +10,7 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 - 000：Plan Context 见 `iterations/000-measure-and-decide/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是值得交付。
 - 001：`iterations/001-apply-batch-decision/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是已交付连续段合并写。
 - 002：`iterations/002-compare-io-uring/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是值得采用。
-- 003：`iterations/003-io-uring-feature/000-initial.md`。Plan Context `ready`，Gate 2 PASS。Act Response 状态 `reported`。Review Result 仍为 `pending`。
+- 003：`iterations/003-io-uring-feature/000-initial.md`。Plan Context `ready`，Gate 2 PASS。Act Response 状态 `reported`。Review Result 为 `accepted`。
 - Persisted Evidence：none。
 - 跳过项：无。
 

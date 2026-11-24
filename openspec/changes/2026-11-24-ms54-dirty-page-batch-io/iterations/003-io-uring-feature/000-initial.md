@@ -131,4 +131,34 @@ Experience Candidates: None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+- 非阻塞 Minor。`io_uring_write` 里的 `IoUringSqe`、`IoUringCqe`、`IoSqringOffsets`、`IoCqringOffsets`、`IoUringParams` 带 `#[allow(dead_code)]`。这些字段保住 SQE 64 字节、CQE 16 字节和 `params` 120 字节，同文件已有 `size_of` 断言。Rust 侧不会逐个读取。与 002 已接受的同类布局字段相同，不作为返工。
+- 非实质局部差异，Act Response 已记录。下标超出内核填回的队列长度，或映射长度、array 槽、完成项偏移溢出时，`write_all` 返回错误，`MappedRing` 析构拆环，不调用 `write_all_at` 或 `pwritev`。`record_page_write` 的条件是 `all(test, not(feature = "io-uring"))`。`pwritev_fully` 与父模块的 `AsRawFd` 导入带 `not(feature = "io-uring")`。默认构建仍在 `write_all_at` 成功后记页写，连续段仍走 `pwritev_fully`。
+
+**Evidence**
+
+- 沿用 Act Response 的验证，不重跑。工作目录是 `/home/daivy/projects/RTsql-changes/2026-11-24-ms54-dirty-page-batch-io`。结论与代码同在 `002278723c8b18578c21128f4d2b6b44625bc196`，审查前工作区干净。公共规则「验证」列出的重跑情形没有出现。本轮 Persisted Evidence 为 none。不因缺少 Evidence 目录记问题。
+- 关闭 feature 的测试还不存在时，`cargo test --offline --lib storage::file_storage::tests::io_uring_feature_off_keeps_the_decided_write_path -- --test-threads=1` 退出码 0，`0 passed`，`465 filtered out`。只加入该测试后同一命令退出码 0，`1 passed`，`465 filtered out`。
+- 写入路径仍是 `write_all_at` 与 `pwritev` 时，`cargo test --offline --features io-uring --lib storage::file_storage::tests::io_uring_feature_on_write_roundtrip -- --test-threads=1` 退出码 101。断言是 `uring_write_count` 的 left 0、right 1。`0 passed`，`1 failed`。这是 RED。
+- 接上 `io_uring_write` 之后，同一条启用命令退出码 0，`1 passed`，`466 filtered out`。默认构建再跑关闭 feature 的命令，退出码 0，`1 passed`，`465 filtered out`。
+- 收尾全量使用默认 features。`N = 171`，`B = 15`，前 9 批各 11 个文件，后 6 批各 12 个，然后是 `cargo test --offline --lib --bins -- --test-threads=1`。没有 `--features io-uring`，没有 `--ignored`。15 个文件批和库测试批的退出码都是 0。173 行 `test result:` 的 failed 都是 0。库测试是 `465 passed; 0 failed; 1 ignored` 与 `0 passed; 0 failed`。那 1 个 ignored 是 `contiguous_dirty_page_write_measure`。
+- 独立阅读 `Cargo.toml` 的 `[features]`、`write_page_blocking`、`write_page_run_blocking`、`io_uring_write::write_all`、`write_page`、`write_page_run`、`read_page_blocking`、`allocate_page`，以及 `io_uring_feature_off_keeps_the_decided_write_path` 和 `io_uring_feature_on_write_roundtrip`。`default` 仍是 `cli`、`network`、`crypto`。`io-uring = []` 单独成行。`Cargo.lock` 相对 `5c0a4f67919a1b0615a77f5241b616e5d9ea3ae4` 无差异。依赖列表没有新包，源码没有 `tokio-uring`。
+- `git diff 5c0a4f67919a1b0615a77f5241b616e5d9ea3ae4 -- Cargo.toml src`：`Cargo.toml` 只增加 `io-uring = []`。`src` 只有 `src/storage/file_storage.rs`。本提交相对 `e3911f8b210a305d79f6cb227dc93a1ade373fdb` 的产品差异也只是这两处。`read_page_blocking`、`write_page`、`write_page_run` 的注入位置、`allocate_page`、`flush_claimed`、`evict_one` 和检查点不在该差异里。
+- 启用分支在 `write_page_blocking` 与 `write_page_run_blocking` 里调用 `io_uring_write::write_all`。这两个函数只从 `write_page`、`write_page_run` 的 `spawn_blocking` 进入。`write_all` 以 `entries = 8`、`flags = 0` 调用 `io_uring_setup`。opcode 是 23。`io_uring_enter` 的参数是环描述符、`1u32`、`1u32`、`1u32`、`0usize`。完成队列没有前进、`user_data` 不一致、`res` 小于 0、`res` 为 0 或 `res` 大于剩余长度时返回错误。短写留在同一次调用里继续提交。整个缓冲写完后，测试构建调用 `record_uring_write` 一次。`MappedRing` 在 `write_all` 返回前析构，`munmap` 已成功的映射并 `close` 环描述符，不关闭数据文件。建环或映射失败返回 `last_os_error()`，启用分支没有 `pwritev_fully` 或 `write_all_at`。
+- `DataWrite` 仍在 `spawn_blocking` 之前消费。错误文本是 `injected io failure (write_page)`。`write_page` 对该页 `mark_write_failed`。`write_page_run` 对每一页 `mark_write_failed`。启用测试断言两次注入的这段文本、`uring_write_count()` 为 0、旧字节仍在，以及 `failed_pages` 含对应页。明文和加密的两页 `flush_all`、明文和加密的单页 `write_page` 断言 `uring_write_count()` 为 1、`page_write_count()` 为 0，并用 `read_page` 核对字节。关闭 feature 的测试断言两页 `flush_all` 的 `page_write_count()` 小于 2、读回一致，以及 `cfg!(feature = "io-uring")` 为假。
+- `read_page_blocking` 仍调用 `read_exact_at`。加密分支仍先 `encrypt_page`。`allocate_page` 的新页仍是加密时直接 `write_all_at`、明文时 `set_len`。`io_uring_flush_compare` 与 `contiguous_dirty_page_write_measure` 的 `#[ignore]` 仍在。merge-base `2a78e01b44b7275add1f1fe9d539a887e889e4ad` 到 `e3911f8` 的产品差异是已接受的 001、002。本轮没有改那些路径。
+
+**Follow-up Decision**
+
+Acceptance 已满足。上面两项不阻塞，不要求当前 Cycle 修复，也不创建 rework 或 replan。Iteration Plan 保持不变。`tasks.md` 在 003 之后没有未展开的 Iteration。Issue 候选：None。Experience Candidates 沿用 Act Response 的 None。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
