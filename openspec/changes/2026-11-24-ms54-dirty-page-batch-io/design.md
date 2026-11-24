@@ -88,7 +88,7 @@ flowchart TD
 
 `write_page_run` 接收已按页号升序排好的 `Vec<Page>`。页号不连续时，任何字节落盘前返回 `StorageError::Internal`，文本含 `non-contiguous page run`。只读拒绝文本与 `write_page` 相同。`DataWrite` 在 `spawn_blocking` 之前消费一次；命中时这一段每一页都 `mark_write_failed`，错误文本仍含 `injected io failure (write_page)`，不调用 `pwritev`。
 
-未命中时，一次 `spawn_blocking` 里完成加密（若有）和 `pwritev`。明文每组 4096 字节，加密每组 4124 字节。偏移仍是第一页的 `HEADER_SIZE + page_id.to_offset(record_size)`。`pwritev` 短写则前进偏移继续调用；返回错误，或未写完就返回 0，则这一段每一页都 `mark_write_failed` 并返回错误。成功则每一页 `mark_write_succeeded`。
+未命中时，一次 `spawn_blocking` 里完成加密（若有）和 `pwritev`。明文每组 4096 字节，加密每组 4124 字节。偏移仍是第一页的 `HEADER_SIZE + page_id.to_offset(record_size)`。`pwritev` 短写则前进偏移继续调用；返回错误，或未写完就返回 0，则这一段每一页都 `mark_write_failed` 并返回错误。成功则每一页 `mark_write_succeeded`。`libc = "0.2"` 目前只在 `[dev-dependencies]`。产品代码调用 `pwritev` 时把它移到 `[dependencies]`，版本字符串不变。不新增别的依赖，不改 default features。
 
 调用方在 `Err` 时把这一段的每一页和尚未尝试的页交还脏位，并清除这些页的 `write_in_flight`。已经成功返回的更早一段保持清洁，不进入这次的失败集合。默认实现按页 `write_page`；中途失败时，前缀页可能已经 `mark_write_succeeded`，帧脏位仍由调用方整段交还。
 

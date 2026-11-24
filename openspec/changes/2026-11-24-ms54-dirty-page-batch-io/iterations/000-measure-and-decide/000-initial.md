@@ -157,4 +157,31 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+- 非阻塞 Minor，Act 偏离：合并段计时前多调用一次 `reset_page_io_counts`。基线的提交次数和写次数已经读入局部变量。清零之后，从复制 64 页到 `pwritev` 结束，产品提交次数和写次数为 0。这满足 Task Definition「这段期间必须仍是 0」，也满足规格「合并写期间产品写计数保持不变」。
+- 非阻塞 Minor，Act 偏离：`pwritev` 报告的字节数大于剩余缓冲时，测试返回错误。Task Definition 要求负值和未写完的 0 失败。Act Response 记录这次五次都是一次写完，该分支没有执行。多出来的失败分支不改变这五行的数字。
+- 非阻塞 Minor：不计打印的那次 `flush_all` 用 `PageGuard::mark_dirty` 把页 0 到 63 标脏。`mark_dirty` 把帧的 `dirty` 设为真。这次断言只要求 `page_write_count` 为 64。
+
+**Evidence**
+
+- 沿用 Act Response 的验证，不重跑。命令是 `cargo test --offline --release --lib storage::file_storage::tests::contiguous_dirty_page_write_measure -- --test-threads=1 --nocapture`。Act Response 记录退出码 0，`1 passed`，输出没有「值得交付」或「保留逐页写」。代码与该结论在同一提交 `e67a86cc3776c6bd559689adcd1a7ce8ac65978e`，其后没有新的提交。结论与 `src/storage/file_storage.rs` 的计数位置和测试断言一致，不属于公共规则「验证」里的重跑情形。
+- `write_page` 在 `IoFailPoint::DataWrite` 提前返回之后、`spawn_blocking` 之前，加密与非加密两个分支都在 `#[cfg(test)]` 下调用 `record_page_submit`。`write_page_blocking` 在明文和加密两条 `write_all_at` 成功返回后调用 `record_page_write`，失败走 `?`。`sync` 在 `sync_all` 成功返回后调用 `record_page_sync`。三组计数都在 `#[cfg(test)]` 下。
+- 测试按 Task Definition 的顺序分配页 0 到 70，把页 70 写成 `0x5A`，用容量 128 的池只装入页 0 到 63，先做一次写次数为 64 的 `flush_all`，再打印五行。`pwritev` 的偏移是 `HEADER_SIZE`（64），长度是 `64 * Page::PAGE_SIZE`（4096）。页 64 断言全 0，页 70 断言全 `0x5A`。每行断言 `baseline_submissions` 与 `baseline_writes` 为 64，两侧纳秒大于 0，`merged_submissions` 为 1，`merged_writes` 大于或等于 1。随后 `sync_calls` 为 1。测试源码不打印裁定词。
+- 五个 `baseline_ns` 升序后的第三个是 2500566。五个 `merged_ns` 升序后的第三个是 119665。五次 `merged_writes` 都是 1，都小于 64。119665 小于 2500566。`sync_ns` 没有参加比较。执行记录中的裁定「值得交付」与这条规则一致，五行和 `sync_calls=1` 行都在 Act Response 里。
+- `git diff 2a78e01b44b7275add1f1fe9d539a887e889e4ad..HEAD` 的产品文件只有 `src/storage/file_storage.rs`。相对范围提交 `91f96362ac25ba9e109ec35e8a6ff3dd1033dad9`，产品写入差异仍只有该文件里的 `#[cfg(test)]` 计数和这个测试。`Cargo.toml`、`buffer_pool.rs`、`checkpoint.rs` 无差异。非测试代码没有 `pwritev` 或 `io_uring_setup`。`flush_all` 的逐页循环没有修改。
+- Persisted Evidence 为 none。不因缺少 Evidence 目录记问题。
+
+**Follow-up Decision**
+
+Acceptance 已满足。上面三项不阻塞，不创建当前 Cycle 修复，也不创建 rework 或 replan。裁定是值得交付，按 `tasks.md` 既有 Map 展开 Iteration 001，只执行 T3 的值得交付一节。io_uring 留在 002。M18 的四条不改。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`openspec/changes/2026-11-24-ms54-dirty-page-batch-io/iterations/001-apply-batch-decision/000-initial.md`

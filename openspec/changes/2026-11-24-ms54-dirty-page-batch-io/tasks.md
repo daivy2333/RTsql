@@ -7,8 +7,9 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/storage-io-optimization/spec.md`。
-- 000：Plan Context 见 `iterations/000-measure-and-decide/000-initial.md`，状态 `ready`。Act Response 状态 `reported`。Review Result 仍为 `pending`。
-- 001、002、003：只列在下面的 Iteration Plan 里，不建目录。
+- 000：Plan Context 见 `iterations/000-measure-and-decide/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是值得交付。
+- 001：`iterations/001-apply-batch-decision/000-initial.md`，Plan Context `ready`，Gate 2 PASS。Act 未开始。
+- 002、003：只列在下面的 Iteration Plan 里，不建目录。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -42,7 +43,7 @@ T1 与 T2 的执行依据是 `iterations/000-measure-and-decide/000-initial.md` 
 - Tasks: T3
 - Depends on: Iteration 000 的执行记录写了「值得交付」或「保留逐页写」。记录若是测量无效，不展开本轮
 - Stable result: 保留时，页写入仍是逐页 `write_page`。值得交付时，`flush_all` 与 `flush_all_except` 把连续页号合成 `pwritev`，失败重试、释放提升和 M18 的四条保持，`flush_pages` 与 `evict_one` 仍逐页。
-- Verification boundary: 受影响回归，命令见 T3，全部 `--test-threads=1`，一次一个 cargo 进程。不在本轮跑全量。合并写触及刷盘失败和释放提升的生命周期，全量留到最后一轮执行的那次收尾，不在这里提前跑。
+- Verification boundary: 受影响回归，命令见 001 Cycle 的 Verification，全部 `--test-threads=1`，一次一个 cargo 进程。不在本轮跑全量。合并写触及刷盘失败和释放提升的生命周期，全量留到最后一轮执行的那次收尾，不在这里提前跑。
 - Diagnostic boundary: `src/storage/file_storage.rs`、`src/storage/async_storage.rs`、`src/storage/buffer_pool.rs` 的 `flush_all` 与 `flush_all_except`，以及 T3 列出的测试。`evict_one` 的选页、`src/wal/checkpoint.rs` 的步骤顺序、WAL 组提交不在排查范围。
 - Non-goals: 不比较 io_uring。不给数据文件加 `sync_all`。不合并 `flush_pages`。不改 M18 的正文。
 
@@ -99,7 +100,7 @@ T1 与 T2 的执行依据是 `iterations/000-measure-and-decide/000-initial.md` 
 
 ## T3: 按裁定交付或保留
 
-本任务在 Iteration 001 展开之后执行。000 的 Cycle 不执行。只执行与 T2 结论相符的那一节。
+本任务的执行依据是 `iterations/001-apply-batch-decision/000-initial.md` 的 Task Definition。000 的 Cycle 不执行。T2 的记录是值得交付，所以只执行下面的「值得交付」一节。
 
 ### 保留逐页写
 
@@ -119,27 +120,21 @@ T1 与 T2 的执行依据是 `iterations/000-measure-and-decide/000-initial.md` 
 
 - Requirement/Scenario: 「值得交付时只合并连续脏页段」的全部场景，以及「失败重试、释放耐久性与恢复约定保持」。
 - Depends on: T2 记录的是值得交付。
-- Targets: `src/storage/async_storage.rs` 的 `write_page_run` 默认实现；`src/storage/file_storage.rs` 的 `FileStorage::write_page_run`；`src/storage/buffer_pool.rs` 的 `flush_all` 与 `flush_all_except`。测试加在这两个文件已有的 `tests` 模块。
+- Targets: `src/storage/async_storage.rs` 的 `write_page_run` 默认实现；`src/storage/file_storage.rs` 的 `FileStorage::write_page_run`；`src/storage/buffer_pool.rs` 的 `flush_all` 与 `flush_all_except`。测试加在这两个文件已有的 `tests` 模块。`Cargo.toml` 只把 `libc = "0.2"` 从 `[dev-dependencies]` 移到 `[dependencies]`。
 - Current behavior: `flush_all` 按 DashMap 顺序逐页 `write_page`。连续 64 页的产品写次数为 64。
 - Required behavior: 收集后按 `PageId` 升序切连续段。长度大于或等于 2 的段一次 `pwritev`，长度为 1 的段仍是 `write_page`。空洞页字节不变。失败时整段和未尝试的页重新为脏，更早的成功段不进入这次失败集合。加密两页按 4124 字节记录读回。测量测试改为 `#[ignore]`。
 - Preserve: `flush_pages` 的顺序、`evict_one`、`allocate_page`、检查点对 `FileStorage::sync` 的不调用、`injected io failure (write_page)`、M18 的四条。
 - Forbidden: 修改 `src/wal/checkpoint.rs` 的步骤顺序。修改 `evict_one` 的选页。把提交页并进 `flush_all_except` 的同一次 `pwritev`。给数据文件加 `sync_all`。调用 `io_uring_setup`。
 - First test: 改写入前，先跑 `cargo test --offline --lib storage::file_storage::tests -- --test-threads=1 --skip contiguous_dirty_page_write_measure`，退出码 0。再跑 `cargo test --offline --lib storage::buffer_pool::tests::failed_flush_then_evict_keeps_the_new_bytes -- --test-threads=1`，退出码 0。这是改前的 GREEN，不重跑测量测试。
 - GREEN condition: 见 Verification 的顺序。新测试在实现前必须先观察到失败。
-- Verification: 按下面的顺序，一次一个进程。
-  1. 只添加 `contiguous_flush_coalesces_a_run_and_keeps_the_gap`，运行 `cargo test --offline --release --lib storage::file_storage::tests::contiguous_flush_coalesces_a_run_and_keeps_the_gap -- --test-threads=1`。实现前产品写次数不小于脏页数，测试失败。这是 RED。
-  2. 实现明文 `pwritev`。加密配置下的 `write_page_run` 先保持逐页 `write_all_at`。同一命令再次运行，退出码 0。
-  3. 添加 `contiguous_flush_encrypted_pages_roundtrip`，运行 `cargo test --offline --release --lib storage::file_storage::tests::contiguous_flush_encrypted_pages_roundtrip -- --test-threads=1`。此时写次数仍不小于 2，测试失败。
-  4. 补上加密记录的 `pwritev`。同一命令退出码 0。
-  5. 添加 `failed_run_restores_every_page_in_the_run`，运行 `cargo test --offline --lib storage::buffer_pool::tests::failed_run_restores_every_page_in_the_run -- --test-threads=1`。若整段交还尚未接上，测试失败，然后接上再跑到退出码 0。
-  6. 顺序跑完下面这些既有命令，每条退出码 0：`cargo test --offline --lib storage::buffer_pool::tests::failed_flush_then_evict_keeps_the_new_bytes -- --test-threads=1`；`cargo test --offline --test write_failure_state_test -- --test-threads=1`；`cargo test --offline --test release_durability_precondition_test -- --test-threads=1`；`cargo test --offline --test free_page_lifecycle_test -- --test-threads=1`；`cargo test --offline --lib wal::checkpoint::tests -- --test-threads=1`；`cargo test --offline --test checkpoint_test -- --test-threads=1`；`cargo test --offline --test ddl_layout_publication_test -- --test-threads=1`。
+- Verification: 与 001 Cycle 的 Verification 同序，一次一个进程。第一条合并测试先只断言写次数和读回，不调用 `write_page_run`。明文 `pwritev` 通过后，再把失败集合断言加进同一个测试。加密记录的 `pwritev` 晚于加密测试的第一次失败。命令和通过条件以该 Cycle 为准。
 - Stop when: 不把 `flush_pages` 并进同一次 `pwritev` 就不能保持目录提交点；既有测试要求 DashMap 的刷盘顺序；必须修改 `evict_one` 的选页、检查点步骤或 M18 的门控；或 `async_trait` 的默认 `write_page_run` 不能通过 `Arc<dyn AsyncStorage>` 调用。停止并回到计划。不要改成强制每个存储手写该方法，也不要把存储向下转型成 `FileStorage`。
 
-`contiguous_flush_coalesces_a_run_and_keeps_the_gap` 的断言：页 3 和页 4 有可识别原内容且不为脏，页 0、1、2 和页 5 为脏；`flush_all` 后产品写次数小于 4；页 3 和页 4 的原字节还在；页 0、1、2、5 的新字节可读回。接着在容量 128 的池里把页 0 到 63 改脏，`flush_all` 的产品写次数小于 64，64 页读回一致。页 70 若被写成 `0x5A` 且不在脏集合里，刷盘后仍是 `0x5A`。
+`contiguous_flush_coalesces_a_run_and_keeps_the_gap` 的断言：页 3 和页 4 有可识别原内容且不为脏，页 0、1、2 和页 5 为脏；`flush_all` 后产品写次数小于 4；页 3 和页 4 的原字节还在；页 0、1、2、5 的新字节可读回。接着在容量 128 的池里把页 0 到 63 改脏，`flush_all` 的产品写次数小于 64，64 页读回一致。页 70 写成 `0x5A` 且不在脏集合里，刷盘后仍是 `0x5A`。另一次把页 0、1、2 和页 5 改脏，`flush_all_except` 排除页 5，写次数小于 3，页 0、1、2 的新字节可读回，页 5 的磁盘字节仍是旧内容。明文 `write_page_run` 成功写出页 0 和页 1 之后，武装 `DataWrite` 再写页 3 和页 4，错误文本含 `injected io failure (write_page)`，`failed_pages` 含 3 和 4、不含 0 和 1。字段访问和顺序见 001 的 Task Definition。
 
 `contiguous_flush_encrypted_pages_roundtrip`：`open_with_key(..., Some("pw"))`，页 0 和页 1 改脏后 `flush_all`，产品写次数小于 2，同一密钥读回的明文一致。
 
-`failed_run_restores_every_page_in_the_run`：仿照同文件的 `GatedWriteStorage` 写一个测试存储，`write_page` 数到第二次调用时返回 `Io` 且不更新该页。池里只有连续的页 0、1、2 为脏。`flush_all` 返回错误后，这三页的 `dirty` 都为真，`write_in_flight` 都为假。测试模块可以直接读 `pages` 里的 `PageFrame`。不要新增产品侧的脏位查询方法。
+`failed_run_restores_every_page_in_the_run`：仿照同文件的 `GatedWriteStorage` 写测试存储，测试模块直接读 `pages` 里的 `PageFrame`。不要新增产品侧的脏位查询方法。第一个案例不覆盖 `write_page_run`，`write_page` 第二次调用返回 `Io` 且不更新该页，池里只有页 0、1、2 为脏；`flush_all` 返回错误后这三页的 `dirty` 都为真，`write_in_flight` 都为假。第二个案例覆盖 `write_page_run`，第一次成功，第二次返回 `Io`；页 0 和页 1 为一段，页 3 和页 4 为下一段，页 6 单独为脏。错误返回后页 0 和页 1 不脏，页 3、4、6 为脏，这些页的 `write_in_flight` 都为假，页 6 的 `write_page` 没有被调用。
 
 ## T4: 比较 io_uring
 
