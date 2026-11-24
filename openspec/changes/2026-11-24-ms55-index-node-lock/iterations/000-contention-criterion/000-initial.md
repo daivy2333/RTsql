@@ -75,6 +75,35 @@ Plan Context 为 draft。本节留待 Act。现在不得填写成 `reported`。
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: replan-required
 
-尚未 Review。本 Cycle 没有交给 Act。
+**Findings**
+
+父 Cycle 没有 Act。Plan Context 仍是 `draft`，其中的 Gate 2 仍是 BLOCKED。该 Plan Context 不改写。
+
+父 Cycle 自己的目标已经达到：判据写不出来，所以停在 draft，不交给 Act。偏差原因是验收边界改变。用户随后批准的选择把本 Iteration 的结果定为保持现有 `write_gate`。重叠写停在 `write_gate.lock()` 的等待，按规格要求的同一索引结构写串行处理。这需要新的 Task Definition，并重新通过 Gate 2。父 Cycle 的执行依据里没有这项任务。
+
+没有 Act 偏离，也没有新的产品代码证据。这不是 Minor finding。
+
+**Evidence**
+
+- 父 Cycle Plan Context：Status 为 `draft`；Gate 2 Readiness 为 BLOCKED；Task Definitions 为无。
+- 用户原话：「选择通用最优的处理方式就好」。goal：「开始计划实施ms55，要求遵守各种规范」。
+- 规划时 `git diff --stat 55efdb0fb872a1d6406891128cf8d4e0f29c8997 -- src tests Cargo.toml` 没有输出。
+- 后继 Cycle：`iterations/000-contention-criterion/001-replan.md`。
+
+**Follow-up Decision**
+
+父 Cycle 的 Plan Context 不能改成可执行任务。保持决定要写进新的 Task Definition，并让新 Cycle 的 Gate 2 通过。因此创建同目录的 replan Cycle，不创建 rework repair item。
+
+**Iteration Plan Update**
+
+Iteration 000 的任务从无改为 T1。稳定结果改为：产品代码相对 `55efdb0fb872a1d6406891128cf8d4e0f29c8997` 无差异，现有 `write_gate` 保持，不加节点锁。验证从「无命令」改为 `git diff` 与符号阅读。不加锁的后继 Iteration 仍然不设。
+
+**Next Cycle**
+
+`iterations/000-contention-criterion/001-replan.md`
+
+**Next Iteration**
+
+None

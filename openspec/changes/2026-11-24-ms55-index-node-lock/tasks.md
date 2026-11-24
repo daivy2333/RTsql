@@ -1,47 +1,49 @@
-# MS55 节点锁：判据未闭合
+# MS55 节点锁：保持现有 write_gate
 
 来源：`.agents/docs/tasks.md` 的 MS55，承接 I025。格式部分已由 `2026-11-24-ms55-index-page-space` 接受。本文件只规划锁这一支。
 
-Gate 1：PASS。需求、场景和范围来自 MS55，以及 `proposal.md` 里由本次 goal 授权写入的选择。这是批准，不是跳过。
+Gate 1：PASS。需求、场景和范围来自 MS55，以及 `proposal.md` 里由本次 goal 授权写入的选择。这是批准，不是跳过。没有需求裁剪。
 
-Gate 2：BLOCKED。写争用的可观察判据写不出来。正文在 `proposal.md` 的同名一节，决定和被替代方案在 `design.md` 的 D2。当前 Cycle 的 Plan Context 保持 `draft`。
+Gate 2：`000-initial.md` 仍是 BLOCKED，Plan Context 保持 `draft`，不改写。`001-replan.md` 为 PASS，Plan Context 为 `ready`。决定和被替代方案在 `design.md` 的 D4。
 
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。没有行为规格增量。`.openspec.yaml` 的 `skip_specs: true` 记录这个事实。
-- 000：已展开 Cycle，未交给 Act。`iterations/000-contention-criterion/000-initial.md` 的 Plan Context 状态为 `draft`。Review Result 仍为 `pending`。
+- 000 的 `000-initial.md`：Plan Context 状态为 `draft`。Gate 2 为 BLOCKED。Plan Context 不改写。Review Result 为 `replan-required`。Next Cycle 为 `001-replan.md`。
+- 000 的 `001-replan.md`：当前 Cycle。Plan Context 状态为 `ready`。Gate 2 为 PASS。任务是 T1。Review Result 仍为 `pending`。
 - Persisted Evidence：none。
-- 没有加锁 Iteration。测量结论还不存在，不能预写「保持现有锁」或「加节点锁」的下一轮。
+- 没有加锁 Iteration。
 
 ## 全部任务与归属
 
-没有可执行任务。
+### T1：保持现有 write_gate，产品代码停在起点
 
-采纳或保持需要一条能两头走的判据。该判据是实质未知项，不能留给 Act 现编比例或次数。因此不设 T1。
+归属 Iteration 000。执行依据在 `iterations/000-contention-criterion/001-replan.md` 的 Task Definition。
+
+结果：`src`、`tests`、`Cargo.toml` 相对 `55efdb0fb872a1d6406891128cf8d4e0f29c8997` 无差异。每个 `IndexManager` 仍有一把 `write_gate: Arc<Mutex<()>>`。`insert`、`delete`、`delete_exact`、`update`、`find_key_by_row_id` 仍在 `spawn_blocking` 里取得它。`search`、`scan_all`、`scan_range` 仍不取得它。不加节点锁，不新写耗时比例或等待次数。
 
 ## Iteration Plan
 
-### Iteration 000: 写下写争用判据，或停在写不出来
+### Iteration 000: 确认未过加锁门槛，保持现有 write_gate
 
-- Tasks: 无
+- Tasks: T1
 - Depends on: 格式变更 Iteration 000 的 `accepted`。该结论已在 master 的归档 Cycle 里，本分支不合并它
-- Stable result: 未达到。稳定结果本应是「保持现有 `write_gate`」或「加锁 Iteration 的前提已经写明」。两者都依赖尚未写出的判据
-- Verification boundary: 无命令。本 Iteration 不改产品代码，不新增测试，不跑全量。全量读不到一份还不存在的判据
-- Diagnostic boundary: 只核对判据是否仍然缺失，以及 `src/` 是否未被本变更修改。不排查刷盘、代价模型或槽格式
-- Non-goals: 节点锁实现，latch coupling，Semaphore，索引页格式，Key 宽度，Tag 合并，脏页批量写，io_uring，代价模型，变长键
+- Stable result: 产品代码相对 `55efdb0fb872a1d6406891128cf8d4e0f29c8997` 无差异。现有 `write_gate` 保持。不加节点锁
+- Verification boundary: `git diff --exit-code 55efdb0fb872a1d6406891128cf8d4e0f29c8997 -- src tests Cargo.toml` 退出码为 0，并阅读 `index_manager.rs` 里上列符号。不新增测试，不跑全量，不跑 `tests/index_write_atomicity_test.rs`。本 Iteration 不改产品代码，受影响回归集为空。全量套件不预算：没有跨模块公共面的代码改动，未到发布或迁移门槛，也没有人要求全量
+- Diagnostic boundary: diff 非空时只看 `src`、`tests`、`Cargo.toml` 里多出来的路径。符号与计划不符时只看 `index_manager.rs` 的 `write_gate` 取得点。不排查刷盘、代价模型或槽格式
+- Non-goals: 节点锁，latch coupling，Semaphore，耗时比例，等待次数，暂停夹具，身份证明，索引页格式，Key 宽度，Tag 合并，脏页批量写，io_uring，代价模型，变长键
 
-平衡：测量打印和加锁实现不能拆成两轮再开工。打印若没有事先写明的保持条件，数字没有归宿；把加锁放进同一轮，又是在判据出现之前改锁。合并这两件事仍然没有判据。所以本轮不设任务，也不为了凑一个可执行 Iteration 而加上「抄一段锁类型」这种不产生去留结论的任务。
+目录名保持 `iterations/000-contention-criterion/`。本 replan 不另建 Iteration 目录。
 
-没有第二个 Iteration。
+平衡：这一轮只有一个稳定结果，就是锁保持现状。测量打印和加锁实现都不进本轮。拆开「看 diff」和「看符号」得不到两个可独立验收的结果。没有第二个 Iteration。
 
 ## Requirements Traceability Matrix
 
-要求来自 `proposal.md` 的场景。没有行为规格增量。
+要求来自 MS55 的 Outcome，以及 `proposal.md` 的场景。没有行为规格增量。没有 Simplified。
 
 | Requirement | Task | First Test |
 |---|---|---|
-| 写争用被测量证实才加节点锁，未过门槛则保持现有锁 | Missing | Missing |
-| 保持写单元、根发布、取消、回滚和同一索引的结构写串行 | Missing：没有改这些行为的任务 | 无。本批不改产品代码，也不新增测试 |
-| 不改索引页格式 | Missing：没有改格式的任务 | 无。槽宽沿用已接受的格式结论 |
-
-「写争用」这一行是 Gate 2 失败的原因。后两行没有任务，是因为本批不修改它们；这不是已批准的需求裁剪。没有 Simplified。
+| 未过门槛则保持现有锁，不加节点锁 | T1 | 变更前 `git diff --exit-code 55efdb0fb872a1d6406891128cf8d4e0f29c8997 -- src tests Cargo.toml` 退出码为 0，并阅读 `IndexManager.write_gate`。不新增测试 |
+| 保持写单元、根发布、取消、回滚，以及同一索引的结构写串行 | T1 | 同一条 diff。阅读 `insert`、`delete`、`delete_exact`、`update` 的 `spawn_blocking` 闭包 |
+| `search`、`scan_all`、`scan_range` 不取得 `write_gate` | T1 | 同一条 diff。这三处源码没有 `write_gate.lock` |
+| 不改索引页格式 | T1 | 同一条 diff。`src` 为空即覆盖槽宽与 `FORMAT_VERSION` |

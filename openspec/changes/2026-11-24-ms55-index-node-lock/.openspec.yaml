@@ -1,4 +1,4 @@
 schema: spec-driven
 created: 2026-11-24
 skip_specs: true
-goal: 测量写争用并决定是否加节点锁。判据写不出来，Plan Context 保持 draft，本批不加锁。
+goal: 未过加节点锁的门槛时保持现有 write_gate。不改产品代码。

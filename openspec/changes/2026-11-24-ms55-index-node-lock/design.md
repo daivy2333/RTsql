@@ -1,14 +1,14 @@
 ## 背景
 
-起点是 `55efdb0fb872a1d6406891128cf8d4e0f29c8997`。分支 `changes/2026-11-24-ms55-index-node-lock` 的计划提交之前，HEAD 是 `97b648ae069a274c40b54399db0647d0ecdc8782`，上面只有本变更的提案。没有合并 master。`write_gate` 在本分支的 `src/storage/btree/index_manager.rs` 里可读。
+起点是 `55efdb0fb872a1d6406891128cf8d4e0f29c8997`。分支 `changes/2026-11-24-ms55-index-node-lock` 在写入本 replan 之前，HEAD 是 `170cbc6f3b8dba6305ea82f7f5fb64a029175eff`。没有合并 master。`write_gate` 在本分支的 `src/storage/btree/index_manager.rs` 里可读。规划时执行 `git diff --stat 55efdb0fb872a1d6406891128cf8d4e0f29c8997 -- src tests Cargo.toml`，没有输出。
 
 格式变更的执行记录在 master 的 `openspec/changes/archive/2026-11-24-ms55-index-page-space/iterations/000-measure-and-keep/000-initial.md`。Review Result 为 `accepted`，Next Iteration 为 None。本分支槽宽与该结论一致，所以不把归档目录合并进来。
 
 ## 目标与非目标
 
-目标：为 I025 写下写争用的采纳或保持判据。判据必须来自 MS55 原文、既有规格，或能从当前代码和可观察等待证明的条件。写不出来就保持计划为 draft，不加锁。
+目标：未过加节点锁的门槛时，保持现有 `write_gate`。重叠写停在 `write_gate.lock()` 的等待，按规格「同一索引的结构写侧串行化」理解。不加节点锁，不改这把锁，不新写耗时比例或等待次数。写单元原子性、根发布、取消和回滚保持。
 
-非目标：改索引页格式，缩短 Key，合并 Tag byte，脏页批量写，io_uring，代价模型，变长键。也不在本文件里选择 latch coupling、crabbing 或 Semaphore。
+非目标：改索引页格式，缩短 Key，合并 Tag byte，脏页批量写，io_uring，代价模型，变长键。也不在本文件里选择 latch coupling、crabbing 或 Semaphore。不实现节点锁。
 
 ## 当前行为
 
@@ -32,7 +32,7 @@
 
 页帧本身是 `Arc<Mutex<PageFrame>>`（M17）。这把帧锁只覆盖单次读页或改页。它不代替 `write_gate` 把整次写单元串起来。
 
-`find_key_by_row_id` 取得闸门，是为了不看见「结构已改、反向映射还没写」的中间态。这段等待属于写单元的读者排除，不属于节点锁要拆开的树等待。
+`find_key_by_row_id` 取得闸门，是为了不看见「结构已改、反向映射还没写」的中间态。这段等待属于写单元的读者排除。
 
 `index_manager.rs` 不调用诊断接口。诊断阶段里的等待合计没有 `write_gate` 的计时。`arm_write_pause` 的位置是结构已改、根页 id 尚未发布。未装载时写路径只做一次未命中检查。装载后的停留时长由 `WritePauseHandle::release` 决定。既有原子性测试把 10 秒写成夹具失控兜底，并写明它不是行为判据。
 
@@ -42,15 +42,15 @@ M08：根页 id 用 `AtomicU64`，异步读路径不用 `RwLock` 保护根指针
 
 槽宽沿用已接受的格式结论，并用本分支源码核对过宽度公式。本变更不新增槽字节测试，不改 `node.rs`、`key.rs`、`version_chain.rs`、`tuple.rs`、`file_header.rs`。
 
-被替代的做法：在本分支重跑格式变更的两条打印测试。结论已经接受，槽公式也还在，重跑不产生锁的判据。
+被替代的做法：在本分支重跑格式变更的两条打印测试。结论已经接受，槽公式也还在，重跑不产生锁的决定。
 
 ## D2 不设采纳或保持判据
 
-写争用的可观察判据写不出来。正文与 `proposal.md` 同节一致，这里记录选择和被替代方案。
+这一节只约束 `000-initial.md`。写争用的可观察判据在那个 Cycle 写不出来，所以它的 Plan Context 保持 `draft`。变更当前的选择见 D4。
 
-选择：Plan Context 保持 `draft`。不创建测量测试，不修改 `write_gate`，不在 `tasks.md` 里预写加锁 Iteration。
+选择（仅 `000-initial`）：Plan Context 保持 `draft`。不创建测量测试，不修改 `write_gate`，不在那个 Cycle 里预写加锁 Iteration。
 
-理由：MS55 要求未过门槛时保持现有锁。判据必须能走向保持，也能走向加锁。下面每一条被替代方案都做不到这一点，或者使用了 MS55 和现有规格都没有的数字。
+下面这些方案不能当作那个 Cycle 的判据。要么保持分支到不了，要么使用了 MS55 和现有规格都没有的数字。D4 也不采纳它们。
 
 | 被替代方案 | 不采用的原因 |
 |---|---|
@@ -62,13 +62,28 @@ M08：根页 id 用 `AtomicU64`，异步读路径不用 `RwLock` 保护根指针
 | 用 `arm_write_pause` 的停留或诊断阶段的等待合计当门槛 | 停留由放行决定。诊断不读取 `write_gate`。原子性测试已写明 10 秒不是行为判据 |
 | I025 的 Semaphore 加 latch coupling 直接作为实现 | 那是方向，不是已批准需求。读路径并不取得 `write_gate`，不能用「每次操作锁整棵树」证明争用已经成立 |
 
-## D3 以后若要离开 draft
+## D3 重新计划的边界
 
-需要新的判据来源：MS55 的补充原文、既有规格里的句子，或一种不靠自选比例和次数、并且保持分支仍然可达的可观察等待。那是重新计划，不是本 Cycle 的 Act。加锁若进入那时的后继 Iteration，写单元、根发布、取消和回滚仍要保持，M08 与 M13 仍要保持。
+`000-initial` 不交给 Act。重新计划是 `iterations/000-contention-criterion/001-replan.md`。它不补耗时比例或等待次数，也不展开加锁 Iteration。保持决定见 D4。写单元、根发布、取消和回滚仍要保持。M08 与 M13 仍要保持。
+
+## D4 保持现有 write_gate
+
+选择：不加节点锁，不改 `write_gate`，不新写耗时比例或等待次数。每个 `IndexManager` 继续持有一把 `Arc<Mutex<()>>`。写路径继续在 `spawn_blocking` 里取得它。`search`、`scan_all`、`scan_range` 继续不取得它。写单元原子性、根发布、取消和回滚保持。产品代码保持 `55efdb0fb872a1d6406891128cf8d4e0f29c8997`。
+
+理由：同样满足 MS55 的方案里，按 Scope Control 优先复用已有实现。现有 `write_gate: Arc<Mutex<()>>` 就是索引写侧的锁。两次落在不同叶子上的插入若在时间上重叠，后一次会停在 `write_gate.lock()`。这次等待是这把锁正在把同一索引的结构写串起来，规格 `index-write-side-atomicity` 要求这种串行。它不是另一条需要新锁才能解释的争用。MS55 的原文允许未过门槛时保持现有锁。用户原话「选择通用最优的处理方式就好」批准了这个选择。这是批准，不是跳过。
+
+被替代方案：
+
+| 被替代方案 | 不采用的原因 |
+|---|---|
+| 把这一次必然等待当成争用已证实并加节点锁 | 这种等待在重叠写时一定出现。把它当成已过门槛，里程碑里「未过门槛则保持现有锁」走不到 |
+| 新写一个耗时比例或等待次数 | MS55、`index-write-side-atomicity` 和这次等待的证明里都没有这个数 |
+
+D2 的其余方案仍然不采用。本决定走「未过门槛则保持」。MS55 里「证实之后可以加」的半句留在里程碑原文里。本变更不删这半句，也没有新的门槛来源去执行它。
 
 ## 风险
 
-有人把场景 4 的必然等待读成测量已经证实。D2 的第一行就是为了挡住这个读法。
+有人把场景 4 的必然等待读成测量已经证实。D4 的第一行被替代方案挡住这个读法。Act 不得据此加节点锁。
 
 本分支没有格式变更的归档目录。以后核对执行记录用 master 上的那份 Cycle，不合并。
 
