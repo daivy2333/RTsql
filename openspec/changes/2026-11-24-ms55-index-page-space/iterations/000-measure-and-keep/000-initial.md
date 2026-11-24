@@ -155,4 +155,45 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+既有 Acceptance 已满足。没有阻塞项。
+
+Act Response 记下的两处局部差异不改变测量对象。原因是 Plan 遗漏了这两个 API 细节，实施按现有签名接上，属于等价实现：
+
+- `serialize_tuple` 返回 `Result<usize>`。测试 `unwrap()` 之后 `assert_eq!(n, 9)`。写出的仍是一个 `Value::Int(7)`：`TAG_INT` 加 8 字节。
+- `with_page_data` 的闭包返回 `Result`，页内借用不能带出闭包。测试把 `get_slot_data_checked` 的字节复制出来再算 `gap`。比较的仍是原始槽字节，没有改用 `read_tuple_from_data_page`。
+
+子页没有单独断言首字节 `0x01`。根页有 `data[0] == 0x02`。子页断言的是 `check_tree_page` 无 violation，以及槽长 38，等于 `MAX_KEY_LEN + RowId::SIZE`。生产叶条目是这个宽度，`insert_separator` 的分隔条目是 36。同一 200 键循环在既有 `string_key_uses_existing_tree_entry_width` 里把最左子页断言为 `0x01`。这次打印的 `leaf_len=38` 与叶条目宽度一致。这是非阻塞 Minor finding，不要求当前 Cycle 修复。
+
+**Evidence**
+
+独立阅读的 diff 范围是 merge-base `55efdb0fb872a1d6406891128cf8d4e0f29c8997` 到 HEAD `35284c4fd0fb35a59eba47e6788172c870ea339e`。`src/` 只增加两个测试：
+
+- `src/storage/btree/index_manager.rs` 的 `tests::index_page_separator_has_no_removable_byte`
+- `src/storage/data_page.rs` 的 `tests::data_slot_prefix_is_version_header`
+
+两处都在 `#[cfg(test)]` 模块末尾。`insert_separator` 的 `entry_size` 仍是 `MAX_KEY_LEN + 4`。`MAX_KEY_LEN` 是 32。叶插入的 `entry_size` 仍是 `MAX_KEY_LEN + RowId::SIZE`，`RowId::SIZE` 是 6。`InternalNodeRef::leftmost_child` 仍读页头 `next_page_id`。`write_tuple_to_data_page` 仍把 `version_header.to_bytes()` 与 tuple 直接拼接。`VersionHeader::SIZE` 与 `to_bytes` 仍是 22 字节。`serialize_tuple` 对 `Value::Int` 仍先写 `TAG_INT`（`0x01`）。`FORMAT_VERSION` 仍是 1。`node.rs`、`key.rs`、`file_header.rs`、`version_chain.rs`、`tuple.rs` 不在这份 diff 里。`write_gate` 的函数体不在这份 diff 里。工作区没有 `2026-11-24-ms55-index-node-lock` 的 Iteration。
+
+验证沿用 Act Response，没有重跑。HEAD 就是记下这两次命令的提交，工作区干净，上述生产写入路径没有在测试之后被修改。
+
+来源：本 Cycle Act Response 的「验证」。
+
+- `cargo test --offline --lib storage::btree::index_manager::tests::index_page_separator_has_no_removable_byte -- --test-threads=1 --nocapture`：退出码 0。打印 `index_pages=4 separator_len=36 leaf_len=38 removable=0`。
+- `cargo test --offline --lib storage::data_page::tests::data_slot_prefix_is_version_header -- --test-threads=1 --nocapture`：退出码 0。打印 `header_len=22 tuple_tag=1 gap=0 slot_len=31`。
+
+本次重新执行 `git diff --name-only 55efdb0fb872a1d6406891128cf8d4e0f29c8997 -- src`，结果仍是这两个文件。
+
+**Follow-up Decision**
+
+场景 1 到 6 都已满足。两处可移除字节都是 0。执行记录写明内部节点槽保持 36 字节分隔条目，数据槽保持 22 字节版本头紧贴 tuple。生产逻辑保持起点。不需要当前 Cycle 修复，也不需要新的执行依据。Iteration Plan 保持不变。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None

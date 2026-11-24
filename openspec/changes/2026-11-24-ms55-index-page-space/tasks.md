@@ -9,7 +9,7 @@ Gate 2：PASS。执行依据在 `iterations/000-measure-and-keep/000-initial.md`
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。没有行为规格增量，`.openspec.yaml` 的 `skip_specs: true` 记录这个事实。
-- 000：Plan Context 为 `ready`。Act Response 为 `reported`。Review Result 为 `pending`。
+- 000：Plan Context 为 `ready`。Act Response 为 `reported`。Review Result 为 `accepted`。
 - Persisted Evidence：none。
 - 没有后续 Iteration。
 
