@@ -494,9 +494,13 @@ impl FileStorage {
         if let Some(cipher) = cipher {
             let record = cipher.encrypt_page(page_id, data.as_ref());
             file.as_ref().write_all_at(&record, offset)?;
+            #[cfg(test)]
+            record_page_write();
             return Ok(());
         }
         file.as_ref().write_all_at(&*data, offset)?;
+        #[cfg(test)]
+        record_page_write();
         Ok(())
     }
 
@@ -552,6 +556,8 @@ impl AsyncStorage for FileStorage {
         #[cfg(feature = "crypto")]
         {
             let cipher = self.cipher.clone();
+            #[cfg(test)]
+            record_page_submit();
             match spawn_blocking(move || {
                 Self::write_page_blocking(file, page_id, record_size, data, cipher)
             })
@@ -569,6 +575,8 @@ impl AsyncStorage for FileStorage {
         }
         #[cfg(not(feature = "crypto"))]
         {
+            #[cfg(test)]
+            record_page_submit();
             match spawn_blocking(move || {
                 Self::write_page_blocking(file, page_id, record_size, data)
             })
@@ -664,6 +672,8 @@ impl AsyncStorage for FileStorage {
         let file = self.file.clone();
         spawn_blocking(move || {
             file.as_ref().sync_all()?;
+            #[cfg(test)]
+            record_page_sync();
             Ok::<(), StorageError>(())
         })
         .await?
@@ -749,10 +759,55 @@ impl AsyncStorage for FileStorage {
 }
 
 #[cfg(test)]
+static PAGE_SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static PAGE_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static PAGE_SYNC_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn record_page_submit() {
+    let _ = PAGE_SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn record_page_write() {
+    let _ = PAGE_WRITE_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn record_page_sync() {
+    let _ = PAGE_SYNC_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn reset_page_io_counts() {
+    PAGE_SUBMIT_COUNT.store(0, Ordering::SeqCst);
+    PAGE_WRITE_COUNT.store(0, Ordering::SeqCst);
+    PAGE_SYNC_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn page_submit_count() -> u64 {
+    PAGE_SUBMIT_COUNT.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn page_write_count() -> u64 {
+    PAGE_WRITE_COUNT.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn sync_count() -> u64 {
+    PAGE_SYNC_COUNT.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[cfg(feature = "crypto")]
     use crate::storage::FLAG_ENCRYPTED;
+    use crate::storage::BufferPool;
     use tempfile::tempdir;
 
     fn page_with(fill: u8) -> Page {
@@ -915,5 +970,174 @@ mod tests {
             ),
             "got: {err:?}"
         );
+    }
+
+    fn page_pattern(page_num: u64, fill: u8) -> [u8; Page::PAGE_SIZE] {
+        let mut data = [fill; Page::PAGE_SIZE];
+        data[0] = page_num as u8;
+        data
+    }
+
+    /// 短写则前进偏移继续；负值或未写完的 0 都失败。返回 `pwritev` 调用次数。
+    fn pwritev_all(file: &std::fs::File, buf: &mut [u8], mut offset: u64) -> std::io::Result<u32> {
+        use std::os::unix::io::AsRawFd;
+        let mut calls = 0u32;
+        let mut done = 0usize;
+        while done < buf.len() {
+            let iov = libc::iovec {
+                iov_base: buf[done..].as_mut_ptr() as *mut libc::c_void,
+                iov_len: buf.len() - done,
+            };
+            let off = libc::off_t::try_from(offset).expect("offset fits off_t");
+            let n = unsafe { libc::pwritev(file.as_raw_fd(), &iov, 1, off) };
+            calls += 1;
+            if n < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "pwritev returned 0 before the buffer was fully written",
+                ));
+            }
+            let n = usize::try_from(n).expect("positive pwritev length");
+            if done + n > buf.len() {
+                return Err(std::io::Error::other(
+                    "pwritev reported more bytes than the remaining buffer",
+                ));
+            }
+            done += n;
+            offset += n as u64;
+        }
+        Ok(calls)
+    }
+
+    /// 连续 64 个脏页：五次逐页刷盘和五次测试内 `pwritev` 的提交次数、写次数和耗时。
+    #[tokio::test]
+    async fn contiguous_dirty_page_write_measure() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("measure.db");
+        let storage: Arc<dyn AsyncStorage> = Arc::new(FileStorage::open(&path).unwrap());
+        for expected in 0..71u64 {
+            let id = storage.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+
+        let mut sentinel = Page::new(PageId(70));
+        sentinel.data.fill(0x5A);
+        storage.write_page(PageId(70), &sentinel).await.unwrap();
+
+        let pool = BufferPool::new(128, Arc::clone(&storage)).unwrap();
+        for id in 0..64u64 {
+            pool.get_page(PageId(id)).await.unwrap();
+        }
+
+        for id in 0..64u64 {
+            let guard = pool.get_page(PageId(id)).await.unwrap();
+            guard.mark_dirty();
+        }
+        super::reset_page_io_counts();
+        pool.flush_all().await.unwrap();
+        assert_eq!(super::page_write_count(), 64);
+        super::reset_page_io_counts();
+
+        let merged_file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let mut rows = Vec::with_capacity(5);
+        for repeat in 0..5u32 {
+            let baseline_fill = (repeat + 1) as u8;
+            for id in 0..64u64 {
+                let guard = pool.get_page(PageId(id)).await.unwrap();
+                guard.modify_page(|page| {
+                    page.data[0] = id as u8;
+                    page.data[1..].fill(baseline_fill);
+                });
+            }
+
+            let started = std::time::Instant::now();
+            pool.flush_all().await.unwrap();
+            let baseline_ns = started.elapsed().as_nanos();
+            let baseline_submissions = super::page_submit_count();
+            let baseline_writes = super::page_write_count();
+            for id in 0..64u64 {
+                let page = storage.read_page(PageId(id)).await.unwrap();
+                assert_eq!(&page.data[..], &page_pattern(id, baseline_fill)[..]);
+            }
+
+            let merged_fill = (repeat + 101) as u8;
+            for id in 0..64u64 {
+                let guard = pool.get_page(PageId(id)).await.unwrap();
+                guard.modify_page(|page| {
+                    page.data[0] = id as u8;
+                    page.data[1..].fill(merged_fill);
+                });
+            }
+
+            super::reset_page_io_counts();
+            let started = std::time::Instant::now();
+            let mut buf = Vec::with_capacity(64 * Page::PAGE_SIZE);
+            for id in 0..64u64 {
+                let guard = pool.get_page(PageId(id)).await.unwrap();
+                buf.extend_from_slice(&guard.page().data[..]);
+            }
+            let file = merged_file.try_clone().unwrap();
+            let merged_writes = tokio::task::spawn_blocking(move || {
+                pwritev_all(&file, &mut buf, HEADER_SIZE as u64)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let merged_ns = started.elapsed().as_nanos();
+            assert_eq!(super::page_submit_count(), 0);
+            assert_eq!(super::page_write_count(), 0);
+
+            for id in 0..64u64 {
+                let page = storage.read_page(PageId(id)).await.unwrap();
+                assert_eq!(&page.data[..], &page_pattern(id, merged_fill)[..]);
+            }
+            let gap = storage.read_page(PageId(64)).await.unwrap();
+            assert_eq!(&gap.data[..], &[0u8; Page::PAGE_SIZE][..]);
+            let kept = storage.read_page(PageId(70)).await.unwrap();
+            assert_eq!(&kept.data[..], &[0x5A; Page::PAGE_SIZE][..]);
+
+            let merged_submissions = 1u32;
+            println!(
+                "repeat={repeat} baseline_submissions={baseline_submissions} baseline_writes={baseline_writes} baseline_ns={baseline_ns} merged_submissions={merged_submissions} merged_writes={merged_writes} merged_ns={merged_ns}"
+            );
+            rows.push((
+                baseline_submissions,
+                baseline_writes,
+                baseline_ns,
+                merged_submissions,
+                merged_writes,
+                merged_ns,
+            ));
+        }
+
+        super::reset_page_io_counts();
+        let started = std::time::Instant::now();
+        storage.sync().await.unwrap();
+        let sync_ns = started.elapsed().as_nanos();
+        let sync_calls = super::sync_count();
+        println!("sync_calls={sync_calls} sync_ns={sync_ns}");
+        assert_eq!(sync_calls, 1);
+        assert!(sync_ns > 0);
+
+        assert_eq!(rows.len(), 5);
+        for (
+            baseline_submissions,
+            baseline_writes,
+            baseline_ns,
+            merged_submissions,
+            merged_writes,
+            merged_ns,
+        ) in rows
+        {
+            assert_eq!(baseline_submissions, 64);
+            assert_eq!(baseline_writes, 64);
+            assert!(baseline_ns > 0);
+            assert_eq!(merged_submissions, 1);
+            assert!(merged_writes >= 1);
+            assert!(merged_ns > 0);
+        }
     }
 }

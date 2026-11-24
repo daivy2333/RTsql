@@ -93,7 +93,67 @@ PASS。审查计划 11 项通过；RTM 无 Missing、无 Simplified；接口、�
 
 ## Act Response
 
-- Status: 尚未执行
+- Status: reported
+
+### 实际改动
+
+- `src/storage/file_storage.rs`
+  - `write_page`：注入失败返回之后、`spawn_blocking` 之前，`#[cfg(test)]` 调用 `record_page_submit`。加密与非加密两个分支各一处。
+  - `write_page_blocking`：明文和加密两条 `write_all_at` 成功返回后，`#[cfg(test)]` 调用 `record_page_write`。失败走 `?`，不加。
+  - `sync`：`sync_all` 成功返回后，`#[cfg(test)]` 调用 `record_page_sync`。
+  - 测试构建的计数：`reset_page_io_counts`、`page_submit_count`、`page_write_count`、`sync_count`，以及只供上述加一使用的 `record_page_submit`、`record_page_write`、`record_page_sync`。
+  - 测试 `storage::file_storage::tests::contiguous_dirty_page_write_measure`：通过 `super::` 调用上述四个计数函数。
+- `openspec/changes/2026-11-24-ms54-dirty-page-batch-io/tasks.md`：T1、T2 状态改为 `reported`。001 未展开。
+- 未改 `flush_all`、`buffer_pool.rs`、`checkpoint.rs`、`Cargo.toml`。非测试代码没有 `pwritev` 或 `io_uring_setup`。
+
+### 与计划的偏差
+
+- 合并段计时前多调用一次 `reset_page_io_counts`。逐页刷盘的提交次数和写次数已经读入局部变量。清零后，这段从复制 64 页到 `pwritev` 结束，产品提交次数和写次数保持为 0。
+- `pwritev` 若报告的字节数大于剩余缓冲，测试返回错误。计划要求负值和未写完的 0 失败。这次五次都是一次写完，该分支没有执行。
+
+### 验证
+
+先行测试 RED：同一条命令在计数落地前退出码 101。`reset_page_io_counts`、`page_submit_count`、`page_write_count`、`sync_count` 均报 `E0425`。
+
+验证命令只跑了一次，T2 没有重跑：
+
+```
+cargo test --offline --release --lib storage::file_storage::tests::contiguous_dirty_page_write_measure -- --test-threads=1 --nocapture
+```
+
+退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 460 filtered out`。输出没有「值得交付」或「保留逐页写」。`rtsql` 没有 rustc 警告。
+
+```
+repeat=0 baseline_submissions=64 baseline_writes=64 baseline_ns=2584264 merged_submissions=1 merged_writes=1 merged_ns=280418
+repeat=1 baseline_submissions=64 baseline_writes=64 baseline_ns=2500566 merged_submissions=1 merged_writes=1 merged_ns=419135
+repeat=2 baseline_submissions=64 baseline_writes=64 baseline_ns=2168840 merged_submissions=1 merged_writes=1 merged_ns=108542
+repeat=3 baseline_submissions=64 baseline_writes=64 baseline_ns=2952992 merged_submissions=1 merged_writes=1 merged_ns=110777
+repeat=4 baseline_submissions=64 baseline_writes=64 baseline_ns=2375862 merged_submissions=1 merged_writes=1 merged_ns=119665
+sync_calls=1 sync_ns=2139393
+```
+
+### T2 裁定
+
+五个 `baseline_ns` 升序：2168840、2375862、2500566、2584264、2952992。第三个是 2500566。
+
+五个 `merged_ns` 升序：108542、110777、119665、280418、419135。第三个是 119665。
+
+五次 `merged_writes` 都是 1，都小于 64。合并写中位数 119665 小于逐页中位数 2500566。`sync_ns` 不参加比较。
+
+值得交付
+
+### Gate
+
+- Gate 3：T1、T2 通过。打印字段、读回断言、计数位置和禁止项与 diff 一致。无 Critical 或 Important。
+- Gate 4：T1 的验证命令退出码 0，五行和 `sync_calls=1` 已打印。T2 只对这次输出做了中位数比较。
+
+### Experience Candidates
+
+None
+
+### 未解决问题
+
+无
 
 ## Plan Review
 

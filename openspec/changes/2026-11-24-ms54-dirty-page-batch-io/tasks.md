@@ -7,7 +7,7 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/storage-io-optimization/spec.md`。
-- 000：Plan Context 见 `iterations/000-measure-and-decide/000-initial.md`，状态 `ready`。尚未执行。
+- 000：Plan Context 见 `iterations/000-measure-and-decide/000-initial.md`，状态 `ready`。Act Response 状态 `reported`。Review Result 仍为 `pending`。
 - 001、002、003：只列在下面的 Iteration Plan 里，不建目录。
 - Persisted Evidence：none。
 - 跳过项：无。
@@ -16,8 +16,8 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | release 测试打印五次写次数和耗时，非测试写入行为不变 | 未执行 |
-| T2 | 000 | T1 | 用 T1 的五行裁定值得交付或保留逐页写 | 未执行 |
+| T1 | 000 | 无 | release 测试打印五次写次数和耗时，非测试写入行为不变 | reported |
+| T2 | 000 | T1 | 用 T1 的五行裁定值得交付或保留逐页写 | reported |
 | T3 | 001 | T2 记下了值得交付或保留逐页写 | 按裁定交付连续段合并写，或确认仍是逐页写 | 未执行 |
 | T4 | 002 | T3 的结论已写入执行记录 | 比较 io_uring，默认 features 不变 | 未执行 |
 | T5 | 003 | T4 记下了值得采用 | 增加默认关闭的 `io-uring` feature | 未执行 |
