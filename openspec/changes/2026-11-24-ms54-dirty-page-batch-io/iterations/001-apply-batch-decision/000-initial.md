@@ -161,4 +161,30 @@ None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
+
+**Findings**
+
+- 非阻塞 Minor。`contiguous_dirty_page_write_measure` 仍断言不计打印的那次 `flush_all` 使 `page_write_count` 为 64，五次基线的 `baseline_writes` 也仍为 64。合并写之后这条路径走 `pwritev`，不调用 `write_all_at`，计数保持 0。Task Definition 只要求加上规定的 `#[ignore]`，并禁止重跑这个测试。忽略属性已经是 `#[ignore = "五次打印已记在 Iteration 000 的执行记录"]`。默认测试不会运行它。不在本 Cycle 改测试正文。
+- 非阻塞 Minor，等价实现。`failed_run_restores_every_page_in_the_run` 用 `PrefixThenFail` 和 `RunThenFail` 两个测试存储，而不是改现有的 `GatedWriteStorage`。两个案例的脏位、`write_in_flight` 和页 6 未被 `write_page` 调用，与 Task Definition 的断言一致。
+
+**Evidence**
+
+- 沿用 Act Response 的验证，不重跑。工作目录是 `/home/daivy/projects/RTsql-changes/2026-11-24-ms54-dirty-page-batch-io`。改前 `storage::file_storage::tests`（跳过测量）8 passed，退出码 0；`failed_flush_then_evict_keeps_the_new_bytes` 1 passed，退出码 0。合并测试先以 `flush of four dirty pages wrote 4 times` 失败，明文 `pwritev` 后 1 passed。失败集合断言第一次即 1 passed。加密测试先以 `flush of two encrypted dirty pages wrote 2 times` 失败，加密 `pwritev` 后 1 passed。`failed_run_restores_every_page_in_the_run` 第一次即 1 passed。随后 `failed_flush_then_evict_keeps_the_new_bytes`、`write_failure_state_test`（3 passed）、`release_durability_precondition_test`（2 passed）、`free_page_lifecycle_test`（12 passed）、`wal::checkpoint::tests`（5 passed）、`checkpoint_test`（2 passed）、`ddl_layout_publication_test`（11 passed）都是退出码 0。这些命令都带 `--test-threads=1`，一次一个 cargo 进程。代码与这些结论同在 `ab7515e2024e3adf764f25590fa66272db70745c`，其后产品文件没有新提交。结论与下面读到的代码一致，不属于公共规则「验证」里的重跑情形。
+- `AsyncStorage::write_page_run` 的默认实现按页 `await write_page`，`?` 在第一处错误返回。`FileStorage::write_page_run` 先用与 `write_page` 相同的 `read_only_violation("write a page")` 拒绝只读。`contiguous_page_run` 要求长度至少为 2 且相邻 `id.0` 的 `checked_add(1)` 相等；否则返回 `StorageError::Internal`，文本含 `non-contiguous page run`，此时还没有消费 `DataWrite`，也没有 `mark_write_failed`。连续时在 `spawn_blocking` 之前消费一次 `DataWrite`，命中则为每一页 `mark_write_failed` 并返回含 `injected io failure (write_page)` 的 `StorageError::Io`。未命中时一次 `spawn_blocking` 调用 `write_page_run_blocking`。偏移是 `HEADER_SIZE + pages[0].id.to_offset(record_size)`。明文拼接 `page.data`，加密在 `cipher` 为 `Some` 时先 `encrypt_page` 再拼接。`pwritev_fully` 用一块缓冲和一个 `iovec`，短写则前进偏移。返回负值、未写完的 0，或字节数大于剩余缓冲时，错误经 `From<std::io::Error>` 成为 `StorageError::Io`，调用方对这一段每一页 `mark_write_failed`。成功则 `mark_write_succeeded`。这条路径不调用 `write_all_at`，也不调用 `record_page_write`。
+- `flush_claimed` 先按 `PageId` 排序，再按 `checked_add(1)` 切最大连续段。长度大于或等于 2 调用 `write_page_run`，否则 `write_page`。`Err` 时 `restore_dirty_from(&claimed, start)`，从当前段起点到已排序向量末尾把 `dirty` 设回真并清除 `write_in_flight`。成功段调用 `finish_write_in_flight(id, true)`，只清除在途标记。`flush_all` 和 `flush_all_except` 都进入 `flush_claimed`。`flush_all_except` 在认领前跳过排除集。`flush_pages` 仍按调用方顺序逐页 `write_page`。`evict_one` 仍是一次 `write_page`。
+- `contiguous_flush_coalesces_a_run_and_keeps_the_gap` 覆盖四页写次数小于 4、页 3 和页 4 的原字节、页 70 的 `0x5A`、64 页写次数小于 64 且读回一致、`flush_all_except` 排除页 5 后写次数小于 3，以及页 0 和页 1 成功后对页 3 和页 4 注入 `DataWrite`。错误文本含 `injected io failure (write_page)`，`failed_pages` 含 3 和 4、不含 0 和 1，页 3 和页 4 的字节不变。`contiguous_flush_encrypted_pages_roundtrip` 带 `#[cfg(feature = "crypto")]`，两页写次数小于 2，同一密钥读回的填充字节一致。`failed_run_restores_every_page_in_the_run` 覆盖默认实现的三页重新变脏，以及两段加单页时更早一段保持不脏、页 3、4、6 重新变脏、页 6 的 `write_page` 未被调用。
+- Act Response 记录的三处偏差与计划允许的范围一致。失败集合断言和失败交还测试第一次即通过，Verification 第 3 步和第 6 步允许保留这次通过。`pwritev` 使用一块连续缓冲，Plan Context 把一组向量或一块缓冲留给实现。
+- `git diff 2a78e01b44b7275add1f1fe9d539a887e889e4ad..ab7515e2024e3adf764f25590fa66272db70745c` 的产品文件是 `Cargo.toml`、`src/storage/async_storage.rs`、`src/storage/buffer_pool.rs`、`src/storage/file_storage.rs`。`Cargo.toml` 只把 `libc = "0.2"` 从 `[dev-dependencies]` 移到 `[dependencies]`。default features 仍是 `cli`、`network`、`crypto`。`src` 与 change 文档里都没有 `io_uring_setup`。`src/wal/checkpoint.rs` 不在 diff 里。Persisted Evidence 为 none。不因缺少 Evidence 目录记问题。
+
+**Follow-up Decision**
+
+Acceptance 已满足。上面两项不阻塞，不要求当前 Cycle 修复，也不创建 rework 或 replan。Iteration Plan 保持不变。001 已交付合并写，按 `tasks.md` 的既有 Map 展开 Iteration 002，只比较 io_uring，不实现 feature，不把 `io-uring` 放进默认 features。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+`openspec/changes/2026-11-24-ms54-dirty-page-batch-io/iterations/002-compare-io-uring/000-initial.md`

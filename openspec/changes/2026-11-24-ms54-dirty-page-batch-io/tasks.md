@@ -8,8 +8,9 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。规格在 `specs/storage-io-optimization/spec.md`。
 - 000：Plan Context 见 `iterations/000-measure-and-decide/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是值得交付。
-- 001：`iterations/001-apply-batch-decision/000-initial.md`，Plan Context `ready`，Gate 2 PASS。Act 未开始。
-- 002、003：只列在下面的 Iteration Plan 里，不建目录。
+- 001：`iterations/001-apply-batch-decision/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是已交付连续段合并写。
+- 002：`iterations/002-compare-io-uring/000-initial.md`，Plan Context `ready`，Gate 2 PASS。Act 未开始。
+- 003：只列在下面的 Iteration Plan 里，不建目录。T4 记下保留或平台不适合时不展开本轮。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -19,7 +20,7 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 |---|---|---|---|---|
 | T1 | 000 | 无 | release 测试打印五次写次数和耗时，非测试写入行为不变 | reported |
 | T2 | 000 | T1 | 用 T1 的五行裁定值得交付或保留逐页写 | reported |
-| T3 | 001 | T2 记下了值得交付或保留逐页写 | 按裁定交付连续段合并写，或确认仍是逐页写 | 未执行 |
+| T3 | 001 | T2 记下了值得交付或保留逐页写 | 按裁定交付连续段合并写，或确认仍是逐页写 | reported |
 | T4 | 002 | T3 的结论已写入执行记录 | 比较 io_uring，默认 features 不变 | 未执行 |
 | T5 | 003 | T4 记下了值得采用 | 增加默认关闭的 `io-uring` feature | 未执行 |
 
@@ -138,7 +139,7 @@ T1 与 T2 的执行依据是 `iterations/000-measure-and-decide/000-initial.md` 
 
 ## T4: 比较 io_uring
 
-本任务在 Iteration 002 展开之后执行。000 和 001 不执行。
+本任务的执行依据是 `iterations/002-compare-io-uring/000-initial.md` 的 Task Definition。000 和 001 不执行。
 
 - Requirement/Scenario: 「io_uring 比较不替换默认后端」的前三个场景。
 - Depends on: T3 的执行记录已经是保留逐页写或值得交付。
@@ -147,8 +148,8 @@ T1 与 T2 的执行依据是 `iterations/000-measure-and-decide/000-initial.md` 
 - Required behavior: 打印五次 `flush_ns` 与 `uring_ns`，以及 `setup=<ok 或错误号>`。页 0 到 63 的字节一致，页 64 为 0，页 70 为 `0x5A`。执行记录写明值得采用、保留或平台不适合。默认 features 不含 `io-uring`。
 - Preserve: T3 的写入路径。测量测试在保留分支仍不忽略，在交付分支保持 `#[ignore]`。
 - Forbidden: 修改默认 features。把比较放在没有 T3 记录的时候做。用「30–50%」作门槛。重跑 T1。
-- First test: `io_uring_flush_compare`。实现测试前该名称不存在，编译失败，这是 RED。测试写完后命令退出码 0。
-- GREEN condition: `cargo test --offline --release --lib storage::file_storage::tests::io_uring_flush_compare -- --test-threads=1 --nocapture` 退出码 0，且输出有五行和一个 `setup=`。
+- First test: 见 002 Cycle。测试函数还不存在时，同一条 release 命令编译通过但没有执行这个测试，过滤结果是 `0 passed`，这是 RED。测试写完后该命令退出码 0。
+- GREEN condition: 见 002 Cycle。同一条 release 命令退出码 0。`setup=ok` 时输出有五行；`setup=` 为错误号时没有五行。
 - Verification: 只跑这一条。`setup` 不是 ok 时，记录平台不适合，不比较中位数。`setup` 为 ok 时，五个 `uring_ns` 的中位数小于五个 `flush_ns` 的中位数，且字节断言已由测试通过，才记录值得采用；否则记录保留。001 已交付合并写且本结论不是值得采用时，再执行一次收尾全量。
 - Stop when: 测试只有改默认 features 或改产品写入路径才能编译。停止并回到计划。
 
