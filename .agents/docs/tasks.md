@@ -11,7 +11,7 @@
 
 ## Milestone Roadmap
 
-详细的已完成里程碑段已归档，见文件末墓碑。MS22 已 superseded 退回 improvements，候选见 `.agents/memory/improvements.md`。当前路线上尚未完成的里程碑是 MS55，状态为 ready。
+详细的已完成里程碑段已归档，见文件末墓碑。MS22 已 superseded 退回 improvements，候选见 `.agents/memory/improvements.md`。当前路线上的里程碑均已完成。
 
 ### MS45：主命令 profiling 不再因索引扫描中止
 
@@ -145,14 +145,14 @@
 
 ### MS55：索引页空间与锁
 
-- **Status**: ready
+- **Status**: completed（2026-11-24。两份归档见 Related changes。索引页可移除字节为 0，内部节点槽保持 36 字节分隔条目，数据槽保持 22 字节版本头紧贴 tuple。写争用没有独立于现有 write_gate 的加锁门槛。每个 IndexManager 仍是一把 `Arc<Mutex<()>>`。不加节点锁）
 - **Outcome**: 索引页的空间和锁粒度有测量。瘦内部节点或 Tag 合并只有在空间收益盖过格式兼容成本时才改格式。节点锁只有在写争用被测量证实后才加，并保留写单元原子性、根发布、取消和回滚。未过门槛的保持原格式和现有锁。
 - **Rationale**: 三者都作用在已经稳定的定长键布局上。格式和锁要分开验收，但不值得各占一个里程碑。
 - **Dependencies**: None。建议在 MS52 之后，避免格式与驱逐策略同时变。不硬依赖 MS54。
 - **Scope**: I025、I029、I030。不沿用变长键假设。
 - **Non-goals**: 脏页批量写、io_uring、代价模型。
 - **Stable result**: 索引页格式和锁粒度有可依赖的结论。
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-11-24-ms55-index-page-space/`；`openspec/changes/archive/2026-11-24-ms55-index-node-lock/`
 - **Consumes**: I025、I029、I030
 - **Split signals**: 格式变更与节点锁若不能用同一次恢复和并发测试判断，分成两个 change，不新编号。格式变更若使旧库打不开且没有已写明的兼容路径，退回范围审议。
 
@@ -185,7 +185,7 @@ MS51 查询代价与 JOIN 重排 ✓（无前置）
 MS52 撕裂树与跨进程访问的去留 ✓（无前置）
 MS53 复制、分配与行锁 ✓（无前置；建议序 MS49 后）
 MS52 ──→ MS54 脏页批量写与 I/O 后端 ✓
-MS55 索引页空间与锁（无前置；建议序 MS52 后）
+MS55 索引页空间与锁 ✓（无前置；建议序 MS52 后）
 ```
 
 ## 与 OpenSpec Changes 同步
