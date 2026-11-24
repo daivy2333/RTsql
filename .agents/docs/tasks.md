@@ -11,7 +11,7 @@
 
 ## Milestone Roadmap
 
-详细的已完成里程碑段已归档，见文件末墓碑。MS22 已 superseded 退回 improvements，候选见 `.agents/memory/improvements.md`。当前路线上尚未完成的里程碑是 MS54 与 MS55：MS54 依赖 MS52，状态为 planned，MS55 仍为 ready。
+详细的已完成里程碑段已归档，见文件末墓碑。MS22 已 superseded 退回 improvements，候选见 `.agents/memory/improvements.md`。当前路线上尚未完成的里程碑是 MS55，状态为 ready。
 
 ### MS45：主命令 profiling 不再因索引扫描中止
 
@@ -132,14 +132,14 @@
 
 ### MS54：脏页批量写与 I/O 后端
 
-- **Status**: planned
+- **Status**: completed（2026-11-24。change `openspec/changes/archive/2026-11-24-ms54-dirty-page-batch-io/` 已归档。Iteration 000、001、002 与 003 的 Review Result 均为 accepted。连续 64 个脏页的五次测量后裁定值得交付，`flush_all` 与 `flush_all_except` 把连续页号合成一次 `pwritev`，失败重试、释放提升和恢复门控保持。io_uring 五次比较后裁定值得采用，增加默认关闭的 `io-uring` feature，默认 features 仍是 `cli`、`network`、`crypto`。收尾全量在 Iteration 003，默认 features：15 个文件批和库测试批退出码都是 0，failed 都是 0）
 - **Outcome**: 连续脏页写入有测量。批量写值得做则交付，并保留失败重试、释放耐久性和恢复约定。其后才比较 io_uring。不值得或平台不适合则保留现有后端。
 - **Rationale**: I028 需要 I026 先给出批量 I/O 基线。两者都在页写入路径上。撕裂树的去留会决定刷盘和驱逐，所以排在 MS52 之后。
 - **Dependencies**: MS52
 - **Scope**: I026、I028。先完成批量写的去留，再比较后端。
 - **Non-goals**: 索引页格式、节点锁、分配器、组提交评估。
 - **Stable result**: 页写入要么走已交付的批量路径，要么仍是逐页写。I/O 后端有采用或保留现状的结论。
-- **Related changes**: None
+- **Related changes**: `openspec/changes/archive/2026-11-24-ms54-dirty-page-batch-io/`
 - **Consumes**: I026、I028
 - **Split signals**: io_uring 若要替换默认跨平台后端，退回范围审议。批量写若要改恢复不变量，退回范围审议。
 
@@ -184,7 +184,7 @@ MS50 结果消费与值类型 ✓（无前置）
 MS51 查询代价与 JOIN 重排 ✓（无前置）
 MS52 撕裂树与跨进程访问的去留 ✓（无前置）
 MS53 复制、分配与行锁 ✓（无前置；建议序 MS49 后）
-MS52 ──→ MS54 脏页批量写与 I/O 后端
+MS52 ──→ MS54 脏页批量写与 I/O 后端 ✓
 MS55 索引页空间与锁（无前置；建议序 MS52 后）
 ```
 

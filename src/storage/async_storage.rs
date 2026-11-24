@@ -6,6 +6,16 @@ use async_trait::async_trait;
 pub trait AsyncStorage: Send + Sync {
     async fn read_page(&self, page_id: PageId) -> Result<Page>;
     async fn write_page(&self, page_id: PageId, page: &Page) -> Result<()>;
+
+    /// 写出已经按页号升序排好的一段页。默认逐页调用 `write_page`，
+    /// 中途失败立即返回，不再写后面的页。
+    async fn write_page_run(&self, pages: Vec<Page>) -> Result<()> {
+        for page in &pages {
+            self.write_page(page.id, page).await?;
+        }
+        Ok(())
+    }
+
     async fn allocate_page(&self) -> Result<PageId>;
     async fn free_page(&self, page_id: PageId) -> Result<()>;
     async fn sync(&self) -> Result<()>;
