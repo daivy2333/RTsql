@@ -10,7 +10,7 @@ Gate 2：`000-initial.md` 仍是 BLOCKED，Plan Context 保持 `draft`，不改�
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。没有行为规格增量。`.openspec.yaml` 的 `skip_specs: true` 记录这个事实。
 - 000 的 `000-initial.md`：Plan Context 状态为 `draft`。Gate 2 为 BLOCKED。Plan Context 不改写。Review Result 为 `replan-required`。Next Cycle 为 `001-replan.md`。
-- 000 的 `001-replan.md`：当前 Cycle。Plan Context 状态为 `ready`。Gate 2 为 PASS。任务是 T1。Review Result 仍为 `pending`。
+- 000 的 `001-replan.md`：Plan Context 状态为 `ready`。Gate 2 为 PASS。任务是 T1。Review Result 为 `accepted`。Next Cycle 与 Next Iteration 均为 None。
 - Persisted Evidence：none。
 - 没有加锁 Iteration。
 

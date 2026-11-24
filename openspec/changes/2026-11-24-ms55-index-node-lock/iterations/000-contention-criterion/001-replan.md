@@ -110,6 +110,38 @@ Experience Candidates: None
 
 ## Plan Review
 
-- Review Result: pending
+- Review Result: accepted
 
-尚未 Review。本 Cycle 还没有交给 Act。
+**Findings**
+
+独立阅读 `src/storage/btree/index_manager.rs`，并阅读 Act 提交 `9858324efd7da59c5fd1c8b03d06b9af360f6772` 的 diff。该提交只填写本 Cycle 的 Act Response，没有改写 Plan Context，也没有改 `src/`、`tests/`、`Cargo.toml`。读到的 `write_gate` 类型、两处构造、五处 `lock` 和三处读路径与 Act Response、T1 的 Current behavior 一致。没有可归入 Plan 遗漏、Plan 错误、Act 偏离、现状变化或新证据的偏差。没有阻塞 Acceptance 的发现，也没有 Minor finding。
+
+**Evidence**
+
+沿用 Act Response 的验证：在 HEAD `703eac55e761e472a216ca060378f3b08c100dbc` 执行 `git diff --exit-code 55efdb0fb872a1d6406891128cf8d4e0f29c8997 -- src tests Cargo.toml`，退出码 0，没有 diff 文本。这条结论仍然覆盖当前树。`703eac55` 到当前 HEAD `9858324` 之间，`src`、`tests`、`Cargo.toml` 的 `git diff --stat` 为空。本分支与 `master` 的 merge-base 仍是 `55efdb0fb872a1d6406891128cf8d4e0f29c8997`。调度器在本次 Review 前对同一条 `git diff --exit-code` 看到退出码 0。本次没有重跑这条命令，也没有跑 `cargo test`。Persisted Evidence 为 none，不因缺少 `evidence/` 提出问题。
+
+本次读到的符号，文件 `src/storage/btree/index_manager.rs`：
+
+- `write_gate` 的类型是 `Arc<Mutex<()>>`。`Mutex` 来自 `std::sync`，导入在第 17 行，字段在第 165 行。
+- `IndexManager::new` 第 246 行和 `IndexManager::from_root` 第 265 行各自写 `write_gate: Arc::new(Mutex::new(()))`。文件里没有第三处构造。
+- 取得它的函数是 `insert`、`delete`、`delete_exact`、`update`、`find_key_by_row_id`。都是闭包外 `clone`，`spawn_blocking` 闭包开头 `write_gate.lock().unwrap()`，守卫持有到闭包结束。全文件 `write_gate.lock` 只有这五处。
+  - `insert`：clone 第 450 行，闭包第 453 行，lock 第 455 行。闭包内顺序是 `BTree::insert`、`pause_at(AfterStructureChangeBeforeRootPublish)`、按需 `root_page_id.store`、`row_to_key.write().insert`。`sync_root_to_catalog` 在第 482 行，位于 `.await` 之后。
+  - `delete`：clone 第 497 行，闭包第 500 行，lock 第 501 行。闭包内是查找、`BTree::delete`、同一暂停点、按需发布根、按需删除反向映射。目录同步在第 529 行，位于闭包外。
+  - `delete_exact`：clone 第 557 行，闭包第 559 行，lock 第 560 行。`BTree::delete_exact` 之后按需删映射，不发布根。
+  - `update`：clone 第 729 行，闭包第 731 行，lock 第 732 行。`BTree::update` 之后更新映射，不发布根。
+  - `find_key_by_row_id`：clone 第 760 行，闭包第 761 行，lock 第 762 行。闭包内读 `row_to_key`。
+- 不取得它的函数是 `search`（第 330 行）、`scan_all`（第 580 行）、`scan_range`（第 643 行）。三处只 `load(Ordering::Acquire)` 根页 id，函数体内没有 `write_gate.lock`。`search_all`（第 338 行）和 `collect_all_pages`（第 784 行）同样不取得它。
+
+这覆盖 Acceptance 1 至 4：产品树相对基点无差异，写路径仍在闭包内持有现有闸门，三条读路径仍不取得它，产品代码里没有新的节点锁、耗时比例、等待次数或为测量而加的暂停夹具。
+
+**Follow-up Decision**
+
+四条既有 Acceptance 都已满足。继续改代码不是达到本 Iteration 原有 Acceptance 的必要条件。Iteration Plan 保持不变，`tasks.md` 没有后续 Iteration。接受本 Cycle。不要求当前 Cycle 修复，不创建 rework 或 replan Cycle。父 Cycle `000-initial.md` 的 Plan Context 仍是 `draft`，本次不改写。本轮范围外没有需要报告的实质缺陷。
+
+**Next Cycle**
+
+None
+
+**Next Iteration**
+
+None
