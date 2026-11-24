@@ -9,7 +9,7 @@ Gate 2：PASS。执行依据在 `iterations/000-measure-and-keep/000-initial.md`
 ## 当前批次状态
 
 - 需求与 BDD：completed。场景草图在 `proposal.md`。没有行为规格增量，`.openspec.yaml` 的 `skip_specs: true` 记录这个事实。
-- 000：Plan Context 为 `ready`。Act 尚未开始。Review Result 为 `pending`。
+- 000：Plan Context 为 `ready`。Act Response 为 `reported`。Review Result 为 `pending`。
 - Persisted Evidence：none。
 - 没有后续 Iteration。
 
@@ -17,9 +17,9 @@ Gate 2：PASS。执行依据在 `iterations/000-measure-and-keep/000-initial.md`
 
 | Task | 所属轮次 | 依赖 | 交付与通过依据 | 状态 |
 |---|---|---|---|---|
-| T1 | 000 | 无 | 索引页测试打印页数和槽长度，可移除字节为 0 | 未完成 |
-| T2 | 000 | T1 | 数据槽测试打印 gap 为 0，原始槽前 22 字节等于版本头 | 未完成 |
-| T3 | 000 | T2 | 执行记录写明保持原格式，生产逻辑无差异 | 未完成 |
+| T1 | 000 | 无 | 索引页测试打印页数和槽长度，可移除字节为 0 | 已完成 |
+| T2 | 000 | T1 | 数据槽测试打印 gap 为 0，原始槽前 22 字节等于版本头 | 已完成 |
+| T3 | 000 | T2 | 执行记录写明保持原格式，生产逻辑无差异 | 已完成 |
 
 T1、T2、T3 的执行依据只在 `iterations/000-measure-and-keep/000-initial.md` 的 Task Definition。本文件不另写一套步骤。
 

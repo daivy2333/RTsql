@@ -100,7 +100,58 @@ PASS。计划批准来自本次 goal，检查项都已做完，不是跳过。�
 
 ## Act Response
 
-Act 填写。计划交接时还没有实施结果。
+- Status: reported
+
+内部节点槽保持 36 字节分隔条目。数据槽保持 22 字节版本头紧贴 tuple。不改格式。
+
+T1 打印：`index_pages=4 separator_len=36 leaf_len=38 removable=0`
+
+T2 打印：`header_len=22 tuple_tag=1 gap=0 slot_len=31`
+
+`removable` 按 `separator.length as usize - MAX_KEY_LEN - 4` 计算，`MAX_KEY_LEN` 为 32。`gap` 是槽长减去这次写入所用 `VersionHeader::new(1, None).to_bytes()` 的 22 字节，再减去 `serialize_tuple` 写出的 9 字节 INT tuple。两处都是 0。分隔条目仍是 32 字节 Key 加 4 字节子页号。叶槽仍是 Key 加 `RowId`。数据槽偏移 22 仍是 tuple 里的 `TAG_INT`。`FORMAT_VERSION` 未改。
+
+### 实际改动
+
+- `src/storage/btree/index_manager.rs` 的 `tests::index_page_separator_has_no_removable_byte`。测试模块以外没有改动。
+- `src/storage/data_page.rs` 的 `tests::data_slot_prefix_is_version_header`。`write_tuple_to_data_page` 未改。
+- `openspec/changes/2026-11-24-ms55-index-page-space/tasks.md`：T1、T2、T3 状态改为已完成。000 的 Act Response 记为 `reported`，Review Result 仍为 `pending`。
+
+`git diff --name-only 55efdb0fb872a1d6406891128cf8d4e0f29c8997 -- src`：
+
+```
+src/storage/btree/index_manager.rs
+src/storage/data_page.rs
+```
+
+这两份差异只在各自的 `tests` 模块末尾增加上述测试。未改 `write_gate`。未创建 `2026-11-24-ms55-index-node-lock` 的 Iteration。
+
+### 与计划的偏差
+
+`serialize_tuple` 返回 `Result<usize>`。T2 用 `unwrap()` 得到写出长度 `n`，再 `assert_eq!(n, 9)`。`with_page_data` 的闭包必须返回 `Result`，页内借用也不能带出闭包，所以测试把 `get_slot_data_checked` 的字节复制出来再算 `gap`。比较的仍是原始槽字节。
+
+### 验证
+
+两条命令各跑一次，没有重跑，也没有跑全量。
+
+`cargo test --offline --lib storage::btree::index_manager::tests::index_page_separator_has_no_removable_byte -- --test-threads=1 --nocapture`
+
+退出码 0。打印 `index_pages=4 separator_len=36 leaf_len=38 removable=0`。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 466 filtered out`。
+
+`cargo test --offline --lib storage::data_page::tests::data_slot_prefix_is_version_header -- --test-threads=1 --nocapture`
+
+退出码 0。打印 `header_len=22 tuple_tag=1 gap=0 slot_len=31`。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 467 filtered out`。
+
+Gate 3：两个测试的字段、根页 `0x02`、两页 `check_tree_page` 无 violation、`removable=0`、`gap=0`、偏移 22 为 `TAG_INT` 与 diff 一致。未改 `node.rs`、`key.rs`、`file_header.rs`、`version_chain.rs`、`tuple.rs`。无 Critical 或 Important。
+
+Gate 4：上面两条命令退出码都是 0，`src` 差异只有这两个测试文件。
+
+### Experience Candidates
+
+None
+
+### 未解决问题
+
+无。
 
 ## Plan Review
 
