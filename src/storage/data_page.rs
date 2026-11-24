@@ -556,4 +556,52 @@ mod tests {
         assert_eq!(read_vh.commit_tx_id(), None);
         assert_eq!(read_data, b"roundtrip-data");
     }
+
+    /// 数据槽前 22 字节是版本头，紧贴 INT tuple，gap 为 0。
+    #[tokio::test]
+    async fn data_slot_prefix_is_version_header() {
+        use crate::storage::page_format::{serialize_tuple, TAG_INT};
+        use crate::Value;
+
+        let (pool, table, _dir) = setup().await;
+        let vh = VersionHeader::new(1, None);
+        let mut buf = [0u8; 16];
+        let n = serialize_tuple(&[Value::Int(7)], &[ColumnType::Int], &mut buf).unwrap();
+        assert_eq!(n, 9);
+
+        let row_id = write_tuple_to_data_page(&pool, &table, &vh, &buf[..n])
+            .await
+            .unwrap();
+        let header_bytes = vh.to_bytes();
+        let slot_data = pool
+            .with_page_data(PageId(row_id.page_id as u64), |data| {
+                let slotted = SlottedPageRef::new(data);
+                let (slot, _) = slotted
+                    .get_slot_by_logical_id(row_id.slot_id)
+                    .expect("written slot");
+                let bytes = slotted
+                    .get_slot_data_checked(&slot)
+                    .expect("slot bytes in bounds");
+                Ok(bytes.to_vec())
+            })
+            .await
+            .unwrap();
+
+        let gap = slot_data.len() - header_bytes.len() - n;
+        let tuple_tag = slot_data[header_bytes.len()];
+        println!(
+            "header_len={} tuple_tag={} gap={} slot_len={}",
+            header_bytes.len(),
+            tuple_tag,
+            gap,
+            slot_data.len()
+        );
+        assert_eq!(header_bytes.len(), 22);
+        assert_eq!(n, 9);
+        assert_eq!(slot_data.len(), 22 + n);
+        assert_eq!(&slot_data[..header_bytes.len()], header_bytes.as_slice());
+        assert_eq!(&slot_data[header_bytes.len()..], &buf[..n]);
+        assert_eq!(slot_data[22], TAG_INT);
+        assert_eq!(gap, 0);
+    }
 }

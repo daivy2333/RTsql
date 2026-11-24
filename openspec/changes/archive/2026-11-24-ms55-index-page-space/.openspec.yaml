@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-24
+skip_specs: true
+goal: 测量索引页和数据槽里、在 32 字节键与按值 tag 保持不变时还能去掉的字节。测得 0 则保持原格式。节点锁不在本次。

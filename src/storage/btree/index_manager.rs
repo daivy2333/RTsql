@@ -1318,4 +1318,76 @@ mod tests {
         im.delete_exact(shared.as_bytes(), rid_a).await.unwrap();
         assert_eq!(im.search_all(shared.as_bytes()).await.unwrap(), vec![rid_b]);
     }
+
+    /// 200 个 `s0000` 形字符串键之后，分隔槽没有可移除字节。
+    #[tokio::test]
+    async fn index_page_separator_has_no_removable_byte() {
+        use crate::storage::page_format::{
+            ColumnType as SchemaColumnType, SlottedPageRef, MAX_KEY_LEN,
+        };
+        use crate::Value;
+
+        let (_dir, im) = make_manager().await;
+        let column = SchemaColumnType::String(255);
+        for i in 0..200u32 {
+            let key = Value::String(format!("s{i:04}"))
+                .secondary_index_key(&column)
+                .expect("sample string fits in 32 bytes");
+            let rid = RowId::new(i + 1, 1);
+            im.insert(key.as_bytes(), rid).await.unwrap();
+        }
+
+        let pages = im.collect_all_pages().await.unwrap();
+
+        let (separator_len, child) = {
+            let guard = im.async_loader.load_page(im.root_page_id()).await.unwrap();
+            let data = guard.page_data();
+            assert_eq!(data[0], 0x02);
+            let check = check_tree_page(&data);
+            assert!(
+                check.violations.is_empty(),
+                "root violations: {:?}",
+                check.violations
+            );
+            let separator = SlottedPageRef::new(&data)
+                .get_slot(0)
+                .expect("root has a separator slot");
+            let child = InternalNodeRef::new(&data).leftmost_child();
+            (separator.length, child)
+        };
+
+        let leaf_len = {
+            let guard = im
+                .async_loader
+                .load_page(PageId(child as u64))
+                .await
+                .unwrap();
+            let data = guard.page_data();
+            let check = check_tree_page(&data);
+            assert!(
+                check.violations.is_empty(),
+                "leaf violations: {:?}",
+                check.violations
+            );
+            let slot = SlottedPageRef::new(&data)
+                .get_slot(0)
+                .expect("leaf has an entry");
+            slot.length
+        };
+
+        assert!(pages.len() >= 2, "index_pages={}", pages.len());
+        assert_eq!(MAX_KEY_LEN, 32);
+        assert_eq!(leaf_len as usize, MAX_KEY_LEN + RowId::SIZE);
+        let removable = separator_len as usize - MAX_KEY_LEN - 4;
+        println!(
+            "index_pages={} separator_len={} leaf_len={} removable={}",
+            pages.len(),
+            separator_len,
+            leaf_len,
+            removable
+        );
+        assert_eq!(separator_len, 36);
+        assert_eq!(leaf_len, 38);
+        assert_eq!(removable, 0);
+    }
 }
