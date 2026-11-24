@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
+#[cfg(not(feature = "io-uring"))]
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -494,14 +495,24 @@ impl FileStorage {
         #[cfg(feature = "crypto")]
         if let Some(cipher) = cipher {
             let record = cipher.encrypt_page(page_id, data.as_ref());
-            file.as_ref().write_all_at(&record, offset)?;
-            #[cfg(test)]
-            record_page_write();
+            #[cfg(feature = "io-uring")]
+            io_uring_write::write_all(file.as_ref(), &record, offset)?;
+            #[cfg(not(feature = "io-uring"))]
+            {
+                file.as_ref().write_all_at(&record, offset)?;
+                #[cfg(test)]
+                record_page_write();
+            }
             return Ok(());
         }
-        file.as_ref().write_all_at(&*data, offset)?;
-        #[cfg(test)]
-        record_page_write();
+        #[cfg(feature = "io-uring")]
+        io_uring_write::write_all(file.as_ref(), &*data, offset)?;
+        #[cfg(not(feature = "io-uring"))]
+        {
+            file.as_ref().write_all_at(&*data, offset)?;
+            #[cfg(test)]
+            record_page_write();
+        }
         Ok(())
     }
 
@@ -511,6 +522,350 @@ impl FileStorage {
 
     fn mark_write_succeeded(&self, page_id: PageId) {
         self.failed_pages.lock().unwrap().remove(&page_id.0);
+    }
+}
+
+/// 一次阻塞写自己建环、提交 `IORING_OP_WRITE`、取完完成项后拆环。
+#[cfg(feature = "io-uring")]
+mod io_uring_write {
+    use std::os::unix::io::AsRawFd;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const IORING_OP_WRITE: u8 = 23;
+    const IORING_ENTER_GETEVENTS: u32 = 1;
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoUringSqe {
+        opcode: u8,
+        flags: u8,
+        ioprio: u16,
+        fd: i32,
+        off: u64,
+        addr: u64,
+        len: u32,
+        rw_flags: u32,
+        user_data: u64,
+        buf_index: u16,
+        personality: u16,
+        splice_fd_in: i32,
+        pad: [u64; 2],
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoUringCqe {
+        user_data: u64,
+        res: i32,
+        flags: u32,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoSqringOffsets {
+        head: u32,
+        tail: u32,
+        ring_mask: u32,
+        ring_entries: u32,
+        flags: u32,
+        dropped: u32,
+        array: u32,
+        resv1: u32,
+        resv2: u64,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoCqringOffsets {
+        head: u32,
+        tail: u32,
+        ring_mask: u32,
+        ring_entries: u32,
+        overflow: u32,
+        cqes: u32,
+        flags: u32,
+        resv1: u32,
+        resv2: u64,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoUringParams {
+        sq_entries: u32,
+        cq_entries: u32,
+        flags: u32,
+        sq_thread_cpu: u32,
+        sq_thread_idle: u32,
+        features: u32,
+        wq_fd: u32,
+        resv: [u32; 3],
+        sq_off: IoSqringOffsets,
+        cq_off: IoCqringOffsets,
+    }
+
+    const _: () = assert!(std::mem::size_of::<IoUringSqe>() == 64);
+    const _: () = assert!(std::mem::size_of::<IoUringCqe>() == 16);
+    const _: () = assert!(std::mem::size_of::<IoUringParams>() == 120);
+
+    struct MappedRing {
+        fd: i32,
+        sq: *mut libc::c_void,
+        sq_len: usize,
+        cq: *mut libc::c_void,
+        cq_len: usize,
+        sqes: *mut libc::c_void,
+        sqes_len: usize,
+        sq_entries: u32,
+        cq_entries: u32,
+        sq_tail_off: u32,
+        sq_ring_mask_off: u32,
+        sq_array_off: u32,
+        cq_head_off: u32,
+        cq_tail_off: u32,
+        cq_ring_mask_off: u32,
+        cq_cqes_off: u32,
+    }
+
+    impl Drop for MappedRing {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.sq.is_null() {
+                    libc::munmap(self.sq, self.sq_len);
+                    self.sq = std::ptr::null_mut();
+                }
+                if !self.cq.is_null() {
+                    libc::munmap(self.cq, self.cq_len);
+                    self.cq = std::ptr::null_mut();
+                }
+                if !self.sqes.is_null() {
+                    libc::munmap(self.sqes, self.sqes_len);
+                    self.sqes = std::ptr::null_mut();
+                }
+                if self.fd >= 0 {
+                    libc::close(self.fd);
+                    self.fd = -1;
+                }
+            }
+        }
+    }
+
+    fn map_bytes(start: u32, count: u32, stride: usize) -> std::io::Result<usize> {
+        let extra = (count as usize).checked_mul(stride).ok_or_else(|| {
+            std::io::Error::other("io_uring map length overflow")
+        })?;
+        (start as usize).checked_add(extra).ok_or_else(|| {
+            std::io::Error::other("io_uring map length overflow")
+        })
+    }
+
+    fn mmap_shared(fd: i32, len: usize, offset: libc::off_t) -> *mut libc::c_void {
+        // SAFETY: 长度覆盖内核填回的环区域，偏移是 io_uring 的固定映射偏移。
+        unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                offset,
+            )
+        }
+    }
+
+    fn atomic_at(base: *mut libc::c_void, offset: usize) -> *const AtomicU32 {
+        (base as usize + offset) as *const AtomicU32
+    }
+
+    fn ring_load(base: *mut libc::c_void, offset: u32) -> u32 {
+        // SAFETY: `offset` 是 io_uring_setup 填回的 4 字节对齐字段，映射活过这次读取。
+        unsafe { (*atomic_at(base, offset as usize)).load(Ordering::Acquire) }
+    }
+
+    fn ring_store(base: *mut libc::c_void, offset: u32, value: u32) {
+        // SAFETY: 与 `ring_load` 同一字段。Release 把此前写入的 SQE 或完成消费发布给内核。
+        unsafe { (*atomic_at(base, offset as usize)).store(value, Ordering::Release) }
+    }
+
+    fn setup_ring() -> std::io::Result<MappedRing> {
+        let mut params: IoUringParams = unsafe { std::mem::zeroed() };
+        let setup = unsafe {
+            libc::syscall(
+                libc::SYS_io_uring_setup,
+                8u32,
+                &mut params as *mut IoUringParams,
+            )
+        };
+        if setup < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let fd = i32::try_from(setup).map_err(|_| {
+            std::io::Error::other("io_uring ring descriptor does not fit i32")
+        })?;
+        let mut ring = MappedRing {
+            fd,
+            sq: std::ptr::null_mut(),
+            sq_len: 0,
+            cq: std::ptr::null_mut(),
+            cq_len: 0,
+            sqes: std::ptr::null_mut(),
+            sqes_len: 0,
+            sq_entries: params.sq_entries,
+            cq_entries: params.cq_entries,
+            sq_tail_off: params.sq_off.tail,
+            sq_ring_mask_off: params.sq_off.ring_mask,
+            sq_array_off: params.sq_off.array,
+            cq_head_off: params.cq_off.head,
+            cq_tail_off: params.cq_off.tail,
+            cq_ring_mask_off: params.cq_off.ring_mask,
+            cq_cqes_off: params.cq_off.cqes,
+        };
+        ring.sq_len = map_bytes(params.sq_off.array, params.sq_entries, 4)?;
+        ring.cq_len = map_bytes(params.cq_off.cqes, params.cq_entries, 16)?;
+        ring.sqes_len = map_bytes(0, params.sq_entries, 64)?;
+
+        let sq = mmap_shared(ring.fd, ring.sq_len, 0);
+        if sq == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        ring.sq = sq;
+        let cq = mmap_shared(ring.fd, ring.cq_len, 0x8000000);
+        if cq == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        ring.cq = cq;
+        let sqes = mmap_shared(ring.fd, ring.sqes_len, 0x10000000);
+        if sqes == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        ring.sqes = sqes;
+        Ok(ring)
+    }
+
+    pub(super) fn write_all(
+        file: &std::fs::File,
+        buf: &[u8],
+        mut offset: u64,
+    ) -> std::io::Result<()> {
+        let ring = setup_ring()?;
+        let sq_mask = ring_load(ring.sq, ring.sq_ring_mask_off);
+        let cq_mask = ring_load(ring.cq, ring.cq_ring_mask_off);
+        let fd = file.as_raw_fd();
+        let mut done = 0usize;
+        let mut user_data = 1u64;
+        while done < buf.len() {
+            let tail = ring_load(ring.sq, ring.sq_tail_off);
+            let index = tail & sq_mask;
+            if ring.sq_entries == 0 || index >= ring.sq_entries {
+                return Err(std::io::Error::other(
+                    "io_uring submission index is outside the queue",
+                ));
+            }
+            let remaining = buf.len() - done;
+            let len = u32::try_from(remaining).map_err(|_| {
+                std::io::Error::other("io_uring write length does not fit u32")
+            })?;
+            let sqe = IoUringSqe {
+                opcode: IORING_OP_WRITE,
+                flags: 0,
+                ioprio: 0,
+                fd,
+                off: offset,
+                addr: buf[done..].as_ptr() as u64,
+                len,
+                rw_flags: 0,
+                user_data,
+                buf_index: 0,
+                personality: 0,
+                splice_fd_in: 0,
+                pad: [0; 2],
+            };
+            let slot_off = (ring.sq_array_off as usize)
+                .checked_add(index as usize * 4)
+                .ok_or_else(|| {
+                    std::io::Error::other("io_uring submission array offset overflow")
+                })?;
+            // SAFETY: SQE 槽和 array 槽都落在本次映射里。这两次写入发生在 SQ tail 的 Release 之前。
+            // `buf` 活到对应完成项被取走。
+            unsafe {
+                let sqe_ptr = (ring.sqes as *mut IoUringSqe).add(index as usize);
+                sqe_ptr.write(sqe);
+                (*atomic_at(ring.sq, slot_off)).store(index, Ordering::Relaxed);
+            }
+            ring_store(ring.sq, ring.sq_tail_off, tail.wrapping_add(1));
+
+            let cq_tail_before = ring_load(ring.cq, ring.cq_tail_off);
+            let entered = unsafe {
+                libc::syscall(
+                    libc::SYS_io_uring_enter,
+                    ring.fd,
+                    1u32,
+                    1u32,
+                    IORING_ENTER_GETEVENTS,
+                    0usize,
+                )
+            };
+            if entered < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let cq_tail = ring_load(ring.cq, ring.cq_tail_off);
+            if cq_tail == cq_tail_before {
+                return Err(std::io::Error::other(
+                    "io_uring completion queue did not advance",
+                ));
+            }
+            let cq_head = ring_load(ring.cq, ring.cq_head_off);
+            let cq_index = cq_head & cq_mask;
+            if ring.cq_entries == 0 || cq_index >= ring.cq_entries {
+                return Err(std::io::Error::other(
+                    "io_uring completion index is outside the queue",
+                ));
+            }
+            let cqe_off = (ring.cq_cqes_off as usize)
+                .checked_add(cq_index as usize * std::mem::size_of::<IoUringCqe>())
+                .ok_or_else(|| {
+                    std::io::Error::other("io_uring completion offset overflow")
+                })?;
+            // SAFETY: 完成项落在 CQ 映射内。Acquire 读到 tail 前进之后，内核已经写完这个完成项。
+            let cqe = unsafe {
+                let cqe_ptr = (ring.cq as *const u8).add(cqe_off) as *const IoUringCqe;
+                cqe_ptr.read()
+            };
+            if cqe.user_data != user_data {
+                return Err(std::io::Error::other(
+                    "io_uring completion user_data does not match the submission",
+                ));
+            }
+            ring_store(ring.cq, ring.cq_head_off, cq_head.wrapping_add(1));
+            if cqe.res < 0 {
+                return Err(match cqe.res.checked_neg() {
+                    Some(code) => std::io::Error::from_raw_os_error(code),
+                    None => std::io::Error::other(
+                        "io_uring completion error code cannot be negated",
+                    ),
+                });
+            }
+            if cqe.res == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "io_uring write returned 0 before the buffer was fully written",
+                ));
+            }
+            let written = cqe.res as usize;
+            if written > remaining {
+                return Err(std::io::Error::other(
+                    "io_uring write reported more bytes than the remaining buffer",
+                ));
+            }
+            done += written;
+            offset += written as u64;
+            user_data = user_data.wrapping_add(1);
+            if user_data == 0 {
+                user_data = 1;
+            }
+        }
+        #[cfg(test)]
+        super::record_uring_write();
+        Ok(())
     }
 }
 
@@ -537,17 +892,24 @@ fn write_page_run_blocking(
             let record = cipher.encrypt_page(page.id, page.data.as_ref());
             buf.extend_from_slice(&record);
         }
+        #[cfg(feature = "io-uring")]
+        io_uring_write::write_all(file, &buf, offset)?;
+        #[cfg(not(feature = "io-uring"))]
         pwritev_fully(file, &buf, offset)?;
         return Ok(());
     }
     for page in pages {
         buf.extend_from_slice(&page.data[..]);
     }
+    #[cfg(feature = "io-uring")]
+    io_uring_write::write_all(file, &buf, offset)?;
+    #[cfg(not(feature = "io-uring"))]
     pwritev_fully(file, &buf, offset)?;
     Ok(())
 }
 
 /// 短写则前进偏移继续 `pwritev`。负值、未写完就返回 0，或报告的字节数大于剩余缓冲时失败。
+#[cfg(not(feature = "io-uring"))]
 fn pwritev_fully(file: &std::fs::File, buf: &[u8], mut offset: u64) -> std::io::Result<()> {
     let mut done = 0usize;
     while done < buf.len() {
@@ -893,7 +1255,7 @@ fn record_page_submit() {
     let _ = PAGE_SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst);
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "io-uring")))]
 fn record_page_write() {
     let _ = PAGE_WRITE_COUNT.fetch_add(1, Ordering::SeqCst);
 }
@@ -918,6 +1280,24 @@ fn page_submit_count() -> u64 {
 #[cfg(test)]
 fn page_write_count() -> u64 {
     PAGE_WRITE_COUNT.load(Ordering::SeqCst)
+}
+
+#[cfg(all(test, feature = "io-uring"))]
+static URING_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(test, feature = "io-uring"))]
+fn reset_uring_write_count() {
+    URING_WRITE_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[cfg(all(test, feature = "io-uring"))]
+fn uring_write_count() -> u64 {
+    URING_WRITE_COUNT.load(Ordering::SeqCst)
+}
+
+#[cfg(all(test, feature = "io-uring"))]
+fn record_uring_write() {
+    let _ = URING_WRITE_COUNT.fetch_add(1, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -1327,6 +1707,192 @@ mod tests {
                 "page {id} did not round-trip"
             );
         }
+    }
+
+    /// 默认构建仍把连续两页交给一次合并写，并且没有启用 io_uring。
+    #[tokio::test]
+    async fn io_uring_feature_off_keeps_the_decided_write_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("feature-off.db");
+        let storage = Arc::new(FileStorage::open(&path).unwrap());
+        for expected in 0..2u64 {
+            let id = storage.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+        let pool = BufferPool::new(8, Arc::clone(&storage) as Arc<dyn AsyncStorage>).unwrap();
+        for (id, fill) in [(0u64, 0x21u8), (1, 0x22)] {
+            let guard = pool.get_page(PageId(id)).await.unwrap();
+            let pattern = page_pattern(id, fill);
+            guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+        }
+        super::reset_page_io_counts();
+        pool.flush_all().await.unwrap();
+        let writes = super::page_write_count();
+        assert!(
+            writes < 2,
+            "flush of two dirty pages wrote {writes} times"
+        );
+        for (id, fill) in [(0u64, 0x21u8), (1, 0x22)] {
+            let page = storage.read_page(PageId(id)).await.unwrap();
+            assert_eq!(&page.data[..], &page_pattern(id, fill)[..]);
+        }
+        assert!(!cfg!(feature = "io-uring"));
+    }
+
+    /// 启用 io_uring 后，合并写和单页写各完成一次，注入仍在落盘前失败。
+    #[cfg(feature = "io-uring")]
+    #[tokio::test]
+    async fn io_uring_feature_on_write_roundtrip() {
+        let plain_flush_dir = tempdir().unwrap();
+        let plain_flush_path = plain_flush_dir.path().join("uring-plain-flush.db");
+        let plain_flush = Arc::new(FileStorage::open(&plain_flush_path).unwrap());
+        for expected in 0..2u64 {
+            let id = plain_flush.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+        let plain_flush_pool =
+            BufferPool::new(8, Arc::clone(&plain_flush) as Arc<dyn AsyncStorage>).unwrap();
+        for (id, fill) in [(0u64, 0x21u8), (1, 0x22)] {
+            let guard = plain_flush_pool.get_page(PageId(id)).await.unwrap();
+            let pattern = page_pattern(id, fill);
+            guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+        }
+        super::reset_uring_write_count();
+        super::reset_page_io_counts();
+        plain_flush_pool.flush_all().await.unwrap();
+        assert_eq!(super::uring_write_count(), 1);
+        assert_eq!(super::page_write_count(), 0);
+        for (id, fill) in [(0u64, 0x21u8), (1, 0x22)] {
+            let page = plain_flush.read_page(PageId(id)).await.unwrap();
+            assert_eq!(&page.data[..], &page_pattern(id, fill)[..]);
+        }
+
+        let plain_page_dir = tempdir().unwrap();
+        let plain_page_path = plain_page_dir.path().join("uring-plain-page.db");
+        let plain_page = FileStorage::open(&plain_page_path).unwrap();
+        let plain_page_id = plain_page.allocate_page().await.unwrap();
+        assert_eq!(plain_page_id, PageId(0));
+        let mut plain_written = Page::new(PageId(0));
+        plain_written.data.copy_from_slice(&page_pattern(0, 0x41));
+        super::reset_uring_write_count();
+        super::reset_page_io_counts();
+        plain_page
+            .write_page(PageId(0), &plain_written)
+            .await
+            .unwrap();
+        assert_eq!(super::uring_write_count(), 1);
+        assert_eq!(super::page_write_count(), 0);
+        let plain_read = plain_page.read_page(PageId(0)).await.unwrap();
+        assert_eq!(&plain_read.data[..], &page_pattern(0, 0x41)[..]);
+
+        let enc_flush_dir = tempdir().unwrap();
+        let enc_flush_path = enc_flush_dir.path().join("uring-enc-flush.db");
+        let enc_flush = Arc::new(FileStorage::open_with_key(&enc_flush_path, Some("pw")).unwrap());
+        for expected in 0..2u64 {
+            let id = enc_flush.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+        let enc_flush_pool =
+            BufferPool::new(8, Arc::clone(&enc_flush) as Arc<dyn AsyncStorage>).unwrap();
+        for (id, fill) in [(0u64, 0x31u8), (1, 0x32)] {
+            let guard = enc_flush_pool.get_page(PageId(id)).await.unwrap();
+            let pattern = page_pattern(id, fill);
+            guard.modify_page(|page| page.data.copy_from_slice(&pattern));
+        }
+        super::reset_uring_write_count();
+        super::reset_page_io_counts();
+        enc_flush_pool.flush_all().await.unwrap();
+        assert_eq!(super::uring_write_count(), 1);
+        assert_eq!(super::page_write_count(), 0);
+        for (id, fill) in [(0u64, 0x31u8), (1, 0x32)] {
+            let page = enc_flush.read_page(PageId(id)).await.unwrap();
+            assert_eq!(&page.data[..], &page_pattern(id, fill)[..]);
+        }
+
+        let enc_page_dir = tempdir().unwrap();
+        let enc_page_path = enc_page_dir.path().join("uring-enc-page.db");
+        let enc_page = FileStorage::open_with_key(&enc_page_path, Some("pw")).unwrap();
+        let enc_page_id = enc_page.allocate_page().await.unwrap();
+        assert_eq!(enc_page_id, PageId(0));
+        let mut enc_written = Page::new(PageId(0));
+        enc_written.data.copy_from_slice(&page_pattern(0, 0x51));
+        super::reset_uring_write_count();
+        super::reset_page_io_counts();
+        enc_page.write_page(PageId(0), &enc_written).await.unwrap();
+        assert_eq!(super::uring_write_count(), 1);
+        assert_eq!(super::page_write_count(), 0);
+        let enc_read = enc_page.read_page(PageId(0)).await.unwrap();
+        assert_eq!(&enc_read.data[..], &page_pattern(0, 0x51)[..]);
+
+        let run_dir = tempdir().unwrap();
+        let run_path = run_dir.path().join("uring-inject-run.db");
+        let run_storage = Arc::new(FileStorage::open(&run_path).unwrap());
+        for expected in 0..2u64 {
+            let id = run_storage.allocate_page().await.unwrap();
+            assert_eq!(id, PageId(expected));
+        }
+        let mut old_run = Vec::new();
+        for (id, fill) in [(0u64, 0x71u8), (1, 0x72)] {
+            let mut page = Page::new(PageId(id));
+            page.data.copy_from_slice(&page_pattern(id, fill));
+            old_run.push(page);
+        }
+        run_storage.write_page_run(old_run).await.unwrap();
+        let mut new_run = Vec::new();
+        for (id, fill) in [(0u64, 0xF1u8), (1, 0xF2)] {
+            let mut page = Page::new(PageId(id));
+            page.data.copy_from_slice(&page_pattern(id, fill));
+            new_run.push(page);
+        }
+        super::reset_uring_write_count();
+        super::reset_page_io_counts();
+        *run_storage.io_failpoint.lock().unwrap() = Some(IoFailPoint::DataWrite);
+        let run_err = run_storage.write_page_run(new_run).await.unwrap_err();
+        assert!(
+            run_err
+                .to_string()
+                .contains("injected io failure (write_page)"),
+            "got: {run_err}"
+        );
+        assert_eq!(super::uring_write_count(), 0);
+        for (id, fill) in [(0u64, 0x71u8), (1, 0x72)] {
+            let page = run_storage.read_page(PageId(id)).await.unwrap();
+            assert_eq!(&page.data[..], &page_pattern(id, fill)[..]);
+        }
+        {
+            let failed = run_storage.failed_pages.lock().unwrap();
+            assert!(failed.contains(&0));
+            assert!(failed.contains(&1));
+        }
+
+        let page_dir = tempdir().unwrap();
+        let page_path = page_dir.path().join("uring-inject-page.db");
+        let page_storage = FileStorage::open(&page_path).unwrap();
+        let page_id = page_storage.allocate_page().await.unwrap();
+        assert_eq!(page_id, PageId(0));
+        let mut old_page = Page::new(PageId(0));
+        old_page.data.copy_from_slice(&page_pattern(0, 0x81));
+        page_storage.write_page(PageId(0), &old_page).await.unwrap();
+        let mut new_page = Page::new(PageId(0));
+        new_page.data.copy_from_slice(&page_pattern(0, 0xEE));
+        super::reset_uring_write_count();
+        super::reset_page_io_counts();
+        *page_storage.io_failpoint.lock().unwrap() = Some(IoFailPoint::DataWrite);
+        let page_err = page_storage
+            .write_page(PageId(0), &new_page)
+            .await
+            .unwrap_err();
+        assert!(
+            page_err
+                .to_string()
+                .contains("injected io failure (write_page)"),
+            "got: {page_err}"
+        );
+        assert_eq!(super::uring_write_count(), 0);
+        let kept = page_storage.read_page(PageId(0)).await.unwrap();
+        assert_eq!(&kept.data[..], &page_pattern(0, 0x81)[..]);
+        let failed = page_storage.failed_pages.lock().unwrap();
+        assert!(failed.contains(&0));
     }
 
     /// 连续 64 个脏页：五次逐页刷盘和五次测试内 `pwritev` 的提交次数、写次数和耗时。

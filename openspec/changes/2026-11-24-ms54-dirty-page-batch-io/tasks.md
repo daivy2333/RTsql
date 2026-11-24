@@ -10,7 +10,7 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 - 000：Plan Context 见 `iterations/000-measure-and-decide/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是值得交付。
 - 001：`iterations/001-apply-batch-decision/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是已交付连续段合并写。
 - 002：`iterations/002-compare-io-uring/000-initial.md`。Act Response 状态 `reported`。Review Result 为 `accepted`。执行记录是值得采用。
-- 003：`iterations/003-io-uring-feature/000-initial.md`。Plan Context `ready`，Gate 2 PASS。Act Response 尚未执行。Review Result 为 `pending`。
+- 003：`iterations/003-io-uring-feature/000-initial.md`。Plan Context `ready`，Gate 2 PASS。Act Response 状态 `reported`。Review Result 仍为 `pending`。
 - Persisted Evidence：none。
 - 跳过项：无。
 
@@ -22,7 +22,7 @@ Gate 1：PASS。需求、场景和范围来自 MS54 已写明的字段，以及 
 | T2 | 000 | T1 | 用 T1 的五行裁定值得交付或保留逐页写 | reported |
 | T3 | 001 | T2 记下了值得交付或保留逐页写 | 按裁定交付连续段合并写，或确认仍是逐页写 | reported |
 | T4 | 002 | T3 的结论已写入执行记录 | 比较 io_uring，默认 features 不变 | reported |
-| T5 | 003 | T4 记下了值得采用 | 增加默认关闭的 `io-uring` feature | 未执行 |
+| T5 | 003 | T4 记下了值得采用 | 增加默认关闭的 `io-uring` feature | reported |
 
 T1 与 T2 的执行依据是 `iterations/000-measure-and-decide/000-initial.md` 的 Task Definition。本文件不另写一套步骤。T5 只在 T4 记下值得采用之后展开。T4 记下保留或平台不适合时，不展开 003。
 

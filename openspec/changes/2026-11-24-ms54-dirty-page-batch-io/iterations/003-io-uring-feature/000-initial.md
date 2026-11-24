@@ -90,7 +90,44 @@ PASS。审查计划 11 项通过；RTM 无 Missing、无 Simplified；feature �
 
 ## Act Response
 
-- Status: 尚未执行
+- Status: reported
+
+实际改动：
+
+- `Cargo.toml` 的 `[features]` 增加 `io-uring = []`。`default` 仍是 `cli`、`network`、`crypto`。没有新依赖，`Cargo.lock` 没有改。
+- `src/storage/file_storage.rs` 增加 `#[cfg(feature = "io-uring")]` 的私有模块 `io_uring_write`。布局类型和 `write_all` 只在这个模块里。SQE 64 字节，CQE 16 字节，`params` 120 字节。`write_all` 以 `entries = 8`、`flags = 0` 调用 `io_uring_setup`。建环失败返回 `last_os_error()`，不映射，也不改走 `write_all_at` 或 `pwritev`。成功后按内核填回的长度做三次 `mmap`，保护是 `PROT_READ | PROT_WRITE`，标志是 `MAP_SHARED`，偏移是 0、`0x8000000`、`0x10000000`。提交 opcode 是 23。`io_uring_enter` 的参数是环描述符、`1u32`、`1u32`、`1u32`、`0usize`。SQE 和 array 槽写在 SQ `tail` 的 `Release` 存储之前。对端更新的 `head` 或 `tail` 用 `Acquire` 读取。每取走一个完成项，用 `Release` 把 CQ `head` 加 1。`user_data` 从 1 起，绕回 0 时改回 1。短写留在同一次调用里继续提交。整个缓冲写完后，测试构建调用 `record_uring_write` 一次。返回时 `MappedRing` 析构，`munmap` 已成功的映射并 `close` 环描述符，不关闭数据文件。
+- `write_page_blocking` 与 `write_page_run_blocking` 在 feature 打开时改为调用 `io_uring_write::write_all`。加密分支仍先 `encrypt_page`。这两处在 feature 打开时不调用 `record_page_write`。feature 关闭时仍是 `write_all_at`、`pwritev_fully` 和 `record_page_write`。`write_page` 与 `write_page_run` 在 `spawn_blocking` 之前的只读判断、连续性判断和 `DataWrite` 消费没有改。
+- 测试构建在 feature 打开时增加 `reset_uring_write_count`、`uring_write_count`、`record_uring_write`，放在页计数旁边。测试是 `io_uring_feature_off_keeps_the_decided_write_path` 和 `#[cfg(feature = "io-uring")]` 的 `io_uring_feature_on_write_roundtrip`。
+
+与计划的偏差：
+
+成功路径按 Task Definition 提交。下标超出内核填回的队列长度，或映射长度、array 槽、完成项偏移溢出时，`write_all` 返回错误并拆环，不改走 `write_all_at` 或 `pwritev`。`record_page_write` 的条件是 `all(test, not(feature = "io-uring"))`，默认构建仍在 `write_all_at` 成功后调用它。`pwritev_fully` 和父模块的 `AsRawFd` 导入带 `not(feature = "io-uring")`，默认构建仍调用原来的 `pwritev_fully`。
+
+自检：
+
+Gate 3 通过。启用路径覆盖明文和加密的两页 `flush_all`、单页 `write_page`，以及两次注入。注入文本、失败集合和旧字节由 `io_uring_feature_on_write_roundtrip` 断言。默认路径的两页合并写、`page_write_count() < 2` 和读回由关闭 feature 的测试断言。`read_page_blocking`、`write_page`、`write_page_run` 的注入位置、`flush_claimed`、`evict_one`、`allocate_page` 和检查点没有改。定向测试和 `cargo check --offline --features io-uring --lib` 都没有新增 rustc 警告。`cargo check` 退出码 0，说明非测试构建不会调用 `record_uring_write`。
+
+遗留 Minor：`io_uring_write` 里的布局结构带 `#[allow(dead_code)]`。这些字段要保住 SQE 64 字节、CQE 16 字节和 `params` 120 字节，Rust 侧不会逐个读取。
+
+验证：
+
+工作目录是 `/home/daivy/projects/RTsql-changes/2026-11-24-ms54-dirty-page-batch-io`。每条命令单独一个 cargo，都带 `--test-threads=1`。
+
+1. 关闭 feature 的测试还不存在。`cargo test --offline --lib storage::file_storage::tests::io_uring_feature_off_keeps_the_decided_write_path -- --test-threads=1` 退出码 0。`test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 465 filtered out`。
+
+2. 只加入这个测试，不改 `Cargo.toml`，也不改写入路径。同一命令退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 465 filtered out`。
+
+3. 加上 `io-uring = []`、计数函数和 `io_uring_feature_on_write_roundtrip`，写入路径仍是 `write_all_at` 与 `pwritev`。`cargo test --offline --features io-uring --lib storage::file_storage::tests::io_uring_feature_on_write_roundtrip -- --test-threads=1` 退出码 101。断言是 `uring_write_count` 的 left 0、right 1。`test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 466 filtered out`。这是 RED。
+
+4. 接上 `io_uring_write` 之后，同一条启用命令退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 466 filtered out`。随后默认构建再跑关闭 feature 的命令，退出码 0。`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 465 filtered out`。
+
+5. `git diff 5c0a4f67919a1b0615a77f5241b616e5d9ea3ae4 -- Cargo.toml src`：`Cargo.toml` 只增加 `io-uring = []`，`default` 仍是 `cli`、`network`、`crypto`。`src` 只有 `src/storage/file_storage.rs`。`Cargo.lock` 没有差异。
+
+6. 收尾全量使用默认 features。`ls tests/*.rs | sort` 得到 N = 171。B = 15。前 9 批各 11 个文件，后 6 批各 12 个。每一批是 `cargo test --offline --test <名> ... -- --test-threads=1`。文件批之后是 `cargo test --offline --lib --bins -- --test-threads=1`。没有 `--features io-uring`，没有 `--ignored`。15 个文件批和库测试批的退出码都是 0。全部 173 行 `test result:` 的 failed 都是 0。库测试两行是 `ok. 465 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out` 和 `ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`。那 1 个 ignored 是 `contiguous_dirty_page_write_measure`。
+
+Experience Candidates: None
+
+未解决问题：无。
 
 ## Plan Review
 

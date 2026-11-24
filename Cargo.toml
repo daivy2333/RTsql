@@ -35,6 +35,7 @@ default = ["cli", "network", "crypto"]
 cli = ["dep:clap", "dep:clap_complete", "dep:csv"]
 network = ["dep:tokio-util"]
 crypto = ["dep:argon2", "dep:aes-gcm"]
+io-uring = []
 
 [[bin]]
 name = "rtsql"
